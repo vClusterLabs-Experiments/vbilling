@@ -1,0 +1,78 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "vbilling.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "vbilling.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "vbilling.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "vbilling.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "vbilling.serviceAccountName" . }}
+      containers:
+        - name: vbilling
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: LAGO_API_URL
+              value: {{ .Values.lago.apiURL | quote }}
+            - name: LAGO_API_KEY
+              {{- if .Values.lago.existingSecret }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.lago.existingSecret }}
+                  key: api-key
+              {{- else }}
+              value: {{ .Values.lago.apiKey | quote }}
+              {{- end }}
+            - name: DEFAULT_PLAN_CODE
+              value: {{ .Values.billing.defaultPlanCode | quote }}
+            - name: BILLING_CURRENCY
+              value: {{ .Values.billing.currency | quote }}
+            - name: COLLECTION_INTERVAL
+              value: {{ .Values.billing.collectionInterval | quote }}
+            - name: RECONCILE_INTERVAL
+              value: {{ .Values.billing.reconcileInterval | quote }}
+            - name: CPU_PRICE_PER_CORE_HOUR
+              value: {{ .Values.pricing.cpuPerCoreHour | quote }}
+            - name: MEMORY_PRICE_PER_GB_HOUR
+              value: {{ .Values.pricing.memoryPerGBHour | quote }}
+            - name: STORAGE_PRICE_PER_GB_HOUR
+              value: {{ .Values.pricing.storagePerGBHour | quote }}
+            - name: INSTANCE_PRICE_PER_HOUR
+              value: {{ .Values.pricing.instancePerHour | quote }}
+            - name: GPU_DEFAULT_PRICE_PER_HOUR
+              value: {{ .Values.pricing.gpuDefaultPerHour | quote }}
+            - name: GPU_PRICES
+              value: {{ .Values.pricing.gpuPrices | quote }}
+            - name: NETWORK_EGRESS_PRICE_PER_GB
+              value: {{ .Values.pricing.networkEgressPerGB | quote }}
+            - name: LB_PRICE_PER_HOUR
+              value: {{ .Values.pricing.lbPerHour | quote }}
+            - name: SPOT_DISCOUNT_PERCENT
+              value: {{ .Values.pricing.spotDiscountPercent | quote }}
+            {{- if .Values.prometheus.url }}
+            - name: PROMETHEUS_URL
+              value: {{ .Values.prometheus.url | quote }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

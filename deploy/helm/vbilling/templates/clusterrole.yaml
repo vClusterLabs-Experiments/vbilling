@@ -1,0 +1,35 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "vbilling.fullname" . }}
+  labels:
+    {{- include "vbilling.labels" . | nindent 4 }}
+rules:
+  # Discover vClusters via StatefulSets and Deployments
+  - apiGroups: ["apps"]
+    resources: ["statefulsets", "deployments"]
+    verbs: ["list", "watch", "get"]
+  # Read pod details for GPU allocation and node mapping
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list", "get"]
+  # Read PVCs for storage billing
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["list", "get"]
+  # Read services for LoadBalancer billing
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["list", "get"]
+  # Read nodes for GPU type detection and spot/on-demand status
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["list", "get"]
+  # Read namespaces for vCluster namespace enumeration
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["list", "get"]
+  # Read pod metrics from metrics-server
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods"]
+    verbs: ["list", "get"]

@@ -1,0 +1,57 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/loft-sh/vbilling
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# Lago connection
+lago:
+  apiURL: "http://lago-api.lago-system.svc.cluster.local:3000"
+  apiKey: ""  # REQUIRED: set via --set or secret
+  # Use existing secret for API key (key: "api-key")
+  existingSecret: ""
+
+# Billing configuration
+billing:
+  defaultPlanCode: "vcluster-standard"
+  currency: "USD"
+  collectionInterval: "60s"
+  reconcileInterval: "30s"
+
+# Pricing per unit (string format for decimal precision)
+pricing:
+  cpuPerCoreHour: "0.05"
+  memoryPerGBHour: "0.01"
+  storagePerGBHour: "0.001"
+  instancePerHour: "0.10"
+  gpuDefaultPerHour: "2.50"
+  networkEgressPerGB: "0.05"
+  lbPerHour: "0.025"
+  # GPU type-specific pricing (comma-separated TYPE:PRICE)
+  gpuPrices: "NVIDIA-A100-SXM4-80GB:3.50,NVIDIA-H100-80GB-HBM3:5.00,NVIDIA-H100-SXM5-80GB:5.50,NVIDIA-L40S:1.80,NVIDIA-A10G:1.20,NVIDIA-T4:0.75"
+  spotDiscountPercent: 60
+
+# Optional: Prometheus URL for DCGM + network metrics
+prometheus:
+  url: ""  # e.g. "http://prometheus.monitoring.svc.cluster.local:9090"
+
+# Namespace filter (empty = watch all namespaces)
+watchNamespaces: []
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

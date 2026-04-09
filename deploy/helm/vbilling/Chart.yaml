@@ -1,0 +1,18 @@
+apiVersion: v2
+name: vbilling
+description: vCluster Billing Controller - Usage-based billing for vCluster with Lago
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/loft-sh/vbilling
+keywords:
+  - vcluster
+  - billing
+  - metering
+  - lago
+  - kubernetes
+  - multi-tenancy
+  - gpu
+maintainers:
+  - name: Loft Labs
+    url: https://loft.sh
