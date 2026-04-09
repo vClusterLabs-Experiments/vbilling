@@ -510,6 +510,69 @@
         <div>If you see customers and usage data, vBilling is working. Usage events are sent every collection interval (default: 60 seconds). Invoices are generated monthly by Lago.</div>
       </div>
 
+      <h2 id="try-with-vind">Try It Locally with vind</h2>
+      <p>You can test the full pipeline on your laptop using <strong>vind</strong> (vCluster in Docker) -- no cloud cluster needed.</p>
+
+      <h3>Create a vind host cluster</h3>
+      <div class="code-block"><code><span class="comment"># Set Docker driver and create a host cluster</span>
+<span class="cmd">vcluster</span> use driver docker
+<span class="cmd">vcluster</span> create vbilling-host <span class="flag">--connect=true</span>
+
+<span class="comment"># Install metrics-server</span>
+<span class="cmd">kubectl</span> apply <span class="flag">-f</span> https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+<span class="cmd">kubectl</span> patch deployment metrics-server <span class="flag">-n</span> kube-system <span class="flag">--type=json</span> \
+  <span class="flag">-p=</span><span class="string">'[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'</span></code></div>
+
+      <h3>Create nested vClusters</h3>
+      <div class="code-block"><code><span class="cmd">vcluster</span> use driver helm
+<span class="cmd">vcluster</span> create team-alpha <span class="flag">--namespace</span> vcluster-team-alpha <span class="flag">--connect=false</span>
+<span class="cmd">vcluster</span> create team-beta <span class="flag">--namespace</span> vcluster-team-beta <span class="flag">--connect=false</span>
+<span class="cmd">vcluster</span> create team-gpu <span class="flag">--namespace</span> vcluster-team-gpu <span class="flag">--connect=false</span></code></div>
+
+      <h3>Deploy vBilling as a pod in the vind cluster</h3>
+      <div class="code-block"><code><span class="comment"># Build the image</span>
+<span class="cmd">docker</span> build <span class="flag">--build-arg</span> TARGETARCH=arm64 <span class="flag">-t</span> vbilling:test .
+
+<span class="comment"># Load into vind's containerd</span>
+<span class="cmd">docker</span> save vbilling:test | <span class="cmd">docker</span> exec <span class="flag">-i</span> vcluster.cp.vbilling-host \
+  ctr <span class="flag">-n</span> k8s.io images import <span class="flag">--all-platforms</span> -
+
+<span class="comment"># Create secret and install via Helm</span>
+<span class="cmd">kubectl</span> create namespace vbilling-system
+<span class="cmd">kubectl</span> create secret generic lago-credentials \
+  <span class="flag">--namespace</span> vbilling-system \
+  <span class="flag">--from-literal=</span>api-key=<span class="string">"$LAGO_API_KEY"</span>
+
+<span class="cmd">helm</span> upgrade <span class="flag">--install</span> vbilling deploy/helm/vbilling \
+  <span class="flag">--namespace</span> vbilling-system \
+  <span class="flag">--set</span> image.repository=vbilling \
+  <span class="flag">--set</span> image.tag=test \
+  <span class="flag">--set</span> image.pullPolicy=Never \
+  <span class="flag">--set</span> lago.apiURL=http://host.docker.internal:3000 \
+  <span class="flag">--set</span> lago.existingSecret=lago-credentials</code></div>
+
+      <h3>Verify</h3>
+      <div class="code-block"><code><span class="cmd">kubectl</span> logs <span class="flag">-n</span> vbilling-system deployment/vbilling
+
+<span class="output"># Expected output:
+# Using in-cluster Kubernetes config
+# [discovery] found 3 vCluster(s)
+# [controller] new vCluster discovered: vcluster-team-alpha/team-alpha
+# [controller] ensured customer vcluster-vcluster-team-alpha-team-alpha
+# [metrics] vcluster-team-alpha: CPU=0.048 cores, Memory=0.33 GB
+# [metrics] vcluster-team-alpha: Storage=5.00 GB (1 PVCs)
+# [controller] sent 12 billing events to Lago</span></code></div>
+
+      <div class="callout callout-success">
+        <div class="callout-icon">&#10003;</div>
+        <div>This is the exact output from a verified test. vBilling runs as a real Kubernetes Deployment with in-cluster ServiceAccount, discovers vClusters via RBAC, collects metrics, and sends events to Lago.</div>
+      </div>
+
+      <h3>Clean up</h3>
+      <div class="code-block"><code><span class="cmd">vcluster</span> use driver docker
+<span class="cmd">vcluster</span> delete vbilling-host
+<span class="cmd">cd</span> deploy/lago && <span class="cmd">docker compose</span> down <span class="flag">-v</span></code></div>
+
       <h2 id="next-steps">Next Steps</h2>
       <ul>
         <li><a href="configuration.html">Configuration</a> -- tune intervals, namespaces, and pricing</li>
