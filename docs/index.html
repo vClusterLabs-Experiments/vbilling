@@ -1207,8 +1207,9 @@
             <p>Spin up the open-source billing engine with Docker Compose. UI at :8080, API at :3000.</p>
             <div class="code-block">
               <button class="code-copy" onclick="copyCode(this)" aria-label="Copy code">Copy</button>
-              <code><span class="comment"># Generate RSA key and start Lago</span>
-<span class="cmd">cd</span> deploy/lago
+              <code><span class="comment"># Clone vBilling and start Lago</span>
+<span class="cmd">git clone</span> https://github.com/vClusterLabs-Experiments/vbilling.git
+<span class="cmd">cd</span> vbilling/deploy/lago
 <span class="cmd">openssl</span> genrsa 2048 > lago_rsa.key
 <span class="cmd">echo</span> <span class="string">"LAGO_RSA_PRIVATE_KEY=$(base64 -i lago_rsa.key | tr -d '\n')"</span> > .env
 
