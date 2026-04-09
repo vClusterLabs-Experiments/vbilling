@@ -387,15 +387,6 @@ docker compose --env-file .env up -d
 
 Deploy Lago as Kubernetes workloads. Key components: PostgreSQL, Redis, API (Rails), Sidekiq worker, Clock, Frontend. See [Lago docs](https://getlago.com/docs) for production guidance.
 
-## Relationship to OpenCost
-
-OpenCost and vBilling solve different problems:
-
-- **OpenCost** = cost monitoring ("what is my infrastructure costing me?")
-- **vBilling** = tenant billing ("what do I charge each customer?")
-
-OpenCost reads cloud provider pricing. vBilling sends usage to Lago where **you set the prices**. They're complementary — OpenCost could feed into vBilling as a data source for cost-based pricing.
-
 ## Roadmap
 
 - [ ] MIG (Multi-Instance GPU) partition tracking
@@ -405,7 +396,6 @@ OpenCost reads cloud provider pricing. vBilling sends usage to Lago where **you 
 - [ ] Reserved capacity / commitment pricing
 - [ ] Auto Nodes billing (dynamic node provisioning events)
 - [ ] Netris network isolation billing integration
-- [ ] OpenCost integration as alternative metrics source
 
 ## License
 
