@@ -21,32 +21,32 @@ Built for neoclouds, AI factories, and platform teams running managed Kubernetes
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                          Host Cluster                               │
-│                                                                     │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐              │
-│  │  vCluster     │  │  vCluster     │  │  vCluster     │             │
-│  │  team-alpha   │  │  team-beta    │  │  team-gpu     │             │
-│  │  (shared)     │  │  (shared)     │  │  (private)    │             │
-│  │               │  │               │  │   ┌────────┐  │             │
-│  │  Pods in host │  │  Pods in host │  │   │8× H100 │  │             │
+┌─────────────────────────────────────────────────────────────────--────┐
+│                          Host Cluster                                 │
+│                                                                       │
+│  ┌──────-────────┐  ┌─-─────────────┐  ┌-──────────────-┐             │
+│  │  vCluster     │  │  vCluster     │  │  vCluster      │             │
+│  │  team-alpha   │  │  team-beta    │  │  team-gpu      │             │
+│  │  (shared)     │  │  (shared)     │  │  (private)     │             │
+│  │               │  │               │  │   ┌────────-┐  │             │
+│  │  Pods in host │  │  Pods in host │  │   │8× H100  │  │             │
 │  │  namespace    │  │  namespace    │  │   │Private  │  │             │
 │  │               │  │               │  │   │Nodes    │  │             │
-│  └───────┬───────┘  └───────┬───────┘  └───┴───┬────┘──┘             │
-│          │                  │                   │                    │
-│          └──────────────────┼───────────────────┘                    │
-│                             │                                       │
-│                  ┌──────────▼──────────┐                            │
-│                  │     vBilling         │                            │
-│                  │     Controller       │                            │
-│                  │                      │                            │
-│                  │  • Auto-discovers    │                            │
-│                  │  • Collects metrics  │                            │
-│                  │  • Sends usage events│                            │
-│                  └──────────┬───────────┘                            │
-└─────────────────────────────┼────────────────────────────────────────┘
+│  └───────┬───────┘  └───────┬───────┘  └───┴─-──┬────┘──┘             │
+│          │                  │                   │                     │
+│          └──────────────────┼───────────────────┘                     │
+│                             │                                         │
+│                  ┌──────────▼────────-──┐                             │
+│                  │     vBilling         │                             │
+│                  │     Controller       │                             │
+│                  │                      │                             │
+│                  │  • Auto-discovers    │                             │
+│                  │  • Collects metrics  │                             │
+│                  │  • Sends usage events│                             │
+│                  └──────────┬───────────┘                             │
+└─────────────────────────────┼────────────────────────────────────────-┘
                               │ Usage events (HTTP)
-                     ┌────────▼────────┐
+                     ┌────────▼──────-──┐
                      │      Lago        │
                      │  Billing Engine  │
                      │                  │
