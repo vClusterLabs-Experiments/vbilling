@@ -1,0 +1,546 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Getting Started - vBilling Docs</title>
+  <meta name="description" content="Complete getting started guide for vBilling: deploy Lago, install vBilling, configure pricing, and verify everything works.">
+  <style>
+    *, *::before, *::after {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    :root {
+      --primary: #f97316;
+      --primary-dark: #ea580c;
+      --primary-darker: #9a3412;
+      --primary-light: #fff7ed;
+      --primary-light-2: #ffedd5;
+      --accent: #fb923c;
+      --text-dark: #0f172a;
+      --text-gray: #475569;
+      --text-light: #64748b;
+      --white: #ffffff;
+      --bg-code: #0f172a;
+      --border: #e2e8f0;
+      --shadow-sm: 0 1px 2px rgba(0,0,0,0.05);
+      --shadow-md: 0 4px 6px -1px rgba(0,0,0,0.07), 0 2px 4px -2px rgba(0,0,0,0.05);
+      --shadow-lg: 0 10px 15px -3px rgba(0,0,0,0.08), 0 4px 6px -4px rgba(0,0,0,0.04);
+      --radius: 12px;
+      --radius-lg: 16px;
+      --sidebar-width: 260px;
+    }
+
+    html { scroll-behavior: smooth; scroll-padding-top: 80px; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', Roboto, Oxygen, Ubuntu, sans-serif;
+      color: var(--text-dark);
+      line-height: 1.6;
+      background: var(--white);
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ── Header ── */
+    .header {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 1000;
+      background: rgba(255,255,255,0.92);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+    }
+    .header.scrolled { box-shadow: var(--shadow-md); }
+    .header-inner {
+      max-width: 1400px; margin: 0 auto; padding: 0 24px;
+      display: flex; align-items: center; justify-content: space-between; height: 64px;
+    }
+    .header-logo {
+      display: flex; align-items: center; gap: 10px;
+      text-decoration: none; color: var(--text-dark);
+    }
+    .header-logo-icon {
+      width: 32px; height: 32px; border-radius: 8px;
+      background: linear-gradient(135deg, var(--primary-dark), var(--primary));
+      display: flex; align-items: center; justify-content: center;
+      color: var(--white); font-weight: 700; font-size: 0.9rem;
+    }
+    .header-logo-text { font-size: 1.15rem; font-weight: 700; letter-spacing: -0.5px; }
+    .header-logo-text span { color: var(--primary-dark); }
+    .header-nav { display: flex; align-items: center; gap: 20px; }
+    .header-nav a {
+      text-decoration: none; color: var(--text-gray); font-size: 0.88rem;
+      font-weight: 500; transition: color 0.2s;
+    }
+    .header-nav a:hover { color: var(--primary-dark); }
+    .header-nav .gh-link {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: var(--bg-code); color: var(--white); padding: 6px 14px;
+      border-radius: 8px; font-size: 0.82rem; font-weight: 600; transition: opacity 0.2s;
+    }
+    .header-nav .gh-link:hover { opacity: 0.85; color: var(--white); }
+
+    /* ── Layout ── */
+    .docs-layout {
+      display: flex; margin-top: 64px; min-height: calc(100vh - 64px);
+    }
+
+    /* ── Sidebar ── */
+    .sidebar {
+      width: var(--sidebar-width); flex-shrink: 0;
+      border-right: 1px solid var(--border); background: var(--primary-light);
+      padding: 32px 0; position: fixed; top: 64px; bottom: 0;
+      overflow-y: auto;
+    }
+    .sidebar-section { margin-bottom: 28px; }
+    .sidebar-label {
+      padding: 0 24px; font-size: 0.72rem; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 1px; color: var(--primary-darker);
+      margin-bottom: 8px;
+    }
+    .sidebar a {
+      display: block; padding: 7px 24px; text-decoration: none;
+      font-size: 0.88rem; color: var(--text-gray); font-weight: 500;
+      transition: all 0.15s; border-left: 3px solid transparent;
+    }
+    .sidebar a:hover { color: var(--primary-dark); background: var(--primary-light-2); }
+    .sidebar a.active {
+      color: var(--primary-dark); background: var(--primary-light-2);
+      border-left-color: var(--primary); font-weight: 600;
+    }
+    .sidebar-back {
+      display: flex; align-items: center; gap: 6px; margin: 0 24px 24px;
+      padding: 8px 12px; border-radius: 8px; text-decoration: none;
+      font-size: 0.85rem; color: var(--text-light); font-weight: 500;
+      border: 1px solid var(--border); transition: all 0.2s;
+    }
+    .sidebar-back:hover { border-color: var(--primary); color: var(--primary-dark); }
+
+    /* ── Content ── */
+    .content {
+      flex: 1; margin-left: var(--sidebar-width);
+      padding: 48px 64px 80px; max-width: 900px;
+    }
+    .content h1 {
+      font-size: 2.2rem; font-weight: 800; letter-spacing: -1px;
+      margin-bottom: 12px; color: var(--text-dark);
+    }
+    .content .subtitle {
+      font-size: 1.1rem; color: var(--text-gray); line-height: 1.7;
+      margin-bottom: 40px; max-width: 640px;
+    }
+    .content h2 {
+      font-size: 1.5rem; font-weight: 700; letter-spacing: -0.5px;
+      margin: 48px 0 16px; color: var(--text-dark);
+      padding-bottom: 8px; border-bottom: 2px solid var(--primary-light-2);
+    }
+    .content h3 {
+      font-size: 1.15rem; font-weight: 700; margin: 32px 0 12px;
+      color: var(--text-dark);
+    }
+    .content p {
+      font-size: 0.95rem; color: var(--text-gray); line-height: 1.7;
+      margin-bottom: 16px;
+    }
+    .content ul, .content ol {
+      margin: 0 0 16px 24px; color: var(--text-gray); font-size: 0.95rem;
+    }
+    .content li { margin-bottom: 6px; line-height: 1.6; }
+    .content code {
+      background: var(--primary-light-2); padding: 2px 7px; border-radius: 4px;
+      font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+      font-size: 0.85rem; color: var(--primary-darker);
+    }
+    .content a { color: var(--primary-dark); text-decoration: none; font-weight: 500; }
+    .content a:hover { text-decoration: underline; }
+
+    /* ── Code Blocks ── */
+    .code-block {
+      background: var(--bg-code); border-radius: var(--radius);
+      padding: 20px 24px; overflow-x: auto; margin-bottom: 20px;
+      position: relative;
+    }
+    .code-block code {
+      color: #e2e8f0; background: none; padding: 0;
+      font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+      font-size: 0.84rem; line-height: 1.7; white-space: pre;
+    }
+    .code-block .comment { color: #64748b; }
+    .code-block .cmd { color: #fb923c; }
+    .code-block .flag { color: #a5b4fc; }
+    .code-block .string { color: #86efac; }
+    .code-block .output { color: #94a3b8; }
+    .code-label {
+      display: inline-block; background: rgba(255,255,255,0.08);
+      color: #94a3b8; font-size: 0.75rem; font-weight: 600;
+      padding: 2px 10px; border-radius: 4px; margin-bottom: 12px;
+      text-transform: uppercase; letter-spacing: 0.5px;
+    }
+    .code-copy {
+      position: absolute; top: 12px; right: 12px;
+      background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 6px; padding: 5px 10px; color: #94a3b8;
+      font-size: 0.72rem; cursor: pointer; transition: all 0.2s;
+    }
+    .code-copy:hover { background: rgba(255,255,255,0.15); color: #e2e8f0; }
+
+    /* ── Callouts ── */
+    .callout {
+      padding: 16px 20px; border-radius: var(--radius); margin-bottom: 20px;
+      font-size: 0.9rem; line-height: 1.6; display: flex; gap: 12px;
+    }
+    .callout-icon { flex-shrink: 0; font-size: 1.1rem; margin-top: 1px; }
+    .callout-info {
+      background: #eff6ff; border: 1px solid #bfdbfe; color: #1e40af;
+    }
+    .callout-warn {
+      background: var(--primary-light); border: 1px solid var(--primary-light-2); color: var(--primary-darker);
+    }
+    .callout-success {
+      background: #f0fdf4; border: 1px solid #bbf7d0; color: #166534;
+    }
+
+    /* ── Step markers ── */
+    .step-marker {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 32px; height: 32px; border-radius: 50%;
+      background: linear-gradient(135deg, var(--primary-dark), var(--primary));
+      color: var(--white); font-weight: 700; font-size: 0.85rem;
+      margin-right: 10px; flex-shrink: 0; vertical-align: middle;
+    }
+
+    /* ── Mobile sidebar toggle ── */
+    .mobile-sidebar-toggle {
+      display: none; position: fixed; bottom: 24px; right: 24px; z-index: 999;
+      width: 48px; height: 48px; border-radius: 50%;
+      background: linear-gradient(135deg, var(--primary-dark), var(--primary));
+      color: var(--white); border: none; font-size: 1.3rem; cursor: pointer;
+      box-shadow: var(--shadow-lg);
+    }
+
+    /* ── Responsive ── */
+    @media (max-width: 900px) {
+      .sidebar {
+        transform: translateX(-100%); transition: transform 0.3s ease;
+        z-index: 900; width: 280px;
+      }
+      .sidebar.open { transform: translateX(0); }
+      .content { margin-left: 0; padding: 32px 24px 80px; }
+      .mobile-sidebar-toggle { display: flex; align-items: center; justify-content: center; }
+      .content h1 { font-size: 1.7rem; }
+      .content h2 { font-size: 1.3rem; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <header class="header" id="header">
+    <div class="header-inner">
+      <a href="index.html" class="header-logo">
+        <div class="header-logo-icon">vB</div>
+        <div class="header-logo-text">v<span>Billing</span> Docs</div>
+      </a>
+      <nav class="header-nav">
+        <a href="index.html">Home</a>
+        <a href="getting-started.html">Guide</a>
+        <a href="https://github.com/vClusterLabs-Experiments/vbilling" class="gh-link" target="_blank">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <!-- Layout -->
+  <div class="docs-layout">
+
+    <!-- Sidebar -->
+    <nav class="sidebar" id="sidebar">
+      <a href="index.html" class="sidebar-back">&#8592; Back to main site</a>
+      <div class="sidebar-section">
+        <div class="sidebar-label">Documentation</div>
+        <a href="getting-started.html" class="active">Getting Started</a>
+        <a href="configuration.html">Configuration</a>
+        <a href="metrics.html">Metrics Reference</a>
+        <a href="private-nodes.html">Private Nodes</a>
+        <a href="troubleshooting.html">Troubleshooting</a>
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-label">Resources</div>
+        <a href="https://github.com/vClusterLabs-Experiments/vbilling" target="_blank">GitHub Repository</a>
+        <a href="https://www.getlago.com/docs" target="_blank">Lago Docs</a>
+        <a href="https://www.vcluster.com/docs" target="_blank">vCluster Docs</a>
+      </div>
+    </nav>
+
+    <!-- Content -->
+    <main class="content">
+      <h1>Getting Started</h1>
+      <p class="subtitle">Go from zero to metered vCluster billing in four steps. This guide walks you through deploying Lago, installing vBilling, configuring pricing, and verifying the full pipeline.</p>
+
+      <!-- Prerequisites -->
+      <h2 id="prerequisites">Prerequisites</h2>
+      <p>Before you begin, make sure you have the following tools installed:</p>
+      <ul>
+        <li><strong>Docker</strong> and <strong>Docker Compose</strong> (for running Lago locally)</li>
+        <li><strong>kubectl</strong> configured to talk to a Kubernetes cluster</li>
+        <li><strong>vCluster CLI</strong> (<code>vcluster</code>) with at least one vCluster running</li>
+        <li><strong>Helm 3</strong> (for the Helm installation path)</li>
+        <li><strong>Go 1.22+</strong> (only if building from source)</li>
+        <li><strong>metrics-server</strong> installed in the cluster (for CPU/memory metrics)</li>
+      </ul>
+
+      <div class="callout callout-info">
+        <div class="callout-icon">i</div>
+        <div>vBilling auto-discovers vClusters by scanning for StatefulSets/Deployments with the <code>app=vcluster</code> label, or via the vCluster Platform API if available. Make sure you have at least one vCluster running before starting.</div>
+      </div>
+
+      <!-- Step 1: Deploy Lago -->
+      <h2 id="step-1"><span class="step-marker">1</span>Deploy Lago</h2>
+      <p>Lago is the open-source billing engine that vBilling sends usage events to. You can run it locally with Docker Compose or deploy it to your cluster.</p>
+
+      <h3>Clone the Lago repository</h3>
+      <div class="code-block"><code><span class="cmd">git</span> clone https://github.com/getlago/lago.git
+<span class="cmd">cd</span> lago</code></div>
+
+      <h3>Generate RSA keys for Lago API authentication</h3>
+      <div class="code-block"><code><span class="comment"># Generate RSA keypair for JWT signing</span>
+<span class="cmd">openssl</span> genrsa <span class="flag">-out</span> lago.key 2048
+<span class="cmd">openssl</span> rsa <span class="flag">-in</span> lago.key <span class="flag">-pubout</span> <span class="flag">-out</span> lago.pub
+
+<span class="comment"># Base64-encode for environment variables</span>
+<span class="cmd">export</span> LAGO_RSA_PRIVATE_KEY=$(<span class="cmd">base64</span> <span class="flag">-w0</span> lago.key 2>/dev/null || <span class="cmd">base64</span> lago.key)
+<span class="cmd">echo</span> <span class="string">"RSA_PRIVATE_KEY=$LAGO_RSA_PRIVATE_KEY"</span> >> .env</code></div>
+
+      <h3>Start Lago with Docker Compose</h3>
+      <div class="code-block"><code><span class="cmd">docker</span> compose up <span class="flag">-d</span>
+
+<span class="comment"># Wait for services to be healthy (takes ~60 seconds)</span>
+<span class="cmd">docker</span> compose ps
+
+<span class="output"># Expected output:
+# NAME                    STATUS
+# lago-api-1              running (healthy)
+# lago-front-1            running
+# lago-db-1               running (healthy)
+# lago-redis-1            running (healthy)
+# lago-worker-1           running</span></code></div>
+
+      <h3>Create an organization via GraphQL</h3>
+      <p>Lago needs an organization before you can use the API. Run this GraphQL mutation against the Lago API:</p>
+      <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-X</span> POST http://localhost:3000/graphql \
+  <span class="flag">-H</span> <span class="string">"Content-Type: application/json"</span> \
+  <span class="flag">-d</span> <span class="string">'{
+    "query": "mutation { registerUser(input: { email: \"admin@example.com\", password: \"ILoveLago99!\", organizationName: \"vBilling\" }) { token user { id email } } }"
+  }'</span>
+
+<span class="output"># Expected output:
+# {"data":{"registerUser":{"token":"eyJhb...","user":{"id":"...","email":"admin@example.com"}}}}</span></code></div>
+
+      <h3>Get the API key from the database</h3>
+      <p>The API key is stored in the Lago database. Extract it with:</p>
+      <div class="code-block"><code><span class="comment"># Connect to the Lago database and get the API key</span>
+<span class="cmd">docker</span> compose exec db psql <span class="flag">-U</span> lago <span class="flag">-d</span> lago \
+  <span class="flag">-c</span> <span class="string">"SELECT value FROM api_keys LIMIT 1;"</span>
+
+<span class="output"># Expected output:
+#              value
+# ---------------------------------
+#  a1b2c3d4-e5f6-7890-abcd-ef1234567890
+# (1 row)</span>
+
+<span class="comment"># Save it for later</span>
+<span class="cmd">export</span> LAGO_API_KEY=<span class="string">"a1b2c3d4-e5f6-7890-abcd-ef1234567890"</span></code></div>
+
+      <div class="callout callout-warn">
+        <div class="callout-icon">!</div>
+        <div>Keep this API key safe. You will need it when configuring vBilling. In production, store it in a Kubernetes Secret.</div>
+      </div>
+
+      <!-- Step 2: Install vBilling -->
+      <h2 id="step-2"><span class="step-marker">2</span>Install vBilling</h2>
+      <p>You can install vBilling via Helm (recommended for production) or run it locally during development.</p>
+
+      <h3>Option A: Helm chart (recommended)</h3>
+
+      <p>First, build and push the container image (if not using a pre-built image):</p>
+      <div class="code-block"><code><span class="comment"># Build multi-arch image</span>
+<span class="cmd">docker</span> buildx build \
+  <span class="flag">--platform</span> linux/amd64,linux/arm64 \
+  <span class="flag">-t</span> ghcr.io/vclusterlabs-experiments/vbilling:latest \
+  <span class="flag">--push</span> .
+
+<span class="output"># Or single-arch for local testing:
+# docker build -t vbilling:latest .</span></code></div>
+
+      <p>Install with Helm:</p>
+      <div class="code-block"><code><span class="cmd">helm</span> upgrade <span class="flag">--install</span> vbilling deploy/helm/vbilling \
+  <span class="flag">--namespace</span> vbilling-system <span class="flag">--create-namespace</span> \
+  <span class="flag">--set</span> lago.apiURL=<span class="string">"http://lago-api.lago-system.svc.cluster.local:3000"</span> \
+  <span class="flag">--set</span> lago.apiKey=<span class="string">"$LAGO_API_KEY"</span>
+
+<span class="output"># Expected output:
+# Release "vbilling" does not exist. Installing it now.
+# NAME: vbilling
+# NAMESPACE: vbilling-system
+# STATUS: deployed</span></code></div>
+
+      <p>Or use an existing Kubernetes secret for the API key:</p>
+      <div class="code-block"><code><span class="comment"># Create the secret first</span>
+<span class="cmd">kubectl</span> create secret generic vbilling-lago-secret \
+  <span class="flag">-n</span> vbilling-system \
+  <span class="flag">--from-literal</span>=api-key=<span class="string">"$LAGO_API_KEY"</span>
+
+<span class="comment"># Install with secret reference</span>
+<span class="cmd">helm</span> upgrade <span class="flag">--install</span> vbilling deploy/helm/vbilling \
+  <span class="flag">--namespace</span> vbilling-system <span class="flag">--create-namespace</span> \
+  <span class="flag">--set</span> lago.apiURL=<span class="string">"http://lago-api.lago-system.svc.cluster.local:3000"</span> \
+  <span class="flag">--set</span> lago.existingSecret=<span class="string">"vbilling-lago-secret"</span></code></div>
+
+      <h3>Option B: Run locally (development)</h3>
+      <div class="code-block"><code><span class="comment"># Clone the repository</span>
+<span class="cmd">git</span> clone https://github.com/vClusterLabs-Experiments/vbilling.git
+<span class="cmd">cd</span> vbilling
+
+<span class="comment"># Build the binary</span>
+<span class="cmd">make</span> build
+
+<span class="output"># Expected output:
+# CGO_ENABLED=0 go build -o bin/vbilling ./cmd/vbilling</span>
+
+<span class="comment"># Run with environment variables</span>
+<span class="cmd">export</span> LAGO_API_URL=<span class="string">"http://localhost:3000"</span>
+<span class="cmd">export</span> LAGO_API_KEY=<span class="string">"a1b2c3d4-e5f6-7890-abcd-ef1234567890"</span>
+<span class="cmd">./bin/vbilling</span>
+
+<span class="output"># Expected output:
+# vBilling - vCluster Billing Controller
+# =======================================
+# Lago API: http://localhost:3000
+# Plan: vcluster-standard | Currency: USD
+# Collection: 1m0s | Reconcile: 30s
+# Bootstrapping Lago billing configuration...
+# [bootstrap] setting up Lago billing configuration...
+# [bootstrap] created metric "vcluster_cpu_core_hours" (id=...)
+# [bootstrap] created metric "vcluster_memory_gb_hours" (id=...)
+# ...
+# [bootstrap] created plan "vcluster-standard" (id=...) with 9 charges
+# [bootstrap] Lago billing configuration complete
+# Starting billing controller...</span></code></div>
+
+      <div class="callout callout-info">
+        <div class="callout-icon">i</div>
+        <div>When running locally, vBilling uses your <code>~/.kube/config</code> to connect to the cluster. Make sure your kubeconfig context points to the cluster with your vClusters.</div>
+      </div>
+
+      <!-- Step 3: Configure Pricing -->
+      <h2 id="step-3"><span class="step-marker">3</span>Configure Pricing in Lago</h2>
+      <p>vBilling bootstraps all 9 billable metrics and a default plan (<code>vcluster-standard</code>) on startup. However, <strong>all charges default to $0.00</strong>. You must set pricing in the Lago UI.</p>
+
+      <h3>Open the Lago dashboard</h3>
+      <div class="code-block"><code><span class="comment"># Lago UI is available at:</span>
+<span class="cmd">open</span> http://localhost:80
+
+<span class="comment"># Log in with the credentials you used in the GraphQL mutation:
+# Email: admin@example.com
+# Password: ILoveLago99!</span></code></div>
+
+      <h3>Edit the plan charges</h3>
+      <ol>
+        <li>Navigate to <strong>Plans</strong> in the left sidebar</li>
+        <li>Click on <strong>vCluster Standard</strong> (code: <code>vcluster-standard</code>)</li>
+        <li>Scroll to the <strong>Charges</strong> section</li>
+        <li>For each charge, click the edit icon and set the price per unit:</li>
+      </ol>
+
+      <div class="callout callout-info">
+        <div class="callout-icon">i</div>
+        <div>
+          <strong>Recommended pricing (adjust to your costs):</strong><br>
+          CPU Core-Hours: $0.05 | Memory GB-Hours: $0.01 | Storage GB-Hours: $0.001<br>
+          Instance Hours: $0.10 | GPU Hours: $2.50 (default) | Network Egress/GB: $0.05<br>
+          LoadBalancer Hours: $0.025 | Private Node Hours: $1.00
+        </div>
+      </div>
+
+      <!-- Step 4: Verify -->
+      <h2 id="step-4"><span class="step-marker">4</span>Verify It Works</h2>
+      <p>Once vBilling is running, it will auto-discover your vClusters and start sending usage events within one reconcile cycle (default: 30 seconds).</p>
+
+      <h3>Check vBilling logs</h3>
+      <div class="code-block"><code><span class="comment"># If running via Helm:</span>
+<span class="cmd">kubectl</span> logs <span class="flag">-n</span> vbilling-system <span class="flag">-l</span> app=vbilling <span class="flag">-f</span>
+
+<span class="output"># Expected output:
+# [controller] starting billing controller
+# [controller] reconcile interval: 30s, collection interval: 1m0s
+# [controller] new vCluster discovered: vcluster-team-alpha/my-vcluster
+# [controller] ensured customer vcluster-vcluster-team-alpha-my-vcluster
+# [controller] created subscription sub-vcluster-vcluster-team-alpha-my-vcluster -> plan vcluster-standard
+# [metrics] vcluster-team-alpha: CPU=0.250 cores, Memory=0.51 GB
+# [metrics] vcluster-team-alpha: Storage=10.00 GB (2 PVCs)
+# [controller] sent 4 billing events to Lago</span></code></div>
+
+      <h3>Check Lago for customers</h3>
+      <p>Open the Lago UI and navigate to <strong>Customers</strong>. You should see one customer per discovered vCluster:</p>
+      <div class="code-block"><code><span class="comment"># Or verify via the API:</span>
+<span class="cmd">curl</span> <span class="flag">-s</span> http://localhost:3000/api/v1/customers \
+  <span class="flag">-H</span> <span class="string">"Authorization: Bearer $LAGO_API_KEY"</span> | <span class="cmd">jq</span> <span class="string">'.customers[].external_id'</span>
+
+<span class="output"># Expected output:
+# "vcluster-vcluster-team-alpha-my-vcluster"
+# "vcluster-default-dev-cluster"</span></code></div>
+
+      <h3>Check current usage</h3>
+      <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-s</span> http://localhost:3000/api/v1/customers/vcluster-vcluster-team-alpha-my-vcluster/current_usage\?external_subscription_id=sub-vcluster-vcluster-team-alpha-my-vcluster \
+  <span class="flag">-H</span> <span class="string">"Authorization: Bearer $LAGO_API_KEY"</span> | <span class="cmd">jq</span>
+
+<span class="output"># Expected output:
+# {
+#   "customer_usage": {
+#     "from_datetime": "2025-01-01T00:00:00Z",
+#     "to_datetime": "2025-01-31T23:59:59Z",
+#     "amount_cents": 1250,
+#     "amount_currency": "USD",
+#     ...
+#   }
+# }</span></code></div>
+
+      <div class="callout callout-success">
+        <div class="callout-icon">&#10003;</div>
+        <div>If you see customers and usage data, vBilling is working. Usage events are sent every collection interval (default: 60 seconds). Invoices are generated monthly by Lago.</div>
+      </div>
+
+      <h2 id="next-steps">Next Steps</h2>
+      <ul>
+        <li><a href="configuration.html">Configuration</a> -- tune intervals, namespaces, and pricing</li>
+        <li><a href="metrics.html">Metrics Reference</a> -- understand all 9 billable metrics</li>
+        <li><a href="private-nodes.html">Private Nodes</a> -- set up dedicated node billing</li>
+        <li><a href="troubleshooting.html">Troubleshooting</a> -- common issues and fixes</li>
+      </ul>
+
+    </main>
+  </div>
+
+  <button class="mobile-sidebar-toggle" id="mobileSidebarToggle" aria-label="Toggle sidebar">&#9776;</button>
+
+  <script>
+    // Header scroll shadow
+    const header = document.getElementById('header');
+    window.addEventListener('scroll', () => {
+      header.classList.toggle('scrolled', window.scrollY > 10);
+    });
+
+    // Mobile sidebar toggle
+    const sidebar = document.getElementById('sidebar');
+    const toggle = document.getElementById('mobileSidebarToggle');
+    toggle.addEventListener('click', () => {
+      sidebar.classList.toggle('open');
+    });
+    document.addEventListener('click', (e) => {
+      if (!sidebar.contains(e.target) && !toggle.contains(e.target)) {
+        sidebar.classList.remove('open');
+      }
+    });
+  </script>
+</body>
+</html>

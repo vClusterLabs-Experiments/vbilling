@@ -1,0 +1,630 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Metrics Reference - vBilling Docs</title>
+  <meta name="description" content="Detailed reference for all 9 billable metrics tracked by vBilling: CPU, memory, storage, GPU, network, LoadBalancers, instance hours, and private nodes.">
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+      --primary: #f97316; --primary-dark: #ea580c; --primary-darker: #9a3412;
+      --primary-light: #fff7ed; --primary-light-2: #ffedd5; --accent: #fb923c;
+      --text-dark: #0f172a; --text-gray: #475569; --text-light: #64748b;
+      --white: #ffffff; --bg-code: #0f172a; --border: #e2e8f0;
+      --shadow-sm: 0 1px 2px rgba(0,0,0,0.05);
+      --shadow-md: 0 4px 6px -1px rgba(0,0,0,0.07), 0 2px 4px -2px rgba(0,0,0,0.05);
+      --shadow-lg: 0 10px 15px -3px rgba(0,0,0,0.08), 0 4px 6px -4px rgba(0,0,0,0.04);
+      --radius: 12px; --radius-lg: 16px; --sidebar-width: 260px;
+    }
+
+    html { scroll-behavior: smooth; scroll-padding-top: 80px; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', Roboto, Oxygen, Ubuntu, sans-serif;
+      color: var(--text-dark); line-height: 1.6; background: var(--white);
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .header {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 1000;
+      background: rgba(255,255,255,0.92); backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px); border-bottom: 1px solid var(--border);
+    }
+    .header.scrolled { box-shadow: var(--shadow-md); }
+    .header-inner {
+      max-width: 1400px; margin: 0 auto; padding: 0 24px;
+      display: flex; align-items: center; justify-content: space-between; height: 64px;
+    }
+    .header-logo {
+      display: flex; align-items: center; gap: 10px;
+      text-decoration: none; color: var(--text-dark);
+    }
+    .header-logo-icon {
+      width: 32px; height: 32px; border-radius: 8px;
+      background: linear-gradient(135deg, var(--primary-dark), var(--primary));
+      display: flex; align-items: center; justify-content: center;
+      color: var(--white); font-weight: 700; font-size: 0.9rem;
+    }
+    .header-logo-text { font-size: 1.15rem; font-weight: 700; letter-spacing: -0.5px; }
+    .header-logo-text span { color: var(--primary-dark); }
+    .header-nav { display: flex; align-items: center; gap: 20px; }
+    .header-nav a {
+      text-decoration: none; color: var(--text-gray); font-size: 0.88rem;
+      font-weight: 500; transition: color 0.2s;
+    }
+    .header-nav a:hover { color: var(--primary-dark); }
+    .header-nav .gh-link {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: var(--bg-code); color: var(--white); padding: 6px 14px;
+      border-radius: 8px; font-size: 0.82rem; font-weight: 600; transition: opacity 0.2s;
+    }
+    .header-nav .gh-link:hover { opacity: 0.85; color: var(--white); }
+
+    .docs-layout { display: flex; margin-top: 64px; min-height: calc(100vh - 64px); }
+
+    .sidebar {
+      width: var(--sidebar-width); flex-shrink: 0;
+      border-right: 1px solid var(--border); background: var(--primary-light);
+      padding: 32px 0; position: fixed; top: 64px; bottom: 0; overflow-y: auto;
+    }
+    .sidebar-section { margin-bottom: 28px; }
+    .sidebar-label {
+      padding: 0 24px; font-size: 0.72rem; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 1px; color: var(--primary-darker);
+      margin-bottom: 8px;
+    }
+    .sidebar a {
+      display: block; padding: 7px 24px; text-decoration: none;
+      font-size: 0.88rem; color: var(--text-gray); font-weight: 500;
+      transition: all 0.15s; border-left: 3px solid transparent;
+    }
+    .sidebar a:hover { color: var(--primary-dark); background: var(--primary-light-2); }
+    .sidebar a.active {
+      color: var(--primary-dark); background: var(--primary-light-2);
+      border-left-color: var(--primary); font-weight: 600;
+    }
+    .sidebar-back {
+      display: flex; align-items: center; gap: 6px; margin: 0 24px 24px;
+      padding: 8px 12px; border-radius: 8px; text-decoration: none;
+      font-size: 0.85rem; color: var(--text-light); font-weight: 500;
+      border: 1px solid var(--border); transition: all 0.2s;
+    }
+    .sidebar-back:hover { border-color: var(--primary); color: var(--primary-dark); }
+
+    .content {
+      flex: 1; margin-left: var(--sidebar-width);
+      padding: 48px 64px 80px; max-width: 920px;
+    }
+    .content h1 {
+      font-size: 2.2rem; font-weight: 800; letter-spacing: -1px;
+      margin-bottom: 12px; color: var(--text-dark);
+    }
+    .content .subtitle {
+      font-size: 1.1rem; color: var(--text-gray); line-height: 1.7;
+      margin-bottom: 40px; max-width: 640px;
+    }
+    .content h2 {
+      font-size: 1.5rem; font-weight: 700; letter-spacing: -0.5px;
+      margin: 48px 0 16px; color: var(--text-dark);
+      padding-bottom: 8px; border-bottom: 2px solid var(--primary-light-2);
+    }
+    .content h3 {
+      font-size: 1.15rem; font-weight: 700; margin: 32px 0 12px; color: var(--text-dark);
+    }
+    .content h4 {
+      font-size: 0.95rem; font-weight: 700; margin: 20px 0 8px; color: var(--text-dark);
+    }
+    .content p {
+      font-size: 0.95rem; color: var(--text-gray); line-height: 1.7; margin-bottom: 16px;
+    }
+    .content ul, .content ol {
+      margin: 0 0 16px 24px; color: var(--text-gray); font-size: 0.95rem;
+    }
+    .content li { margin-bottom: 6px; line-height: 1.6; }
+    .content code {
+      background: var(--primary-light-2); padding: 2px 7px; border-radius: 4px;
+      font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+      font-size: 0.85rem; color: var(--primary-darker);
+    }
+    .content a { color: var(--primary-dark); text-decoration: none; font-weight: 500; }
+    .content a:hover { text-decoration: underline; }
+
+    .code-block {
+      background: var(--bg-code); border-radius: var(--radius);
+      padding: 20px 24px; overflow-x: auto; margin-bottom: 20px; position: relative;
+    }
+    .code-block code {
+      color: #e2e8f0; background: none; padding: 0;
+      font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+      font-size: 0.84rem; line-height: 1.7; white-space: pre;
+    }
+    .code-block .comment { color: #64748b; }
+    .code-block .cmd { color: #fb923c; }
+    .code-block .flag { color: #a5b4fc; }
+    .code-block .string { color: #86efac; }
+    .code-block .output { color: #94a3b8; }
+
+    .callout {
+      padding: 16px 20px; border-radius: var(--radius); margin-bottom: 20px;
+      font-size: 0.9rem; line-height: 1.6; display: flex; gap: 12px;
+    }
+    .callout-icon { flex-shrink: 0; font-size: 1.1rem; margin-top: 1px; }
+    .callout-info { background: #eff6ff; border: 1px solid #bfdbfe; color: #1e40af; }
+    .callout-warn { background: var(--primary-light); border: 1px solid var(--primary-light-2); color: var(--primary-darker); }
+
+    /* ── Metric card ── */
+    .metric-card {
+      border: 1px solid var(--border); border-radius: var(--radius-lg);
+      margin-bottom: 32px; overflow: hidden; box-shadow: var(--shadow-sm);
+    }
+    .metric-card-header {
+      background: var(--primary-light); padding: 16px 24px;
+      border-bottom: 1px solid var(--primary-light-2);
+      display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;
+    }
+    .metric-card-header h3 {
+      margin: 0; font-size: 1.1rem; font-weight: 700; color: var(--text-dark);
+    }
+    .metric-card-badges { display: flex; gap: 8px; flex-wrap: wrap; }
+    .metric-badge {
+      display: inline-block; padding: 3px 10px; border-radius: 100px;
+      font-size: 0.75rem; font-weight: 600;
+    }
+    .metric-badge.shared { background: var(--primary-light-2); color: var(--primary-dark); }
+    .metric-badge.private { background: #ffedd5; color: #9a3412; }
+    .metric-badge.optional { background: #eff6ff; color: #1e40af; }
+    .metric-card-body { padding: 20px 24px; }
+    .metric-card-body p { font-size: 0.9rem; }
+
+    .metric-detail {
+      display: grid; grid-template-columns: 120px 1fr; gap: 6px 16px;
+      margin-bottom: 16px; font-size: 0.88rem;
+    }
+    .metric-detail dt {
+      font-weight: 700; color: var(--text-dark); font-size: 0.82rem;
+      text-transform: uppercase; letter-spacing: 0.3px;
+    }
+    .metric-detail dd { color: var(--text-gray); }
+
+    .props-table {
+      width: 100%; border-collapse: collapse; font-size: 0.85rem;
+      margin-top: 12px; margin-bottom: 8px;
+    }
+    .props-table thead { background: var(--primary-light); }
+    .props-table th {
+      padding: 8px 12px; text-align: left; font-weight: 700;
+      color: var(--primary-darker); font-size: 0.75rem;
+      text-transform: uppercase; letter-spacing: 0.5px;
+      border-bottom: 1px solid var(--primary-light-2);
+    }
+    .props-table td {
+      padding: 6px 12px; border-bottom: 1px solid var(--border);
+      color: var(--text-gray); vertical-align: top;
+    }
+    .props-table tr:last-child td { border-bottom: none; }
+
+    .mobile-sidebar-toggle {
+      display: none; position: fixed; bottom: 24px; right: 24px; z-index: 999;
+      width: 48px; height: 48px; border-radius: 50%;
+      background: linear-gradient(135deg, var(--primary-dark), var(--primary));
+      color: var(--white); border: none; font-size: 1.3rem; cursor: pointer;
+      box-shadow: var(--shadow-lg);
+    }
+
+    @media (max-width: 900px) {
+      .sidebar {
+        transform: translateX(-100%); transition: transform 0.3s ease;
+        z-index: 900; width: 280px;
+      }
+      .sidebar.open { transform: translateX(0); }
+      .content { margin-left: 0; padding: 32px 24px 80px; }
+      .mobile-sidebar-toggle { display: flex; align-items: center; justify-content: center; }
+      .content h1 { font-size: 1.7rem; }
+      .content h2 { font-size: 1.3rem; }
+      .metric-detail { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+  <header class="header" id="header">
+    <div class="header-inner">
+      <a href="index.html" class="header-logo">
+        <div class="header-logo-icon">vB</div>
+        <div class="header-logo-text">v<span>Billing</span> Docs</div>
+      </a>
+      <nav class="header-nav">
+        <a href="index.html">Home</a>
+        <a href="getting-started.html">Guide</a>
+        <a href="https://github.com/vClusterLabs-Experiments/vbilling" class="gh-link" target="_blank">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <div class="docs-layout">
+    <nav class="sidebar" id="sidebar">
+      <a href="index.html" class="sidebar-back">&#8592; Back to main site</a>
+      <div class="sidebar-section">
+        <div class="sidebar-label">Documentation</div>
+        <a href="getting-started.html">Getting Started</a>
+        <a href="configuration.html">Configuration</a>
+        <a href="metrics.html" class="active">Metrics Reference</a>
+        <a href="private-nodes.html">Private Nodes</a>
+        <a href="troubleshooting.html">Troubleshooting</a>
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-label">Resources</div>
+        <a href="https://github.com/vClusterLabs-Experiments/vbilling" target="_blank">GitHub Repository</a>
+        <a href="https://www.getlago.com/docs" target="_blank">Lago Docs</a>
+        <a href="https://www.vcluster.com/docs" target="_blank">vCluster Docs</a>
+      </div>
+    </nav>
+
+    <main class="content">
+      <h1>Metrics Reference</h1>
+      <p class="subtitle">vBilling tracks 9 billable metrics across CPU, memory, storage, GPU, network, and infrastructure. Each metric is sent to Lago as a usage event with specific properties.</p>
+
+      <div class="callout callout-info">
+        <div class="callout-icon">i</div>
+        <div>All metrics are aggregated using Lago's <code>sum_agg</code> aggregation type. Values are multiplied by the collection interval (in hours) to convert from instantaneous readings to hourly units.</div>
+      </div>
+
+      <!-- 1. CPU Core-Hours -->
+      <h2 id="cpu-core-hours">1. CPU Core-Hours</h2>
+      <div class="metric-card">
+        <div class="metric-card-header">
+          <h3><code>vcluster_cpu_core_hours</code></h3>
+          <div class="metric-card-badges">
+            <span class="metric-badge shared">Shared Mode</span>
+            <span class="metric-badge private">Private Node Mode</span>
+          </div>
+        </div>
+        <div class="metric-card-body">
+          <dl class="metric-detail">
+            <dt>Source</dt>
+            <dd>Kubernetes Metrics Server (PodMetrics API)</dd>
+            <dt>Unit</dt>
+            <dd>Core-hours</dd>
+            <dt>Formula</dt>
+            <dd><code>current_cpu_cores x interval_hours x cost_multiplier</code></dd>
+            <dt>Lago Field</dt>
+            <dd><code>cpu_core_hours</code></dd>
+          </dl>
+          <p>Measures the actual CPU usage of all pods running in the vCluster namespace. The collector queries the metrics-server PodMetrics API, sums up the CPU usage (in millicores) across all containers, and converts to core-hours by multiplying by the collection interval in hours.</p>
+          <p>In <strong>shared mode</strong>, only namespace pods are counted. In <strong>private node mode</strong>, the full CPU capacity of dedicated nodes is also added to the total.</p>
+          <p>The <code>cost_multiplier</code> adjusts for spot vs. on-demand pricing. If 50% of pods run on spot nodes with a 60% discount, the multiplier is 0.70.</p>
+
+          <h4>Lago event properties</h4>
+          <table class="props-table">
+            <thead><tr><th>Property</th><th>Type</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td><code>cpu_core_hours</code></td><td>float</td><td>Billable core-hours (with cost multiplier applied)</td></tr>
+              <tr><td><code>raw_cpu_cores</code></td><td>float</td><td>Instantaneous CPU usage in cores</td></tr>
+              <tr><td><code>cost_multiplier</code></td><td>float</td><td>Spot/on-demand cost adjustment factor</td></tr>
+              <tr><td><code>vcluster_name</code></td><td>string</td><td>Name of the vCluster</td></tr>
+              <tr><td><code>vcluster_namespace</code></td><td>string</td><td>Namespace of the vCluster</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- 2. Memory GB-Hours -->
+      <h2 id="memory-gb-hours">2. Memory GB-Hours</h2>
+      <div class="metric-card">
+        <div class="metric-card-header">
+          <h3><code>vcluster_memory_gb_hours</code></h3>
+          <div class="metric-card-badges">
+            <span class="metric-badge shared">Shared Mode</span>
+            <span class="metric-badge private">Private Node Mode</span>
+          </div>
+        </div>
+        <div class="metric-card-body">
+          <dl class="metric-detail">
+            <dt>Source</dt>
+            <dd>Kubernetes Metrics Server (PodMetrics API)</dd>
+            <dt>Unit</dt>
+            <dd>GB-hours</dd>
+            <dt>Formula</dt>
+            <dd><code>current_memory_gb x interval_hours x cost_multiplier</code></dd>
+            <dt>Lago Field</dt>
+            <dd><code>memory_gb_hours</code></dd>
+          </dl>
+          <p>Measures actual memory consumption of all pods in the vCluster namespace. Memory is read from the metrics-server in bytes, converted to GB (bytes / 1024^3), then multiplied by the interval to produce GB-hours.</p>
+          <p>In <strong>private node mode</strong>, the total memory capacity of dedicated nodes is added on top of shared-namespace pod usage.</p>
+
+          <h4>Lago event properties</h4>
+          <table class="props-table">
+            <thead><tr><th>Property</th><th>Type</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td><code>memory_gb_hours</code></td><td>float</td><td>Billable GB-hours (with cost multiplier)</td></tr>
+              <tr><td><code>raw_memory_gb</code></td><td>float</td><td>Instantaneous memory usage in GB</td></tr>
+              <tr><td><code>vcluster_name</code></td><td>string</td><td>Name of the vCluster</td></tr>
+              <tr><td><code>vcluster_namespace</code></td><td>string</td><td>Namespace of the vCluster</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- 3. Storage GB-Hours -->
+      <h2 id="storage-gb-hours">3. Storage GB-Hours</h2>
+      <div class="metric-card">
+        <div class="metric-card-header">
+          <h3><code>vcluster_storage_gb_hours</code></h3>
+          <div class="metric-card-badges">
+            <span class="metric-badge shared">Shared Mode</span>
+          </div>
+        </div>
+        <div class="metric-card-body">
+          <dl class="metric-detail">
+            <dt>Source</dt>
+            <dd>PersistentVolumeClaims (PVC <code>spec.resources.requests</code>)</dd>
+            <dt>Unit</dt>
+            <dd>GB-hours</dd>
+            <dt>Formula</dt>
+            <dd><code>total_pvc_storage_gb x interval_hours</code></dd>
+            <dt>Lago Field</dt>
+            <dd><code>storage_gb_hours</code></dd>
+          </dl>
+          <p>Sums the requested storage size of all bound PVCs in the vCluster namespace. Only PVCs with <code>status.phase == Bound</code> are counted. Storage billing is not affected by spot/on-demand node cost multipliers.</p>
+
+          <h4>Lago event properties</h4>
+          <table class="props-table">
+            <thead><tr><th>Property</th><th>Type</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td><code>storage_gb_hours</code></td><td>float</td><td>Billable storage GB-hours</td></tr>
+              <tr><td><code>raw_storage_gb</code></td><td>float</td><td>Total PVC storage in GB at time of collection</td></tr>
+              <tr><td><code>vcluster_name</code></td><td>string</td><td>Name of the vCluster</td></tr>
+              <tr><td><code>vcluster_namespace</code></td><td>string</td><td>Namespace of the vCluster</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- 4. GPU Hours -->
+      <h2 id="gpu-hours">4. GPU Hours</h2>
+      <div class="metric-card">
+        <div class="metric-card-header">
+          <h3><code>vcluster_gpu_hours</code></h3>
+          <div class="metric-card-badges">
+            <span class="metric-badge shared">Shared Mode</span>
+            <span class="metric-badge private">Private Node Mode</span>
+          </div>
+        </div>
+        <div class="metric-card-body">
+          <dl class="metric-detail">
+            <dt>Source</dt>
+            <dd>Pod <code>nvidia.com/gpu</code> resource requests + node labels for GPU type</dd>
+            <dt>Unit</dt>
+            <dd>GPU-hours</dd>
+            <dt>Formula</dt>
+            <dd><code>gpu_count x interval_hours</code> (per GPU type)</dd>
+            <dt>Lago Field</dt>
+            <dd><code>gpu_hours</code></dd>
+          </dl>
+          <p>Counts the number of <code>nvidia.com/gpu</code> resources requested by running pods, grouped by GPU type. The GPU type is detected from node labels on the node where the pod is scheduled. One event is sent per distinct GPU type.</p>
+
+          <h4>GPU type detection (label priority order)</h4>
+          <ol>
+            <li><code>nvidia.com/gpu.product</code> -- NVIDIA GPU Operator (e.g., "NVIDIA-A100-SXM4-80GB")</li>
+            <li><code>nvidia.com/gpu.machine</code> -- alternative NVIDIA label</li>
+            <li><code>accelerator</code> -- GKE generic accelerator label</li>
+            <li><code>cloud.google.com/gke-accelerator</code> -- GKE-specific (e.g., "nvidia-tesla-t4")</li>
+            <li><code>k8s.amazonaws.com/accelerator</code> -- EKS (e.g., "nvidia-tesla-a100")</li>
+            <li><code>node.kubernetes.io/instance-type</code> -- fallback: cloud instance type</li>
+          </ol>
+          <p>In <strong>private node mode</strong>, GPU counts are read from the node's <code>status.capacity["nvidia.com/gpu"]</code> field, and GPU types are detected using the same label priority.</p>
+
+          <h4>Lago event properties</h4>
+          <table class="props-table">
+            <thead><tr><th>Property</th><th>Type</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td><code>gpu_hours</code></td><td>float</td><td>Billable GPU-hours for this GPU type</td></tr>
+              <tr><td><code>gpu_count</code></td><td>int</td><td>Number of GPUs of this type</td></tr>
+              <tr><td><code>gpu_type</code></td><td>string</td><td>GPU model name (normalized)</td></tr>
+              <tr><td><code>billing_mode</code></td><td>string</td><td>"private_node" when from dedicated nodes, absent in shared mode</td></tr>
+              <tr><td><code>vcluster_name</code></td><td>string</td><td>Name of the vCluster</td></tr>
+              <tr><td><code>vcluster_namespace</code></td><td>string</td><td>Namespace of the vCluster</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- 5. GPU Utilization -->
+      <h2 id="gpu-utilization">5. GPU Utilization</h2>
+      <div class="metric-card">
+        <div class="metric-card-header">
+          <h3><code>vcluster_gpu_utilization</code></h3>
+          <div class="metric-card-badges">
+            <span class="metric-badge shared">Shared Mode</span>
+            <span class="metric-badge optional">Requires Prometheus</span>
+          </div>
+        </div>
+        <div class="metric-card-body">
+          <dl class="metric-detail">
+            <dt>Source</dt>
+            <dd>DCGM Exporter via Prometheus (<code>DCGM_FI_DEV_GPU_UTIL</code>)</dd>
+            <dt>Unit</dt>
+            <dd>Percentage-hours (utilization score)</dd>
+            <dt>Formula</dt>
+            <dd><code>avg_utilization_percent x interval_hours</code></dd>
+            <dt>Lago Field</dt>
+            <dd><code>gpu_util_score</code></dd>
+          </dl>
+          <p>Queries DCGM GPU utilization from Prometheus for all GPUs in the vCluster namespace. The average utilization percentage is multiplied by the interval to produce a utilization score. Requires <code>PROMETHEUS_URL</code> to be configured and the DCGM Exporter running in the cluster.</p>
+          <p>Also queries <code>DCGM_FI_DEV_FB_USED</code> and <code>DCGM_FI_DEV_FB_FREE</code> for GPU memory usage tracking. This metric is primarily informational and can be used for billing adjustments or overuse surcharges.</p>
+
+          <h4>Lago event properties</h4>
+          <table class="props-table">
+            <thead><tr><th>Property</th><th>Type</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td><code>gpu_util_score</code></td><td>float</td><td>Utilization score (avg% x hours)</td></tr>
+              <tr><td><code>avg_utilization_pct</code></td><td>float</td><td>Average GPU utilization percentage (0-100)</td></tr>
+              <tr><td><code>gpu_count</code></td><td>int</td><td>Number of GPUs with utilization data</td></tr>
+              <tr><td><code>vcluster_name</code></td><td>string</td><td>Name of the vCluster</td></tr>
+              <tr><td><code>vcluster_namespace</code></td><td>string</td><td>Namespace of the vCluster</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- 6. Network Egress -->
+      <h2 id="network-egress">6. Network Egress</h2>
+      <div class="metric-card">
+        <div class="metric-card-header">
+          <h3><code>vcluster_network_egress_gb</code></h3>
+          <div class="metric-card-badges">
+            <span class="metric-badge shared">Shared Mode</span>
+            <span class="metric-badge optional">Requires Prometheus</span>
+          </div>
+        </div>
+        <div class="metric-card-body">
+          <dl class="metric-detail">
+            <dt>Source</dt>
+            <dd>Prometheus <code>container_network_transmit_bytes_total</code></dd>
+            <dt>Unit</dt>
+            <dd>GB</dd>
+            <dt>Formula</dt>
+            <dd><code>sum(rate(container_network_transmit_bytes_total{namespace}[5m])) x 300</code> / 1024^3</dd>
+            <dt>Lago Field</dt>
+            <dd><code>egress_gb</code></dd>
+          </dl>
+          <p>Measures outbound (transmit) network traffic for all containers in the vCluster namespace. Uses a 5-minute rate window from Prometheus to estimate bytes per second, then multiplies by 300 seconds. Requires <code>PROMETHEUS_URL</code> to be set.</p>
+          <p>Ingress traffic (<code>container_network_receive_bytes_total</code>) is also collected and tracked internally but not billed by default.</p>
+
+          <h4>Lago event properties</h4>
+          <table class="props-table">
+            <thead><tr><th>Property</th><th>Type</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td><code>egress_gb</code></td><td>float</td><td>Egress traffic in GB</td></tr>
+              <tr><td><code>vcluster_name</code></td><td>string</td><td>Name of the vCluster</td></tr>
+              <tr><td><code>vcluster_namespace</code></td><td>string</td><td>Namespace of the vCluster</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- 7. LoadBalancer Hours -->
+      <h2 id="lb-hours">7. LoadBalancer Hours</h2>
+      <div class="metric-card">
+        <div class="metric-card-header">
+          <h3><code>vcluster_lb_hours</code></h3>
+          <div class="metric-card-badges">
+            <span class="metric-badge shared">Shared Mode</span>
+          </div>
+        </div>
+        <div class="metric-card-body">
+          <dl class="metric-detail">
+            <dt>Source</dt>
+            <dd>Kubernetes Services with <code>spec.type == LoadBalancer</code></dd>
+            <dt>Unit</dt>
+            <dd>Hours</dd>
+            <dt>Formula</dt>
+            <dd><code>loadbalancer_count x interval_hours</code></dd>
+            <dt>Lago Field</dt>
+            <dd><code>lb_hours</code></dd>
+          </dl>
+          <p>Counts the number of Services of type <code>LoadBalancer</code> in the vCluster namespace. Each LoadBalancer service incurs an hourly charge. This covers the cost of cloud load balancer resources (e.g., AWS NLB/ALB, GCP LB) provisioned by the vCluster.</p>
+
+          <h4>Lago event properties</h4>
+          <table class="props-table">
+            <thead><tr><th>Property</th><th>Type</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td><code>lb_hours</code></td><td>float</td><td>Total LoadBalancer service-hours</td></tr>
+              <tr><td><code>lb_count</code></td><td>int</td><td>Number of LoadBalancer services</td></tr>
+              <tr><td><code>vcluster_name</code></td><td>string</td><td>Name of the vCluster</td></tr>
+              <tr><td><code>vcluster_namespace</code></td><td>string</td><td>Namespace of the vCluster</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- 8. Instance Hours -->
+      <h2 id="instance-hours">8. Instance Hours</h2>
+      <div class="metric-card">
+        <div class="metric-card-header">
+          <h3><code>vcluster_instance_hours</code></h3>
+          <div class="metric-card-badges">
+            <span class="metric-badge shared">Shared Mode</span>
+            <span class="metric-badge private">Private Node Mode</span>
+          </div>
+        </div>
+        <div class="metric-card-body">
+          <dl class="metric-detail">
+            <dt>Source</dt>
+            <dd>Per-vCluster (always sent for every tracked vCluster)</dd>
+            <dt>Unit</dt>
+            <dd>Hours</dd>
+            <dt>Formula</dt>
+            <dd><code>interval_hours</code> (flat 1x per vCluster)</dd>
+            <dt>Lago Field</dt>
+            <dd><code>instance_hours</code></dd>
+          </dl>
+          <p>A flat hourly charge for running a vCluster instance. This event is always sent for every tracked vCluster, regardless of resource usage. It represents the base cost of operating a vCluster -- the platform overhead, control plane resources, and management infrastructure.</p>
+
+          <h4>Lago event properties</h4>
+          <table class="props-table">
+            <thead><tr><th>Property</th><th>Type</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td><code>instance_hours</code></td><td>float</td><td>Hours the vCluster was running</td></tr>
+              <tr><td><code>vcluster_name</code></td><td>string</td><td>Name of the vCluster</td></tr>
+              <tr><td><code>vcluster_namespace</code></td><td>string</td><td>Namespace of the vCluster</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- 9. Private Node Hours -->
+      <h2 id="private-node-hours">9. Private Node Hours</h2>
+      <div class="metric-card">
+        <div class="metric-card-header">
+          <h3><code>vcluster_private_node_hours</code></h3>
+          <div class="metric-card-badges">
+            <span class="metric-badge private">Private Node Mode Only</span>
+          </div>
+        </div>
+        <div class="metric-card-body">
+          <dl class="metric-detail">
+            <dt>Source</dt>
+            <dd>Node labels: <code>vcluster.loft.sh/managed-by</code>, <code>vcluster.loft.sh/cluster</code></dd>
+            <dt>Unit</dt>
+            <dd>Node-hours</dd>
+            <dt>Formula</dt>
+            <dd><code>private_node_count x interval_hours</code></dd>
+            <dt>Lago Field</dt>
+            <dd><code>private_node_hours</code></dd>
+          </dl>
+          <p>Counts the number of dedicated/private nodes allocated to a vCluster tenant. Only sent when private nodes are detected via node labels. This represents the cost of reserving entire physical or virtual machines for a single tenant.</p>
+          <p>For full details on how private nodes are detected and billed, see the <a href="private-nodes.html">Private Nodes</a> guide.</p>
+
+          <h4>Lago event properties</h4>
+          <table class="props-table">
+            <thead><tr><th>Property</th><th>Type</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td><code>private_node_hours</code></td><td>float</td><td>Total node-hours (count x interval)</td></tr>
+              <tr><td><code>node_count</code></td><td>int</td><td>Number of dedicated nodes</td></tr>
+              <tr><td><code>billing_mode</code></td><td>string</td><td>Always "private_node"</td></tr>
+              <tr><td><code>vcluster_name</code></td><td>string</td><td>Name of the vCluster</td></tr>
+              <tr><td><code>vcluster_namespace</code></td><td>string</td><td>Namespace of the vCluster</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+    </main>
+  </div>
+
+  <button class="mobile-sidebar-toggle" id="mobileSidebarToggle" aria-label="Toggle sidebar">&#9776;</button>
+
+  <script>
+    const header = document.getElementById('header');
+    window.addEventListener('scroll', () => { header.classList.toggle('scrolled', window.scrollY > 10); });
+    const sidebar = document.getElementById('sidebar');
+    const toggle = document.getElementById('mobileSidebarToggle');
+    toggle.addEventListener('click', () => { sidebar.classList.toggle('open'); });
+    document.addEventListener('click', (e) => {
+      if (!sidebar.contains(e.target) && !toggle.contains(e.target)) sidebar.classList.remove('open');
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,636 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Configuration - vBilling Docs</title>
+  <meta name="description" content="Complete configuration reference for vBilling: environment variables, Helm values, and Lago pricing setup.">
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+      --primary: #f97316; --primary-dark: #ea580c; --primary-darker: #9a3412;
+      --primary-light: #fff7ed; --primary-light-2: #ffedd5; --accent: #fb923c;
+      --text-dark: #0f172a; --text-gray: #475569; --text-light: #64748b;
+      --white: #ffffff; --bg-code: #0f172a; --border: #e2e8f0;
+      --shadow-sm: 0 1px 2px rgba(0,0,0,0.05);
+      --shadow-md: 0 4px 6px -1px rgba(0,0,0,0.07), 0 2px 4px -2px rgba(0,0,0,0.05);
+      --shadow-lg: 0 10px 15px -3px rgba(0,0,0,0.08), 0 4px 6px -4px rgba(0,0,0,0.04);
+      --radius: 12px; --radius-lg: 16px; --sidebar-width: 260px;
+    }
+
+    html { scroll-behavior: smooth; scroll-padding-top: 80px; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', Roboto, Oxygen, Ubuntu, sans-serif;
+      color: var(--text-dark); line-height: 1.6; background: var(--white);
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .header {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 1000;
+      background: rgba(255,255,255,0.92); backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px); border-bottom: 1px solid var(--border);
+    }
+    .header.scrolled { box-shadow: var(--shadow-md); }
+    .header-inner {
+      max-width: 1400px; margin: 0 auto; padding: 0 24px;
+      display: flex; align-items: center; justify-content: space-between; height: 64px;
+    }
+    .header-logo {
+      display: flex; align-items: center; gap: 10px;
+      text-decoration: none; color: var(--text-dark);
+    }
+    .header-logo-icon {
+      width: 32px; height: 32px; border-radius: 8px;
+      background: linear-gradient(135deg, var(--primary-dark), var(--primary));
+      display: flex; align-items: center; justify-content: center;
+      color: var(--white); font-weight: 700; font-size: 0.9rem;
+    }
+    .header-logo-text { font-size: 1.15rem; font-weight: 700; letter-spacing: -0.5px; }
+    .header-logo-text span { color: var(--primary-dark); }
+    .header-nav { display: flex; align-items: center; gap: 20px; }
+    .header-nav a {
+      text-decoration: none; color: var(--text-gray); font-size: 0.88rem;
+      font-weight: 500; transition: color 0.2s;
+    }
+    .header-nav a:hover { color: var(--primary-dark); }
+    .header-nav .gh-link {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: var(--bg-code); color: var(--white); padding: 6px 14px;
+      border-radius: 8px; font-size: 0.82rem; font-weight: 600; transition: opacity 0.2s;
+    }
+    .header-nav .gh-link:hover { opacity: 0.85; color: var(--white); }
+
+    .docs-layout { display: flex; margin-top: 64px; min-height: calc(100vh - 64px); }
+
+    .sidebar {
+      width: var(--sidebar-width); flex-shrink: 0;
+      border-right: 1px solid var(--border); background: var(--primary-light);
+      padding: 32px 0; position: fixed; top: 64px; bottom: 0; overflow-y: auto;
+    }
+    .sidebar-section { margin-bottom: 28px; }
+    .sidebar-label {
+      padding: 0 24px; font-size: 0.72rem; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 1px; color: var(--primary-darker);
+      margin-bottom: 8px;
+    }
+    .sidebar a {
+      display: block; padding: 7px 24px; text-decoration: none;
+      font-size: 0.88rem; color: var(--text-gray); font-weight: 500;
+      transition: all 0.15s; border-left: 3px solid transparent;
+    }
+    .sidebar a:hover { color: var(--primary-dark); background: var(--primary-light-2); }
+    .sidebar a.active {
+      color: var(--primary-dark); background: var(--primary-light-2);
+      border-left-color: var(--primary); font-weight: 600;
+    }
+    .sidebar-back {
+      display: flex; align-items: center; gap: 6px; margin: 0 24px 24px;
+      padding: 8px 12px; border-radius: 8px; text-decoration: none;
+      font-size: 0.85rem; color: var(--text-light); font-weight: 500;
+      border: 1px solid var(--border); transition: all 0.2s;
+    }
+    .sidebar-back:hover { border-color: var(--primary); color: var(--primary-dark); }
+
+    .content {
+      flex: 1; margin-left: var(--sidebar-width);
+      padding: 48px 64px 80px; max-width: 900px;
+    }
+    .content h1 {
+      font-size: 2.2rem; font-weight: 800; letter-spacing: -1px;
+      margin-bottom: 12px; color: var(--text-dark);
+    }
+    .content .subtitle {
+      font-size: 1.1rem; color: var(--text-gray); line-height: 1.7;
+      margin-bottom: 40px; max-width: 640px;
+    }
+    .content h2 {
+      font-size: 1.5rem; font-weight: 700; letter-spacing: -0.5px;
+      margin: 48px 0 16px; color: var(--text-dark);
+      padding-bottom: 8px; border-bottom: 2px solid var(--primary-light-2);
+    }
+    .content h3 {
+      font-size: 1.15rem; font-weight: 700; margin: 32px 0 12px; color: var(--text-dark);
+    }
+    .content p {
+      font-size: 0.95rem; color: var(--text-gray); line-height: 1.7; margin-bottom: 16px;
+    }
+    .content ul, .content ol {
+      margin: 0 0 16px 24px; color: var(--text-gray); font-size: 0.95rem;
+    }
+    .content li { margin-bottom: 6px; line-height: 1.6; }
+    .content code {
+      background: var(--primary-light-2); padding: 2px 7px; border-radius: 4px;
+      font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+      font-size: 0.85rem; color: var(--primary-darker);
+    }
+    .content a { color: var(--primary-dark); text-decoration: none; font-weight: 500; }
+    .content a:hover { text-decoration: underline; }
+
+    .code-block {
+      background: var(--bg-code); border-radius: var(--radius);
+      padding: 20px 24px; overflow-x: auto; margin-bottom: 20px; position: relative;
+    }
+    .code-block code {
+      color: #e2e8f0; background: none; padding: 0;
+      font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+      font-size: 0.84rem; line-height: 1.7; white-space: pre;
+    }
+    .code-block .comment { color: #64748b; }
+    .code-block .cmd { color: #fb923c; }
+    .code-block .flag { color: #a5b4fc; }
+    .code-block .string { color: #86efac; }
+    .code-block .output { color: #94a3b8; }
+
+    .callout {
+      padding: 16px 20px; border-radius: var(--radius); margin-bottom: 20px;
+      font-size: 0.9rem; line-height: 1.6; display: flex; gap: 12px;
+    }
+    .callout-icon { flex-shrink: 0; font-size: 1.1rem; margin-top: 1px; }
+    .callout-info { background: #eff6ff; border: 1px solid #bfdbfe; color: #1e40af; }
+    .callout-warn { background: var(--primary-light); border: 1px solid var(--primary-light-2); color: var(--primary-darker); }
+
+    /* ── Tables ── */
+    .config-table-wrap {
+      overflow-x: auto; border-radius: var(--radius); border: 1px solid var(--border);
+      box-shadow: var(--shadow-sm); margin-bottom: 24px;
+    }
+    .config-table {
+      width: 100%; border-collapse: collapse; font-size: 0.88rem;
+    }
+    .config-table thead { background: var(--primary-light); }
+    .config-table th {
+      padding: 12px 16px; text-align: left; font-weight: 700;
+      color: var(--primary-darker); font-size: 0.78rem;
+      text-transform: uppercase; letter-spacing: 0.5px;
+      border-bottom: 2px solid var(--primary-light-2);
+    }
+    .config-table td {
+      padding: 10px 16px; border-bottom: 1px solid var(--border);
+      color: var(--text-gray); vertical-align: top;
+    }
+    .config-table tr:last-child td { border-bottom: none; }
+    .config-table tr:hover td { background: var(--primary-light); }
+    .config-table td code {
+      font-size: 0.8rem; white-space: nowrap;
+    }
+    .td-default {
+      font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+      font-size: 0.8rem; color: var(--text-light);
+    }
+
+    .mobile-sidebar-toggle {
+      display: none; position: fixed; bottom: 24px; right: 24px; z-index: 999;
+      width: 48px; height: 48px; border-radius: 50%;
+      background: linear-gradient(135deg, var(--primary-dark), var(--primary));
+      color: var(--white); border: none; font-size: 1.3rem; cursor: pointer;
+      box-shadow: var(--shadow-lg);
+    }
+
+    @media (max-width: 900px) {
+      .sidebar {
+        transform: translateX(-100%); transition: transform 0.3s ease;
+        z-index: 900; width: 280px;
+      }
+      .sidebar.open { transform: translateX(0); }
+      .content { margin-left: 0; padding: 32px 24px 80px; }
+      .mobile-sidebar-toggle { display: flex; align-items: center; justify-content: center; }
+      .content h1 { font-size: 1.7rem; }
+      .content h2 { font-size: 1.3rem; }
+      .config-table { font-size: 0.82rem; }
+    }
+  </style>
+</head>
+<body>
+
+  <header class="header" id="header">
+    <div class="header-inner">
+      <a href="index.html" class="header-logo">
+        <div class="header-logo-icon">vB</div>
+        <div class="header-logo-text">v<span>Billing</span> Docs</div>
+      </a>
+      <nav class="header-nav">
+        <a href="index.html">Home</a>
+        <a href="getting-started.html">Guide</a>
+        <a href="https://github.com/vClusterLabs-Experiments/vbilling" class="gh-link" target="_blank">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <div class="docs-layout">
+    <nav class="sidebar" id="sidebar">
+      <a href="index.html" class="sidebar-back">&#8592; Back to main site</a>
+      <div class="sidebar-section">
+        <div class="sidebar-label">Documentation</div>
+        <a href="getting-started.html">Getting Started</a>
+        <a href="configuration.html" class="active">Configuration</a>
+        <a href="metrics.html">Metrics Reference</a>
+        <a href="private-nodes.html">Private Nodes</a>
+        <a href="troubleshooting.html">Troubleshooting</a>
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-label">Resources</div>
+        <a href="https://github.com/vClusterLabs-Experiments/vbilling" target="_blank">GitHub Repository</a>
+        <a href="https://www.getlago.com/docs" target="_blank">Lago Docs</a>
+        <a href="https://www.vcluster.com/docs" target="_blank">vCluster Docs</a>
+      </div>
+    </nav>
+
+    <main class="content">
+      <h1>Configuration</h1>
+      <p class="subtitle">All the knobs for tuning vBilling behavior: environment variables, Helm chart values, and Lago pricing setup.</p>
+
+      <!-- Environment Variables -->
+      <h2 id="environment-variables">Environment Variables</h2>
+      <p>When running vBilling as a binary or in a container, the following environment variables control its behavior. All have sensible defaults except <code>LAGO_API_KEY</code>, which is required.</p>
+
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead>
+            <tr>
+              <th>Variable</th>
+              <th>Description</th>
+              <th>Default</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>LAGO_API_URL</code></td>
+              <td>Base URL of the Lago API server</td>
+              <td class="td-default">http://localhost:3000</td>
+            </tr>
+            <tr>
+              <td><code>LAGO_API_KEY</code></td>
+              <td><strong>Required.</strong> API key for authenticating with Lago</td>
+              <td class="td-default">(none)</td>
+            </tr>
+            <tr>
+              <td><code>COLLECTION_INTERVAL</code></td>
+              <td>How often to scrape metrics and send usage events to Lago. Accepts Go duration strings (e.g. <code>60s</code>, <code>5m</code>)</td>
+              <td class="td-default">60s</td>
+            </tr>
+            <tr>
+              <td><code>RECONCILE_INTERVAL</code></td>
+              <td>How often to scan for new or removed vClusters and sync billing entities. Accepts Go duration strings</td>
+              <td class="td-default">30s</td>
+            </tr>
+            <tr>
+              <td><code>DEFAULT_PLAN_CODE</code></td>
+              <td>Lago plan code to assign to newly discovered vClusters</td>
+              <td class="td-default">vcluster-standard</td>
+            </tr>
+            <tr>
+              <td><code>BILLING_CURRENCY</code></td>
+              <td>ISO 4217 currency code for all billing operations</td>
+              <td class="td-default">USD</td>
+            </tr>
+            <tr>
+              <td><code>PROMETHEUS_URL</code></td>
+              <td>Prometheus server URL for DCGM GPU utilization and network egress metrics. Leave empty to disable</td>
+              <td class="td-default">(empty)</td>
+            </tr>
+            <tr>
+              <td><code>SPOT_DISCOUNT_PERCENT</code></td>
+              <td>Percentage discount applied to workloads running on spot/preemptible nodes. A value of 60 means spot nodes cost 40% of on-demand</td>
+              <td class="td-default">60</td>
+            </tr>
+            <tr>
+              <td><code>WATCH_NAMESPACES</code></td>
+              <td>Comma-separated list of namespaces to monitor for vClusters. Empty means watch all namespaces</td>
+              <td class="td-default">(all namespaces)</td>
+            </tr>
+            <tr>
+              <td><code>VCLUSTER_NODE_LABEL</code></td>
+              <td>Custom node label selector for private node detection. Format: <code>key=value-pattern</code> where <code>%s</code> is replaced with the vCluster name. See <a href="private-nodes.html">Private Nodes</a></td>
+              <td class="td-default">(none)</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout callout-info">
+        <div class="callout-icon">i</div>
+        <div><code>COLLECTION_INTERVAL</code> directly affects billing granularity and accuracy. Shorter intervals produce more events but more precise billing. The default of 60 seconds is a good balance.</div>
+      </div>
+
+      <!-- Helm Values -->
+      <h2 id="helm-values">Helm Chart Values</h2>
+      <p>When deploying via Helm, all configuration is specified through <code>values.yaml</code> or <code>--set</code> flags. The Helm chart translates these into the environment variables shown above.</p>
+
+      <h3>Lago connection</h3>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead>
+            <tr><th>Value</th><th>Description</th><th>Default</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>lago.apiURL</code></td>
+              <td>Lago API URL (in-cluster service address)</td>
+              <td class="td-default">http://lago-api.lago-system.svc.cluster.local:3000</td>
+            </tr>
+            <tr>
+              <td><code>lago.apiKey</code></td>
+              <td>Lago API key (plaintext, use <code>--set</code>)</td>
+              <td class="td-default">(empty)</td>
+            </tr>
+            <tr>
+              <td><code>lago.existingSecret</code></td>
+              <td>Name of an existing Kubernetes Secret containing the API key (key: <code>api-key</code>). Preferred over <code>lago.apiKey</code> for production</td>
+              <td class="td-default">(empty)</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Billing settings</h3>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead>
+            <tr><th>Value</th><th>Description</th><th>Default</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>billing.defaultPlanCode</code></td>
+              <td>Lago plan code for new vClusters</td>
+              <td class="td-default">vcluster-standard</td>
+            </tr>
+            <tr>
+              <td><code>billing.currency</code></td>
+              <td>Billing currency (ISO 4217)</td>
+              <td class="td-default">USD</td>
+            </tr>
+            <tr>
+              <td><code>billing.collectionInterval</code></td>
+              <td>Metrics scrape interval</td>
+              <td class="td-default">60s</td>
+            </tr>
+            <tr>
+              <td><code>billing.reconcileInterval</code></td>
+              <td>vCluster discovery interval</td>
+              <td class="td-default">30s</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Pricing defaults</h3>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead>
+            <tr><th>Value</th><th>Description</th><th>Default</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>pricing.cpuPerCoreHour</code></td>
+              <td>Price per CPU core-hour</td>
+              <td class="td-default">0.05</td>
+            </tr>
+            <tr>
+              <td><code>pricing.memoryPerGBHour</code></td>
+              <td>Price per memory GB-hour</td>
+              <td class="td-default">0.01</td>
+            </tr>
+            <tr>
+              <td><code>pricing.storagePerGBHour</code></td>
+              <td>Price per storage GB-hour</td>
+              <td class="td-default">0.001</td>
+            </tr>
+            <tr>
+              <td><code>pricing.instancePerHour</code></td>
+              <td>Flat hourly charge per vCluster instance</td>
+              <td class="td-default">0.10</td>
+            </tr>
+            <tr>
+              <td><code>pricing.gpuDefaultPerHour</code></td>
+              <td>Default GPU price per hour (when type not in <code>gpuPrices</code>)</td>
+              <td class="td-default">2.50</td>
+            </tr>
+            <tr>
+              <td><code>pricing.networkEgressPerGB</code></td>
+              <td>Price per GB of network egress</td>
+              <td class="td-default">0.05</td>
+            </tr>
+            <tr>
+              <td><code>pricing.lbPerHour</code></td>
+              <td>Price per LoadBalancer service-hour</td>
+              <td class="td-default">0.025</td>
+            </tr>
+            <tr>
+              <td><code>pricing.gpuPrices</code></td>
+              <td>Comma-separated GPU type-specific pricing in <code>TYPE:PRICE</code> format</td>
+              <td class="td-default" style="white-space:normal; font-size:0.75rem;">NVIDIA-A100-SXM4-80GB:3.50,NVIDIA-H100-80GB-HBM3:5.00,NVIDIA-H100-SXM5-80GB:5.50,NVIDIA-L40S:1.80,NVIDIA-A10G:1.20,NVIDIA-T4:0.75</td>
+            </tr>
+            <tr>
+              <td><code>pricing.spotDiscountPercent</code></td>
+              <td>Spot instance discount percentage</td>
+              <td class="td-default">60</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Optional integrations</h3>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead>
+            <tr><th>Value</th><th>Description</th><th>Default</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>prometheus.url</code></td>
+              <td>Prometheus URL for DCGM and network metrics</td>
+              <td class="td-default">(empty)</td>
+            </tr>
+            <tr>
+              <td><code>watchNamespaces</code></td>
+              <td>List of namespaces to watch (YAML array)</td>
+              <td class="td-default">[] (all)</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Deployment settings</h3>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead>
+            <tr><th>Value</th><th>Description</th><th>Default</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>image.repository</code></td>
+              <td>Container image repository</td>
+              <td class="td-default">ghcr.io/vclusterlabs-experiments/vbilling</td>
+            </tr>
+            <tr>
+              <td><code>image.tag</code></td>
+              <td>Container image tag</td>
+              <td class="td-default">v0.1.0</td>
+            </tr>
+            <tr>
+              <td><code>image.pullPolicy</code></td>
+              <td>Image pull policy</td>
+              <td class="td-default">IfNotPresent</td>
+            </tr>
+            <tr>
+              <td><code>replicaCount</code></td>
+              <td>Number of replicas (only 1 recommended)</td>
+              <td class="td-default">1</td>
+            </tr>
+            <tr>
+              <td><code>serviceAccount.create</code></td>
+              <td>Create a ServiceAccount for the deployment</td>
+              <td class="td-default">true</td>
+            </tr>
+            <tr>
+              <td><code>resources.requests.cpu</code></td>
+              <td>CPU request</td>
+              <td class="td-default">50m</td>
+            </tr>
+            <tr>
+              <td><code>resources.requests.memory</code></td>
+              <td>Memory request</td>
+              <td class="td-default">64Mi</td>
+            </tr>
+            <tr>
+              <td><code>resources.limits.cpu</code></td>
+              <td>CPU limit</td>
+              <td class="td-default">200m</td>
+            </tr>
+            <tr>
+              <td><code>resources.limits.memory</code></td>
+              <td>Memory limit</td>
+              <td class="td-default">128Mi</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Example Helm install</h3>
+      <div class="code-block"><code><span class="cmd">helm</span> upgrade <span class="flag">--install</span> vbilling deploy/helm/vbilling \
+  <span class="flag">--namespace</span> vbilling-system <span class="flag">--create-namespace</span> \
+  <span class="flag">--set</span> lago.existingSecret=<span class="string">"vbilling-lago-secret"</span> \
+  <span class="flag">--set</span> billing.collectionInterval=<span class="string">"120s"</span> \
+  <span class="flag">--set</span> prometheus.url=<span class="string">"http://prometheus.monitoring.svc.cluster.local:9090"</span> \
+  <span class="flag">--set</span> pricing.cpuPerCoreHour=<span class="string">"0.08"</span> \
+  <span class="flag">--set</span> pricing.gpuDefaultPerHour=<span class="string">"3.00"</span></code></div>
+
+      <!-- Lago Pricing Configuration -->
+      <h2 id="lago-pricing">Lago Pricing Configuration</h2>
+      <p>vBilling bootstraps 9 billable metrics and a <code>vcluster-standard</code> plan on startup. All charges default to <strong>$0.00</strong> per unit. You must configure pricing in the Lago UI or API to actually generate non-zero invoices.</p>
+
+      <h3>Charges to configure</h3>
+      <p>In the Lago UI, go to <strong>Plans &gt; vCluster Standard &gt; Edit</strong> and set the per-unit price for each charge:</p>
+
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead>
+            <tr><th>Metric Code</th><th>Aggregation Field</th><th>Charge Model</th><th>Suggested Price</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>vcluster_cpu_core_hours</code></td>
+              <td><code>cpu_core_hours</code></td>
+              <td>Standard (per unit)</td>
+              <td class="td-default">$0.05</td>
+            </tr>
+            <tr>
+              <td><code>vcluster_memory_gb_hours</code></td>
+              <td><code>memory_gb_hours</code></td>
+              <td>Standard (per unit)</td>
+              <td class="td-default">$0.01</td>
+            </tr>
+            <tr>
+              <td><code>vcluster_storage_gb_hours</code></td>
+              <td><code>storage_gb_hours</code></td>
+              <td>Standard (per unit)</td>
+              <td class="td-default">$0.001</td>
+            </tr>
+            <tr>
+              <td><code>vcluster_instance_hours</code></td>
+              <td><code>instance_hours</code></td>
+              <td>Standard (per unit)</td>
+              <td class="td-default">$0.10</td>
+            </tr>
+            <tr>
+              <td><code>vcluster_gpu_hours</code></td>
+              <td><code>gpu_hours</code></td>
+              <td>Standard (per unit)</td>
+              <td class="td-default">$2.50</td>
+            </tr>
+            <tr>
+              <td><code>vcluster_gpu_utilization</code></td>
+              <td><code>gpu_util_score</code></td>
+              <td>Standard (per unit)</td>
+              <td class="td-default">$0.00 (informational)</td>
+            </tr>
+            <tr>
+              <td><code>vcluster_network_egress_gb</code></td>
+              <td><code>egress_gb</code></td>
+              <td>Standard (per unit)</td>
+              <td class="td-default">$0.05</td>
+            </tr>
+            <tr>
+              <td><code>vcluster_lb_hours</code></td>
+              <td><code>lb_hours</code></td>
+              <td>Standard (per unit)</td>
+              <td class="td-default">$0.025</td>
+            </tr>
+            <tr>
+              <td><code>vcluster_private_node_hours</code></td>
+              <td><code>private_node_hours</code></td>
+              <td>Standard (per unit)</td>
+              <td class="td-default">$1.00</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Example: Neocloud pricing</h3>
+      <p>For a GPU-focused neocloud selling compute to AI teams, you might set higher GPU prices and include a premium for dedicated infrastructure:</p>
+      <div class="code-block"><code><span class="comment"># Neocloud pricing example</span>
+CPU Core-Hours:        <span class="string">$0.08</span>   <span class="comment"># higher due to bare-metal premium</span>
+Memory GB-Hours:       <span class="string">$0.015</span>  <span class="comment"># ECC memory cost</span>
+Storage GB-Hours:      <span class="string">$0.002</span>  <span class="comment"># NVMe SSD storage</span>
+Instance Hours:        <span class="string">$0.25</span>   <span class="comment"># base platform fee</span>
+GPU Hours (default):   <span class="string">$3.50</span>   <span class="comment"># A100 baseline</span>
+GPU Hours (H100):      <span class="string">$5.50</span>   <span class="comment"># premium for latest gen</span>
+Network Egress/GB:     <span class="string">$0.08</span>   <span class="comment"># cross-DC traffic</span>
+LoadBalancer Hours:    <span class="string">$0.05</span>   <span class="comment"># dedicated L4 LB</span>
+Private Node Hours:    <span class="string">$2.00</span>   <span class="comment"># full node reservation</span></code></div>
+
+      <h3>Example: Internal platform team pricing</h3>
+      <p>For an IDP (Internal Developer Platform) team doing internal chargebacks, use lower prices that reflect shared infrastructure costs:</p>
+      <div class="code-block"><code><span class="comment"># Internal platform team (chargeback) pricing</span>
+CPU Core-Hours:        <span class="string">$0.02</span>   <span class="comment"># internal cost only</span>
+Memory GB-Hours:       <span class="string">$0.005</span>  <span class="comment"># shared cluster memory</span>
+Storage GB-Hours:      <span class="string">$0.0005</span> <span class="comment"># network-attached storage</span>
+Instance Hours:        <span class="string">$0.05</span>   <span class="comment"># minimal overhead fee</span>
+GPU Hours (default):   <span class="string">$1.00</span>   <span class="comment"># amortized GPU cost</span>
+Network Egress/GB:     <span class="string">$0.01</span>   <span class="comment"># internal network</span>
+LoadBalancer Hours:    <span class="string">$0.01</span>   <span class="comment"># shared ingress</span>
+Private Node Hours:    <span class="string">$0.50</span>   <span class="comment"># bare-metal amortization</span></code></div>
+
+      <div class="callout callout-warn">
+        <div class="callout-icon">!</div>
+        <div>If you see usage events in Lago but invoices show $0.00, it means the charge amounts are still set to their defaults ($0). Edit the plan charges in the Lago UI.</div>
+      </div>
+
+    </main>
+  </div>
+
+  <button class="mobile-sidebar-toggle" id="mobileSidebarToggle" aria-label="Toggle sidebar">&#9776;</button>
+
+  <script>
+    const header = document.getElementById('header');
+    window.addEventListener('scroll', () => { header.classList.toggle('scrolled', window.scrollY > 10); });
+    const sidebar = document.getElementById('sidebar');
+    const toggle = document.getElementById('mobileSidebarToggle');
+    toggle.addEventListener('click', () => { sidebar.classList.toggle('open'); });
+    document.addEventListener('click', (e) => {
+      if (!sidebar.contains(e.target) && !toggle.contains(e.target)) sidebar.classList.remove('open');
+    });
+  </script>
+</body>
+</html>

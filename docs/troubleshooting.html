@@ -1,0 +1,611 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Troubleshooting - vBilling Docs</title>
+  <meta name="description" content="Common issues and solutions when running vBilling: discovery problems, metrics, GPU detection, Lago connectivity, and more.">
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+      --primary: #f97316; --primary-dark: #ea580c; --primary-darker: #9a3412;
+      --primary-light: #fff7ed; --primary-light-2: #ffedd5; --accent: #fb923c;
+      --text-dark: #0f172a; --text-gray: #475569; --text-light: #64748b;
+      --white: #ffffff; --bg-code: #0f172a; --border: #e2e8f0;
+      --shadow-sm: 0 1px 2px rgba(0,0,0,0.05);
+      --shadow-md: 0 4px 6px -1px rgba(0,0,0,0.07), 0 2px 4px -2px rgba(0,0,0,0.05);
+      --shadow-lg: 0 10px 15px -3px rgba(0,0,0,0.08), 0 4px 6px -4px rgba(0,0,0,0.04);
+      --radius: 12px; --radius-lg: 16px; --sidebar-width: 260px;
+    }
+
+    html { scroll-behavior: smooth; scroll-padding-top: 80px; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', Roboto, Oxygen, Ubuntu, sans-serif;
+      color: var(--text-dark); line-height: 1.6; background: var(--white);
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .header {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 1000;
+      background: rgba(255,255,255,0.92); backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px); border-bottom: 1px solid var(--border);
+    }
+    .header.scrolled { box-shadow: var(--shadow-md); }
+    .header-inner {
+      max-width: 1400px; margin: 0 auto; padding: 0 24px;
+      display: flex; align-items: center; justify-content: space-between; height: 64px;
+    }
+    .header-logo {
+      display: flex; align-items: center; gap: 10px;
+      text-decoration: none; color: var(--text-dark);
+    }
+    .header-logo-icon {
+      width: 32px; height: 32px; border-radius: 8px;
+      background: linear-gradient(135deg, var(--primary-dark), var(--primary));
+      display: flex; align-items: center; justify-content: center;
+      color: var(--white); font-weight: 700; font-size: 0.9rem;
+    }
+    .header-logo-text { font-size: 1.15rem; font-weight: 700; letter-spacing: -0.5px; }
+    .header-logo-text span { color: var(--primary-dark); }
+    .header-nav { display: flex; align-items: center; gap: 20px; }
+    .header-nav a {
+      text-decoration: none; color: var(--text-gray); font-size: 0.88rem;
+      font-weight: 500; transition: color 0.2s;
+    }
+    .header-nav a:hover { color: var(--primary-dark); }
+    .header-nav .gh-link {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: var(--bg-code); color: var(--white); padding: 6px 14px;
+      border-radius: 8px; font-size: 0.82rem; font-weight: 600; transition: opacity 0.2s;
+    }
+    .header-nav .gh-link:hover { opacity: 0.85; color: var(--white); }
+
+    .docs-layout { display: flex; margin-top: 64px; min-height: calc(100vh - 64px); }
+
+    .sidebar {
+      width: var(--sidebar-width); flex-shrink: 0;
+      border-right: 1px solid var(--border); background: var(--primary-light);
+      padding: 32px 0; position: fixed; top: 64px; bottom: 0; overflow-y: auto;
+    }
+    .sidebar-section { margin-bottom: 28px; }
+    .sidebar-label {
+      padding: 0 24px; font-size: 0.72rem; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 1px; color: var(--primary-darker);
+      margin-bottom: 8px;
+    }
+    .sidebar a {
+      display: block; padding: 7px 24px; text-decoration: none;
+      font-size: 0.88rem; color: var(--text-gray); font-weight: 500;
+      transition: all 0.15s; border-left: 3px solid transparent;
+    }
+    .sidebar a:hover { color: var(--primary-dark); background: var(--primary-light-2); }
+    .sidebar a.active {
+      color: var(--primary-dark); background: var(--primary-light-2);
+      border-left-color: var(--primary); font-weight: 600;
+    }
+    .sidebar-back {
+      display: flex; align-items: center; gap: 6px; margin: 0 24px 24px;
+      padding: 8px 12px; border-radius: 8px; text-decoration: none;
+      font-size: 0.85rem; color: var(--text-light); font-weight: 500;
+      border: 1px solid var(--border); transition: all 0.2s;
+    }
+    .sidebar-back:hover { border-color: var(--primary); color: var(--primary-dark); }
+
+    .content {
+      flex: 1; margin-left: var(--sidebar-width);
+      padding: 48px 64px 80px; max-width: 900px;
+    }
+    .content h1 {
+      font-size: 2.2rem; font-weight: 800; letter-spacing: -1px;
+      margin-bottom: 12px; color: var(--text-dark);
+    }
+    .content .subtitle {
+      font-size: 1.1rem; color: var(--text-gray); line-height: 1.7;
+      margin-bottom: 40px; max-width: 640px;
+    }
+    .content h2 {
+      font-size: 1.5rem; font-weight: 700; letter-spacing: -0.5px;
+      margin: 48px 0 16px; color: var(--text-dark);
+      padding-bottom: 8px; border-bottom: 2px solid var(--primary-light-2);
+    }
+    .content h3 {
+      font-size: 1.15rem; font-weight: 700; margin: 32px 0 12px; color: var(--text-dark);
+    }
+    .content p {
+      font-size: 0.95rem; color: var(--text-gray); line-height: 1.7; margin-bottom: 16px;
+    }
+    .content ul, .content ol {
+      margin: 0 0 16px 24px; color: var(--text-gray); font-size: 0.95rem;
+    }
+    .content li { margin-bottom: 6px; line-height: 1.6; }
+    .content code {
+      background: var(--primary-light-2); padding: 2px 7px; border-radius: 4px;
+      font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+      font-size: 0.85rem; color: var(--primary-darker);
+    }
+    .content a { color: var(--primary-dark); text-decoration: none; font-weight: 500; }
+    .content a:hover { text-decoration: underline; }
+
+    .code-block {
+      background: var(--bg-code); border-radius: var(--radius);
+      padding: 20px 24px; overflow-x: auto; margin-bottom: 20px; position: relative;
+    }
+    .code-block code {
+      color: #e2e8f0; background: none; padding: 0;
+      font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+      font-size: 0.84rem; line-height: 1.7; white-space: pre;
+    }
+    .code-block .comment { color: #64748b; }
+    .code-block .cmd { color: #fb923c; }
+    .code-block .flag { color: #a5b4fc; }
+    .code-block .string { color: #86efac; }
+    .code-block .output { color: #94a3b8; }
+
+    .callout {
+      padding: 16px 20px; border-radius: var(--radius); margin-bottom: 20px;
+      font-size: 0.9rem; line-height: 1.6; display: flex; gap: 12px;
+    }
+    .callout-icon { flex-shrink: 0; font-size: 1.1rem; margin-top: 1px; }
+    .callout-info { background: #eff6ff; border: 1px solid #bfdbfe; color: #1e40af; }
+    .callout-warn { background: var(--primary-light); border: 1px solid var(--primary-light-2); color: var(--primary-darker); }
+    .callout-success { background: #f0fdf4; border: 1px solid #bbf7d0; color: #166534; }
+    .callout-error { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; }
+
+    /* ── Issue card ── */
+    .issue {
+      border: 1px solid var(--border); border-radius: var(--radius-lg);
+      margin-bottom: 32px; overflow: hidden; box-shadow: var(--shadow-sm);
+    }
+    .issue-header {
+      background: #fef2f2; padding: 16px 24px;
+      border-bottom: 1px solid #fecaca;
+    }
+    .issue-header h3 {
+      margin: 0; font-size: 1.05rem; font-weight: 700; color: #991b1b;
+    }
+    .issue-body { padding: 20px 24px; }
+    .issue-body h4 {
+      font-size: 0.92rem; font-weight: 700; color: var(--text-dark);
+      margin: 16px 0 8px;
+    }
+    .issue-body h4:first-child { margin-top: 0; }
+    .issue-body p { font-size: 0.9rem; }
+
+    .fix-label {
+      display: inline-block; background: #f0fdf4; color: #166534;
+      padding: 2px 10px; border-radius: 100px; font-size: 0.75rem;
+      font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;
+      margin-bottom: 8px;
+    }
+
+    .mobile-sidebar-toggle {
+      display: none; position: fixed; bottom: 24px; right: 24px; z-index: 999;
+      width: 48px; height: 48px; border-radius: 50%;
+      background: linear-gradient(135deg, var(--primary-dark), var(--primary));
+      color: var(--white); border: none; font-size: 1.3rem; cursor: pointer;
+      box-shadow: var(--shadow-lg);
+    }
+
+    @media (max-width: 900px) {
+      .sidebar {
+        transform: translateX(-100%); transition: transform 0.3s ease;
+        z-index: 900; width: 280px;
+      }
+      .sidebar.open { transform: translateX(0); }
+      .content { margin-left: 0; padding: 32px 24px 80px; }
+      .mobile-sidebar-toggle { display: flex; align-items: center; justify-content: center; }
+      .content h1 { font-size: 1.7rem; }
+      .content h2 { font-size: 1.3rem; }
+    }
+  </style>
+</head>
+<body>
+
+  <header class="header" id="header">
+    <div class="header-inner">
+      <a href="index.html" class="header-logo">
+        <div class="header-logo-icon">vB</div>
+        <div class="header-logo-text">v<span>Billing</span> Docs</div>
+      </a>
+      <nav class="header-nav">
+        <a href="index.html">Home</a>
+        <a href="getting-started.html">Guide</a>
+        <a href="https://github.com/vClusterLabs-Experiments/vbilling" class="gh-link" target="_blank">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <div class="docs-layout">
+    <nav class="sidebar" id="sidebar">
+      <a href="index.html" class="sidebar-back">&#8592; Back to main site</a>
+      <div class="sidebar-section">
+        <div class="sidebar-label">Documentation</div>
+        <a href="getting-started.html">Getting Started</a>
+        <a href="configuration.html">Configuration</a>
+        <a href="metrics.html">Metrics Reference</a>
+        <a href="private-nodes.html">Private Nodes</a>
+        <a href="troubleshooting.html" class="active">Troubleshooting</a>
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-label">Resources</div>
+        <a href="https://github.com/vClusterLabs-Experiments/vbilling" target="_blank">GitHub Repository</a>
+        <a href="https://www.getlago.com/docs" target="_blank">Lago Docs</a>
+        <a href="https://www.vcluster.com/docs" target="_blank">vCluster Docs</a>
+      </div>
+    </nav>
+
+    <main class="content">
+      <h1>Troubleshooting</h1>
+      <p class="subtitle">Common issues you might encounter when running vBilling, with step-by-step solutions.</p>
+
+      <!-- Issue 1: No vClusters Discovered -->
+      <h2 id="no-vclusters-discovered">No vClusters Discovered</h2>
+      <div class="issue">
+        <div class="issue-header">
+          <h3>"[discovery] found 0 vCluster(s)"</h3>
+        </div>
+        <div class="issue-body">
+          <h4>Symptoms</h4>
+          <p>vBilling starts but reports zero vClusters. No customers or events appear in Lago. The controller log shows <code>[discovery] found 0 vCluster(s)</code> on every reconcile cycle.</p>
+
+          <h4>Cause</h4>
+          <p>vBilling discovers vClusters by scanning for StatefulSets and Deployments with the label <code>app=vcluster</code>. If your vClusters use different labels, or if RBAC prevents listing these resources, discovery will find nothing.</p>
+
+          <h4><span class="fix-label">Fix</span> Check that vClusters have the expected labels</h4>
+          <div class="code-block"><code><span class="comment"># List StatefulSets with the vcluster label</span>
+<span class="cmd">kubectl</span> get statefulsets <span class="flag">--all-namespaces</span> <span class="flag">-l</span> app=vcluster
+
+<span class="output"># Should list your vClusters, e.g.:
+# NAMESPACE              NAME         READY   AGE
+# vcluster-team-alpha    my-vcluster  1/1     3d</span>
+
+<span class="comment"># Also check Deployments (some vCluster configs use Deployments)</span>
+<span class="cmd">kubectl</span> get deployments <span class="flag">--all-namespaces</span> <span class="flag">-l</span> app=vcluster</code></div>
+
+          <h4><span class="fix-label">Fix</span> Check RBAC permissions</h4>
+          <p>The vBilling ServiceAccount needs permission to list StatefulSets, Deployments, Pods, Services, PVCs, Nodes, and PodMetrics across all namespaces (or the specific namespaces configured in <code>WATCH_NAMESPACES</code>).</p>
+          <div class="code-block"><code><span class="comment"># Verify the ServiceAccount can list StatefulSets</span>
+<span class="cmd">kubectl</span> auth can-i list statefulsets <span class="flag">--as=system:serviceaccount:vbilling-system:vbilling</span> <span class="flag">--all-namespaces</span>
+
+<span class="output"># Should return: yes</span>
+
+<span class="comment"># If RBAC is the issue, check the ClusterRole</span>
+<span class="cmd">kubectl</span> get clusterrolebinding | <span class="cmd">grep</span> vbilling</code></div>
+
+          <h4><span class="fix-label">Fix</span> Verify Platform API access (optional)</h4>
+          <p>If using vCluster Platform, vBilling tries the Platform API first (management.loft.sh/v1 VirtualClusterInstance resources). If this CRD does not exist, vBilling falls back to workload scanning. Check the logs for:</p>
+          <div class="code-block"><code><span class="output">[discovery] Platform API not available, falling back to StatefulSet scanning: ...</span></code></div>
+          <p>This is normal if you are not running vCluster Platform -- the fallback to StatefulSet scanning is the expected behavior.</p>
+
+          <h4><span class="fix-label">Fix</span> Check namespace filter</h4>
+          <div class="code-block"><code><span class="comment"># If WATCH_NAMESPACES is set, only those namespaces are scanned</span>
+<span class="comment"># Make sure your vCluster namespace is included</span>
+<span class="cmd">kubectl</span> get configmap <span class="flag">-n</span> vbilling-system <span class="flag">-o</span> yaml | <span class="cmd">grep</span> WATCH_NAMESPACES</code></div>
+        </div>
+      </div>
+
+      <!-- Issue 2: Metrics Unavailable -->
+      <h2 id="metrics-unavailable">Metrics Unavailable</h2>
+      <div class="issue">
+        <div class="issue-header">
+          <h3>"[metrics] warning: cannot get pod metrics for &lt;namespace&gt;"</h3>
+        </div>
+        <div class="issue-body">
+          <h4>Symptoms</h4>
+          <p>vBilling discovers vClusters but CPU and memory metrics are always zero. The log shows warnings about failing to get pod metrics.</p>
+
+          <h4>Cause</h4>
+          <p>vBilling requires the Kubernetes metrics-server to be installed and functioning. Without it, the PodMetrics API is unavailable.</p>
+
+          <h4><span class="fix-label">Fix</span> Install metrics-server</h4>
+          <div class="code-block"><code><span class="comment"># Check if metrics-server is running</span>
+<span class="cmd">kubectl</span> get pods <span class="flag">-n</span> kube-system <span class="flag">-l</span> k8s-app=metrics-server
+
+<span class="comment"># If not installed, install it:</span>
+<span class="cmd">kubectl</span> apply <span class="flag">-f</span> https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+
+<span class="comment"># For development clusters (minikube, kind) with self-signed certs:</span>
+<span class="cmd">kubectl</span> apply <span class="flag">-f</span> https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+<span class="cmd">kubectl</span> patch deployment metrics-server <span class="flag">-n</span> kube-system \
+  <span class="flag">--type</span>=json \
+  <span class="flag">-p</span> <span class="string">'[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'</span></code></div>
+
+          <h4><span class="fix-label">Fix</span> Verify the metrics API works</h4>
+          <div class="code-block"><code><span class="comment"># Test the metrics API directly</span>
+<span class="cmd">kubectl</span> top pods <span class="flag">-n</span> &lt;vcluster-namespace&gt;
+
+<span class="output"># Should show CPU and memory usage:
+# NAME                     CPU(cores)   MEMORY(bytes)
+# my-vcluster-0            25m          128Mi</span>
+
+<span class="comment"># If this fails, metrics-server is not working</span></code></div>
+        </div>
+      </div>
+
+      <!-- Issue 3: GPU Type Empty -->
+      <h2 id="gpu-type-empty">GPU Type Empty</h2>
+      <div class="issue">
+        <div class="issue-header">
+          <h3>GPU events show gpu_type "unknown"</h3>
+        </div>
+        <div class="issue-body">
+          <h4>Symptoms</h4>
+          <p>GPU hours are being reported, but the <code>gpu_type</code> property in Lago events shows "unknown" instead of the actual GPU model.</p>
+
+          <h4>Cause</h4>
+          <p>vBilling reads the GPU type from node labels. If none of the expected labels are present, it falls back to "unknown".</p>
+
+          <h4><span class="fix-label">Fix</span> Check which GPU labels exist on your nodes</h4>
+          <div class="code-block"><code><span class="comment"># Check all GPU-related labels on your GPU nodes</span>
+<span class="cmd">kubectl</span> get nodes <span class="flag">-l</span> nvidia.com/gpu <span class="flag">-o</span> jsonpath=<span class="string">'{range .items[*]}{.metadata.name}{"\t"}{.metadata.labels}{"\n"}{end}'</span>
+
+<span class="comment"># vBilling checks these labels in order:</span>
+<span class="comment"># 1. nvidia.com/gpu.product         (NVIDIA GPU Operator)</span>
+<span class="comment"># 2. nvidia.com/gpu.machine          (alternative)</span>
+<span class="comment"># 3. accelerator                     (GKE generic)</span>
+<span class="comment"># 4. cloud.google.com/gke-accelerator (GKE specific)</span>
+<span class="comment"># 5. k8s.amazonaws.com/accelerator   (EKS)</span>
+<span class="comment"># 6. node.kubernetes.io/instance-type (fallback)</span></code></div>
+
+          <h4><span class="fix-label">Fix</span> Install the NVIDIA GPU Operator</h4>
+          <p>The easiest way to get GPU labels is to install the NVIDIA GPU Operator, which automatically labels nodes with <code>nvidia.com/gpu.product</code>:</p>
+          <div class="code-block"><code><span class="cmd">helm</span> repo add nvidia https://helm.ngc.nvidia.com/nvidia
+<span class="cmd">helm</span> install gpu-operator nvidia/gpu-operator <span class="flag">--namespace</span> gpu-operator <span class="flag">--create-namespace</span></code></div>
+
+          <h4><span class="fix-label">Fix</span> Manually label your GPU nodes</h4>
+          <div class="code-block"><code><span class="comment"># If you know the GPU model, label manually</span>
+<span class="cmd">kubectl</span> label node &lt;gpu-node&gt; nvidia.com/gpu.product=<span class="string">"NVIDIA-A100-SXM4-80GB"</span></code></div>
+        </div>
+      </div>
+
+      <!-- Issue 4: Private Nodes Not Detected -->
+      <h2 id="private-nodes-not-detected">Private Nodes Not Detected</h2>
+      <div class="issue">
+        <div class="issue-header">
+          <h3>Private nodes labeled but not appearing in billing events</h3>
+        </div>
+        <div class="issue-body">
+          <h4>Symptoms</h4>
+          <p>You have labeled nodes with <code>vcluster.loft.sh/managed-by</code> but vBilling does not report any private nodes. No <code>vcluster_private_node_hours</code> events appear in Lago.</p>
+
+          <h4>Cause</h4>
+          <p>The most common cause is a label value mismatch between the node label and the vCluster namespace name. vBilling tries multiple label values, but they must correspond to the namespace.</p>
+
+          <h4><span class="fix-label">Fix</span> Understand the label matching logic</h4>
+          <p>For a vCluster in namespace <code>vcluster-team-gpu</code>, vBilling searches for nodes with these selectors:</p>
+          <div class="code-block"><code><span class="comment"># Selector 1: full namespace name</span>
+vcluster.loft.sh/managed-by=<span class="string">vcluster-team-gpu</span>
+vcluster.loft.sh/cluster=<span class="string">vcluster-team-gpu</span>
+
+<span class="comment"># Selector 2: namespace with "vcluster-" prefix stripped</span>
+vcluster.loft.sh/managed-by=<span class="string">team-gpu</span>
+vcluster.loft.sh/cluster=<span class="string">team-gpu</span>
+
+<span class="comment"># Selector 3: custom VCLUSTER_NODE_LABEL (if set)</span></code></div>
+
+          <h4><span class="fix-label">Fix</span> Verify the node labels</h4>
+          <div class="code-block"><code><span class="comment"># Check what value your nodes are actually labeled with</span>
+<span class="cmd">kubectl</span> get nodes <span class="flag">-l</span> vcluster.loft.sh/managed-by <span class="flag">-o</span> custom-columns=<span class="string">"NAME:.metadata.name,MANAGED-BY:.metadata.labels.vcluster\.loft\.sh/managed-by"</span>
+
+<span class="output"># NAME              MANAGED-BY
+# gpu-node-001      team-gpu</span>
+
+<span class="comment"># Make sure the label value matches one of the selectors above</span>
+<span class="comment"># For namespace "vcluster-team-gpu", either of these will work:</span>
+<span class="cmd">kubectl</span> label node gpu-node-001 vcluster.loft.sh/managed-by=<span class="string">vcluster-team-gpu</span>
+<span class="comment"># OR</span>
+<span class="cmd">kubectl</span> label node gpu-node-001 vcluster.loft.sh/managed-by=<span class="string">team-gpu</span></code></div>
+
+          <h4><span class="fix-label">Fix</span> Test the exact selector vBilling uses</h4>
+          <div class="code-block"><code><span class="comment"># Simulate what vBilling does internally:</span>
+<span class="cmd">kubectl</span> get nodes <span class="flag">-l</span> vcluster.loft.sh/managed-by=team-gpu
+
+<span class="comment"># If this returns your nodes, vBilling will find them</span>
+<span class="comment"># If empty, the label value doesn't match</span></code></div>
+        </div>
+      </div>
+
+      <!-- Issue 5: Lago Connection Failed -->
+      <h2 id="lago-connection-failed">Lago Connection Failed</h2>
+      <div class="issue">
+        <div class="issue-header">
+          <h3>"lago API error" or connection refused</h3>
+        </div>
+        <div class="issue-body">
+          <h4>Symptoms</h4>
+          <p>vBilling logs show errors like <code>HTTP POST /api/v1/events/batch: connection refused</code> or <code>lago API error 401</code>. The bootstrap step may fail with a warning.</p>
+
+          <h4><span class="fix-label">Fix</span> Check the Lago URL</h4>
+          <div class="code-block"><code><span class="comment"># If running in-cluster, verify the service exists</span>
+<span class="cmd">kubectl</span> get svc <span class="flag">-n</span> lago-system
+
+<span class="comment"># Test connectivity from inside the cluster</span>
+<span class="cmd">kubectl</span> run test-curl <span class="flag">--rm</span> <span class="flag">-it</span> <span class="flag">--image=curlimages/curl</span> <span class="flag">--</span> \
+  curl <span class="flag">-s</span> http://lago-api.lago-system.svc.cluster.local:3000/api/v1/billable_metrics \
+  <span class="flag">-H</span> <span class="string">"Authorization: Bearer $LAGO_API_KEY"</span>
+
+<span class="comment"># If running locally, check that Lago is running</span>
+<span class="cmd">curl</span> <span class="flag">-s</span> http://localhost:3000/api/v1/billable_metrics \
+  <span class="flag">-H</span> <span class="string">"Authorization: Bearer $LAGO_API_KEY"</span></code></div>
+
+          <h4><span class="fix-label">Fix</span> Check the API key</h4>
+          <div class="code-block"><code><span class="comment"># Verify the API key is correct</span>
+<span class="cmd">curl</span> <span class="flag">-s</span> <span class="flag">-o</span> /dev/null <span class="flag">-w</span> <span class="string">"%{http_code}"</span> \
+  http://localhost:3000/api/v1/billable_metrics \
+  <span class="flag">-H</span> <span class="string">"Authorization: Bearer $LAGO_API_KEY"</span>
+
+<span class="output"># 200 = API key is valid
+# 401 = API key is wrong
+# 000 = Connection failed (Lago not running or wrong URL)</span></code></div>
+
+          <h4><span class="fix-label">Fix</span> Check the Kubernetes secret</h4>
+          <div class="code-block"><code><span class="comment"># If using lago.existingSecret, verify the secret exists and has the right key</span>
+<span class="cmd">kubectl</span> get secret vbilling-lago-secret <span class="flag">-n</span> vbilling-system <span class="flag">-o</span> jsonpath=<span class="string">'{.data.api-key}'</span> | <span class="cmd">base64</span> <span class="flag">-d</span></code></div>
+        </div>
+      </div>
+
+      <!-- Issue 6: Events Sent But $0 -->
+      <h2 id="zero-dollar-invoices">Events Sent But $0.00 in Lago</h2>
+      <div class="issue">
+        <div class="issue-header">
+          <h3>Usage events appear in Lago but invoices show $0.00</h3>
+        </div>
+        <div class="issue-body">
+          <h4>Symptoms</h4>
+          <p>vBilling is successfully sending events (you can see them in the Lago UI under the customer's events tab), but the current usage and invoices all show $0.00.</p>
+
+          <h4>Cause</h4>
+          <p>When vBilling bootstraps the <code>vcluster-standard</code> plan, <strong>all charge amounts default to $0.00 per unit</strong>. This is by design -- vBilling creates the plan structure, but you must configure the actual pricing.</p>
+
+          <h4><span class="fix-label">Fix</span> Configure pricing in Lago</h4>
+          <ol>
+            <li>Open the Lago UI (e.g., <code>http://localhost:80</code>)</li>
+            <li>Navigate to <strong>Plans</strong> in the left sidebar</li>
+            <li>Click on <strong>vCluster Standard</strong></li>
+            <li>For each charge, click the edit icon and set a non-zero price per unit</li>
+            <li>Save the plan</li>
+          </ol>
+          <p>See <a href="configuration.html#lago-pricing">Configuration: Lago Pricing</a> for recommended pricing for each metric.</p>
+
+          <div class="callout callout-info">
+            <div class="callout-icon">i</div>
+            <div>After updating pricing, new events will be billed at the new rate. Existing events in the current billing period will also be recalculated by Lago.</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Issue 7: Duplicate Subscriptions -->
+      <h2 id="duplicate-subscriptions">Duplicate Subscriptions</h2>
+      <div class="issue">
+        <div class="issue-header">
+          <h3>Duplicate or missing subscriptions after controller restart</h3>
+        </div>
+        <div class="issue-body">
+          <h4>Symptoms</h4>
+          <p>After restarting the vBilling controller, you see warnings about subscription creation failing, or duplicate subscriptions appear in Lago.</p>
+
+          <h4>Cause</h4>
+          <p>vBilling is designed to be idempotent on restart. When it discovers a vCluster, it first probes for an existing subscription using the <code>GetCurrentUsage</code> API call. If the subscription already exists, Lago returns usage data and vBilling reuses the subscription. If the probe fails (404), vBilling creates a new subscription.</p>
+
+          <h4>How it works</h4>
+          <div class="code-block"><code><span class="comment"># vBilling's subscription detection logic:</span>
+<span class="comment"># 1. Try GetCurrentUsage(customerID, subscriptionID)</span>
+<span class="comment"># 2. If success: subscription exists, reuse it</span>
+<span class="comment"># 3. If error:  subscription does not exist, create it</span>
+
+<span class="output">[controller] subscription sub-vcluster-ns-name already exists, reusing</span>
+<span class="comment"># OR</span>
+<span class="output">[controller] created subscription sub-vcluster-ns-name -> plan vcluster-standard</span></code></div>
+
+          <h4><span class="fix-label">Fix</span> This is normally self-healing</h4>
+          <p>If you see "subscription already exists" warnings, the controller is correctly detecting and reusing existing subscriptions. No action needed.</p>
+
+          <h4><span class="fix-label">Fix</span> Clean up duplicates in Lago</h4>
+          <p>If actual duplicates exist (multiple subscriptions for the same vCluster), you can terminate the extra ones via the Lago UI or API:</p>
+          <div class="code-block"><code><span class="comment"># List subscriptions for a customer</span>
+<span class="cmd">curl</span> <span class="flag">-s</span> http://localhost:3000/api/v1/subscriptions\?external_customer_id=vcluster-ns-name \
+  <span class="flag">-H</span> <span class="string">"Authorization: Bearer $LAGO_API_KEY"</span> | <span class="cmd">jq</span> <span class="string">'.subscriptions[].external_id'</span>
+
+<span class="comment"># Terminate a duplicate subscription</span>
+<span class="cmd">curl</span> <span class="flag">-X</span> DELETE http://localhost:3000/api/v1/subscriptions/&lt;duplicate-external-id&gt; \
+  <span class="flag">-H</span> <span class="string">"Authorization: Bearer $LAGO_API_KEY"</span></code></div>
+        </div>
+      </div>
+
+      <!-- Issue 8: CORS Issues -->
+      <h2 id="cors-issues">CORS Issues with Dashboard</h2>
+      <div class="issue">
+        <div class="issue-header">
+          <h3>Browser console shows CORS errors when accessing Lago UI or vBilling dashboard</h3>
+        </div>
+        <div class="issue-body">
+          <h4>Symptoms</h4>
+          <p>When accessing the Lago UI or any vBilling dashboard from a browser, you see errors like: <code>Access to fetch at 'http://localhost:3000/...' from origin 'http://localhost:8080' has been blocked by CORS policy</code>.</p>
+
+          <h4>Cause</h4>
+          <p>The browser enforces Cross-Origin Resource Sharing (CORS) restrictions when the frontend and API are served from different origins (different ports or domains).</p>
+
+          <h4><span class="fix-label">Fix</span> Configure Lago CORS settings</h4>
+          <p>In the Lago Docker Compose setup, ensure the <code>LAGO_FRONT_URL</code> environment variable matches your frontend URL:</p>
+          <div class="code-block"><code><span class="comment"># In lago/.env or docker-compose.yml</span>
+LAGO_FRONT_URL=<span class="string">http://localhost</span>
+LAGO_API_URL=<span class="string">http://localhost:3000</span></code></div>
+
+          <h4><span class="fix-label">Fix</span> Use a reverse proxy</h4>
+          <p>For production, put both the API and frontend behind the same domain using a reverse proxy (nginx, Traefik, etc.) so CORS is not an issue.</p>
+
+          <h4><span class="fix-label">Fix</span> Port-forward with matching origins</h4>
+          <div class="code-block"><code><span class="comment"># If accessing in-cluster Lago from your machine:</span>
+<span class="cmd">kubectl</span> port-forward svc/lago-front <span class="flag">-n</span> lago-system 80:80 &amp;
+<span class="cmd">kubectl</span> port-forward svc/lago-api <span class="flag">-n</span> lago-system 3000:3000 &amp;
+
+<span class="comment"># Then access the frontend at http://localhost</span></code></div>
+        </div>
+      </div>
+
+      <!-- General debugging tips -->
+      <h2 id="general-tips">General Debugging Tips</h2>
+
+      <div class="callout callout-info">
+        <div class="callout-icon">i</div>
+        <div>
+          <strong>Enable verbose logging:</strong> vBilling logs to stdout with the <code>[component]</code> prefix convention. Key prefixes to filter:
+          <ul style="margin-top: 8px; margin-bottom: 0;">
+            <li><code>[discovery]</code> -- vCluster discovery events</li>
+            <li><code>[controller]</code> -- Reconciliation and event sending</li>
+            <li><code>[metrics]</code> -- Resource collection (CPU, memory, GPU, etc.)</li>
+            <li><code>[bootstrap]</code> -- Lago metric and plan setup</li>
+            <li><code>[lago]</code> -- Raw API calls to Lago</li>
+          </ul>
+        </div>
+      </div>
+
+      <h3>Useful commands</h3>
+      <div class="code-block"><code><span class="comment"># Stream vBilling logs</span>
+<span class="cmd">kubectl</span> logs <span class="flag">-n</span> vbilling-system <span class="flag">-l</span> app=vbilling <span class="flag">-f</span>
+
+<span class="comment"># Filter for errors only</span>
+<span class="cmd">kubectl</span> logs <span class="flag">-n</span> vbilling-system <span class="flag">-l</span> app=vbilling | <span class="cmd">grep</span> <span class="flag">-i</span> <span class="string">"error\|warning\|fatal"</span>
+
+<span class="comment"># Check vBilling pod status</span>
+<span class="cmd">kubectl</span> get pods <span class="flag">-n</span> vbilling-system
+
+<span class="comment"># Describe pod for events and conditions</span>
+<span class="cmd">kubectl</span> describe pod <span class="flag">-n</span> vbilling-system <span class="flag">-l</span> app=vbilling
+
+<span class="comment"># Check cluster-wide vCluster StatefulSets</span>
+<span class="cmd">kubectl</span> get statefulsets <span class="flag">--all-namespaces</span> <span class="flag">-l</span> app=vcluster
+
+<span class="comment"># Check Lago health</span>
+<span class="cmd">curl</span> <span class="flag">-s</span> http://localhost:3000/api/v1/billable_metrics \
+  <span class="flag">-H</span> <span class="string">"Authorization: Bearer $LAGO_API_KEY"</span> | <span class="cmd">jq</span> <span class="string">'.billable_metrics | length'</span>
+
+<span class="output"># Should return: 9</span>
+
+<span class="comment"># Check which customers exist in Lago</span>
+<span class="cmd">curl</span> <span class="flag">-s</span> http://localhost:3000/api/v1/customers \
+  <span class="flag">-H</span> <span class="string">"Authorization: Bearer $LAGO_API_KEY"</span> | <span class="cmd">jq</span> <span class="string">'.customers[] | {external_id, name}'</span></code></div>
+
+      <div class="callout callout-success">
+        <div class="callout-icon">&#10003;</div>
+        <div>If you encounter an issue not covered here, please <a href="https://github.com/vClusterLabs-Experiments/vbilling/issues" target="_blank">open a GitHub issue</a> with your vBilling logs and cluster details.</div>
+      </div>
+
+    </main>
+  </div>
+
+  <button class="mobile-sidebar-toggle" id="mobileSidebarToggle" aria-label="Toggle sidebar">&#9776;</button>
+
+  <script>
+    const header = document.getElementById('header');
+    window.addEventListener('scroll', () => { header.classList.toggle('scrolled', window.scrollY > 10); });
+    const sidebar = document.getElementById('sidebar');
+    const toggle = document.getElementById('mobileSidebarToggle');
+    toggle.addEventListener('click', () => { sidebar.classList.toggle('open'); });
+    document.addEventListener('click', (e) => {
+      if (!sidebar.contains(e.target) && !toggle.contains(e.target)) sidebar.classList.remove('open');
+    });
+  </script>
+</body>
+</html>

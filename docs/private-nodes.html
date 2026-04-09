@@ -1,0 +1,612 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Private Nodes - vBilling Docs</title>
+  <meta name="description" content="How vBilling detects and bills dedicated bare-metal or virtual nodes allocated to individual vCluster tenants.">
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+      --primary: #f97316; --primary-dark: #ea580c; --primary-darker: #9a3412;
+      --primary-light: #fff7ed; --primary-light-2: #ffedd5; --accent: #fb923c;
+      --text-dark: #0f172a; --text-gray: #475569; --text-light: #64748b;
+      --white: #ffffff; --bg-code: #0f172a; --border: #e2e8f0;
+      --shadow-sm: 0 1px 2px rgba(0,0,0,0.05);
+      --shadow-md: 0 4px 6px -1px rgba(0,0,0,0.07), 0 2px 4px -2px rgba(0,0,0,0.05);
+      --shadow-lg: 0 10px 15px -3px rgba(0,0,0,0.08), 0 4px 6px -4px rgba(0,0,0,0.04);
+      --radius: 12px; --radius-lg: 16px; --sidebar-width: 260px;
+    }
+
+    html { scroll-behavior: smooth; scroll-padding-top: 80px; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', Roboto, Oxygen, Ubuntu, sans-serif;
+      color: var(--text-dark); line-height: 1.6; background: var(--white);
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .header {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 1000;
+      background: rgba(255,255,255,0.92); backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px); border-bottom: 1px solid var(--border);
+    }
+    .header.scrolled { box-shadow: var(--shadow-md); }
+    .header-inner {
+      max-width: 1400px; margin: 0 auto; padding: 0 24px;
+      display: flex; align-items: center; justify-content: space-between; height: 64px;
+    }
+    .header-logo {
+      display: flex; align-items: center; gap: 10px;
+      text-decoration: none; color: var(--text-dark);
+    }
+    .header-logo-icon {
+      width: 32px; height: 32px; border-radius: 8px;
+      background: linear-gradient(135deg, var(--primary-dark), var(--primary));
+      display: flex; align-items: center; justify-content: center;
+      color: var(--white); font-weight: 700; font-size: 0.9rem;
+    }
+    .header-logo-text { font-size: 1.15rem; font-weight: 700; letter-spacing: -0.5px; }
+    .header-logo-text span { color: var(--primary-dark); }
+    .header-nav { display: flex; align-items: center; gap: 20px; }
+    .header-nav a {
+      text-decoration: none; color: var(--text-gray); font-size: 0.88rem;
+      font-weight: 500; transition: color 0.2s;
+    }
+    .header-nav a:hover { color: var(--primary-dark); }
+    .header-nav .gh-link {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: var(--bg-code); color: var(--white); padding: 6px 14px;
+      border-radius: 8px; font-size: 0.82rem; font-weight: 600; transition: opacity 0.2s;
+    }
+    .header-nav .gh-link:hover { opacity: 0.85; color: var(--white); }
+
+    .docs-layout { display: flex; margin-top: 64px; min-height: calc(100vh - 64px); }
+
+    .sidebar {
+      width: var(--sidebar-width); flex-shrink: 0;
+      border-right: 1px solid var(--border); background: var(--primary-light);
+      padding: 32px 0; position: fixed; top: 64px; bottom: 0; overflow-y: auto;
+    }
+    .sidebar-section { margin-bottom: 28px; }
+    .sidebar-label {
+      padding: 0 24px; font-size: 0.72rem; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 1px; color: var(--primary-darker);
+      margin-bottom: 8px;
+    }
+    .sidebar a {
+      display: block; padding: 7px 24px; text-decoration: none;
+      font-size: 0.88rem; color: var(--text-gray); font-weight: 500;
+      transition: all 0.15s; border-left: 3px solid transparent;
+    }
+    .sidebar a:hover { color: var(--primary-dark); background: var(--primary-light-2); }
+    .sidebar a.active {
+      color: var(--primary-dark); background: var(--primary-light-2);
+      border-left-color: var(--primary); font-weight: 600;
+    }
+    .sidebar-back {
+      display: flex; align-items: center; gap: 6px; margin: 0 24px 24px;
+      padding: 8px 12px; border-radius: 8px; text-decoration: none;
+      font-size: 0.85rem; color: var(--text-light); font-weight: 500;
+      border: 1px solid var(--border); transition: all 0.2s;
+    }
+    .sidebar-back:hover { border-color: var(--primary); color: var(--primary-dark); }
+
+    .content {
+      flex: 1; margin-left: var(--sidebar-width);
+      padding: 48px 64px 80px; max-width: 900px;
+    }
+    .content h1 {
+      font-size: 2.2rem; font-weight: 800; letter-spacing: -1px;
+      margin-bottom: 12px; color: var(--text-dark);
+    }
+    .content .subtitle {
+      font-size: 1.1rem; color: var(--text-gray); line-height: 1.7;
+      margin-bottom: 40px; max-width: 640px;
+    }
+    .content h2 {
+      font-size: 1.5rem; font-weight: 700; letter-spacing: -0.5px;
+      margin: 48px 0 16px; color: var(--text-dark);
+      padding-bottom: 8px; border-bottom: 2px solid var(--primary-light-2);
+    }
+    .content h3 {
+      font-size: 1.15rem; font-weight: 700; margin: 32px 0 12px; color: var(--text-dark);
+    }
+    .content h4 {
+      font-size: 0.95rem; font-weight: 700; margin: 20px 0 8px; color: var(--text-dark);
+    }
+    .content p {
+      font-size: 0.95rem; color: var(--text-gray); line-height: 1.7; margin-bottom: 16px;
+    }
+    .content ul, .content ol {
+      margin: 0 0 16px 24px; color: var(--text-gray); font-size: 0.95rem;
+    }
+    .content li { margin-bottom: 6px; line-height: 1.6; }
+    .content code {
+      background: var(--primary-light-2); padding: 2px 7px; border-radius: 4px;
+      font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+      font-size: 0.85rem; color: var(--primary-darker);
+    }
+    .content a { color: var(--primary-dark); text-decoration: none; font-weight: 500; }
+    .content a:hover { text-decoration: underline; }
+
+    .code-block {
+      background: var(--bg-code); border-radius: var(--radius);
+      padding: 20px 24px; overflow-x: auto; margin-bottom: 20px; position: relative;
+    }
+    .code-block code {
+      color: #e2e8f0; background: none; padding: 0;
+      font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+      font-size: 0.84rem; line-height: 1.7; white-space: pre;
+    }
+    .code-block .comment { color: #64748b; }
+    .code-block .cmd { color: #fb923c; }
+    .code-block .flag { color: #a5b4fc; }
+    .code-block .string { color: #86efac; }
+    .code-block .output { color: #94a3b8; }
+
+    .callout {
+      padding: 16px 20px; border-radius: var(--radius); margin-bottom: 20px;
+      font-size: 0.9rem; line-height: 1.6; display: flex; gap: 12px;
+    }
+    .callout-icon { flex-shrink: 0; font-size: 1.1rem; margin-top: 1px; }
+    .callout-info { background: #eff6ff; border: 1px solid #bfdbfe; color: #1e40af; }
+    .callout-warn { background: var(--primary-light); border: 1px solid var(--primary-light-2); color: var(--primary-darker); }
+    .callout-success { background: #f0fdf4; border: 1px solid #bbf7d0; color: #166534; }
+
+    /* ── Info boxes ── */
+    .info-grid {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px;
+    }
+    .info-box {
+      background: var(--primary-light); border: 1px solid var(--primary-light-2);
+      border-radius: var(--radius); padding: 20px;
+    }
+    .info-box h4 {
+      margin: 0 0 8px; font-size: 0.9rem; color: var(--primary-darker);
+    }
+    .info-box p {
+      margin: 0; font-size: 0.88rem; color: var(--text-gray);
+    }
+
+    /* ── Flow diagram ── */
+    .flow-diagram {
+      background: var(--bg-code); border-radius: var(--radius-lg);
+      padding: 28px 32px; margin-bottom: 24px; overflow-x: auto;
+    }
+    .flow-diagram pre {
+      color: #e2e8f0; font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 0.82rem; line-height: 1.8; margin: 0; white-space: pre;
+    }
+    .flow-diagram .flow-arrow { color: var(--primary); }
+    .flow-diagram .flow-highlight { color: #fb923c; }
+    .flow-diagram .flow-dim { color: #64748b; }
+
+    .config-table-wrap {
+      overflow-x: auto; border-radius: var(--radius); border: 1px solid var(--border);
+      box-shadow: var(--shadow-sm); margin-bottom: 24px;
+    }
+    .config-table {
+      width: 100%; border-collapse: collapse; font-size: 0.88rem;
+    }
+    .config-table thead { background: var(--primary-light); }
+    .config-table th {
+      padding: 12px 16px; text-align: left; font-weight: 700;
+      color: var(--primary-darker); font-size: 0.78rem;
+      text-transform: uppercase; letter-spacing: 0.5px;
+      border-bottom: 2px solid var(--primary-light-2);
+    }
+    .config-table td {
+      padding: 10px 16px; border-bottom: 1px solid var(--border);
+      color: var(--text-gray); vertical-align: top;
+    }
+    .config-table tr:last-child td { border-bottom: none; }
+    .config-table tr:hover td { background: var(--primary-light); }
+
+    .mobile-sidebar-toggle {
+      display: none; position: fixed; bottom: 24px; right: 24px; z-index: 999;
+      width: 48px; height: 48px; border-radius: 50%;
+      background: linear-gradient(135deg, var(--primary-dark), var(--primary));
+      color: var(--white); border: none; font-size: 1.3rem; cursor: pointer;
+      box-shadow: var(--shadow-lg);
+    }
+
+    @media (max-width: 900px) {
+      .sidebar {
+        transform: translateX(-100%); transition: transform 0.3s ease;
+        z-index: 900; width: 280px;
+      }
+      .sidebar.open { transform: translateX(0); }
+      .content { margin-left: 0; padding: 32px 24px 80px; }
+      .mobile-sidebar-toggle { display: flex; align-items: center; justify-content: center; }
+      .content h1 { font-size: 1.7rem; }
+      .content h2 { font-size: 1.3rem; }
+      .info-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+  <header class="header" id="header">
+    <div class="header-inner">
+      <a href="index.html" class="header-logo">
+        <div class="header-logo-icon">vB</div>
+        <div class="header-logo-text">v<span>Billing</span> Docs</div>
+      </a>
+      <nav class="header-nav">
+        <a href="index.html">Home</a>
+        <a href="getting-started.html">Guide</a>
+        <a href="https://github.com/vClusterLabs-Experiments/vbilling" class="gh-link" target="_blank">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <div class="docs-layout">
+    <nav class="sidebar" id="sidebar">
+      <a href="index.html" class="sidebar-back">&#8592; Back to main site</a>
+      <div class="sidebar-section">
+        <div class="sidebar-label">Documentation</div>
+        <a href="getting-started.html">Getting Started</a>
+        <a href="configuration.html">Configuration</a>
+        <a href="metrics.html">Metrics Reference</a>
+        <a href="private-nodes.html" class="active">Private Nodes</a>
+        <a href="troubleshooting.html">Troubleshooting</a>
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-label">Resources</div>
+        <a href="https://github.com/vClusterLabs-Experiments/vbilling" target="_blank">GitHub Repository</a>
+        <a href="https://www.getlago.com/docs" target="_blank">Lago Docs</a>
+        <a href="https://www.vcluster.com/docs" target="_blank">vCluster Docs</a>
+      </div>
+    </nav>
+
+    <main class="content">
+      <h1>Private Node Billing</h1>
+      <p class="subtitle">How vBilling detects and bills dedicated bare-metal or virtual machines allocated to individual vCluster tenants. Ideal for neoclouds, GPU clusters, and high-isolation environments.</p>
+
+      <!-- What are private nodes -->
+      <h2 id="what-are-private-nodes">What Are Private Nodes?</h2>
+      <p>Private nodes are dedicated Kubernetes nodes (physical servers, cloud VMs, or bare-metal machines) allocated exclusively to a single vCluster tenant. Unlike the default shared model where vCluster pods run alongside other workloads on shared nodes, private nodes give a tenant the entire machine.</p>
+
+      <div class="info-grid">
+        <div class="info-box">
+          <h4>Shared Mode (default)</h4>
+          <p>vCluster pods run in a namespace on shared nodes. Billing is based on actual pod resource usage (CPU, memory) as reported by metrics-server.</p>
+        </div>
+        <div class="info-box">
+          <h4>Private Node Mode</h4>
+          <p>Entire nodes are dedicated to one tenant. Billing is based on the full node capacity (CPU, memory, GPUs, storage) regardless of actual utilization.</p>
+        </div>
+      </div>
+
+      <p>Common use cases for private nodes:</p>
+      <ul>
+        <li><strong>GPU workloads</strong> -- Tenants get dedicated GPU nodes (e.g., 8x A100 or 8x H100)</li>
+        <li><strong>Security isolation</strong> -- Tenants require physical machine-level isolation</li>
+        <li><strong>Performance</strong> -- No noisy-neighbor effects from shared infrastructure</li>
+        <li><strong>Bare-metal providers</strong> -- Neoclouds selling entire servers to tenants</li>
+      </ul>
+
+      <!-- How detection works -->
+      <h2 id="detection">How vBilling Detects Private Nodes</h2>
+      <p>vBilling discovers private nodes by searching for Kubernetes nodes with specific labels that associate them with a vCluster. The detection uses multiple strategies in order:</p>
+
+      <h3>Strategy 1: Direct namespace match</h3>
+      <p>vBilling searches for nodes with these label selectors (where the value matches the vCluster namespace):</p>
+      <div class="code-block"><code><span class="comment"># Label selectors tried for namespace "vcluster-team-gpu":</span>
+vcluster.loft.sh/managed-by=<span class="string">vcluster-team-gpu</span>
+vcluster.loft.sh/cluster=<span class="string">vcluster-team-gpu</span></code></div>
+
+      <h3>Strategy 2: Name with prefix stripping</h3>
+      <p>If the namespace starts with a common prefix (<code>vcluster-</code> or <code>vc-</code>), vBilling also tries the name with the prefix stripped:</p>
+      <div class="code-block"><code><span class="comment"># For namespace "vcluster-team-gpu", the prefix "vcluster-" is stripped:</span>
+<span class="comment"># vCluster name derived = "team-gpu"</span>
+<span class="comment"># Additional selectors tried:</span>
+vcluster.loft.sh/managed-by=<span class="string">team-gpu</span>
+vcluster.loft.sh/cluster=<span class="string">team-gpu</span></code></div>
+
+      <div class="callout callout-warn">
+        <div class="callout-icon">!</div>
+        <div>This prefix stripping is a common source of label mismatch issues. If your namespace is <code>vcluster-team-gpu</code> and you label nodes with <code>vcluster.loft.sh/managed-by=vcluster-team-gpu</code>, it will match via Strategy 1. But if you label with just <code>team-gpu</code>, it matches via Strategy 2. See <a href="troubleshooting.html#private-nodes-not-detected">Troubleshooting</a> for details.</div>
+      </div>
+
+      <h3>Strategy 3: Custom label via environment variable</h3>
+      <p>For non-standard setups, you can specify a custom label selector via the <code>VCLUSTER_NODE_LABEL</code> environment variable:</p>
+      <div class="code-block"><code><span class="comment"># Format: VCLUSTER_NODE_LABEL=label-key=value-pattern</span>
+<span class="comment"># Use %s as a placeholder for the vCluster name (after prefix stripping)</span>
+
+<span class="comment"># Example: nodes labeled with "tenant=team-gpu"</span>
+<span class="cmd">export</span> VCLUSTER_NODE_LABEL=<span class="string">"tenant=%s"</span>
+
+<span class="comment"># Example: nodes labeled with "dedicated-to=team-gpu"</span>
+<span class="cmd">export</span> VCLUSTER_NODE_LABEL=<span class="string">"dedicated-to=%s"</span>
+
+<span class="comment"># In Helm values:</span>
+<span class="comment"># env:</span>
+<span class="comment">#   - name: VCLUSTER_NODE_LABEL</span>
+<span class="comment">#     value: "tenant=%s"</span></code></div>
+
+      <h3>Detection flow diagram</h3>
+      <div class="flow-diagram">
+<pre><span class="flow-dim">For each tracked vCluster namespace:</span>
+
+  <span class="flow-highlight">Namespace</span> = "vcluster-team-gpu"
+      <span class="flow-arrow">|</span>
+      <span class="flow-arrow">|--></span> Try: <span class="flow-highlight">vcluster.loft.sh/managed-by</span>=vcluster-team-gpu
+      <span class="flow-arrow">|--></span> Try: <span class="flow-highlight">vcluster.loft.sh/cluster</span>=vcluster-team-gpu
+      <span class="flow-arrow">|</span>
+      <span class="flow-arrow">|--></span> Strip prefix "vcluster-" <span class="flow-arrow">--></span> Name = "team-gpu"
+      <span class="flow-arrow">|--></span> Try: <span class="flow-highlight">vcluster.loft.sh/managed-by</span>=team-gpu
+      <span class="flow-arrow">|--></span> Try: <span class="flow-highlight">vcluster.loft.sh/cluster</span>=team-gpu
+      <span class="flow-arrow">|</span>
+      <span class="flow-arrow">|--></span> Try: Custom label (<span class="flow-highlight">VCLUSTER_NODE_LABEL</span>=%s <span class="flow-arrow">--></span> "team-gpu")
+      <span class="flow-arrow">|</span>
+      <span class="flow-arrow">v</span>
+  <span class="flow-dim">Deduplicate matched nodes by name</span></pre>
+      </div>
+
+      <!-- What gets billed -->
+      <h2 id="what-gets-billed">What Gets Billed</h2>
+      <p>When private nodes are detected for a vCluster, the <strong>full node capacity</strong> is billed to the tenant. The following data is extracted from each node:</p>
+
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead>
+            <tr><th>Resource</th><th>Source</th><th>Lago Metric</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>CPU (total cores)</td>
+              <td><code>node.status.capacity["cpu"]</code></td>
+              <td><code>vcluster_cpu_core_hours</code> (billing_mode=private_node)</td>
+            </tr>
+            <tr>
+              <td>Memory (total bytes)</td>
+              <td><code>node.status.capacity["memory"]</code></td>
+              <td><code>vcluster_memory_gb_hours</code> (billing_mode=private_node)</td>
+            </tr>
+            <tr>
+              <td>GPU count + type</td>
+              <td><code>node.status.capacity["nvidia.com/gpu"]</code> + node labels</td>
+              <td><code>vcluster_gpu_hours</code> (billing_mode=private_node)</td>
+            </tr>
+            <tr>
+              <td>Ephemeral storage</td>
+              <td><code>node.status.capacity["ephemeral-storage"]</code></td>
+              <td>Tracked internally (not a separate Lago metric)</td>
+            </tr>
+            <tr>
+              <td>Node count</td>
+              <td>Number of matched nodes</td>
+              <td><code>vcluster_private_node_hours</code></td>
+            </tr>
+            <tr>
+              <td>Spot/on-demand status</td>
+              <td>Node labels (see below)</td>
+              <td>Used to determine <code>IsSpot</code> flag</td>
+            </tr>
+            <tr>
+              <td>Instance type</td>
+              <td><code>node.kubernetes.io/instance-type</code></td>
+              <td>Tracked in <code>InstanceType</code> field</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p>Additionally, vBilling queries metrics-server for the <strong>actual CPU and memory usage</strong> on private nodes (via node-level metrics) and adds that to the billing totals. This ensures workloads running directly on dedicated nodes outside the vCluster namespace are also captured.</p>
+
+      <!-- GPU type detection -->
+      <h2 id="gpu-detection">GPU Type Detection on Private Nodes</h2>
+      <p>vBilling checks multiple node labels to determine the GPU model on a private node. Labels are checked in priority order -- the first match wins:</p>
+
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead>
+            <tr><th>Label</th><th>Platform</th><th>Example Value</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>nvidia.com/gpu.product</code></td>
+              <td>NVIDIA GPU Operator (any platform)</td>
+              <td>NVIDIA-A100-SXM4-80GB</td>
+            </tr>
+            <tr>
+              <td><code>nvidia.com/gpu.machine</code></td>
+              <td>Alternative NVIDIA label</td>
+              <td>NVIDIA-DGX-A100</td>
+            </tr>
+            <tr>
+              <td><code>cloud.google.com/gke-accelerator</code></td>
+              <td>Google Kubernetes Engine (GKE)</td>
+              <td>nvidia-tesla-t4</td>
+            </tr>
+            <tr>
+              <td><code>k8s.amazonaws.com/accelerator</code></td>
+              <td>Amazon Elastic Kubernetes Service (EKS)</td>
+              <td>nvidia-tesla-a100</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p>GPU type strings are normalized: spaces are replaced with hyphens and leading/trailing whitespace is trimmed.</p>
+
+      <!-- Spot / On-Demand -->
+      <h2 id="spot-detection">Spot / On-Demand Detection</h2>
+      <p>Each private node is checked for spot/preemptible status using the following labels:</p>
+
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead>
+            <tr><th>Label</th><th>Spot Values</th><th>Platform</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>kubernetes.io/lifecycle</code></td>
+              <td>"spot", "preemptible"</td>
+              <td>Common / generic</td>
+            </tr>
+            <tr>
+              <td><code>node.kubernetes.io/lifecycle</code></td>
+              <td>"spot", "preemptible"</td>
+              <td>Alternative generic</td>
+            </tr>
+            <tr>
+              <td><code>cloud.google.com/gke-preemptible</code></td>
+              <td>"true"</td>
+              <td>GKE preemptible VMs</td>
+            </tr>
+            <tr>
+              <td><code>cloud.google.com/gke-spot</code></td>
+              <td>"true"</td>
+              <td>GKE Spot VMs</td>
+            </tr>
+            <tr>
+              <td><code>eks.amazonaws.com/capacityType</code></td>
+              <td>"SPOT"</td>
+              <td>Amazon EKS</td>
+            </tr>
+            <tr>
+              <td><code>karpenter.sh/capacity-type</code></td>
+              <td>"spot"</td>
+              <td>Karpenter autoscaler</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p>The spot/on-demand status is stored in the <code>IsSpot</code> field of each private node. This information can be used for pricing differentiation.</p>
+
+      <!-- Example: GKE with T4 -->
+      <h2 id="example-gke-t4">Example: GKE Test with T4 GPU</h2>
+      <p>Here is a real-world example of setting up private node billing on GKE with NVIDIA T4 GPUs.</p>
+
+      <h3>Label the node</h3>
+      <div class="code-block"><code><span class="comment"># Identify the GPU node</span>
+<span class="cmd">kubectl</span> get nodes <span class="flag">-l</span> cloud.google.com/gke-accelerator=nvidia-tesla-t4
+
+<span class="output"># NAME                                      STATUS   AGE
+# gke-cluster-gpu-pool-abc12345-def0        Ready    2d</span>
+
+<span class="comment"># Label the node as belonging to the vCluster</span>
+<span class="cmd">kubectl</span> label node gke-cluster-gpu-pool-abc12345-def0 \
+  vcluster.loft.sh/managed-by=<span class="string">team-gpu</span></code></div>
+
+      <h3>Verify detection</h3>
+      <div class="code-block"><code><span class="comment"># Check that the node has the right labels</span>
+<span class="cmd">kubectl</span> get node gke-cluster-gpu-pool-abc12345-def0 <span class="flag">--show-labels</span>
+
+<span class="output"># Labels include:
+#   cloud.google.com/gke-accelerator=nvidia-tesla-t4
+#   vcluster.loft.sh/managed-by=team-gpu
+#   node.kubernetes.io/instance-type=n1-standard-8</span>
+
+<span class="comment"># Check vBilling logs (namespace: vcluster-team-gpu)</span>
+<span class="cmd">kubectl</span> logs <span class="flag">-n</span> vbilling-system <span class="flag">-l</span> app=vbilling <span class="flag">-f</span>
+
+<span class="output"># Expected output:
+# [metrics] vcluster-team-gpu: found 1 private node(s): totalCPU=8 cores, totalMemory=30.00 GB, totalGPUs=1
+# [metrics]   node=gke-cluster-gpu-pool-abc12345-def0 type=n1-standard-8 cpu=8 mem=30720Mi gpus=1(nvidia-tesla-t4) on-demand
+# [metrics] vcluster-team-gpu: added private node usage: CPU=+2.150 cores, Memory=+8.45 GB
+# [controller] sent 6 billing events to Lago</span></code></div>
+
+      <h3>Resulting Lago events</h3>
+      <p>With a 60-second collection interval (0.01667 hours), the following events are sent:</p>
+      <div class="code-block"><code><span class="comment"># CPU core-hours from private node (8 cores x 0.01667h)</span>
+{ "code": "vcluster_cpu_core_hours",
+  "properties": { "cpu_core_hours": 0.133333, "raw_cpu_cores": 8.0,
+                  "billing_mode": "private_node" } }
+
+<span class="comment"># Memory GB-hours from private node (30 GB x 0.01667h)</span>
+{ "code": "vcluster_memory_gb_hours",
+  "properties": { "memory_gb_hours": 0.5, "raw_memory_gb": 30.0,
+                  "billing_mode": "private_node" } }
+
+<span class="comment"># GPU hours (1 T4 x 0.01667h)</span>
+{ "code": "vcluster_gpu_hours",
+  "properties": { "gpu_hours": 0.016667, "gpu_count": 1,
+                  "gpu_type": "nvidia-tesla-t4", "billing_mode": "private_node" } }
+
+<span class="comment"># Private node hours (1 node x 0.01667h)</span>
+{ "code": "vcluster_private_node_hours",
+  "properties": { "private_node_hours": 0.016667, "node_count": 1,
+                  "billing_mode": "private_node" } }</code></div>
+
+      <!-- How to set up -->
+      <h2 id="setup">How to Set Up Private Nodes</h2>
+      <p>Follow these steps to enable private node billing for a vCluster:</p>
+
+      <h3>1. Label your nodes</h3>
+      <div class="code-block"><code><span class="comment"># Option A: Use the standard label</span>
+<span class="cmd">kubectl</span> label node &lt;node-name&gt; \
+  vcluster.loft.sh/managed-by=<span class="string">&lt;vcluster-name&gt;</span>
+
+<span class="comment"># Option B: Use the cluster label</span>
+<span class="cmd">kubectl</span> label node &lt;node-name&gt; \
+  vcluster.loft.sh/cluster=<span class="string">&lt;vcluster-name&gt;</span>
+
+<span class="comment"># For multiple nodes:</span>
+<span class="cmd">kubectl</span> label node node-1 node-2 node-3 \
+  vcluster.loft.sh/managed-by=<span class="string">team-gpu</span></code></div>
+
+      <h3>2. Ensure the label value matches</h3>
+      <div class="callout callout-warn">
+        <div class="callout-icon">!</div>
+        <div>
+          The label value must match what vBilling expects. vBilling tries several values:
+          <ul style="margin-top: 8px; margin-bottom: 0;">
+            <li>The full namespace name (e.g., <code>vcluster-team-gpu</code>)</li>
+            <li>The namespace with <code>vcluster-</code> or <code>vc-</code> prefix stripped (e.g., <code>team-gpu</code>)</li>
+            <li>The custom label pattern from <code>VCLUSTER_NODE_LABEL</code></li>
+          </ul>
+        </div>
+      </div>
+
+      <h3>3. Verify with kubectl</h3>
+      <div class="code-block"><code><span class="comment"># Check which nodes match the label</span>
+<span class="cmd">kubectl</span> get nodes <span class="flag">-l</span> vcluster.loft.sh/managed-by=team-gpu
+
+<span class="output"># NAME                     STATUS   ROLES    AGE   VERSION
+# gpu-node-001             Ready    &lt;none&gt;   5d    v1.29.2
+# gpu-node-002             Ready    &lt;none&gt;   5d    v1.29.2</span>
+
+<span class="comment"># Inspect node details</span>
+<span class="cmd">kubectl</span> describe node gpu-node-001 | <span class="cmd">grep</span> <span class="flag">-A5</span> <span class="string">"Capacity:"</span>
+
+<span class="output"># Capacity:
+#   cpu:                    96
+#   ephemeral-storage:      1844592Ki
+#   hugepages-1Gi:          0
+#   memory:                 1056718848Ki
+#   nvidia.com/gpu:         8</span></code></div>
+
+      <h3>4. Check vBilling logs</h3>
+      <div class="code-block"><code><span class="cmd">kubectl</span> logs <span class="flag">-n</span> vbilling-system <span class="flag">-l</span> app=vbilling | <span class="cmd">grep</span> <span class="string">"private node"</span>
+
+<span class="output"># [metrics] vcluster-team-gpu: found 2 private node(s): totalCPU=192 cores, totalMemory=2013.12 GB, totalGPUs=16
+# [metrics]   node=gpu-node-001 type=p4d.24xlarge cpu=96 mem=1006559Mi gpus=8(NVIDIA-A100-SXM4-80GB) on-demand
+# [metrics]   node=gpu-node-002 type=p4d.24xlarge cpu=96 mem=1006559Mi gpus=8(NVIDIA-A100-SXM4-80GB) on-demand</span></code></div>
+
+      <div class="callout callout-success">
+        <div class="callout-icon">&#10003;</div>
+        <div>Private node billing happens automatically alongside shared-namespace billing. Both shared and private metrics are sent to Lago simultaneously. The <code>billing_mode=private_node</code> property lets you distinguish them in Lago.</div>
+      </div>
+
+    </main>
+  </div>
+
+  <button class="mobile-sidebar-toggle" id="mobileSidebarToggle" aria-label="Toggle sidebar">&#9776;</button>
+
+  <script>
+    const header = document.getElementById('header');
+    window.addEventListener('scroll', () => { header.classList.toggle('scrolled', window.scrollY > 10); });
+    const sidebar = document.getElementById('sidebar');
+    const toggle = document.getElementById('mobileSidebarToggle');
+    toggle.addEventListener('click', () => { sidebar.classList.toggle('open'); });
+    document.addEventListener('click', (e) => {
+      if (!sidebar.contains(e.target) && !toggle.contains(e.target)) sidebar.classList.remove('open');
+    });
+  </script>
+</body>
+</html>
