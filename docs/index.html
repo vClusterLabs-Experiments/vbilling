@@ -447,20 +447,10 @@
 
     /* ── Architecture ── */
     .arch-container {
-      background: var(--bg-code);
+      background: transparent;
       border-radius: var(--radius-lg);
-      padding: 48px;
+      padding: 0;
       overflow-x: auto;
-      box-shadow: var(--shadow-xl);
-    }
-
-    .arch-container pre {
-      color: #e2e8f0;
-      font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
-      font-size: 0.82rem;
-      line-height: 1.6;
-      white-space: pre;
-      margin: 0;
     }
 
     .arch-description {
@@ -1105,39 +1095,75 @@
       <div class="section-label">Architecture</div>
       <h2 class="section-title">How the pieces fit together</h2>
       <p class="section-subtitle">vBilling runs as a controller in your host cluster. It watches for vClusters, collects metrics, and forwards usage events to Lago via HTTP.</p>
-      <div class="arch-container fade-in">
-        <pre>
-<span style="color:#22d3ee">  Host Cluster</span>
-  <span style="color:#475569">---------------------------------------------------------------------</span>
-  |                                                                   |
-  |   <span style="color:#a5b4fc">vCluster</span>            <span style="color:#a5b4fc">vCluster</span>            <span style="color:#a5b4fc">vCluster</span>            |
-  |   <span style="color:#64748b">team-alpha</span>          <span style="color:#64748b">team-beta</span>           <span style="color:#64748b">team-gpu</span>            |
-  |   <span style="color:#475569">(shared nodes)</span>       <span style="color:#475569">(shared nodes)</span>       <span style="color:#475569">(private nodes)</span>      |
-  |                                               <span style="color:#fbbf24">8x H100 GPUs</span>       |
-  |                                               <span style="color:#fbbf24">Dedicated Metal</span>     |
-  |       |                    |                       |              |
-  |       +--------------------+-----------------------+              |
-  |                            |                                      |
-  |                  <span style="color:#22d3ee">+---------v-----------+</span>                        |
-  |                  <span style="color:#22d3ee">|     vBilling         |</span>                        |
-  |                  <span style="color:#22d3ee">|     Controller       |</span>                        |
-  |                  <span style="color:#22d3ee">|                      |</span>                        |
-  |                  <span style="color:#22d3ee">|  * Auto-discovers    |</span>                        |
-  |                  <span style="color:#22d3ee">|  * Collects metrics  |</span>                        |
-  |                  <span style="color:#22d3ee">|  * Sends usage events|</span>                        |
-  |                  <span style="color:#22d3ee">+---------+-----------+</span>                        |
-  |                            |                                      |
-  <span style="color:#475569">---------------------------------------------------------------------</span>
-                               | <span style="color:#64748b">Usage events (HTTP)</span>
-                     <span style="color:#86efac">+---------v---------+</span>
-                     <span style="color:#86efac">|       Lago         |</span>
-                     <span style="color:#86efac">|   Billing Engine   |</span>
-                     <span style="color:#86efac">|                    |</span>
-                     <span style="color:#86efac">|  Plans & pricing   |</span>  <span style="color:#64748b">&lt;- You configure here</span>
-                     <span style="color:#86efac">|  Subscriptions     |</span>
-                     <span style="color:#86efac">|  Invoices          |</span>
-                     <span style="color:#86efac">|  Wallets / prepay  |</span>
-                     <span style="color:#86efac">+--------------------+</span></pre>
+      <div class="arch-container fade-in" style="background:white; border-radius:16px; padding:24px; box-shadow:0 4px 24px rgba(0,0,0,0.08); overflow:hidden;">
+        <img src="../assets/logo.svg" alt="" style="display:none"><!-- preload -->
+        <div style="display:grid; grid-template-rows:auto auto auto; gap:0; width:100%; max-width:900px; margin:0 auto;">
+          <!-- Host Cluster box -->
+          <div style="border:2px solid #e2e8f0; border-radius:16px; padding:24px; background:linear-gradient(135deg,#f8fafc,#f1f5f9); position:relative;">
+            <div style="font-size:12px; font-weight:600; color:#64748b; text-transform:uppercase; letter-spacing:1px; margin-bottom:20px;">Host Kubernetes Cluster</div>
+            <!-- vCluster cards row -->
+            <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:16px; margin-bottom:24px;">
+              <div style="background:linear-gradient(135deg,#3b82f6,#2563eb); border-radius:12px; padding:16px; color:white; text-align:center;">
+                <div style="font-weight:700; font-size:14px;">vCluster</div>
+                <div style="font-size:13px; opacity:0.9;">team-alpha</div>
+                <div style="font-size:11px; opacity:0.7; margin-top:4px;">shared nodes</div>
+              </div>
+              <div style="background:linear-gradient(135deg,#3b82f6,#2563eb); border-radius:12px; padding:16px; color:white; text-align:center;">
+                <div style="font-weight:700; font-size:14px;">vCluster</div>
+                <div style="font-size:13px; opacity:0.9;">team-beta</div>
+                <div style="font-size:11px; opacity:0.7; margin-top:4px;">shared nodes</div>
+              </div>
+              <div style="background:linear-gradient(135deg,#f59e0b,#d97706); border-radius:12px; padding:16px; color:white; text-align:center;">
+                <div style="font-weight:700; font-size:14px;">vCluster</div>
+                <div style="font-size:13px; opacity:0.9;">team-gpu</div>
+                <div style="font-size:11px; opacity:0.9; margin-top:4px;">8x H100 GPUs</div>
+                <div style="font-size:11px; opacity:0.7;">private nodes</div>
+              </div>
+            </div>
+            <!-- Arrow down -->
+            <div style="text-align:center; margin-bottom:8px;">
+              <svg width="24" height="32" viewBox="0 0 24 32"><path d="M12 0 L12 24 M6 18 L12 26 L18 18" stroke="#0891b2" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </div>
+            <!-- vBilling Controller -->
+            <div style="background:linear-gradient(135deg,#0891b2,#0e7490); border-radius:12px; padding:20px; color:white; text-align:center; max-width:400px; margin:0 auto;">
+              <div style="font-weight:800; font-size:18px;">vBilling Controller</div>
+              <div style="font-size:12px; opacity:0.8; margin-top:4px;">Go binary | Deployment in host cluster</div>
+              <div style="display:flex; justify-content:center; gap:16px; margin-top:12px; font-size:11px; opacity:0.9;">
+                <span>Discover</span>
+                <span>Meter</span>
+                <span>Bill</span>
+              </div>
+            </div>
+          </div>
+          <!-- Arrow between cluster and Lago -->
+          <div style="text-align:center; padding:8px 0;">
+            <svg width="24" height="48" viewBox="0 0 24 48"><path d="M12 0 L12 38 M6 32 L12 42 L18 32" stroke="#0891b2" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <div style="font-size:11px; color:#64748b; font-weight:500; margin-top:-4px;">Usage Events (HTTP)</div>
+          </div>
+          <!-- Lago box -->
+          <div style="background:linear-gradient(135deg,#059669,#047857); border-radius:16px; padding:24px; color:white; text-align:center; max-width:500px; margin:0 auto; width:100%;">
+            <div style="font-weight:800; font-size:20px;">Lago</div>
+            <div style="font-size:13px; opacity:0.85; margin-bottom:16px;">Open-Source Billing Engine</div>
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; text-align:left;">
+              <div style="background:rgba(255,255,255,0.15); border-radius:8px; padding:10px 14px;">
+                <div style="font-size:12px; font-weight:600;">Plans & Pricing</div>
+                <div style="font-size:10px; opacity:0.8;">You set the rates</div>
+              </div>
+              <div style="background:rgba(255,255,255,0.15); border-radius:8px; padding:10px 14px;">
+                <div style="font-size:12px; font-weight:600;">Subscriptions</div>
+                <div style="font-size:10px; opacity:0.8;">Auto per vCluster</div>
+              </div>
+              <div style="background:rgba(255,255,255,0.15); border-radius:8px; padding:10px 14px;">
+                <div style="font-size:12px; font-weight:600;">Invoices</div>
+                <div style="font-size:10px; opacity:0.8;">Monthly auto-generated</div>
+              </div>
+              <div style="background:rgba(255,255,255,0.15); border-radius:8px; padding:10px 14px;">
+                <div style="font-size:12px; font-weight:600;">Wallets</div>
+                <div style="font-size:10px; opacity:0.8;">Prepay credits</div>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
       <div class="arch-description">
         <div class="arch-item fade-in">
