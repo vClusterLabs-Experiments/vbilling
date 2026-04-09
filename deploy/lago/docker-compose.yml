@@ -1,0 +1,94 @@
+services:
+  db:
+    image: postgres:14-alpine
+    environment:
+      POSTGRES_USER: lago
+      POSTGRES_PASSWORD: lago
+      POSTGRES_DB: lago
+    volumes:
+      - lago_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lago"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    image: getlago/api:v1.17.1
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      RAILS_ENV: production
+      DATABASE_URL: postgresql://lago:lago@db:5432/lago
+      REDIS_URL: redis://redis:6379
+      SECRET_KEY_BASE: your-secret-key-base-for-demo-only-change-in-production-1234567890
+      LAGO_API_URL: http://localhost:3000
+      LAGO_FRONT_URL: http://localhost:8080
+      LAGO_RSA_PRIVATE_KEY: ${LAGO_RSA_PRIVATE_KEY}
+      LAGO_ENCRYPTION_PRIMARY_KEY: demo-encryption-primary-key-at-least-32-chars-long-for-safety
+      LAGO_ENCRYPTION_DETERMINISTIC_KEY: demo-deterministic-key-at-least-32-chars-long-for-safety
+      LAGO_ENCRYPTION_KEY_DERIVATION_SALT: demo-derivation-salt-at-least-32-chars-long-for-safety
+    ports:
+      - "3000:3000"
+    command: >
+      sh -c "bundle exec rails db:migrate && bundle exec rails s -b 0.0.0.0 -p 3000"
+
+  worker:
+    image: getlago/api:v1.17.1
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      RAILS_ENV: production
+      DATABASE_URL: postgresql://lago:lago@db:5432/lago
+      REDIS_URL: redis://redis:6379
+      SECRET_KEY_BASE: your-secret-key-base-for-demo-only-change-in-production-1234567890
+      LAGO_RSA_PRIVATE_KEY: ${LAGO_RSA_PRIVATE_KEY}
+      LAGO_ENCRYPTION_PRIMARY_KEY: demo-encryption-primary-key-at-least-32-chars-long-for-safety
+      LAGO_ENCRYPTION_DETERMINISTIC_KEY: demo-deterministic-key-at-least-32-chars-long-for-safety
+      LAGO_ENCRYPTION_KEY_DERIVATION_SALT: demo-derivation-salt-at-least-32-chars-long-for-safety
+    command: bundle exec sidekiq
+
+  clock:
+    image: getlago/api:v1.17.1
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      RAILS_ENV: production
+      DATABASE_URL: postgresql://lago:lago@db:5432/lago
+      REDIS_URL: redis://redis:6379
+      SECRET_KEY_BASE: your-secret-key-base-for-demo-only-change-in-production-1234567890
+      LAGO_RSA_PRIVATE_KEY: ${LAGO_RSA_PRIVATE_KEY}
+      LAGO_ENCRYPTION_PRIMARY_KEY: demo-encryption-primary-key-at-least-32-chars-long-for-safety
+      LAGO_ENCRYPTION_DETERMINISTIC_KEY: demo-deterministic-key-at-least-32-chars-long-for-safety
+      LAGO_ENCRYPTION_KEY_DERIVATION_SALT: demo-derivation-salt-at-least-32-chars-long-for-safety
+    command: bundle exec clockwork lib/clock.rb
+
+  front:
+    image: getlago/front:v1.17.1
+    depends_on:
+      - api
+    environment:
+      API_URL: http://localhost:3000
+      APP_ENV: production
+    ports:
+      - "8080:80"
+
+volumes:
+  lago_pg_data:

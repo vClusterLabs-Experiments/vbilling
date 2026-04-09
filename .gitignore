@@ -1,0 +1,14 @@
+bin/
+/vbilling
+*.exe
+.env
+*.key
+*.pem
+.idea/
+.vscode/
+*.swp
+*.swo
+deploy/lago/lago_rsa*
+deploy/lago/.env
+deploy/lago/entrypoint.sh
+.claude/

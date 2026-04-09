@@ -1,0 +1,686 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>vBilling Dashboard</title>
+<style>
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --navy:#0f1a2e;
+    --navy-light:#1a2744;
+    --blue:#3b82f6;
+    --blue-dark:#2563eb;
+    --green:#10b981;
+    --purple:#8b5cf6;
+    --orange:#f59e0b;
+    --red:#ef4444;
+    --cyan:#06b6d4;
+    --pink:#ec4899;
+    --teal:#14b8a6;
+    --gray-50:#f9fafb;
+    --gray-100:#f3f4f6;
+    --gray-200:#e5e7eb;
+    --gray-300:#d1d5db;
+    --gray-400:#9ca3af;
+    --gray-500:#6b7280;
+    --gray-600:#4b5563;
+    --gray-700:#374151;
+    --gray-800:#1f2937;
+    --shadow:0 1px 3px rgba(0,0,0,.1),0 1px 2px rgba(0,0,0,.06);
+    --shadow-md:0 4px 6px rgba(0,0,0,.07),0 2px 4px rgba(0,0,0,.06);
+    --shadow-lg:0 10px 15px rgba(0,0,0,.1),0 4px 6px rgba(0,0,0,.05);
+    --radius:10px;
+  }
+  body{
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+    background:var(--gray-100);
+    color:var(--gray-800);
+    line-height:1.5;
+    min-height:100vh;
+  }
+
+  /* ---- Header ---- */
+  .header{
+    background:linear-gradient(135deg,var(--navy) 0%,var(--navy-light) 100%);
+    color:#fff;
+    padding:0 2rem;
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    height:64px;
+    position:sticky;top:0;z-index:50;
+    box-shadow:0 2px 8px rgba(0,0,0,.25);
+  }
+  .header-brand{display:flex;align-items:center;gap:.75rem}
+  .header-brand svg{width:28px;height:28px;flex-shrink:0}
+  .header-brand h1{font-size:1.2rem;font-weight:700;letter-spacing:-.02em}
+  .header-brand span{font-weight:400;opacity:.7;font-size:.85rem;margin-left:.25rem}
+  .header-right{display:flex;align-items:center;gap:1rem;font-size:.82rem}
+  .refresh-badge{
+    display:inline-flex;align-items:center;gap:.4rem;
+    background:rgba(255,255,255,.1);border-radius:20px;padding:4px 12px;
+    font-size:.78rem;color:rgba(255,255,255,.8);
+  }
+  .refresh-dot{width:7px;height:7px;border-radius:50%;background:var(--green);flex-shrink:0}
+  .refresh-dot.off{background:var(--gray-500)}
+
+  /* ---- Connection bar ---- */
+  .connection-bar{
+    background:#fff;
+    border-bottom:1px solid var(--gray-200);
+    padding:.75rem 2rem;
+    display:flex;
+    align-items:center;
+    gap:1rem;
+    flex-wrap:wrap;
+  }
+  .connection-bar label{font-size:.78rem;font-weight:600;color:var(--gray-500);text-transform:uppercase;letter-spacing:.04em;white-space:nowrap}
+  .conn-field{
+    display:flex;align-items:center;gap:.4rem;
+  }
+  .conn-field input{
+    font-size:.85rem;padding:6px 10px;border:1px solid var(--gray-300);border-radius:6px;
+    background:var(--gray-50);color:var(--gray-800);outline:none;transition:border .15s;
+  }
+  .conn-field input:focus{border-color:var(--blue)}
+  .conn-field input.url-input{width:260px}
+  .conn-field input.key-input{width:220px;font-family:monospace;font-size:.8rem}
+  .btn{
+    font-size:.82rem;font-weight:600;padding:6px 18px;border-radius:6px;border:none;cursor:pointer;
+    transition:background .15s,transform .1s;display:inline-flex;align-items:center;gap:.4rem;
+  }
+  .btn:active{transform:scale(.97)}
+  .btn-primary{background:var(--blue);color:#fff}
+  .btn-primary:hover{background:var(--blue-dark)}
+  .btn-outline{background:transparent;color:var(--gray-600);border:1px solid var(--gray-300)}
+  .btn-outline:hover{background:var(--gray-50)}
+  .toggle-group{display:flex;align-items:center;gap:.5rem;margin-left:auto}
+  .toggle-group label{font-size:.78rem;cursor:pointer}
+  .toggle{
+    width:38px;height:20px;border-radius:12px;background:var(--gray-300);
+    position:relative;cursor:pointer;transition:background .2s;flex-shrink:0;
+  }
+  .toggle.on{background:var(--green)}
+  .toggle::after{
+    content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;
+    border-radius:50%;background:#fff;transition:transform .2s;box-shadow:var(--shadow);
+  }
+  .toggle.on::after{transform:translateX(18px)}
+
+  /* ---- CORS note ---- */
+  .cors-note{
+    background:#fffbeb;border:1px solid #fde68a;border-radius:8px;
+    padding:.6rem 1rem;margin:1rem 2rem 0;font-size:.78rem;color:#92400e;
+    display:flex;align-items:flex-start;gap:.5rem;line-height:1.5;
+  }
+  .cors-note strong{white-space:nowrap}
+  .cors-note.hidden{display:none}
+
+  /* ---- Main container ---- */
+  .main{padding:1.5rem 2rem 3rem;max-width:1440px;margin:0 auto}
+
+  /* ---- Summary row ---- */
+  .summary-row{
+    display:grid;
+    grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
+    gap:1rem;
+    margin-bottom:1.5rem;
+  }
+  .summary-card{
+    background:#fff;border-radius:var(--radius);padding:1.25rem 1.5rem;
+    box-shadow:var(--shadow);
+    display:flex;flex-direction:column;gap:.25rem;
+  }
+  .summary-card .label{font-size:.72rem;text-transform:uppercase;letter-spacing:.05em;color:var(--gray-500);font-weight:600}
+  .summary-card .value{font-size:1.7rem;font-weight:700;color:var(--gray-800);letter-spacing:-.02em}
+  .summary-card .sub{font-size:.78rem;color:var(--gray-500)}
+  .summary-card.highlight{border-left:4px solid var(--blue)}
+  .summary-card.highlight .value{color:var(--blue)}
+  .summary-card.warn{border-left:4px solid var(--orange)}
+  .summary-card.warn .value{color:var(--orange)}
+  .summary-card.good{border-left:4px solid var(--green)}
+  .summary-card.good .value{color:var(--green)}
+
+  /* ---- Tenant grid ---- */
+  .section-title{
+    font-size:.85rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;
+    color:var(--gray-500);margin-bottom:.75rem;display:flex;align-items:center;gap:.5rem;
+  }
+  .tenant-grid{
+    display:grid;
+    grid-template-columns:repeat(auto-fill,minmax(380px,1fr));
+    gap:1.25rem;
+  }
+  .tenant-card{
+    background:#fff;border-radius:var(--radius);
+    box-shadow:var(--shadow);overflow:hidden;
+    transition:box-shadow .2s,transform .2s;
+  }
+  .tenant-card:hover{box-shadow:var(--shadow-lg);transform:translateY(-2px)}
+  .tenant-card-head{
+    padding:1rem 1.25rem;display:flex;justify-content:space-between;align-items:flex-start;
+    border-bottom:1px solid var(--gray-100);
+  }
+  .tenant-name{font-size:1rem;font-weight:700;color:var(--gray-800)}
+  .tenant-id{font-size:.72rem;color:var(--gray-400);margin-top:2px;font-family:monospace}
+  .badge{
+    font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.04em;
+    padding:3px 10px;border-radius:20px;white-space:nowrap;
+  }
+  .badge-active{background:#d1fae5;color:#065f46}
+  .badge-pending{background:#fef3c7;color:#92400e}
+  .badge-terminated{background:#fee2e2;color:#991b1b}
+
+  .tenant-card-body{padding:1rem 1.25rem}
+  .tenant-total{
+    display:flex;align-items:baseline;gap:.5rem;margin-bottom:.35rem;
+  }
+  .tenant-total .amount{font-size:1.85rem;font-weight:800;color:var(--gray-800);letter-spacing:-.03em}
+  .tenant-total .currency{font-size:.85rem;font-weight:600;color:var(--gray-400)}
+  .tenant-period{font-size:.72rem;color:var(--gray-400);margin-bottom:1rem}
+
+  /* progress bar relative to top spender */
+  .spend-bar-track{
+    height:4px;border-radius:4px;background:var(--gray-100);margin-bottom:1.25rem;overflow:hidden;
+  }
+  .spend-bar-fill{height:100%;border-radius:4px;background:linear-gradient(90deg,var(--blue),var(--cyan));transition:width .6s ease}
+
+  /* Metric breakdown */
+  .metrics-grid{display:flex;flex-direction:column;gap:.6rem}
+  .metric-row{display:flex;align-items:center;gap:.6rem}
+  .metric-icon{
+    width:28px;height:28px;border-radius:6px;display:flex;align-items:center;justify-content:center;
+    font-size:.7rem;font-weight:700;color:#fff;flex-shrink:0;
+  }
+  .metric-info{flex:1;min-width:0}
+  .metric-label{font-size:.72rem;color:var(--gray-500);font-weight:500}
+  .metric-bar-track{height:5px;border-radius:5px;background:var(--gray-100);margin-top:3px;overflow:hidden}
+  .metric-bar-fill{height:100%;border-radius:5px;transition:width .5s ease}
+  .metric-value{font-size:.78rem;font-weight:700;color:var(--gray-700);white-space:nowrap;min-width:60px;text-align:right}
+
+  /* ---- States ---- */
+  .state-container{
+    display:flex;flex-direction:column;align-items:center;justify-content:center;
+    padding:4rem 2rem;text-align:center;gap:1rem;
+  }
+  .state-container svg{width:56px;height:56px;opacity:.35}
+  .state-title{font-size:1.1rem;font-weight:700;color:var(--gray-700)}
+  .state-sub{font-size:.85rem;color:var(--gray-400);max-width:420px}
+  .error-box{
+    background:#fef2f2;border:1px solid #fecaca;border-radius:var(--radius);
+    padding:1.25rem 1.5rem;margin:1.5rem 0;
+    display:flex;align-items:flex-start;gap:.75rem;
+  }
+  .error-box .icon{color:var(--red);flex-shrink:0;font-size:1.2rem}
+  .error-box .msg{font-size:.85rem;color:#991b1b}
+  .error-box .msg strong{display:block;margin-bottom:.25rem}
+
+  .spinner{
+    width:32px;height:32px;border:3px solid var(--gray-200);border-top-color:var(--blue);
+    border-radius:50%;animation:spin .7s linear infinite;
+  }
+  @keyframes spin{to{transform:rotate(360deg)}}
+
+  /* ---- Responsive ---- */
+  @media(max-width:768px){
+    .header{padding:0 1rem}
+    .connection-bar{padding:.75rem 1rem}
+    .main{padding:1rem}
+    .tenant-grid{grid-template-columns:1fr}
+    .summary-row{grid-template-columns:1fr 1fr}
+    .cors-note{margin:.75rem 1rem 0}
+  }
+  @media(max-width:480px){
+    .summary-row{grid-template-columns:1fr}
+    .conn-field input.url-input{width:160px}
+    .conn-field input.key-input{width:140px}
+  }
+</style>
+</head>
+<body>
+
+<!-- ===== HEADER ===== -->
+<header class="header">
+  <div class="header-brand">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="2" y="3" width="20" height="18" rx="3"/>
+      <path d="M2 9h20"/><path d="M9 21V9"/>
+    </svg>
+    <h1>vBilling Dashboard <span>| Platform Admin</span></h1>
+  </div>
+  <div class="header-right">
+    <div class="refresh-badge" id="refreshBadge">
+      <span class="refresh-dot" id="refreshDot"></span>
+      <span id="refreshLabel">Auto-refresh: 30s</span>
+    </div>
+    <span id="lastUpdated" style="color:rgba(255,255,255,.5);font-size:.75rem"></span>
+  </div>
+</header>
+
+<!-- ===== CONNECTION BAR ===== -->
+<div class="connection-bar">
+  <div class="conn-field">
+    <label>Lago URL</label>
+    <input type="text" id="lagoUrl" class="url-input" value="http://localhost:3000" spellcheck="false">
+  </div>
+  <div class="conn-field">
+    <label>API Key</label>
+    <input type="password" id="lagoKey" class="key-input" placeholder="Bearer token" spellcheck="false">
+  </div>
+  <button class="btn btn-primary" id="btnFetch" onclick="fetchAll()">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+    Fetch Data
+  </button>
+  <div class="toggle-group">
+    <label for="autoToggle">Auto-refresh</label>
+    <div class="toggle on" id="autoToggle" onclick="toggleAutoRefresh()"></div>
+  </div>
+</div>
+
+<!-- ===== CORS NOTE ===== -->
+<div class="cors-note" id="corsNote">
+  <strong>CORS Note:</strong>
+  This dashboard calls the Lago API directly from the browser. You must either configure
+  Lago to allow CORS from this origin, or run a reverse proxy (e.g.
+  <code>nginx</code>, <code>caddy</code>, or <code>kubectl port-forward</code>) that adds
+  the appropriate <code>Access-Control-Allow-Origin</code> headers.
+  For local development, <code>kubectl port-forward svc/lago-web 3000:3000</code> works out of the box.
+</div>
+
+<!-- ===== MAIN ===== -->
+<div class="main" id="app">
+  <!-- initial state -->
+  <div class="state-container" id="stateInitial">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>
+    </svg>
+    <div class="state-title">Connect to Lago</div>
+    <div class="state-sub">Enter your Lago API URL and API key above, then click <strong>Fetch Data</strong> to load billing data for all vCluster tenants.</div>
+  </div>
+
+  <!-- loading state -->
+  <div class="state-container" id="stateLoading" style="display:none">
+    <div class="spinner"></div>
+    <div class="state-title">Loading billing data...</div>
+    <div class="state-sub">Querying Lago API for customer and usage information.</div>
+  </div>
+
+  <!-- error state -->
+  <div id="stateError" style="display:none"></div>
+
+  <!-- data view -->
+  <div id="dataView" style="display:none">
+    <div class="summary-row" id="summaryRow"></div>
+    <div class="section-title">Tenant Breakdown</div>
+    <div class="tenant-grid" id="tenantGrid"></div>
+  </div>
+</div>
+
+<script>
+(function(){
+  "use strict";
+
+  /* ---- Metric definitions ---- */
+  var METRICS = [
+    {code:"vcluster_cpu_core_hours",     label:"CPU",           short:"CPU",  color:"#3b82f6", bg:"#dbeafe", icon:"C"},
+    {code:"vcluster_memory_gb_hours",    label:"Memory",        short:"MEM",  color:"#10b981", bg:"#d1fae5", icon:"M"},
+    {code:"vcluster_storage_gb_hours",   label:"Storage",       short:"STO",  color:"#f59e0b", bg:"#fef3c7", icon:"S"},
+    {code:"vcluster_gpu_hours",          label:"GPU",           short:"GPU",  color:"#8b5cf6", bg:"#ede9fe", icon:"G"},
+    {code:"vcluster_gpu_utilization",    label:"GPU Util",      short:"UTL",  color:"#ec4899", bg:"#fce7f3", icon:"U"},
+    {code:"vcluster_network_egress_gb",  label:"Network",       short:"NET",  color:"#06b6d4", bg:"#cffafe", icon:"N"},
+    {code:"vcluster_lb_hours",           label:"LoadBalancer",  short:"LB",   color:"#14b8a6", bg:"#ccfbf1", icon:"L"},
+    {code:"vcluster_instance_hours",     label:"Instance",      short:"INS",  color:"#6366f1", bg:"#e0e7ff", icon:"I"}
+  ];
+  var METRIC_MAP = {};
+  METRICS.forEach(function(m){METRIC_MAP[m.code]=m});
+
+  /* ---- State ---- */
+  var autoRefresh = true;
+  var refreshTimer = null;
+  var REFRESH_INTERVAL = 30000;
+  var isLoading = false;
+
+  /* ---- DOM refs ---- */
+  var $url      = document.getElementById("lagoUrl");
+  var $key      = document.getElementById("lagoKey");
+  var $initial  = document.getElementById("stateInitial");
+  var $loading  = document.getElementById("stateLoading");
+  var $error    = document.getElementById("stateError");
+  var $data     = document.getElementById("dataView");
+  var $summary  = document.getElementById("summaryRow");
+  var $grid     = document.getElementById("tenantGrid");
+  var $badge    = document.getElementById("refreshBadge");
+  var $dot      = document.getElementById("refreshDot");
+  var $rlabel   = document.getElementById("refreshLabel");
+  var $updated  = document.getElementById("lastUpdated");
+  var $corsNote = document.getElementById("corsNote");
+
+  /* ---- Utility ---- */
+  function esc(s){
+    var d=document.createElement("div");d.appendChild(document.createTextNode(s));return d.innerHTML;
+  }
+  function money(cents,currency){
+    var val = (cents/100);
+    var symbol = currency === "EUR" ? "\u20ac" : "$";
+    return symbol + val.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
+  }
+  function moneyRaw(cents){
+    return (cents/100).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
+  }
+
+  function showView(name){
+    $initial.style.display = name==="initial" ? "" : "none";
+    $loading.style.display = name==="loading" ? "" : "none";
+    $error.style.display   = name==="error"   ? "" : "none";
+    $data.style.display    = name==="data"    ? "" : "none";
+  }
+
+  /* ---- API helpers ---- */
+  function apiBase(){return $url.value.replace(/\/+$/,"")}
+  function apiKey(){return $key.value.trim()}
+
+  function lago(method,path,body){
+    var headers = {"Content-Type":"application/json"};
+    var key = apiKey();
+    if(key) headers["Authorization"] = "Bearer " + key;
+
+    var opts = {method:method, headers:headers};
+    if(body) opts.body = JSON.stringify(body);
+
+    return fetch(apiBase()+path, opts).then(function(r){
+      if(!r.ok) return r.text().then(function(t){throw new Error("HTTP "+r.status+": "+t)});
+      return r.json();
+    });
+  }
+
+  function lagoGetAll(path, rootKey){
+    /* Paginate through all pages */
+    var all = [];
+    var page = 1;
+    var perPage = 100;
+
+    function nextPage(){
+      var sep = path.indexOf("?") >= 0 ? "&" : "?";
+      var url = path + sep + "page=" + page + "&per_page=" + perPage;
+      return lago("GET", url).then(function(resp){
+        var items = resp[rootKey] || [];
+        all = all.concat(items);
+        var meta = resp.meta || {};
+        if(meta.next_page){
+          page = meta.next_page;
+          return nextPage();
+        }
+        return all;
+      });
+    }
+    return nextPage();
+  }
+
+  /* ---- Fetch all data ---- */
+  window.fetchAll = function(){
+    if(isLoading) return;
+    isLoading = true;
+    showView("loading");
+    $corsNote.classList.add("hidden");
+
+    var customers, subscriptions;
+
+    lagoGetAll("/api/v1/customers","customers")
+      .then(function(c){
+        customers = c;
+        return lagoGetAll("/api/v1/subscriptions?status[]=active","subscriptions");
+      })
+      .then(function(s){
+        subscriptions = s;
+        /* build sub map: external_customer_id -> subscription */
+        var subMap = {};
+        s.forEach(function(sub){
+          var custId = sub.external_customer_id;
+          if(!subMap[custId]) subMap[custId] = [];
+          subMap[custId].push(sub);
+        });
+
+        /* fetch current usage for each customer */
+        var usagePromises = customers.map(function(cust){
+          var custSubs = subMap[cust.external_id] || [];
+          if(custSubs.length === 0) return Promise.resolve({customer:cust, usage:null, subscription:null});
+
+          var sub = custSubs[0]; // primary subscription
+          var usagePath = "/api/v1/customers/" + encodeURIComponent(cust.external_id) +
+                          "/current_usage?external_subscription_id=" + encodeURIComponent(sub.external_id);
+          return lago("GET", usagePath)
+            .then(function(u){return {customer:cust, usage:u.customer_usage, subscription:sub}})
+            .catch(function(){return {customer:cust, usage:null, subscription:sub}});
+        });
+
+        return Promise.all(usagePromises);
+      })
+      .then(function(tenants){
+        renderDashboard(tenants);
+        showView("data");
+        $updated.textContent = "Updated " + new Date().toLocaleTimeString();
+        scheduleRefresh();
+      })
+      .catch(function(err){
+        showError(err);
+        showView("error");
+        scheduleRefresh();
+      })
+      .finally(function(){
+        isLoading = false;
+      });
+  };
+
+  function showError(err){
+    var msg = String(err.message || err);
+    var isCors = msg.indexOf("Failed to fetch") >= 0 || msg.indexOf("NetworkError") >= 0 || msg.indexOf("CORS") >= 0;
+
+    var html = '<div class="error-box">' +
+      '<div class="icon">!</div>' +
+      '<div class="msg">' +
+        '<strong>Unable to reach the Lago API</strong>';
+
+    if(isCors){
+      html += 'This is likely a <strong>CORS</strong> issue. The Lago API at <code>' + esc(apiBase()) + '</code> ' +
+              'is not allowing requests from this origin.<br><br>' +
+              '<strong>Solutions:</strong><br>' +
+              '1. Use <code>kubectl port-forward svc/lago-web 3000:3000</code> to access Lago locally.<br>' +
+              '2. Configure a reverse proxy (nginx, caddy) that adds CORS headers.<br>' +
+              '3. Set <code>LAGO_FRONT_URL</code> and CORS configuration in your Lago deployment.';
+      $corsNote.classList.remove("hidden");
+    } else {
+      html += esc(msg);
+    }
+
+    html += '</div></div>';
+    $error.innerHTML = html;
+  }
+
+  /* ---- Render ---- */
+  function renderDashboard(tenants){
+    /* sort by amount descending */
+    tenants.sort(function(a,b){
+      var aa = a.usage ? (a.usage.amount_cents || 0) : 0;
+      var bb = b.usage ? (b.usage.amount_cents || 0) : 0;
+      return bb - aa;
+    });
+
+    var totalTenants = tenants.length;
+    var totalCents = 0;
+    var maxCents = 0;
+    var topTenant = "-";
+    var currency = "USD";
+
+    tenants.forEach(function(t){
+      if(!t.usage) return;
+      var c = t.usage.amount_cents || 0;
+      totalCents += c;
+      if(c > maxCents){maxCents = c; topTenant = t.customer.name || t.customer.external_id}
+      if(t.usage.currency) currency = t.usage.currency;
+    });
+
+    /* Summary cards */
+    $summary.innerHTML =
+      '<div class="summary-card highlight">' +
+        '<div class="label">Total Tenants</div>' +
+        '<div class="value">' + totalTenants + '</div>' +
+        '<div class="sub">Active vClusters</div>' +
+      '</div>' +
+      '<div class="summary-card good">' +
+        '<div class="label">Total Current Usage</div>' +
+        '<div class="value">' + money(totalCents, currency) + '</div>' +
+        '<div class="sub">Across all tenants this period</div>' +
+      '</div>' +
+      '<div class="summary-card warn">' +
+        '<div class="label">Highest-Spending Tenant</div>' +
+        '<div class="value">' + money(maxCents, currency) + '</div>' +
+        '<div class="sub">' + esc(topTenant) + '</div>' +
+      '</div>' +
+      '<div class="summary-card">' +
+        '<div class="label">Avg Usage / Tenant</div>' +
+        '<div class="value">' + money(totalTenants ? Math.round(totalCents/totalTenants) : 0, currency) + '</div>' +
+        '<div class="sub">Mean current billing period</div>' +
+      '</div>';
+
+    /* Tenant cards */
+    var gridHtml = "";
+    tenants.forEach(function(t){
+      gridHtml += renderTenantCard(t, maxCents);
+    });
+    $grid.innerHTML = gridHtml;
+  }
+
+  function renderTenantCard(t, maxCents){
+    var cust = t.customer;
+    var usage = t.usage;
+    var sub = t.subscription;
+
+    var name = cust.name || cust.external_id;
+    var extId = cust.external_id;
+    var amountCents = usage ? (usage.amount_cents || 0) : 0;
+    var currency = (usage && usage.currency) ? usage.currency : "USD";
+
+    /* subscription status */
+    var status = sub ? (sub.status || "active") : "pending";
+    var badgeClass = status === "active" ? "badge-active" : status === "terminated" ? "badge-terminated" : "badge-pending";
+
+    /* billing period */
+    var period = "";
+    if(usage && usage.from_datetime && usage.to_datetime){
+      period = formatDate(usage.from_datetime) + " - " + formatDate(usage.to_datetime);
+    }
+
+    /* spend bar */
+    var pct = maxCents > 0 ? Math.round((amountCents / maxCents) * 100) : 0;
+
+    /* metric breakdown */
+    var chargesMap = {};
+    if(usage && usage.charges_usage){
+      usage.charges_usage.forEach(function(ch){
+        var code = ch.billable_metric ? ch.billable_metric.code : "";
+        if(code) chargesMap[code] = ch;
+      });
+    }
+
+    var metricsHtml = "";
+    METRICS.forEach(function(m){
+      var ch = chargesMap[m.code];
+      var cents = ch ? (ch.amount_cents || 0) : 0;
+      var units = ch ? (ch.units || "0") : "0";
+      if(cents === 0 && parseFloat(units) === 0) return; // skip zeroes
+
+      var barPct = amountCents > 0 ? Math.min(100, Math.round((cents / amountCents) * 100)) : 0;
+
+      metricsHtml +=
+        '<div class="metric-row">' +
+          '<div class="metric-icon" style="background:' + m.color + '">' + m.icon + '</div>' +
+          '<div class="metric-info">' +
+            '<div class="metric-label">' + esc(m.label) + ' <span style="opacity:.5">(' + parseFloat(units).toLocaleString(undefined,{maximumFractionDigits:2}) + ' units)</span></div>' +
+            '<div class="metric-bar-track"><div class="metric-bar-fill" style="width:' + barPct + '%;background:' + m.color + '"></div></div>' +
+          '</div>' +
+          '<div class="metric-value">' + money(cents, currency) + '</div>' +
+        '</div>';
+    });
+
+    if(!metricsHtml){
+      metricsHtml = '<div style="font-size:.78rem;color:#9ca3af;text-align:center;padding:.5rem 0">No usage recorded yet</div>';
+    }
+
+    return '<div class="tenant-card">' +
+      '<div class="tenant-card-head">' +
+        '<div>' +
+          '<div class="tenant-name">' + esc(name) + '</div>' +
+          '<div class="tenant-id">' + esc(extId) + '</div>' +
+        '</div>' +
+        '<span class="badge ' + badgeClass + '">' + esc(status) + '</span>' +
+      '</div>' +
+      '<div class="tenant-card-body">' +
+        '<div class="tenant-total">' +
+          '<span class="amount">' + moneyRaw(amountCents) + '</span>' +
+          '<span class="currency">' + esc(currency) + '</span>' +
+        '</div>' +
+        (period ? '<div class="tenant-period">' + esc(period) + '</div>' : '') +
+        '<div class="spend-bar-track"><div class="spend-bar-fill" style="width:' + pct + '%"></div></div>' +
+        '<div class="metrics-grid">' + metricsHtml + '</div>' +
+      '</div>' +
+    '</div>';
+  }
+
+  function formatDate(iso){
+    try{
+      var d = new Date(iso);
+      return d.toLocaleDateString(undefined,{month:"short",day:"numeric",year:"numeric"});
+    }catch(e){return iso}
+  }
+
+  /* ---- Auto-refresh ---- */
+  window.toggleAutoRefresh = function(){
+    autoRefresh = !autoRefresh;
+    var tog = document.getElementById("autoToggle");
+    if(autoRefresh){
+      tog.classList.add("on");
+      $dot.classList.remove("off");
+      $rlabel.textContent = "Auto-refresh: 30s";
+      scheduleRefresh();
+    }else{
+      tog.classList.remove("on");
+      $dot.classList.add("off");
+      $rlabel.textContent = "Auto-refresh: off";
+      if(refreshTimer){clearTimeout(refreshTimer);refreshTimer=null}
+    }
+  };
+
+  function scheduleRefresh(){
+    if(refreshTimer){clearTimeout(refreshTimer);refreshTimer=null}
+    if(!autoRefresh) return;
+    refreshTimer = setTimeout(function(){
+      if(apiKey()) fetchAll();
+      else scheduleRefresh();
+    }, REFRESH_INTERVAL);
+  }
+
+  /* ---- Keyboard shortcut ---- */
+  document.addEventListener("keydown",function(e){
+    if((e.ctrlKey||e.metaKey) && e.key==="Enter"){e.preventDefault();fetchAll()}
+  });
+
+  /* ---- Persist settings in sessionStorage ---- */
+  try{
+    var savedUrl = sessionStorage.getItem("vbilling_url");
+    var savedKey = sessionStorage.getItem("vbilling_key");
+    if(savedUrl) $url.value = savedUrl;
+    if(savedKey) $key.value = savedKey;
+  }catch(e){}
+
+  $url.addEventListener("change",function(){try{sessionStorage.setItem("vbilling_url",$url.value)}catch(e){}});
+  $key.addEventListener("change",function(){try{sessionStorage.setItem("vbilling_key",$key.value)}catch(e){}});
+
+  /* auto-fetch if key is present */
+  if(apiKey()){
+    fetchAll();
+  }
+})();
+</script>
+</body>
+</html>
