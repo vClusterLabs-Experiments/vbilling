@@ -120,26 +120,52 @@ An H100 hour and a T4 hour are tracked as separate events so providers can price
 ### 1. Deploy Lago
 
 ```bash
-cd deploy/lago
-# Generate RSA key and create .env
+# Clone the vBilling repo (includes Lago docker-compose)
+git clone https://github.com/vClusterLabs-Experiments/vbilling.git
+cd vbilling/deploy/lago
+
+# Generate RSA key for Lago (required for JWT signing)
 openssl genrsa 2048 > lago_rsa.key
 openssl rsa -in lago_rsa.key -out lago_rsa.key -traditional 2>/dev/null
+
+# Create .env with Base64-encoded RSA key (Lago expects LAGO_RSA_PRIVATE_KEY)
 echo "LAGO_RSA_PRIVATE_KEY=$(base64 -i lago_rsa.key | tr -d '\n')" > .env
 
+# Start Lago
 docker compose --env-file .env up -d
+
+# Wait for API to be ready (~30s for database migrations)
 # UI: http://localhost:8080 | API: http://localhost:3000
+```
+
+Create an organization in Lago (first-time only):
+```bash
+curl -s -X POST http://localhost:3000/graphql \
+  -H "Content-Type: application/json" \
+  -d '{"query":"mutation { registerUser(input: { email: \"admin@example.com\", password: \"yourpassword\", organizationName: \"My Org\" }) { token } }"}'
+
+# Get your API key
+docker exec lago-db-1 psql -U lago -d lago -t -c "SELECT value FROM api_keys LIMIT 1;"
 ```
 
 ### 2. Install vBilling
 
+**Option A: Helm (production)**
 ```bash
+# Build and push the image first
+docker buildx build --platform linux/amd64,linux/arm64 \
+  -t <your-registry>/vbilling:v0.1.0 --push .
+
+# Install via Helm
 helm upgrade --install vbilling deploy/helm/vbilling \
   --namespace vbilling-system --create-namespace \
-  --set lago.apiURL=http://lago-api:3000 \
+  --set image.repository=<your-registry>/vbilling \
+  --set image.tag=v0.1.0 \
+  --set lago.apiURL=http://lago-api.lago-system:3000 \
   --set lago.apiKey=YOUR_LAGO_API_KEY
 ```
 
-Or run locally for development:
+**Option B: Run locally (development/testing)**
 ```bash
 make build
 LAGO_API_KEY=<key> LAGO_API_URL=http://localhost:3000 ./bin/vbilling
@@ -326,12 +352,27 @@ Makefile                          Build targets
 ## Building
 
 ```bash
-make build          # Build binary
-make docker-build   # Build Docker image
+make build          # Build binary (local OS/arch)
+make docker-build   # Build Docker image (local arch)
 make test           # Run tests
 make helm-install   # Install via Helm
 make tidy           # go mod tidy
 ```
+
+### Multi-Arch Docker Image
+
+For production K8s clusters (linux/amd64) and Apple Silicon (linux/arm64):
+
+```bash
+# Build and push multi-arch image
+docker buildx create --use --name vbilling-builder 2>/dev/null || true
+docker buildx build \
+  --platform linux/amd64,linux/arm64 \
+  -t <your-registry>/vbilling:v0.1.0 \
+  --push .
+```
+
+The Dockerfile uses multi-stage build with `gcr.io/distroless/static:nonroot` as the final image (~10MB).
 
 ## Deploying Lago
 
