@@ -5,14 +5,17 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Configuration - vBilling Docs</title>
   <meta name="description" content="Complete configuration reference for vBilling: environment variables, Helm values, and Lago pricing setup.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Roboto+Mono:wght@500&display=swap" rel="stylesheet">
   <style>
     *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 
     :root {
-      --primary: #f97316; --primary-dark: #ea580c; --primary-darker: #9a3412;
-      --primary-light: #fff7ed; --primary-light-2: #ffedd5; --accent: #fb923c;
-      --text-dark: #0f172a; --text-gray: #475569; --text-light: #64748b;
-      --white: #ffffff; --bg-code: #0f172a; --border: #e2e8f0;
+      --primary: #FF6600; --primary-dark: #CC5100; --primary-darker: #993D00;
+      --primary-light: #FFF5EB; --primary-light-2: #FFE0CC; --accent: #FF8433;
+      --text-dark: #050B24; --text-gray: #505466; --text-light: #828592;
+      --white: #ffffff; --bg-code: #050B24; --border: #E6E7E9;
       --shadow-sm: 0 1px 2px rgba(0,0,0,0.05);
       --shadow-md: 0 4px 6px -1px rgba(0,0,0,0.07), 0 2px 4px -2px rgba(0,0,0,0.05);
       --shadow-lg: 0 10px 15px -3px rgba(0,0,0,0.08), 0 4px 6px -4px rgba(0,0,0,0.04);
@@ -21,7 +24,7 @@
 
     html { scroll-behavior: smooth; scroll-padding-top: 80px; }
     body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', Roboto, Oxygen, Ubuntu, sans-serif;
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
       color: var(--text-dark); line-height: 1.6; background: var(--white);
       -webkit-font-smoothing: antialiased;
     }
@@ -121,7 +124,7 @@
     .content li { margin-bottom: 6px; line-height: 1.6; }
     .content code {
       background: var(--primary-light-2); padding: 2px 7px; border-radius: 4px;
-      font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+      font-family: 'Roboto Mono', 'SF Mono', 'Fira Code', monospace;
       font-size: 0.85rem; color: var(--primary-darker);
     }
     .content a { color: var(--primary-dark); text-decoration: none; font-weight: 500; }
@@ -133,11 +136,11 @@
     }
     .code-block code {
       color: #e2e8f0; background: none; padding: 0;
-      font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+      font-family: 'Roboto Mono', 'SF Mono', 'Fira Code', monospace;
       font-size: 0.84rem; line-height: 1.7; white-space: pre;
     }
     .code-block .comment { color: #64748b; }
-    .code-block .cmd { color: #fb923c; }
+    .code-block .cmd { color: #FF8433; }
     .code-block .flag { color: #a5b4fc; }
     .code-block .string { color: #86efac; }
     .code-block .output { color: #94a3b8; }
@@ -175,7 +178,7 @@
       font-size: 0.8rem; white-space: nowrap;
     }
     .td-default {
-      font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+      font-family: 'Roboto Mono', 'SF Mono', 'Fira Code', monospace;
       font-size: 0.8rem; color: var(--text-light);
     }
 
@@ -206,7 +209,7 @@
   <header class="header" id="header">
     <div class="header-inner">
       <a href="index.html" class="header-logo">
-        <div class="header-logo-icon">vB</div>
+        <svg width="28" height="28" viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0"><path d="M4 7L14 21L24 7" stroke="#FF6600" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
         <div class="header-logo-text">v<span>Billing</span> Docs</div>
       </a>
       <nav class="header-nav">
