@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>vBilling — Usage-based billing for AI Clouds running vCluster or vMetal</title>
+  <title>vBilling · Usage-based billing for AI Clouds running vCluster or vMetal</title>
   <meta name="description" content="Auto-discover Tenant Clusters, meter node capacity, GPU SKUs, and egress, and stream usage events to Lago, Stripe, Metronome, or your own billing adapter. Built for AI Clouds.">
 
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -1102,7 +1102,7 @@
       <div class="section-header">
         <p class="section-label">How it works</p>
         <h2 class="section-title">Three steps to tenant billing</h2>
-        <p class="section-body">vBilling collects usage and ships it to your billing adapter. Your adapter handles pricing, plans, and invoicing — you stay in control of what anything costs.</p>
+        <p class="section-body">vBilling collects usage and ships it to your billing adapter. Your adapter handles pricing, plans, and invoicing. You stay in control of what anything costs.</p>
       </div>
 
       <div class="steps">
@@ -1116,7 +1116,7 @@
             <path d="M9 13l2 2 4-4" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
           <h3>Choose Billing Platform</h3>
-          <p>Pick the billing backend you already run — Lago, Stripe Meters, Metronome, or your own. vBilling ships as an adapter, not as a replacement.</p>
+          <p>Pick the billing backend you already run: Lago, Stripe Meters, Metronome, or your own. vBilling ships as an adapter, not as a replacement.</p>
         </div>
         <div class="step">
           <p class="step-number">02 · Configure</p>
@@ -1127,7 +1127,7 @@
             <circle cx="30" cy="28" r="3" fill="currentColor"/>
           </svg>
           <h3>Configure Pricing &amp; Packaging</h3>
-          <p>Define metrics, plans, and per-unit rates in your billing platform. vBilling never decides what anything costs — your platform team owns the price sheet.</p>
+          <p>Define metrics, plans, and per-unit rates in your billing platform. vBilling never decides what anything costs. Your platform team owns the price sheet.</p>
         </div>
         <div class="step">
           <p class="step-number">03 · Connect</p>
@@ -1156,7 +1156,7 @@
         <div class="feature-card">
           <span class="feature-icon">admin_panel_settings</span>
           <h3>Node capacity tracking</h3>
-          <p>Meter full dedicated node capacity — CPU, memory, and GPU SKUs — when tenants own bare-metal nodes.</p>
+          <p>Meter full dedicated node capacity (CPU, memory, and GPU SKUs) when tenants own bare-metal nodes.</p>
         </div>
 
         <div class="feature-card">
@@ -1324,7 +1324,7 @@ LoadBalancer Hours      <span class="string">$0.025</span></code>
 
       <div class="qs-panel" data-panel="metronome" role="tabpanel" hidden>
         <div class="qs-placeholder">
-          <h3>Metronome adapter — coming soon</h3>
+          <h3>Metronome adapter · coming soon</h3>
           <p>Native Metronome adapter is on the near-term roadmap. Same three setup steps: provision Metronome, configure rate cards, point vBilling at it.</p>
           <p>Want early access or to help shape the interface? <a href="https://github.com/vClusterLabs-Experiments/vbilling/issues" style="color:var(--color-primary-50); font-weight:600;">Open an issue on GitHub</a>.</p>
         </div>
@@ -1383,16 +1383,16 @@ LoadBalancer Hours      <span class="string">$0.025</span></code>
         <div class="neocloud-copy">
           <p class="section-label">For AI Clouds</p>
           <h2 class="section-title">Built for AI Clouds</h2>
-          <p class="section-body">If you run an AI cloud on Kubernetes, vBilling gives you the billing pipe — without forcing a billing backend on you.</p>
+          <p class="section-body">If you run an AI cloud on Kubernetes, vBilling gives you the billing pipe, without forcing a billing backend on you.</p>
           <br>
           <p class="section-body" style="font-size:16px; margin-bottom:28px;">AI Clouds give each customer a Tenant Cluster with dedicated GPU nodes. vBilling detects the hardware, meters node capacity by GPU SKU, and streams events into whichever billing adapter you run.</p>
 
           <ul class="checklist">
             <li>Detects dedicated H100, A100, L40S nodes per tenant</li>
-            <li>Meters full node capacity — CPU, memory, and GPUs</li>
+            <li>Meters full node capacity: CPU, memory, and GPUs</li>
             <li>GPU SKU-specific events, priced in your billing platform</li>
             <li>DCGM integration for real utilization tracking</li>
-            <li>Adapter-agnostic — keep your existing billing backend</li>
+            <li>Adapter-agnostic: keep your existing billing backend</li>
           </ul>
 
           <div style="display:flex; gap:12px; flex-wrap:wrap;">

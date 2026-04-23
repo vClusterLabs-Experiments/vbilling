@@ -17,7 +17,7 @@
 
 ---
 
-Built for AI Clouds and platform teams running Kubernetes with vCluster or vMetal. vBilling is the pipe — not the billing engine. You keep your billing backend (Lago today; Metronome, Stripe Meters, OpenMeter, or a custom adapter coming next).
+Built for AI Clouds and platform teams running Kubernetes with vCluster or vMetal. vBilling is the pipe, not the billing engine. You keep your billing backend (Lago today; Metronome, Stripe Meters, OpenMeter, or a custom adapter coming next).
 
 ## Architecture
 
@@ -57,11 +57,11 @@ Built for AI Clouds and platform teams running Kubernetes with vCluster or vMeta
                  └─────────────────────────┘
 ```
 
-vBilling handles **metrics collection and event delivery**. Your billing adapter handles **pricing, plans, and invoicing**. Providers configure pricing in the adapter — vBilling never decides what to charge.
+vBilling handles **metrics collection and event delivery**. Your billing adapter handles **pricing, plans, and invoicing**. Providers configure pricing in the adapter. vBilling never decides what to charge.
 
 ## Deployment Model
 
-Each tenant gets dedicated bare-metal nodes (GPUs, high-memory, etc.). Billing is based on full node allocation — the entire node is theirs.
+Each tenant gets dedicated bare-metal nodes (GPUs, high-memory, etc.). Billing is based on full node allocation. The entire node is theirs.
 
 ```
 team-gpu's dedicated nodes
@@ -95,13 +95,13 @@ An H100 hour and a T4 hour are emitted as separate events so providers can price
 
 ## Quick Start
 
-vBilling ships with a **Lago adapter** today. Metronome, Stripe Meters, OpenMeter, and custom adapters are on the roadmap — the install pattern is the same regardless of adapter. The walkthrough below uses Lago.
+vBilling ships with a **Lago adapter** today. Metronome, Stripe Meters, OpenMeter, and custom adapters are on the roadmap. The install pattern is the same regardless of adapter. The walkthrough below uses Lago.
 
 ### Prerequisites
 
 - Kubernetes cluster with Tenant Clusters running (vCluster)
 - [metrics-server](https://github.com/kubernetes-sigs/metrics-server) installed
-- A billing adapter — Lago instance (see [Deploying Lago](#deploying-lago))
+- A billing adapter: Lago instance (see [Deploying Lago](#deploying-lago))
 - Optional: Prometheus with [DCGM Exporter](https://github.com/NVIDIA/dcgm-exporter) for GPU utilization
 
 ### 1. Choose & deploy your billing adapter (Lago)
@@ -143,7 +143,7 @@ docker exec lago-db-1 psql -U lago -d lago -t -c "SELECT value FROM api_keys LIM
 docker buildx build --platform linux/amd64,linux/arm64 \
   -t <your-registry>/vbilling:v0.1.0 --push .
 
-# Install via Helm — point vBilling at your adapter
+# Install via Helm, point vBilling at your adapter
 helm upgrade --install vbilling deploy/helm/vbilling \
   --namespace vbilling-system --create-namespace \
   --set image.repository=<your-registry>/vbilling \
@@ -167,11 +167,11 @@ vBilling creates billable metrics and a skeleton plan with **$0 pricing**. You s
 2. Edit each charge with your pricing:
    - CPU Core-Hours: `$0.065` (your cost + margin)
    - Memory GB-Hours: `$0.009`
-   - GPU Hours (H100): `$4.50` — or use Lago's graduated pricing for volume discounts
+   - GPU Hours (H100): `$4.50`, or use Lago's graduated pricing for volume discounts
    - Storage GB-Hours: `$0.0002`
    - Network Egress GB: `$0.09`
    - Node Hours: `$25.00` (for dedicated node billing)
-3. Save — pricing takes effect immediately for all tenants
+3. Save. Pricing takes effect immediately for all tenants
 
 You can also create **multiple plans** (e.g., "GPU Premium", "Dev Tier") and assign different plans to different customers via the adapter's API.
 
@@ -271,7 +271,7 @@ prometheus:
   url: "http://prometheus.monitoring:9090"  # optional
 ```
 
-## Use Case — AI Cloud
+## Use Case: AI Cloud
 
 Each customer gets a Tenant Cluster with dedicated bare-metal GPU nodes. vBilling meters the full node allocation by GPU SKU and streams events into whichever billing adapter you run.
 
