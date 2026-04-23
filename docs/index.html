@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>vBilling — Usage-based billing for vCluster tenants</title>
-  <meta name="description" content="Auto-discover vClusters, meter CPU/memory/GPU/storage/network, and generate invoices via Lago. Built for neoclouds, AI factories, and platform teams.">
+  <title>vBilling — Usage-based billing for AI Clouds running vCluster or vMetal</title>
+  <meta name="description" content="Auto-discover Tenant Clusters, meter node capacity, GPU SKUs, and egress, and stream usage events to Lago, Stripe, Metronome, or your own billing adapter. Built for AI Clouds.">
 
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -12,7 +12,7 @@
   <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" rel="stylesheet">
 
   <style>
-    /* ── Brand CSS custom properties ── */
+    /* ── Brand tokens ── */
     :root {
       --font-body: 'Inter', sans-serif;
       --font-code: 'Roboto Mono', monospace;
@@ -56,12 +56,7 @@
 
     /* ── Reset & base ── */
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-    html {
-      scroll-behavior: smooth;
-      scroll-padding-top: 72px;
-    }
-
+    html { scroll-behavior: smooth; scroll-padding-top: 72px; }
     body {
       font-family: var(--font-body);
       font-size: 16px;
@@ -71,18 +66,42 @@
       background: var(--bg-lightest);
       -webkit-font-smoothing: antialiased;
     }
-
     a { color: inherit; text-decoration: none; }
     img { max-width: 100%; display: block; }
 
     /* ── Layout ── */
-    .container {
-      max-width: 1120px;
-      margin: 0 auto;
-      padding: 0 80px;
-    }
+    .container { max-width: 1120px; margin: 0 auto; padding: 0 80px; }
 
-    /* ── Header ── */
+    /* ── Announcement banner ── */
+    .announcement {
+      background: var(--color-primary-50);
+      color: #FFFFFF;
+      font-size: 13px;
+      font-weight: 500;
+      text-align: center;
+    }
+    .announcement a {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 0;
+      color: #FFFFFF;
+      transition: opacity 0.15s;
+    }
+    .announcement a:hover { opacity: 0.85; }
+    .announcement-label {
+      display: inline-block;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      background: rgba(255,255,255,0.22);
+      color: #FFFFFF;
+      padding: 3px 8px;
+      border-radius: var(--radius-small);
+    }
+    .announcement-arrow { margin-left: 4px; }
+
+    /* ── Header (vcluster.com chrome) ── */
     header {
       position: sticky;
       top: 0;
@@ -97,6 +116,7 @@
       align-items: center;
       justify-content: space-between;
       height: 64px;
+      gap: 32px;
     }
     .logo {
       display: flex;
@@ -106,32 +126,33 @@
       font-weight: 700;
       color: var(--text-default);
       letter-spacing: -0.01em;
+      flex-shrink: 0;
     }
-    .logo-mark {
-      width: 28px;
-      height: 28px;
-    }
-    nav {
-      display: flex;
-      align-items: center;
-      gap: 32px;
-    }
-    nav a {
+    .logo-mark { width: 28px; height: 28px; }
+    .main-nav { display: flex; align-items: center; gap: 28px; }
+    .main-nav a {
       font-size: 14px;
       font-weight: 500;
-      color: var(--text-medium);
-      transition: color 0.15s ease;
+      color: var(--text-default);
+      transition: color 0.15s;
     }
-    nav a:hover { color: var(--color-primary-50); }
-    .badge {
-      font-size: 11px;
+    .main-nav a:hover { color: var(--color-primary-50); }
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      flex-shrink: 0;
+    }
+    .slack-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 13px;
       font-weight: 600;
-      color: var(--color-primary-50);
-      background: var(--color-primary-10);
-      border-radius: var(--radius-small);
-      padding: 2px 8px;
-      letter-spacing: 0.02em;
+      color: var(--text-medium);
+      transition: color 0.15s;
     }
+    .slack-link:hover { color: var(--color-primary-50); }
 
     /* ── Buttons ── */
     .btn-primary {
@@ -145,7 +166,7 @@
       padding: 12px 28px;
       cursor: pointer;
       display: inline-block;
-      transition: background 0.15s ease;
+      transition: background 0.15s;
     }
     .btn-primary:hover  { background: var(--color-primary-40); }
     .btn-primary:active { background: var(--color-primary-60); }
@@ -161,7 +182,7 @@
       padding: 11px 28px;
       cursor: pointer;
       display: inline-block;
-      transition: background 0.15s ease;
+      transition: background 0.15s;
     }
     .btn-secondary:hover { background: var(--color-primary-10); }
 
@@ -176,16 +197,12 @@
       padding: 9px 20px;
       cursor: pointer;
       display: inline-block;
-      transition: border-color 0.15s ease;
+      transition: border-color 0.15s;
     }
     .btn-ghost:hover { border-color: rgba(255,255,255,0.8); }
 
-    .btn-sm {
-      font-size: 14px;
-      padding: 9px 20px;
-    }
+    .btn-sm { font-size: 14px; padding: 9px 20px; }
 
-    /* ── Nav CTA ── */
     .nav-cta {
       font-family: var(--font-body);
       font-size: 14px;
@@ -195,15 +212,52 @@
       border-radius: var(--radius-full);
       padding: 8px 18px;
       display: inline-block;
-      transition: background 0.15s ease;
+      transition: background 0.15s;
     }
     .nav-cta:hover { background: var(--color-primary-40); color: #FFFFFF; }
 
-    /* ── Hero ── */
-    .hero {
-      padding: 100px 0 80px;
-      text-align: center;
-      background: var(--bg-lightest);
+    /* ── Hero (two-column) ── */
+    .hero { padding: 100px 0 80px; background: var(--bg-lightest); }
+    .hero .container {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 72px;
+      align-items: center;
+    }
+    .hero-copy { text-align: left; }
+    .hero-eyebrow-row {
+      display: flex;
+      align-items: center;
+      justify-content: flex-start;
+      gap: 14px;
+      flex-wrap: wrap;
+      margin-bottom: 20px;
+    }
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--color-primary-60);
+      background: var(--color-primary-10);
+      border: 1px solid #FFC8A8;
+      border-radius: var(--radius-full);
+      padding: 6px 14px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .status-pill-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--color-primary-50);
+      box-shadow: 0 0 0 3px rgba(255,102,0,0.18);
+      animation: pulse 2s ease-in-out infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { box-shadow: 0 0 0 3px rgba(255,102,0,0.18); }
+      50%      { box-shadow: 0 0 0 5px rgba(255,102,0,0.08); }
     }
     .eyebrow {
       display: inline-block;
@@ -212,30 +266,124 @@
       color: var(--color-primary-50);
       letter-spacing: 0.06em;
       text-transform: uppercase;
-      margin-bottom: 20px;
     }
     .hero h1 {
-      font-size: 60px;
+      font-size: 56px;
       font-weight: 800;
       line-height: 1.05;
       letter-spacing: -0.02em;
       color: var(--text-default);
-      max-width: 760px;
-      margin: 0 auto 24px;
+      margin: 0 0 24px;
     }
     .hero h1 span { color: var(--color-primary-50); }
     .hero p {
-      font-size: 20px;
-      font-weight: 400;
+      font-size: 19px;
       line-height: 1.6;
       color: var(--text-medium);
-      max-width: 560px;
-      margin: 0 auto 40px;
+      max-width: 520px;
+      margin: 0 0 40px;
     }
-    .hero-ctas {
+    .hero-ctas { display: flex; gap: 16px; justify-content: flex-start; }
+
+    .hero-visual {
+      position: relative;
       display: flex;
-      gap: 16px;
       justify-content: center;
+      align-items: center;
+    }
+    .hero-mock {
+      width: 100%;
+      max-width: 520px;
+      background: var(--bg-lightest);
+      border: 1px solid var(--stroke-subtle);
+      border-radius: var(--radius-large);
+      box-shadow: var(--shadow-medium);
+      overflow: hidden;
+      font-family: var(--font-body);
+      position: relative;
+    }
+    .hero-mock::after {
+      content: "";
+      position: absolute;
+      inset: -24px;
+      border-radius: calc(var(--radius-large) + 16px);
+      background: radial-gradient(circle at 30% 30%, rgba(255,102,0,0.08), transparent 60%);
+      z-index: -1;
+      pointer-events: none;
+    }
+    .mock-top {
+      display: flex;
+      gap: 6px;
+      padding: 12px 16px;
+      background: var(--bg-light);
+      border-bottom: 1px solid var(--stroke-subtle);
+    }
+    .mock-top span {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--color-black-10);
+    }
+    .mock-body { padding: 28px 28px 32px; }
+    .mock-invoice-header {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 24px;
+      padding-bottom: 20px;
+      border-bottom: 1px solid var(--stroke-subtle);
+    }
+    .mock-label {
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--color-primary-50);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      margin-bottom: 6px;
+    }
+    .mock-tenant-name {
+      font-family: var(--font-code);
+      font-size: 15px;
+      font-weight: 500;
+      color: var(--text-default);
+    }
+    .mock-sub { font-size: 12px; color: var(--text-medium); margin-top: 4px; }
+    .mock-amount {
+      font-size: 26px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      color: var(--text-default);
+    }
+    .mock-usage { display: flex; flex-direction: column; gap: 14px; }
+    .mock-row {
+      display: grid;
+      grid-template-columns: 1fr 1.2fr 72px;
+      align-items: center;
+      gap: 14px;
+    }
+    .mock-metric { font-size: 13px; font-weight: 500; color: var(--text-default); }
+    .mock-bar {
+      height: 8px;
+      background: var(--bg-light);
+      border-radius: var(--radius-full);
+      overflow: hidden;
+    }
+    .mock-bar-fill {
+      display: block;
+      height: 100%;
+      background: var(--color-primary-50);
+      border-radius: var(--radius-full);
+    }
+    .mock-row:nth-child(2) .mock-bar-fill { background: #1D4ED8; }
+    .mock-row:nth-child(3) .mock-bar-fill { background: #0891B2; }
+    .mock-row:nth-child(4) .mock-bar-fill { background: #C026D3; }
+    .mock-row:nth-child(5) .mock-bar-fill { background: var(--color-primary-40); }
+    .mock-value {
+      font-family: var(--font-code);
+      font-size: 12px;
+      color: var(--text-medium);
+      text-align: right;
     }
 
     /* ── Section base ── */
@@ -262,15 +410,19 @@
       color: var(--text-medium);
       max-width: 560px;
     }
-    .section-header {
-      text-align: center;
-      margin-bottom: 64px;
-    }
+    .section-header { text-align: center; margin-bottom: 64px; }
     .section-header .section-body { margin: 0 auto; }
-
-    /* ── Alternate background sections ── */
     .section-alt  { background: var(--bg-light); }
     .section-dark { background: var(--bg-dark); }
+
+    /* ── Adapter-flow band ── */
+    .hero-flow {
+      display: block;
+      width: 100%;
+      max-width: 860px;
+      height: auto;
+      margin: 0 auto;
+    }
 
     /* ── How it works ── */
     .steps {
@@ -322,7 +474,7 @@
       border-radius: var(--radius-large);
       padding: 32px;
       box-shadow: var(--shadow-xsmall);
-      transition: box-shadow 0.2s ease, transform 0.2s ease;
+      transition: box-shadow 0.2s, transform 0.2s;
     }
     .feature-card:hover {
       box-shadow: var(--shadow-medium);
@@ -348,7 +500,7 @@
       color: var(--text-medium);
     }
 
-    /* ── Architecture ── */
+    /* ── Architecture diagram ── */
     .arch-diagram {
       background: var(--color-black-90);
       border-radius: var(--radius-large);
@@ -359,10 +511,42 @@
       line-height: 1.8;
       overflow-x: auto;
     }
-    .arch-diagram .highlight { color: var(--color-primary-50); font-weight: 700; }
+    .arch-diagram .highlight { color: var(--text-code); font-weight: 600; }
     .arch-diagram .dim { color: rgba(255,255,255,0.35); }
+    .arch-diagram .accent { color: rgba(255,255,255,0.95); font-weight: 500; }
 
-    /* ── Quick start ── */
+    /* ── Quick Start callout ── */
+    .callout {
+      display: flex;
+      align-items: flex-start;
+      gap: 14px;
+      background: var(--color-primary-10);
+      border: 1px solid #FFC8A8;
+      border-radius: var(--radius-large);
+      padding: 18px 22px;
+      margin: 0 auto 48px;
+      max-width: 760px;
+      font-size: 14px;
+      line-height: 1.6;
+      color: var(--text-default);
+    }
+    .callout-icon {
+      flex-shrink: 0;
+      width: 20px;
+      height: 20px;
+      color: var(--color-primary-50);
+      margin-top: 2px;
+    }
+    .callout strong { color: var(--text-default); font-weight: 700; }
+    .callout a {
+      color: var(--color-primary-60);
+      font-weight: 600;
+      text-decoration: underline;
+      text-underline-offset: 2px;
+    }
+    .callout a:hover { color: var(--color-primary-50); }
+
+    /* ── Quick Start steps ── */
     .steps-numbered {
       display: flex;
       flex-direction: column;
@@ -416,8 +600,8 @@
       letter-spacing: -0.01em;
     }
     .code-block code .comment { color: var(--color-black-50); }
-    .code-block code .string  { color: var(--text-code); }
-    .code-block code .flag    { color: #B2F300; }
+    .code-block code .string  { color: rgba(255,255,255,0.95); }
+    .code-block code .flag    { color: var(--text-code); }
     .copy-btn {
       position: absolute;
       top: 12px;
@@ -431,9 +615,73 @@
       border-radius: var(--radius-small);
       padding: 4px 10px;
       cursor: pointer;
-      transition: background 0.15s ease;
+      transition: background 0.15s;
     }
     .copy-btn:hover { background: var(--color-black-70); }
+
+    /* ── Quick Start tabs ── */
+    .qs-tabs {
+      display: flex;
+      gap: 4px;
+      flex-wrap: wrap;
+      border-bottom: 1px solid var(--stroke-subtle);
+      margin-bottom: 40px;
+    }
+    .qs-tab {
+      font-family: var(--font-body);
+      font-size: 15px;
+      font-weight: 600;
+      background: none;
+      border: none;
+      color: var(--text-medium);
+      padding: 12px 20px;
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      margin-bottom: -1px;
+      transition: color 0.15s, border-color 0.15s;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .qs-tab:hover { color: var(--text-default); }
+    .qs-tab.active {
+      color: var(--color-primary-50);
+      border-bottom-color: var(--color-primary-50);
+    }
+    .qs-tab-badge {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      color: var(--color-primary-50);
+      background: var(--color-primary-10);
+      border-radius: var(--radius-small);
+      padding: 2px 6px;
+      text-transform: uppercase;
+    }
+    .qs-panel { display: none; }
+    .qs-panel.active { display: block; }
+    .qs-placeholder {
+      background: var(--bg-light);
+      border: 1px dashed var(--stroke-default);
+      border-radius: var(--radius-large);
+      padding: 56px 32px;
+      text-align: center;
+    }
+    .qs-placeholder h3 {
+      font-size: 22px;
+      font-weight: 700;
+      color: var(--text-default);
+      margin-bottom: 12px;
+      letter-spacing: -0.01em;
+    }
+    .qs-placeholder p {
+      font-size: 15px;
+      line-height: 1.6;
+      color: var(--text-medium);
+      max-width: 560px;
+      margin: 0 auto 20px;
+    }
+    .qs-placeholder p:last-child { margin-bottom: 0; }
 
     /* ── Metrics table ── */
     .metrics-table {
@@ -468,7 +716,7 @@
     .tag-orange { background: var(--color-primary-10); color: var(--color-primary-60); }
     .tag-blue   { background: #E8EFFE; color: #1846ED; }
 
-    /* ── Neoclouds (dark section) ── */
+    /* ── AI Clouds (dark) ── */
     .section-dark .section-label { color: var(--color-primary-40); }
     .section-dark .section-title { color: var(--text-reversed); }
     .section-dark .section-body  { color: rgba(255,255,255,0.65); }
@@ -517,47 +765,99 @@
       line-height: 2;
       color: rgba(255,255,255,0.7);
     }
-    .flow-card .hi { color: var(--color-primary-50); }
+    .flow-card .hi { color: var(--text-code); font-weight: 500; }
     .flow-card .dim { color: rgba(255,255,255,0.3); }
+    .flow-card .accent { color: rgba(255,255,255,0.95); font-weight: 500; }
 
-    /* ── Footer ── */
+    /* ── Footer (vcluster.com chrome) ── */
     footer {
-      background: var(--bg-dark);
-      padding: 64px 0;
-    }
-    .footer-inner {
-      display: grid;
-      grid-template-columns: 2fr 1fr 1fr 1fr;
-      gap: 48px;
-    }
-    .footer-brand .logo { margin-bottom: 12px; }
-    .footer-brand p {
+      background: var(--bg-lightest);
+      color: var(--text-medium);
       font-size: 14px;
-      color: rgba(255,255,255,0.45);
-      line-height: 1.6;
-      max-width: 260px;
+      padding: 80px 0 28px;
+      border-top: 1px solid var(--stroke-subtle);
     }
-    .footer-col h4 {
+    .footer-top {
+      display: grid;
+      grid-template-columns: 1.8fr 1fr 1fr;
+      gap: 64px;
+      padding-bottom: 56px;
+    }
+    .footer-subscribe { max-width: 420px; }
+    .footer-col h4, .footer-subscribe h4 {
       font-size: 13px;
-      font-weight: 600;
-      color: rgba(255,255,255,0.9);
-      margin-bottom: 16px;
+      font-weight: 700;
+      color: var(--text-default);
+      margin-bottom: 18px;
       letter-spacing: 0.02em;
     }
-    .footer-col ul { list-style: none; display: flex; flex-direction: column; gap: 10px; }
+    .footer-col ul { list-style: none; display: flex; flex-direction: column; gap: 12px; }
     .footer-col a {
       font-size: 14px;
-      color: rgba(255,255,255,0.45);
+      color: var(--text-medium);
       transition: color 0.15s;
     }
-    .footer-col a:hover { color: rgba(255,255,255,0.9); }
-    .footer-bottom {
-      margin-top: 48px;
-      padding-top: 24px;
-      border-top: 1px solid rgba(255,255,255,0.08);
-      font-size: 13px;
-      color: rgba(255,255,255,0.3);
+    .footer-col a:hover { color: var(--color-primary-50); }
+    .footer-subscribe > p {
+      font-size: 14px;
+      color: var(--text-medium);
+      margin-bottom: 16px;
+      line-height: 1.6;
     }
+    .subscribe-form {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-bottom: 14px;
+    }
+    .subscribe-form input {
+      flex: 1 1 0;
+      min-width: 180px;
+      height: 42px;
+      padding: 0 16px;
+      border: 1px solid var(--stroke-default);
+      background: var(--bg-lightest);
+      color: var(--text-default);
+      border-radius: var(--radius-full);
+      font-family: var(--font-body);
+      font-size: 14px;
+      outline: none;
+      transition: border-color 0.15s, background 0.15s;
+    }
+    .subscribe-form input::placeholder { color: var(--text-subtle); }
+    .subscribe-form input:focus { border-color: var(--color-primary-50); }
+    .subscribe-form .btn-primary {
+      height: 42px;
+      padding: 0 24px;
+      font-size: 14px;
+      line-height: 42px;
+    }
+    .footer-consent {
+      font-size: 12px;
+      line-height: 1.5;
+      color: var(--text-medium);
+      margin: 0;
+    }
+    .footer-consent a {
+      color: var(--text-default);
+      text-decoration: underline;
+      text-underline-offset: 2px;
+    }
+    .footer-consent a:hover { color: var(--color-primary-50); }
+    .footer-bottom {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+      padding-top: 28px;
+      border-top: 1px solid var(--stroke-subtle);
+      font-size: 13px;
+      color: var(--text-medium);
+      flex-wrap: wrap;
+    }
+    .footer-legal { display: flex; gap: 24px; flex-wrap: wrap; }
+    .footer-legal a { color: var(--text-medium); transition: color 0.15s; }
+    .footer-legal a:hover { color: var(--color-primary-50); }
 
     /* ── Divider ── */
     .divider {
@@ -566,66 +866,50 @@
       margin: 0;
     }
 
-    /* ── Mobile hamburger ── */
-    .nav-toggle {
-      display: none;
-      background: none;
-      border: none;
-      cursor: pointer;
-      padding: 4px;
-      color: var(--text-default);
-    }
-
     /* ── Responsive ── */
     @media (max-width: 1024px) {
       .container { padding: 0 40px; }
+      .hero .container {
+        grid-template-columns: 1fr;
+        gap: 56px;
+        text-align: center;
+      }
+      .hero-copy { text-align: center; }
+      .hero-eyebrow-row { justify-content: center; }
+      .hero p { margin-left: auto; margin-right: auto; }
+      .hero-ctas { justify-content: center; }
       .hero h1 { font-size: 48px; }
       .section-title { font-size: 32px; }
       .steps { grid-template-columns: repeat(2, 1fr); }
       .features-grid { grid-template-columns: repeat(2, 1fr); }
       .neocloud-grid { grid-template-columns: 1fr; gap: 40px; }
-      .footer-inner { grid-template-columns: 1fr 1fr; gap: 32px; }
+      .main-nav { display: none; }
+      .footer-top { grid-template-columns: 1fr 1fr; gap: 40px; }
     }
 
     @media (max-width: 768px) {
       .container { padding: 0 24px; }
-
-      .nav-toggle { display: block; }
-      nav {
-        display: none;
-        position: absolute;
-        top: 64px;
-        left: 0;
-        right: 0;
-        background: var(--bg-lightest);
-        border-bottom: 1px solid var(--stroke-subtle);
-        flex-direction: column;
-        padding: 16px 24px;
-        gap: 16px;
-        box-shadow: var(--shadow-small);
-      }
-      nav.open { display: flex; }
-      .nav-cta { display: none; }
-
+      .announcement { font-size: 12px; }
+      .announcement a { padding: 8px 0; }
+      .header-actions .slack-link { display: none; }
       .hero { padding: 64px 0 48px; }
       .hero h1 { font-size: 36px; }
       .hero p { font-size: 17px; }
       .hero-ctas { flex-direction: column; align-items: center; }
-
+      .mock-body { padding: 20px; }
+      .mock-amount { font-size: 22px; }
+      .mock-row { grid-template-columns: 1fr 1fr 60px; gap: 10px; }
       section { padding: 64px 0; }
       .section-header { margin-bottom: 40px; }
       .section-title { font-size: 28px; }
       .section-body { font-size: 16px; }
-
       .steps { grid-template-columns: 1fr; }
       .features-grid { grid-template-columns: 1fr; }
-
       .arch-diagram { padding: 24px; font-size: 11px; }
-
       .metrics-table { font-size: 12px; }
       .metrics-table th, .metrics-table td { padding: 10px 8px; }
-
-      .footer-inner { grid-template-columns: 1fr; gap: 32px; }
+      .footer-top { grid-template-columns: 1fr; gap: 36px; }
+      .footer-bottom { flex-direction: column; align-items: flex-start; gap: 16px; }
     }
 
     @media (max-width: 480px) {
@@ -636,34 +920,46 @@
 </head>
 <body>
 
+  <!-- ── Announcement ── -->
+  <div class="announcement">
+    <div class="container">
+      <a href="https://www.vmetal.ai/">
+        <span class="announcement-label">NEW</span>
+        Introducing vMetal: turn your GPU racks into a cloud platform
+        <span class="announcement-arrow">→</span>
+      </a>
+    </div>
+  </div>
+
   <!-- ── Header ── -->
   <header id="header">
     <div class="container">
       <div class="header-inner">
 
-        <a href="index.html" class="logo">
-          <svg class="logo-mark" viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <path d="M4 7L14 21L24 7" stroke="#FF6600" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
-            <path d="M4 7L14 14L24 7" stroke="#050B24" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.15"/>
+        <a href="https://vcluster.com/" class="logo">
+          <svg class="logo-mark" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M16 3L29 10.5V21.5L16 29L3 21.5V10.5L16 3Z" fill="#FF6600"/>
+            <path d="M16 9L22.5 12.75V20.25L16 24L9.5 20.25V12.75L16 9Z" fill="white"/>
           </svg>
-          vBilling
+          vCluster
         </a>
 
-        <button class="nav-toggle" onclick="document.getElementById('nav').classList.toggle('open')" aria-label="Toggle navigation">
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 12h18M3 6h18M3 18h18"/></svg>
-        </button>
-
-        <nav id="nav">
-          <a href="#how-it-works">How it works</a>
-          <a href="#features">Features</a>
-          <a href="#architecture">Architecture</a>
-          <a href="#quick-start">Quick start</a>
-          <a href="#neoclouds">Neoclouds</a>
-          <a href="getting-started.html">Docs</a>
-          <span class="badge">Alpha</span>
+        <nav class="main-nav">
+          <a href="https://www.vcluster.com/">Product</a>
+          <a href="https://www.vcluster.com/solutions">Solutions</a>
+          <a href="https://www.vcluster.com/pricing">Pricing</a>
+          <a href="https://www.vcluster.com/docs">Docs</a>
+          <a href="https://www.vcluster.com/blog">Blog</a>
+          <a href="https://www.vcluster.com/company/about">Company</a>
         </nav>
 
-        <a href="https://github.com/vClusterLabs-Experiments/vbilling" class="nav-cta">GitHub</a>
+        <div class="header-actions">
+          <a href="https://slack.loft.sh/" class="slack-link" aria-label="Community Slack">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><path d="M5.042 15.165a2.528 2.528 0 01-2.52 2.523A2.528 2.528 0 010 15.165a2.527 2.527 0 012.522-2.522h2.52v2.522zM6.313 15.165a2.527 2.527 0 012.521-2.522 2.527 2.527 0 012.521 2.522v6.313A2.528 2.528 0 018.834 24a2.528 2.528 0 01-2.521-2.522v-6.313zM8.834 5.042a2.528 2.528 0 01-2.521-2.52A2.528 2.528 0 018.834 0a2.528 2.528 0 012.521 2.522v2.52H8.834zM8.834 6.313a2.528 2.528 0 012.521 2.521 2.528 2.528 0 01-2.521 2.521H2.522A2.528 2.528 0 010 8.834a2.528 2.528 0 012.522-2.521h6.312zM18.956 8.834a2.528 2.528 0 012.522-2.521A2.528 2.528 0 0124 8.834a2.528 2.528 0 01-2.522 2.521h-2.522V8.834zM17.688 8.834a2.528 2.528 0 01-2.523 2.521 2.527 2.527 0 01-2.52-2.521V2.522A2.527 2.527 0 0115.165 0a2.528 2.528 0 012.523 2.522v6.312zM15.165 18.956a2.528 2.528 0 012.523 2.522A2.528 2.528 0 0115.165 24a2.527 2.527 0 01-2.52-2.522v-2.522h2.52zM15.165 17.688a2.527 2.527 0 01-2.52-2.523 2.526 2.526 0 012.52-2.52h6.313A2.527 2.527 0 0124 15.165a2.528 2.528 0 01-2.522 2.523h-6.313z"/></svg>
+            5.0k
+          </a>
+          <a href="https://www.vcluster.com/install" class="nav-cta">Install</a>
+        </div>
 
       </div>
     </div>
@@ -672,87 +968,201 @@
   <!-- ── Hero ── -->
   <section class="hero">
     <div class="container">
-      <span class="eyebrow">Open source billing controller</span>
-      <h1>Usage-based billing<br>for <span>vCluster</span> tenants</h1>
-      <p>Auto-discover virtual clusters, meter CPU, memory, GPU, storage, and network consumption, then generate invoices with Lago.</p>
-      <div class="hero-ctas">
-        <a href="#quick-start" class="btn-primary">Get started</a>
-        <a href="https://github.com/vClusterLabs-Experiments/vbilling" class="btn-secondary">View on GitHub</a>
+
+      <div class="hero-copy">
+        <div class="hero-eyebrow-row">
+          <span class="status-pill">
+            <span class="status-pill-dot"></span>
+            Alpha
+          </span>
+          <span class="eyebrow">Open source billing controller</span>
+        </div>
+        <h1>Usage-based billing for <span>AI Clouds</span> running vCluster or vMetal</h1>
+        <p>Auto-discover Tenant Clusters, meter node capacity, GPU SKUs, and egress, then stream usage events to the billing adapter of your choice.</p>
+        <div class="hero-ctas">
+          <a href="#quick-start" class="btn-primary">Get started</a>
+          <a href="https://github.com/vClusterLabs-Experiments/vbilling" class="btn-secondary">View on GitHub</a>
+        </div>
       </div>
+
+      <div class="hero-visual">
+        <div class="hero-mock">
+          <div class="mock-top"><span></span><span></span><span></span></div>
+          <div class="mock-body">
+            <div class="mock-invoice-header">
+              <div>
+                <div class="mock-label">Invoice preview</div>
+                <div class="mock-tenant-name">team-gpu-prod</div>
+                <div class="mock-sub">April 2026 · 8x H100 dedicated</div>
+              </div>
+              <div class="mock-amount">$34,582.50</div>
+            </div>
+            <div class="mock-usage">
+              <div class="mock-row">
+                <span class="mock-metric">GPU hours · H100</span>
+                <span class="mock-bar"><span class="mock-bar-fill" style="width:94%;"></span></span>
+                <span class="mock-value">7,680</span>
+              </div>
+              <div class="mock-row">
+                <span class="mock-metric">CPU core-hours</span>
+                <span class="mock-bar"><span class="mock-bar-fill" style="width:58%;"></span></span>
+                <span class="mock-value">92.1k</span>
+              </div>
+              <div class="mock-row">
+                <span class="mock-metric">Memory GB-hrs</span>
+                <span class="mock-bar"><span class="mock-bar-fill" style="width:72%;"></span></span>
+                <span class="mock-value">368k</span>
+              </div>
+              <div class="mock-row">
+                <span class="mock-metric">Storage GB-hrs</span>
+                <span class="mock-bar"><span class="mock-bar-fill" style="width:31%;"></span></span>
+                <span class="mock-value">14.4k</span>
+              </div>
+              <div class="mock-row">
+                <span class="mock-metric">Network egress</span>
+                <span class="mock-bar"><span class="mock-bar-fill" style="width:22%;"></span></span>
+                <span class="mock-value">842 GB</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
     </div>
   </section>
 
   <hr class="divider">
 
+  <!-- ── Adapter flow band ── -->
+  <section id="adapter-flow" class="section-alt">
+    <div class="container">
+      <div class="section-header">
+        <p class="section-label">Adapter-agnostic</p>
+        <h2 class="section-title">Ships to your billing backend</h2>
+        <p class="section-body">vBilling is the pipe, not the billing engine. Meter Tenant Clusters once and route events to whichever billing adapter you run.</p>
+      </div>
+
+      <svg class="hero-flow" viewBox="0 0 820 240" xmlns="http://www.w3.org/2000/svg" role="img"
+           aria-label="vCluster and vMetal feed vBilling which routes usage events to Lago, Metronome (coming soon), Stripe, or a custom billing adapter">
+        <defs>
+          <marker id="arrow-gray" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="#B4B6BD"/>
+          </marker>
+          <marker id="arrow-orange" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="#FF6600"/>
+          </marker>
+        </defs>
+
+        <g>
+          <rect x="0" y="48" width="150" height="48" rx="10" fill="#FFFFFF" stroke="#E6E7E9"/>
+          <text x="75" y="78" text-anchor="middle" font-family="Inter, sans-serif" font-size="15" font-weight="600" fill="#050B24">vCluster</text>
+        </g>
+        <g>
+          <rect x="0" y="144" width="150" height="48" rx="10" fill="#FFFFFF" stroke="#E6E7E9"/>
+          <text x="75" y="174" text-anchor="middle" font-family="Inter, sans-serif" font-size="15" font-weight="600" fill="#050B24">vMetal</text>
+        </g>
+
+        <path d="M150 72 C 230 72, 270 120, 330 120" fill="none" stroke="#B4B6BD" stroke-width="1.6" marker-end="url(#arrow-gray)"/>
+        <path d="M150 168 C 230 168, 270 120, 330 120" fill="none" stroke="#B4B6BD" stroke-width="1.6" marker-end="url(#arrow-gray)"/>
+
+        <g>
+          <rect x="340" y="92" width="140" height="56" rx="12" fill="#FF6600"/>
+          <text x="410" y="126" text-anchor="middle" font-family="Inter, sans-serif" font-size="17" font-weight="700" fill="#FFFFFF">vBilling</text>
+        </g>
+
+        <path d="M480 108 C 550 108, 580 28,  640 28"  fill="none" stroke="#FF6600" stroke-width="1.6" marker-end="url(#arrow-orange)"/>
+        <path d="M480 114 C 550 114, 580 80,  640 80"  fill="none" stroke="#FF6600" stroke-width="1.6" marker-end="url(#arrow-orange)"/>
+        <path d="M480 126 C 550 126, 580 136, 640 136" fill="none" stroke="#FF6600" stroke-width="1.6" marker-end="url(#arrow-orange)"/>
+        <path d="M480 132 C 550 132, 580 192, 640 192" fill="none" stroke="#FF6600" stroke-width="1.6" marker-end="url(#arrow-orange)"/>
+
+        <g>
+          <rect x="640" y="4" width="180" height="44" rx="10" fill="#FFFFFF" stroke="#E6E7E9"/>
+          <text x="730" y="31" text-anchor="middle" font-family="Inter, sans-serif" font-size="14" font-weight="600" fill="#050B24">Lago</text>
+        </g>
+        <g>
+          <rect x="640" y="56" width="180" height="44" rx="10" fill="#FFFFFF" stroke="#E6E7E9"/>
+          <text x="730" y="75" text-anchor="middle" font-family="Inter, sans-serif" font-size="14" font-weight="600" fill="#050B24">Metronome</text>
+          <text x="730" y="91" text-anchor="middle" font-family="Inter, sans-serif" font-size="9" font-weight="700" fill="#FF6600" letter-spacing="0.8">COMING SOON</text>
+        </g>
+        <g>
+          <rect x="640" y="108" width="180" height="44" rx="10" fill="#FFFFFF" stroke="#E6E7E9"/>
+          <text x="730" y="134" text-anchor="middle" font-family="Inter, sans-serif" font-size="14" font-weight="600" fill="#050B24">Stripe</text>
+        </g>
+        <g>
+          <rect x="640" y="160" width="180" height="44" rx="10" fill="#FFFFFF" stroke="#E6E7E9"/>
+          <text x="730" y="186" text-anchor="middle" font-family="Inter, sans-serif" font-size="14" font-weight="600" fill="#050B24">Custom Adapter</text>
+        </g>
+      </svg>
+    </div>
+  </section>
+
   <!-- ── How it works ── -->
-  <section id="how-it-works" class="section-alt">
+  <section id="how-it-works">
     <div class="container">
       <div class="section-header">
         <p class="section-label">How it works</p>
         <h2 class="section-title">Three steps to tenant billing</h2>
-        <p class="section-body">vBilling handles metrics collection and event delivery. Lago handles pricing, plans, and invoicing. You set the prices.</p>
+        <p class="section-body">vBilling collects usage and ships it to your billing adapter. Your adapter handles pricing, plans, and invoicing — you stay in control of what anything costs.</p>
       </div>
 
       <div class="steps">
         <div class="step">
-          <p class="step-number">01 — Discover</p>
+          <p class="step-number">01 · Choose</p>
           <svg class="step-icon" viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <circle cx="18" cy="18" r="10" stroke="currentColor" stroke-width="2.5"/>
-            <path d="M26 26L33 33" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
+            <rect x="6" y="7" width="12" height="12" rx="2" stroke="currentColor" stroke-width="2.5"/>
+            <rect x="22" y="7" width="12" height="12" rx="2" stroke="currentColor" stroke-width="2.5" opacity="0.35"/>
+            <rect x="6" y="23" width="12" height="12" rx="2" stroke="currentColor" stroke-width="2.5" opacity="0.35"/>
+            <rect x="22" y="23" width="12" height="12" rx="2" stroke="currentColor" stroke-width="2.5" opacity="0.35"/>
+            <path d="M9 13l2 2 4-4" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
-          <h3>Discover</h3>
-          <p>Automatically finds all virtual clusters via StatefulSet labels or the vCluster Platform API. No manual registration needed.</p>
+          <h3>Choose Billing Platform</h3>
+          <p>Pick the billing backend you already run — Lago, Stripe Meters, Metronome, or your own. vBilling ships as an adapter, not as a replacement.</p>
         </div>
         <div class="step">
-          <p class="step-number">02 — Meter</p>
+          <p class="step-number">02 · Configure</p>
           <svg class="step-icon" viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <rect x="6" y="24" width="6" height="12" rx="2" fill="currentColor" opacity="0.3"/>
-            <rect x="17" y="16" width="6" height="20" rx="2" fill="currentColor" opacity="0.6"/>
-            <rect x="28" y="8" width="6" height="28" rx="2" fill="currentColor"/>
+            <path d="M6 12h20M6 20h14M6 28h22" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
+            <circle cx="28" cy="12" r="3" fill="currentColor"/>
+            <circle cx="22" cy="20" r="3" fill="currentColor"/>
+            <circle cx="30" cy="28" r="3" fill="currentColor"/>
           </svg>
-          <h3>Meter</h3>
-          <p>Collects 9 resource metrics every 60 seconds: CPU, memory, GPU (type-aware), storage, network egress, and more.</p>
+          <h3>Configure Pricing &amp; Packaging</h3>
+          <p>Define metrics, plans, and per-unit rates in your billing platform. vBilling never decides what anything costs — your platform team owns the price sheet.</p>
         </div>
         <div class="step">
-          <p class="step-number">03 — Bill</p>
+          <p class="step-number">03 · Connect</p>
           <svg class="step-icon" viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <rect x="8" y="6" width="24" height="30" rx="3" stroke="currentColor" stroke-width="2.5"/>
-            <path d="M14 16h12M14 22h8M14 28h10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+            <path d="M14 14l-4 4a5.66 5.66 0 108 8l4-4" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M26 26l4-4a5.66 5.66 0 10-8-8l-4 4" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
-          <h3>Bill</h3>
-          <p>Sends usage events to Lago for aggregation, plan-based pricing, and automatic invoice generation each billing period.</p>
+          <h3>Connect vBilling Adapter</h3>
+          <p>Deploy vBilling and point it at your adapter. Tenant Clusters are auto-discovered; usage events start streaming in minutes.</p>
         </div>
       </div>
     </div>
   </section>
 
   <!-- ── Features ── -->
-  <section id="features">
+  <section id="features" class="section-alt">
     <div class="container">
       <div class="section-header">
         <p class="section-label">Features</p>
         <h2 class="section-title">Everything you need to bill tenants</h2>
-        <p class="section-body">Whether you run a shared platform or dedicated GPU clusters, vBilling adapts to your deployment model automatically.</p>
+        <p class="section-body">vBilling meters dedicated-node consumption across Kubernetes and streams usage events to the billing adapter you choose.</p>
       </div>
 
       <div class="features-grid">
 
         <div class="feature-card">
-          <span class="feature-icon">hive</span>
-          <h3>Shared nodes</h3>
-          <p>Bill by actual pod-level CPU and memory consumption when multiple tenants share cluster nodes.</p>
-        </div>
-
-        <div class="feature-card">
           <span class="feature-icon">admin_panel_settings</span>
-          <h3>Private nodes</h3>
-          <p>Bill full dedicated node capacity when tenants own bare-metal infrastructure with GPUs or high-memory.</p>
+          <h3>Node capacity tracking</h3>
+          <p>Meter full dedicated node capacity — CPU, memory, and GPU SKUs — when tenants own bare-metal nodes.</p>
         </div>
 
         <div class="feature-card">
           <span class="feature-icon">memory_alt</span>
           <h3>GPU type-aware</h3>
-          <p>Detects GPU models (H100, A100, T4) from node labels. Price each type differently in Lago.</p>
+          <p>Detects GPU models (H100, A100, T4) from node labels. Price each SKU differently in your billing platform.</p>
         </div>
 
         <div class="feature-card">
@@ -764,7 +1174,19 @@
         <div class="feature-card">
           <span class="feature-icon">chart_data</span>
           <h3>Network egress</h3>
-          <p>Meter outbound network traffic per namespace through Prometheus for bandwidth-based billing.</p>
+          <p>Meter outbound network traffic per tenant through Prometheus or CNI metrics for bandwidth-based billing.</p>
+        </div>
+
+        <div class="feature-card">
+          <span class="feature-icon">swap_horiz</span>
+          <h3>Pluggable adapters</h3>
+          <p>Ship usage events to Lago today; Metronome, Stripe Meters, OpenMeter, and custom adapters are on the way.</p>
+        </div>
+
+        <div class="feature-card">
+          <span class="feature-icon">tune</span>
+          <h3>LoadBalancer tracking</h3>
+          <p>Track LoadBalancer service hours per Tenant Cluster for infrastructure-level billing.</p>
         </div>
 
         <div class="feature-card">
@@ -774,21 +1196,9 @@
         </div>
 
         <div class="feature-card">
-          <span class="feature-icon">tune</span>
-          <h3>LoadBalancer tracking</h3>
-          <p>Track LoadBalancer service hours per virtual cluster for infrastructure-level billing.</p>
-        </div>
-
-        <div class="feature-card">
-          <span class="feature-icon">door_open</span>
-          <h3>Customer portal</h3>
-          <p>Lago provides a built-in customer portal where tenants view usage, invoices, and prepaid wallets.</p>
-        </div>
-
-        <div class="feature-card">
           <span class="feature-icon">autorenew</span>
           <h3>Auto-discovery</h3>
-          <p>Watches for vCluster StatefulSets and Platform API resources. Customers created in Lago automatically.</p>
+          <p>Watches for Tenant Cluster StatefulSets and Platform API resources. Customers are created in your billing adapter automatically.</p>
         </div>
 
       </div>
@@ -796,29 +1206,30 @@
   </section>
 
   <!-- ── Architecture ── -->
-  <section id="architecture" class="section-alt">
+  <section id="architecture">
     <div class="container">
       <div class="section-header">
         <p class="section-label">Architecture</p>
         <h2 class="section-title">How the pieces fit together</h2>
-        <p class="section-body">vBilling runs as a controller in your host cluster. It watches for virtual clusters, collects metrics, and forwards usage events to Lago via HTTP.</p>
+        <p class="section-body">vBilling runs as a controller in your Control Plane Cluster. It watches Tenant Clusters, collects capacity and usage metrics, and streams events to the billing adapter you choose.</p>
       </div>
 
       <div class="arch-diagram">
-<span class="highlight">Host Kubernetes Cluster</span>
+<span class="highlight">Control Plane Cluster</span>
 <span class="dim">─────────────────────────────────────────────────────────</span>
 
-  <span class="highlight">vCluster</span> team-alpha        <span class="highlight">vCluster</span> team-beta        <span class="highlight">vCluster</span> team-gpu
-  shared nodes             shared nodes             8x H100 GPUs / private
+  <span class="highlight">Tenant Cluster</span> team-alpha    <span class="highlight">Tenant Cluster</span> team-beta    <span class="highlight">Tenant Cluster</span> team-gpu
+  private · 4x A100          private · 2x L40S          private · 8x H100
 
                     <span class="highlight">vBilling Controller</span>
-                    Go binary · Deployment in host cluster
-                    <span style="color:#B2F300">Discover → Meter → Bill</span>
+                    Go binary · Deployment in Control Plane Cluster
+                    <span class="accent">Choose → Configure → Connect</span>
                             |
                     Usage events (HTTP)
                             |
-                    <span class="highlight">Lago — Open-source billing engine</span>
-                    Plans &amp; pricing · Subscriptions · Invoices · Wallets
+                    <span class="highlight">Billing Adapter</span>
+                    Lago · Stripe · Metronome · Custom
+                    Plans &amp; pricing · Subscriptions · Invoices
 
 <span class="dim">─────────────────────────────────────────────────────────</span>
       </div>
@@ -826,79 +1237,117 @@
   </section>
 
   <!-- ── Quick Start ── -->
-  <section id="quick-start">
+  <section id="quick-start" class="section-alt">
     <div class="container">
       <div class="section-header">
         <p class="section-label">Quick start</p>
         <h2 class="section-title">Up and running in 3 steps</h2>
-        <p class="section-body">Deploy Lago, install vBilling, and configure your pricing. Usage events start flowing immediately.</p>
+        <p class="section-body">Pick your billing adapter below. Each tab walks through deploy, install, and pricing for that platform.</p>
       </div>
 
-      <div class="steps-numbered">
+      <div class="callout">
+        <svg class="callout-icon" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="10" cy="10" r="9" stroke="currentColor" stroke-width="1.6"/>
+          <path d="M10 6v4M10 14h.01" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+        </svg>
+        <div>
+          <strong>What you'll need.</strong> vBilling works with open-source vCluster out of the box. Platform API discovery and other advanced capabilities require a <a href="https://www.vcluster.com/pricing">vCluster Free</a> account (free for small teams) or vCluster Enterprise.
+        </div>
+      </div>
 
-        <div class="qs-step">
-          <div class="qs-num">1</div>
-          <div class="qs-content">
-            <h3>Deploy Lago</h3>
-            <p>Spin up the open-source billing engine with Docker Compose. UI at :8080, API at :3000.</p>
-            <div class="code-block">
-              <button class="copy-btn" onclick="copyCode(this)">Copy</button>
-              <code><span class="comment"># Clone vBilling and start Lago</span>
+      <div class="qs-tabs" role="tablist">
+        <button class="qs-tab active" data-tab="lago" role="tab" aria-selected="true">Lago</button>
+        <button class="qs-tab" data-tab="metronome" role="tab" aria-selected="false">
+          Metronome <span class="qs-tab-badge">Coming soon</span>
+        </button>
+        <button class="qs-tab" data-tab="custom" role="tab" aria-selected="false">Custom Billing Adapter</button>
+      </div>
+
+      <div class="qs-panel active" data-panel="lago" role="tabpanel">
+        <div class="steps-numbered">
+
+          <div class="qs-step">
+            <div class="qs-num">1</div>
+            <div class="qs-content">
+              <h3>Deploy Lago</h3>
+              <p>Spin up the open-source billing engine with Docker Compose. UI at :8080, API at :3000.</p>
+              <div class="code-block">
+                <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+                <code><span class="comment"># Clone vBilling and start Lago</span>
 git clone https://github.com/vClusterLabs-Experiments/vbilling.git
 cd vbilling/deploy/lago
 openssl genrsa 2048 > lago_rsa.key
 echo <span class="string">"LAGO_RSA_PRIVATE_KEY=$(base64 -i lago_rsa.key | tr -d '\n')"</span> > .env
 docker compose <span class="flag">--env-file</span> .env up <span class="flag">-d</span></code>
+              </div>
             </div>
           </div>
-        </div>
 
-        <div class="qs-step">
-          <div class="qs-num">2</div>
-          <div class="qs-content">
-            <h3>Install vBilling</h3>
-            <p>Deploy the controller via Helm. Point it at your Lago instance with your API key.</p>
-            <div class="code-block">
-              <button class="copy-btn" onclick="copyCode(this)">Copy</button>
-              <code>helm upgrade <span class="flag">--install</span> vbilling deploy/helm/vbilling \
+          <div class="qs-step">
+            <div class="qs-num">2</div>
+            <div class="qs-content">
+              <h3>Install vBilling</h3>
+              <p>Deploy the controller via Helm. Point it at your Lago instance with your API key.</p>
+              <div class="code-block">
+                <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+                <code>helm upgrade <span class="flag">--install</span> vbilling deploy/helm/vbilling \
   <span class="flag">--namespace</span> vbilling-system <span class="flag">--create-namespace</span> \
+  <span class="flag">--set</span> <span class="string">adapter=lago</span> \
   <span class="flag">--set</span> <span class="string">lago.apiURL=http://lago-api:3000</span> \
   <span class="flag">--set</span> <span class="string">lago.apiKey=YOUR_LAGO_API_KEY</span></code>
+              </div>
             </div>
           </div>
-        </div>
 
-        <div class="qs-step">
-          <div class="qs-num">3</div>
-          <div class="qs-content">
-            <h3>Configure pricing</h3>
-            <p>vBilling creates a skeleton plan with $0 pricing. Set your rates in the Lago UI or API.</p>
-            <div class="code-block">
-              <button class="copy-btn" onclick="copyCode(this)">Copy</button>
-              <code><span class="comment"># In Lago UI → Plans → vCluster Standard</span>
+          <div class="qs-step">
+            <div class="qs-num">3</div>
+            <div class="qs-content">
+              <h3>Configure pricing</h3>
+              <p>vBilling creates a skeleton plan with $0 pricing. Set your rates in the Lago UI or API.</p>
+              <div class="code-block">
+                <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+                <code><span class="comment"># In Lago UI → Plans → vCluster Standard</span>
 <span class="comment"># Set prices per metric:</span>
 CPU Core-Hours          <span class="string">$0.065</span>
 Memory GB-Hours         <span class="string">$0.009</span>
 GPU Hours (H100)        <span class="string">$4.50</span>
 Storage GB-Hours        <span class="string">$0.0002</span>
 Network Egress GB       <span class="string">$0.09</span>
-Private Node Hours      <span class="string">$25.00</span>
+Node Hours              <span class="string">$25.00</span>
 LoadBalancer Hours      <span class="string">$0.025</span></code>
+              </div>
             </div>
           </div>
-        </div>
 
+        </div>
       </div>
+
+      <div class="qs-panel" data-panel="metronome" role="tabpanel" hidden>
+        <div class="qs-placeholder">
+          <h3>Metronome adapter — coming soon</h3>
+          <p>Native Metronome adapter is on the near-term roadmap. Same three setup steps: provision Metronome, configure rate cards, point vBilling at it.</p>
+          <p>Want early access or to help shape the interface? <a href="https://github.com/vClusterLabs-Experiments/vbilling/issues" style="color:var(--color-primary-50); font-weight:600;">Open an issue on GitHub</a>.</p>
+        </div>
+      </div>
+
+      <div class="qs-panel" data-panel="custom" role="tabpanel" hidden>
+        <div class="qs-placeholder">
+          <h3>Build your own adapter</h3>
+          <p>vBilling is structured so any HTTP billing API can plug in. Implement the <code style="font-family:var(--font-code); background:var(--bg-lightest); padding:2px 6px; border-radius:4px; border:1px solid var(--stroke-subtle);">Destination</code> interface in a small Go package, rebuild the image, and point vBilling at your endpoint.</p>
+          <p>Stripe Meters, OpenMeter, and homegrown backends all fit this shape. Full interface reference lands with the next release.</p>
+        </div>
+      </div>
+
     </div>
   </section>
 
   <!-- ── Metrics ── -->
-  <section class="section-alt">
+  <section>
     <div class="container">
       <div class="section-header">
         <p class="section-label">Metrics</p>
-        <h2 class="section-title">9 metrics, zero manual tagging</h2>
-        <p class="section-body">Everything collected automatically from the Kubernetes API, metrics-server, and Prometheus. No code changes or annotations needed.</p>
+        <h2 class="section-title">Default events, zero manual tagging</h2>
+        <p class="section-body">Collected automatically from the Kubernetes API, metrics-server, and Prometheus. Custom sources and transforms extend the defaults without forking vBilling.</p>
       </div>
 
       <div style="overflow-x:auto;">
@@ -907,124 +1356,122 @@ LoadBalancer Hours      <span class="string">$0.025</span></code>
             <tr>
               <th>Metric</th>
               <th>Source</th>
-              <th>Shared mode</th>
-              <th>Private mode</th>
+              <th>Granularity</th>
             </tr>
           </thead>
           <tbody>
-            <tr><td>CPU core-hours</td><td>metrics-server / node capacity</td><td>Pod usage</td><td>Full node capacity</td></tr>
-            <tr><td>Memory GB-hours</td><td>metrics-server / node capacity</td><td>Pod usage</td><td>Full node capacity</td></tr>
-            <tr><td>Storage GB-hours</td><td>PVC sizes</td><td>Per PVC</td><td>Per PVC</td></tr>
-            <tr><td>GPU hours (by type) <span class="tag tag-orange">H100 / A100 / T4</span></td><td>Pod requests + node labels</td><td>Per pod allocation</td><td>Full node GPUs</td></tr>
-            <tr><td>GPU utilization</td><td>DCGM via Prometheus</td><td>Per GPU %</td><td>Per GPU %</td></tr>
-            <tr><td>Network egress GB</td><td>Prometheus</td><td>Per namespace</td><td>Per namespace</td></tr>
-            <tr><td>LoadBalancer hours</td><td>Service count</td><td>Per LB service</td><td>Per LB service</td></tr>
-            <tr><td>Instance hours</td><td>Per virtual cluster flat</td><td>1 per cluster</td><td>1 per cluster</td></tr>
-            <tr><td>Private node hours</td><td>Node count</td><td><span style="color:var(--text-subtle)">—</span></td><td>Per dedicated node</td></tr>
+            <tr><td>Node hours</td><td>Node watch</td><td>Per dedicated node</td></tr>
+            <tr><td>CPU core-hours</td><td>Node capacity</td><td>Full node capacity</td></tr>
+            <tr><td>Memory GB-hours</td><td>Node capacity</td><td>Full node capacity</td></tr>
+            <tr><td>GPU hours (by SKU) <span class="tag tag-orange">H100 / A100 / T4</span></td><td>Node labels</td><td>Per GPU SKU</td></tr>
+            <tr><td>GPU utilization</td><td>DCGM via Prometheus</td><td>Per GPU %</td></tr>
+            <tr><td>Storage GB-hours</td><td>PVC sizes</td><td>Per PVC</td></tr>
+            <tr><td>Network egress GB</td><td>CNI / Prometheus</td><td>Per tenant</td></tr>
+            <tr><td>LoadBalancer hours</td><td>Service count</td><td>Per LB service</td></tr>
+            <tr><td>Control plane hours</td><td>Tenant Cluster watch</td><td>1 per cluster</td></tr>
           </tbody>
         </table>
       </div>
     </div>
   </section>
 
-  <!-- ── Neoclouds (dark section) ── -->
-  <section id="neoclouds" class="section-dark">
+  <!-- ── AI Clouds (dark) ── -->
+  <section id="ai-clouds" class="section-dark">
     <div class="container">
       <div class="neocloud-grid">
 
         <div class="neocloud-copy">
-          <p class="section-label">For neoclouds</p>
-          <h2 class="section-title">Built for GPU cloud providers</h2>
-          <p class="section-body">If you sell GPU compute on Kubernetes, vBilling gives you the billing layer you need — without building it yourself.</p>
+          <p class="section-label">For AI Clouds</p>
+          <h2 class="section-title">Built for AI Clouds</h2>
+          <p class="section-body">If you run an AI cloud on Kubernetes, vBilling gives you the billing pipe — without forcing a billing backend on you.</p>
           <br>
-          <p class="section-body" style="font-size:16px; margin-bottom:28px;">Neocloud providers give each customer a virtual cluster with private, dedicated GPU nodes. vBilling detects the dedicated hardware, meters full node capacity, and feeds usage into Lago for monthly invoicing.</p>
+          <p class="section-body" style="font-size:16px; margin-bottom:28px;">AI Clouds give each customer a Tenant Cluster with dedicated GPU nodes. vBilling detects the hardware, meters node capacity by GPU SKU, and streams events into whichever billing adapter you run.</p>
 
           <ul class="checklist">
             <li>Detects dedicated H100, A100, L40S nodes per tenant</li>
-            <li>Bills full node capacity — CPU, memory, and GPUs</li>
-            <li>GPU type-specific pricing via Lago plans</li>
+            <li>Meters full node capacity — CPU, memory, and GPUs</li>
+            <li>GPU SKU-specific events, priced in your billing platform</li>
             <li>DCGM integration for real utilization tracking</li>
-            <li>Lago handles invoices, wallets, and Stripe integration</li>
+            <li>Adapter-agnostic — keep your existing billing backend</li>
           </ul>
 
           <div style="display:flex; gap:12px; flex-wrap:wrap;">
             <a href="#quick-start" class="btn-primary">Get started</a>
-            <a href="getting-started.html" class="btn-ghost">View docs</a>
+            <a href="https://github.com/vClusterLabs-Experiments/vbilling" class="btn-ghost">View on GitHub</a>
           </div>
         </div>
 
         <div class="flow-card">
-          <div style="font-weight:700; color:rgba(255,255,255,0.9); margin-bottom:12px; font-family:var(--font-body); font-size:14px; letter-spacing:0.04em; text-transform:uppercase;">Neocloud billing flow</div>
+          <div style="font-weight:700; color:rgba(255,255,255,0.9); margin-bottom:12px; font-family:var(--font-body); font-size:14px; letter-spacing:0.04em; text-transform:uppercase;">AI Cloud billing flow</div>
           <div class="dim">──────────────────────────────</div>
           Customer signs up
           <div class="dim">↓</div>
-          Platform provisions virtual cluster
+          Platform provisions Tenant Cluster
           <span class="hi">+ private nodes (8x H100)</span>
           <div class="dim">↓</div>
           vBilling auto-discovers
-          <span class="hi">detects private nodes</span>
+          <span class="hi">detects dedicated nodes</span>
           <div class="dim">↓</div>
-          Sends events every 60s:
+          Streams events every 60s:
           <span class="hi">  8 GPU-hours (H100)</span>
           <span class="hi">  96 CPU-hours</span>
           <span class="hi">  1 TB memory-hours</span>
           <div class="dim">↓</div>
-          Lago aggregates monthly
+          Billing adapter aggregates
           <span class="hi">generates invoice</span>
           <div class="dim">↓</div>
-          <span style="color:#B2F300">Webhook → Stripe → Paid $</span>
+          <span class="accent">Webhook → payments → Paid $</span>
         </div>
 
       </div>
     </div>
   </section>
 
-  <!-- ── Footer ── -->
+  <!-- ── Footer (vcluster.com chrome) ── -->
   <footer>
     <div class="container">
-      <div class="footer-inner">
+      <div class="footer-top">
 
-        <div class="footer-brand">
-          <div class="logo" style="color:#FFFFFF; margin-bottom:12px;">
-            <svg class="logo-mark" viewBox="0 0 28 28" fill="none"><path d="M4 7L14 21L24 7" stroke="#FF6600" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            vBilling
-          </div>
-          <p>Usage-based billing for vCluster tenants. Auto-discovers virtual clusters, meters resource consumption, and generates invoices via Lago.</p>
+        <div class="footer-subscribe">
+          <h4>Subscribe</h4>
+          <p>Join our newsletter to stay up to date on new releases.</p>
+          <form class="subscribe-form" action="https://www.vcluster.com/" method="get">
+            <input type="email" placeholder="Email address" aria-label="Email address">
+            <button type="submit" class="btn-primary btn-sm">Subscribe</button>
+          </form>
+          <p class="footer-consent">By subscribing you agree to our <a href="https://www.vcluster.com/legal/privacy">Privacy Policy</a> and provide email consent.</p>
         </div>
 
         <div class="footer-col">
           <h4>Product</h4>
           <ul>
-            <li><a href="#how-it-works">How it works</a></li>
-            <li><a href="#features">Features</a></li>
-            <li><a href="#architecture">Architecture</a></li>
-            <li><a href="#quick-start">Quick start</a></li>
+            <li><a href="https://github.com/loft-sh/vcluster">GitHub</a></li>
+            <li><a href="https://www.vcluster.com/docs/get-started">Getting Started</a></li>
+            <li><a href="https://www.vcluster.com/docs">Documentation</a></li>
+            <li><a href="https://slack.loft.sh/">Slack</a></li>
+            <li><a href="https://www.vcluster.com/releases">Changelog</a></li>
           </ul>
         </div>
 
         <div class="footer-col">
-          <h4>Resources</h4>
+          <h4>Company</h4>
           <ul>
-            <li><a href="https://github.com/vClusterLabs-Experiments/vbilling/issues">GitHub issues</a></li>
-            <li><a href="getting-started.html">Documentation</a></li>
-            <li><a href="https://github.com/vClusterLabs-Experiments/vbilling/blob/main/LICENSE">License (Apache 2.0)</a></li>
-          </ul>
-        </div>
-
-        <div class="footer-col">
-          <h4>Ecosystem</h4>
-          <ul>
-            <li><a href="https://vcluster.com">vCluster</a></li>
-            <li><a href="https://www.getlago.com">Lago</a></li>
-            <li><a href="https://loft.sh">Loft Labs</a></li>
-            <li><a href="https://github.com/NVIDIA/dcgm-exporter">DCGM exporter</a></li>
+            <li><a href="https://www.vcluster.com/company/about">About</a></li>
+            <li><a href="https://www.vcluster.com/blog">Blog</a></li>
+            <li><a href="https://www.vcluster.com/careers">Careers</a></li>
+            <li><a href="https://www.vcluster.com/events">Events</a></li>
           </ul>
         </div>
 
       </div>
 
       <div class="footer-bottom">
-        Apache 2.0 license. Built for the Kubernetes community. vBilling is not affiliated with Loft Labs or Lago.
+        <span>© 2026 vCluster. All rights reserved.</span>
+        <div class="footer-legal">
+          <a href="https://www.vcluster.com/legal/privacy">Privacy Policy</a>
+          <a href="https://www.vcluster.com/legal/terms">Terms of Service</a>
+          <a href="https://www.vcluster.com/legal/cookies">Cookie Policy</a>
+        </div>
       </div>
     </div>
   </footer>
@@ -1045,10 +1492,21 @@ LoadBalancer Hours      <span class="string">$0.025</span></code>
       });
     }
 
-    // Close mobile nav on link click
-    document.querySelectorAll('#nav a').forEach(a => {
-      a.addEventListener('click', () => {
-        document.getElementById('nav').classList.remove('open');
+    // Quick Start tabs
+    document.querySelectorAll('.qs-tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        const id = tab.dataset.tab;
+        document.querySelectorAll('.qs-tab').forEach(t => {
+          const isActive = t === tab;
+          t.classList.toggle('active', isActive);
+          t.setAttribute('aria-selected', isActive ? 'true' : 'false');
+        });
+        document.querySelectorAll('.qs-panel').forEach(p => {
+          const isActive = p.dataset.panel === id;
+          p.classList.toggle('active', isActive);
+          if (isActive) p.removeAttribute('hidden');
+          else p.setAttribute('hidden', '');
+        });
       });
     });
   </script>

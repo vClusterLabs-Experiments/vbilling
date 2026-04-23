@@ -3,121 +3,108 @@
 </p>
 
 <p align="center">
-  <strong>Usage-based billing for vCluster tenants</strong><br>
-  Auto-discovers vClusters, meters resource consumption, and generates invoices via <a href="https://github.com/getlago/lago">Lago</a>
+  <strong>Usage-based billing for AI Clouds running vCluster or vMetal</strong><br>
+  Auto-discovers Tenant Clusters, meters node capacity and GPU SKUs, and streams usage events to your billing adapter.
 </p>
 
 <p align="center">
   <a href="https://github.com/vClusterLabs-Experiments/vbilling/actions"><img src="https://img.shields.io/badge/build-passing-brightgreen" alt="Build"></a>
   <a href="https://goreportcard.com/report/github.com/vClusterLabs-Experiments/vbilling"><img src="https://img.shields.io/badge/go%20report-A+-brightgreen" alt="Go Report"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="License"></a>
-  <a href="https://github.com/getlago/lago"><img src="https://img.shields.io/badge/billing-Lago%20OSS-06b6d4" alt="Lago"></a>
+  <a href="#quick-start"><img src="https://img.shields.io/badge/adapter-Lago-06b6d4" alt="Lago adapter"></a>
+  <a href="#quick-start"><img src="https://img.shields.io/badge/adapter-Metronome%20%7C%20Stripe-lightgrey" alt="Coming soon"></a>
 </p>
 
 ---
 
-Built for neoclouds, AI factories, and platform teams running managed Kubernetes with vCluster.
+Built for AI Clouds and platform teams running Kubernetes with vCluster or vMetal. vBilling is the pipe — not the billing engine. You keep your billing backend (Lago today; Metronome, Stripe Meters, OpenMeter, or a custom adapter coming next).
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────--────┐
-│                          Host Cluster                                 │
-│                                                                       │
-│  ┌──────-────────┐  ┌─-─────────────┐  ┌-──────────────-┐             │
-│  │  vCluster     │  │  vCluster     │  │  vCluster      │             │
-│  │  team-alpha   │  │  team-beta    │  │  team-gpu      │             │
-│  │  (shared)     │  │  (shared)     │  │  (private)     │             │
-│  │               │  │               │  │   ┌────────-┐  │             │
-│  │  Pods in host │  │  Pods in host │  │   │8× H100  │  │             │
-│  │  namespace    │  │  namespace    │  │   │Private  │  │             │
-│  │               │  │               │  │   │Nodes    │  │             │
-│  └───────┬───────┘  └───────┬───────┘  └───┴─-──┬────┘──┘             │
-│          │                  │                   │                     │
-│          └──────────────────┼───────────────────┘                     │
-│                             │                                         │
-│                  ┌──────────▼────────-──┐                             │
-│                  │     vBilling         │                             │
-│                  │     Controller       │                             │
-│                  │                      │                             │
-│                  │  • Auto-discovers    │                             │
-│                  │  • Collects metrics  │                             │
-│                  │  • Sends usage events│                             │
-│                  └──────────┬───────────┘                             │
-└─────────────────────────────┼────────────────────────────────────────-┘
+┌─────────────────────────────────────────────────────────────────────┐
+│                      Control Plane Cluster                          │
+│                                                                     │
+│  ┌───────────────┐  ┌───────────────┐  ┌───────────────┐            │
+│  │ Tenant        │  │ Tenant        │  │ Tenant        │            │
+│  │ Cluster       │  │ Cluster       │  │ Cluster       │            │
+│  │ team-alpha    │  │ team-beta     │  │ team-gpu      │            │
+│  │               │  │               │  │               │            │
+│  │ private ·     │  │ private ·     │  │ private ·     │            │
+│  │ 4× A100       │  │ 2× L40S       │  │ 8× H100       │            │
+│  └───────┬───────┘  └───────┬───────┘  └───────┬───────┘            │
+│          │                  │                  │                    │
+│          └──────────────────┼──────────────────┘                    │
+│                             │                                       │
+│                 ┌───────────▼────────────┐                          │
+│                 │      vBilling          │                          │
+│                 │      Controller        │                          │
+│                 │                        │                          │
+│                 │  • Auto-discovers      │                          │
+│                 │  • Meters node capacity│                          │
+│                 │  • Streams events      │                          │
+│                 └───────────┬────────────┘                          │
+└─────────────────────────────┼───────────────────────────────────────┘
                               │ Usage events (HTTP)
-                     ┌────────▼──────-──┐
-                     │      Lago        │
-                     │  Billing Engine  │
-                     │                  │
-                     │  Plans & pricing │  ← Provider configures here
-                     │  Subscriptions   │
-                     │  Invoices        │
-                     │  Wallets/prepay  │
-                     └──────────────────┘
+                 ┌────────────▼────────────┐
+                 │     Billing Adapter     │
+                 │                         │
+                 │  Lago · Stripe ·        │
+                 │  Metronome · Custom     │
+                 │                         │
+                 │  Plans · Subscriptions  │  ← Provider configures
+                 │  Invoices · Wallets     │
+                 └─────────────────────────┘
 ```
 
-vBilling handles **metrics collection and event delivery**. Lago handles **pricing, plans, and invoicing**. Providers configure their own pricing in Lago — vBilling never decides what to charge.
+vBilling handles **metrics collection and event delivery**. Your billing adapter handles **pricing, plans, and invoicing**. Providers configure pricing in the adapter — vBilling never decides what to charge.
 
-## Supported Deployment Models
-
-### Shared Nodes (IDP / Platform Teams)
-
-Multiple vClusters share the same host cluster nodes. Billing is based on actual pod-level resource consumption.
-
-```
-Host Node (shared)
-├── team-alpha pods → billed by actual CPU/memory usage
-├── team-beta pods  → billed by actual CPU/memory usage
-└── team-gpu pods   → billed by actual CPU/memory usage
-```
-
-### Private Nodes (Neoclouds / AI Factories)
+## Deployment Model
 
 Each tenant gets dedicated bare-metal nodes (GPUs, high-memory, etc.). Billing is based on full node allocation — the entire node is theirs.
 
 ```
-team-gpu's Private Nodes (dedicated)
-├── node-1: 8× H100, 96 CPU, 1TB RAM → billed for full node
-├── node-2: 8× H100, 96 CPU, 1TB RAM → billed for full node
-└── node-3: 8× H100, 96 CPU, 1TB RAM → billed for full node
+team-gpu's dedicated nodes
+├── node-1: 8× H100, 96 CPU, 1TB RAM → metered at full node capacity
+├── node-2: 8× H100, 96 CPU, 1TB RAM → metered at full node capacity
+└── node-3: 8× H100, 96 CPU, 1TB RAM → metered at full node capacity
 ```
 
-vBilling detects the mode automatically:
-- **Private nodes found** → bills full node capacity (CPU, memory, GPUs)
-- **No private nodes** → bills actual pod-level usage from metrics-server
+> Pod-level metering for shared-node platforms is present in the code but not the documented path. Primary focus is dedicated-node tenants running on AI Clouds.
 
 ## What Gets Metered
 
-| Metric | Source | Shared Mode | Private Mode |
-|--------|--------|-------------|-------------|
-| CPU core-hours | metrics-server / node capacity | Pod usage | Full node capacity |
-| Memory GB-hours | metrics-server / node capacity | Pod usage | Full node capacity |
-| Storage GB-hours | PVC sizes | Per PVC | Per PVC |
-| GPU hours (by type) | Pod requests + node labels | Per pod allocation | Full node GPUs |
-| GPU utilization | DCGM via Prometheus | Per GPU % | Per GPU % |
-| Network egress GB | Prometheus | Per namespace | Per namespace |
-| LoadBalancer hours | Service count | Per LB service | Per LB service |
-| Instance hours | Per vCluster flat | 1 per vCluster | 1 per vCluster |
-| Private node hours | Node count | N/A | Per dedicated node |
+| Metric                  | Source                | Granularity        |
+|-------------------------|-----------------------|--------------------|
+| Node hours              | Node watch            | Per dedicated node |
+| CPU core-hours          | Node capacity         | Full node capacity |
+| Memory GB-hours         | Node capacity         | Full node capacity |
+| GPU hours (by SKU)      | Node labels           | Per GPU SKU        |
+| GPU utilization         | DCGM via Prometheus   | Per GPU %          |
+| Storage GB-hours        | PVC sizes             | Per PVC            |
+| Network egress GB       | CNI / Prometheus      | Per tenant         |
+| LoadBalancer hours      | Service count         | Per LB service     |
+| Control plane hours     | Tenant Cluster watch  | 1 per cluster      |
 
-**GPU type detection** reads from node labels:
+**GPU SKU detection** reads from node labels:
 - `nvidia.com/gpu.product` (NVIDIA GPU Operator)
 - `cloud.google.com/gke-accelerator` (GKE)
 - `k8s.amazonaws.com/accelerator` (EKS)
 
-An H100 hour and a T4 hour are tracked as separate events so providers can price them differently in Lago.
+An H100 hour and a T4 hour are emitted as separate events so providers can price each SKU differently in their billing adapter.
 
 ## Quick Start
 
+vBilling ships with a **Lago adapter** today. Metronome, Stripe Meters, OpenMeter, and custom adapters are on the roadmap — the install pattern is the same regardless of adapter. The walkthrough below uses Lago.
+
 ### Prerequisites
 
-- Kubernetes cluster with vClusters running
+- Kubernetes cluster with Tenant Clusters running (vCluster)
 - [metrics-server](https://github.com/kubernetes-sigs/metrics-server) installed
-- Lago instance (see [Deploying Lago](#deploying-lago))
+- A billing adapter — Lago instance (see [Deploying Lago](#deploying-lago))
 - Optional: Prometheus with [DCGM Exporter](https://github.com/NVIDIA/dcgm-exporter) for GPU utilization
 
-### 1. Deploy Lago
+### 1. Choose & deploy your billing adapter (Lago)
 
 ```bash
 # Clone the vBilling repo (includes Lago docker-compose)
@@ -156,11 +143,12 @@ docker exec lago-db-1 psql -U lago -d lago -t -c "SELECT value FROM api_keys LIM
 docker buildx build --platform linux/amd64,linux/arm64 \
   -t <your-registry>/vbilling:v0.1.0 --push .
 
-# Install via Helm
+# Install via Helm — point vBilling at your adapter
 helm upgrade --install vbilling deploy/helm/vbilling \
   --namespace vbilling-system --create-namespace \
   --set image.repository=<your-registry>/vbilling \
   --set image.tag=v0.1.0 \
+  --set adapter=lago \
   --set lago.apiURL=http://lago-api.lago-system:3000 \
   --set lago.apiKey=YOUR_LAGO_API_KEY
 ```
@@ -171,35 +159,35 @@ make build
 LAGO_API_KEY=<key> LAGO_API_URL=http://localhost:3000 ./bin/vbilling
 ```
 
-### 3. Configure Pricing in Lago
+### 3. Configure pricing in your adapter
 
-vBilling creates billable metrics and a skeleton plan with **$0 pricing**. You set your own prices:
+vBilling creates billable metrics and a skeleton plan with **$0 pricing**. You set your own prices in the adapter's UI or API:
 
 1. Open Lago UI → **Plans** → **vCluster Standard**
 2. Edit each charge with your pricing:
    - CPU Core-Hours: `$0.065` (your cost + margin)
    - Memory GB-Hours: `$0.009`
-   - GPU Hours: `$4.50` (for H100) or use Lago's graduated pricing for volume discounts
+   - GPU Hours (H100): `$4.50` — or use Lago's graduated pricing for volume discounts
    - Storage GB-Hours: `$0.0002`
    - Network Egress GB: `$0.09`
-   - Private Node Hours: `$25.00` (for dedicated node billing)
+   - Node Hours: `$25.00` (for dedicated node billing)
 3. Save — pricing takes effect immediately for all tenants
 
-You can also create **multiple plans** (e.g., "GPU Premium", "Dev Tier") and assign different plans to different customers via the Lago API.
+You can also create **multiple plans** (e.g., "GPU Premium", "Dev Tier") and assign different plans to different customers via the adapter's API.
 
 ### 4. Done
 
 vBilling will:
-- Auto-discover all vClusters (via StatefulSet labels or Platform API)
-- Create a billing customer in Lago for each vCluster
-- Start sending usage events every 60 seconds
-- Lago generates invoices at the end of each billing period
+- Auto-discover all Tenant Clusters (via StatefulSet labels or Platform API)
+- Create a billing customer in your adapter for each Tenant Cluster
+- Stream usage events every 60 seconds
+- Your adapter generates invoices at the end of each billing period
 
 ## How It Works
 
 ### Discovery
 
-vBilling finds vClusters using two methods:
+vBilling finds Tenant Clusters using two methods:
 
 1. **Label scanning** (works with OSS vCluster): Watches StatefulSets and Deployments with `app=vcluster` label
 2. **Platform API** (works with vCluster Platform): Lists `VirtualClusterInstance` resources via the management API
@@ -209,15 +197,14 @@ vBilling finds vClusters using two methods:
 Every collection interval (default 60s):
 
 ```
-For each discovered vCluster:
-  1. Check for private nodes (labels: vcluster.loft.sh/managed-by=<name>)
-     → If found: read full node capacity (CPU, memory, GPUs, storage)
-     → If not: read pod-level metrics from metrics-server
+For each discovered Tenant Cluster:
+  1. Read dedicated node capacity (labels: vcluster.loft.sh/managed-by=<name>)
+     → Read full node capacity: CPU, memory, GPUs, storage
 
   2. Collect storage from PVCs in the namespace
 
   3. Collect GPU allocation from pod nvidia.com/gpu requests
-     → Detect GPU type from the node's nvidia.com/gpu.product label
+     → Detect GPU SKU from the node's nvidia.com/gpu.product label
 
   4. Count LoadBalancer services
 
@@ -229,23 +216,23 @@ For each discovered vCluster:
   8. Convert all metrics to billing units:
      CPU: cores × interval_hours = core-hours
      Memory: GB × interval_hours = GB-hours
-     GPU: count × interval_hours = GPU-hours (tagged with GPU type)
+     GPU: count × interval_hours = GPU-hours (tagged with GPU SKU)
 
-  9. Send all events to Lago in batch
+  9. Stream all events to the configured billing adapter in batch
 ```
 
 ### Billing Flow
 
 ```
-vCluster created  →  Customer auto-created in Lago
-                  →  Subscription started (plan: vcluster-standard)
-                  →  Usage events every 60s
-                  →  Lago aggregates over billing period
-                  →  Invoice generated (monthly)
-                  →  Webhook to payment provider (optional)
+Tenant Cluster created  →  Customer auto-created in adapter
+                        →  Subscription started (plan: vcluster-standard)
+                        →  Usage events every 60s
+                        →  Adapter aggregates over billing period
+                        →  Invoice generated (monthly)
+                        →  Webhook to payment provider (optional)
 
-vCluster deleted  →  Subscription terminated
-                  →  Final prorated invoice
+Tenant Cluster deleted  →  Subscription terminated
+                        →  Final prorated invoice
 ```
 
 ## Configuration
@@ -254,20 +241,23 @@ vCluster deleted  →  Subscription terminated
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LAGO_API_URL` | `http://localhost:3000` | Lago API endpoint |
-| `LAGO_API_KEY` | (required) | Lago API key |
+| `ADAPTER` | `lago` | Billing adapter to use (`lago` today; more adapters coming) |
+| `LAGO_API_URL` | `http://localhost:3000` | Lago API endpoint (when `ADAPTER=lago`) |
+| `LAGO_API_KEY` | (required for Lago) | Lago API key |
 | `COLLECTION_INTERVAL` | `60s` | How often to scrape metrics |
-| `RECONCILE_INTERVAL` | `30s` | How often to discover vClusters |
-| `DEFAULT_PLAN_CODE` | `vcluster-standard` | Default Lago plan code |
+| `RECONCILE_INTERVAL` | `30s` | How often to discover Tenant Clusters |
+| `DEFAULT_PLAN_CODE` | `vcluster-standard` | Default plan code in the adapter |
 | `BILLING_CURRENCY` | `USD` | Currency for billing |
 | `PROMETHEUS_URL` | (empty) | Prometheus URL for DCGM/network |
 | `SPOT_DISCOUNT_PERCENT` | `60` | Discount for pods on spot nodes |
 
-**Note:** Pricing is NOT configured via environment variables. Configure pricing in Lago UI or API.
+**Note:** Pricing is NOT configured via environment variables. Configure pricing in your billing adapter's UI or API.
 
 ### Helm Values
 
 ```yaml
+adapter: lago  # billing adapter (lago today)
+
 lago:
   apiURL: "http://lago-api:3000"
   apiKey: ""
@@ -281,38 +271,22 @@ prometheus:
   url: "http://prometheus.monitoring:9090"  # optional
 ```
 
-## Use Cases
+## Use Case — AI Cloud
 
-### Neocloud / AI Factory
-
-Each customer gets a vCluster with Private Nodes (dedicated GPU bare metal). vBilling meters the full node allocation.
+Each customer gets a Tenant Cluster with dedicated bare-metal GPU nodes. vBilling meters the full node allocation by GPU SKU and streams events into whichever billing adapter you run.
 
 ```
 Customer signs up
-  → Platform provisions vCluster + Private Nodes (H100 cluster)
-  → vBilling discovers vCluster, detects private nodes
-  → Sends events: 8 GPU-hours (H100) + 96 CPU-hours + 1TB memory-hours per hour
-  → Lago invoices monthly at provider's rates
-  → Customer pays via Stripe (Lago webhook integration)
-```
-
-### Internal Platform (IDP)
-
-*Example: Enterprise platform team*
-
-Dev teams share cluster resources via vClusters. vBilling enables internal chargeback.
-
-```
-Team requests vCluster
-  → Platform team creates vCluster (shared nodes)
-  → vBilling discovers it, starts metering actual usage
-  → Each team sees their cost in Lago customer portal
-  → Finance does quarterly chargeback based on Lago invoices
+  → Platform provisions Tenant Cluster + dedicated nodes (8× H100)
+  → vBilling discovers Tenant Cluster, detects the dedicated nodes
+  → Streams events: 8 GPU-hours (H100) + 96 CPU-hours + 1 TB memory-hours per hour
+  → Adapter (Lago) invoices monthly at the provider's rates
+  → Customer pays via the adapter's payments integration (e.g., Stripe webhooks)
 ```
 
 ## Dashboard
 
-A lightweight billing dashboard is included at `dashboard/index.html`. It queries the Lago API directly and shows per-tenant usage breakdowns.
+A lightweight billing dashboard is included at `dashboard/index.html`. It queries the Lago API directly and shows per-tenant usage breakdowns. (Adapter-specific dashboards for Metronome and Stripe will ship alongside those adapters.)
 
 ```bash
 # Serve the dashboard
@@ -334,12 +308,12 @@ cmd/vbilling/main.go              Entry point
 internal/
   config/config.go                Configuration from env vars
   lago/
-    client.go                     Lago HTTP API client
+    client.go                     Lago HTTP API client (current adapter)
     bootstrap.go                  Auto-creates metrics + skeleton plan
-  discovery/discovery.go          vCluster discovery (labels + Platform API)
+  discovery/discovery.go          Tenant Cluster discovery (labels + Platform API)
   metrics/collector.go            All metrics: CPU, memory, GPU, storage,
-                                  network, DCGM, private nodes, spot/on-demand
-  controller/controller.go        Main reconciliation + billing loop
+                                  network, DCGM, dedicated nodes, spot/on-demand
+  controller/controller.go        Main reconciliation + event-streaming loop
 deploy/
   helm/vbilling/                  Helm chart with RBAC
   lago/                           Docker Compose for Lago
@@ -348,6 +322,8 @@ scripts/demo.sh                   End-to-end demo using vind
 Dockerfile                        Multi-stage distroless build
 Makefile                          Build targets
 ```
+
+> Multi-adapter refactor (Source/Destination plugin pattern) is planned. Today Lago is wired directly; future adapters will live under `internal/destinations/<name>/`.
 
 ## Building
 
@@ -389,10 +365,14 @@ Deploy Lago as Kubernetes workloads. Key components: PostgreSQL, Redis, API (Rai
 
 ## Roadmap
 
+- [ ] Source / Destination plugin refactor (adapter pattern)
+- [ ] Metronome adapter
+- [ ] Stripe Meters adapter
+- [ ] OpenMeter adapter (native CloudEvents)
+- [ ] Custom adapter developer guide
 - [ ] MIG (Multi-Instance GPU) partition tracking
-- [ ] Lago webhook handler for invoice lifecycle events
 - [ ] Grafana dashboard integration
-- [ ] Budget alerts per vCluster
+- [ ] Budget alerts per Tenant Cluster
 - [ ] Reserved capacity / commitment pricing
 - [ ] Auto Nodes billing (dynamic node provisioning events)
 - [ ] Netris network isolation billing integration
