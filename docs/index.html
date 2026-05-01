@@ -590,6 +590,12 @@
       position: relative;
       overflow-x: auto;
     }
+    .code-block pre {
+      margin: 0;
+      background: transparent;
+      white-space: pre;
+      overflow-x: auto;
+    }
     .code-block code {
       font-family: var(--font-code);
       font-size: 13px;
@@ -598,6 +604,7 @@
       color: rgba(255,255,255,0.88);
       display: block;
       letter-spacing: -0.01em;
+      white-space: pre;
     }
     .code-block code .comment { color: var(--color-black-50); }
     .code-block code .string  { color: rgba(255,255,255,0.95); }
@@ -1215,23 +1222,24 @@
       </div>
 
       <div class="arch-diagram">
-<span class="highlight">Control Plane Cluster</span>
-<span class="dim">─────────────────────────────────────────────────────────</span>
-
-  <span class="highlight">Tenant Cluster</span> team-alpha    <span class="highlight">Tenant Cluster</span> team-beta    <span class="highlight">Tenant Cluster</span> team-gpu
-  private · 4x A100          private · 2x L40S          private · 8x H100
-
-                    <span class="highlight">vBilling Controller</span>
-                    Go binary · Deployment in Control Plane Cluster
-                    <span class="accent">Choose → Configure → Connect</span>
-                            |
-                    Usage events (HTTP)
-                            |
-                    <span class="highlight">Billing Adapter</span>
-                    Lago · Stripe · Metronome · Custom
-                    Plans &amp; pricing · Subscriptions · Invoices
-
-<span class="dim">─────────────────────────────────────────────────────────</span>
+        <div><span class="highlight">Control Plane Cluster</span></div>
+        <div class="dim">─────────────────────────────────────────────</div>
+        <div>&nbsp;</div>
+        <div><span class="highlight">Tenant Cluster</span> team-alpha &middot; private &middot; 4x A100</div>
+        <div><span class="highlight">Tenant Cluster</span> team-beta &middot; private &middot; 2x L40S</div>
+        <div><span class="highlight">Tenant Cluster</span> team-gpu &middot; private &middot; 8x H100</div>
+        <div>&nbsp;</div>
+        <div><span class="highlight">vBilling Controller</span></div>
+        <div>Go binary &middot; Deployment in Control Plane Cluster</div>
+        <div><span class="accent">Choose &rarr; Configure &rarr; Connect</span></div>
+        <div>&nbsp;</div>
+        <div class="dim">&darr; Usage events (HTTP) &darr;</div>
+        <div>&nbsp;</div>
+        <div><span class="highlight">Billing Adapter</span></div>
+        <div>Lago &middot; Stripe &middot; Metronome &middot; Custom</div>
+        <div>Plans &amp; pricing &middot; Subscriptions &middot; Invoices</div>
+        <div>&nbsp;</div>
+        <div class="dim">─────────────────────────────────────────────</div>
       </div>
     </div>
   </section>
@@ -1273,12 +1281,12 @@
               <p>Spin up the open-source billing engine with Docker Compose. UI at :8080, API at :3000.</p>
               <div class="code-block">
                 <button class="copy-btn" onclick="copyCode(this)">Copy</button>
-                <code><span class="comment"># Clone vBilling and start Lago</span>
+                <pre><code><span class="comment"># Clone vBilling and start Lago</span>
 git clone https://github.com/vClusterLabs-Experiments/vbilling.git
 cd vbilling/deploy/lago
 openssl genrsa 2048 > lago_rsa.key
 echo <span class="string">"LAGO_RSA_PRIVATE_KEY=$(base64 -i lago_rsa.key | tr -d '\n')"</span> > .env
-docker compose <span class="flag">--env-file</span> .env up <span class="flag">-d</span></code>
+docker compose <span class="flag">--env-file</span> .env up <span class="flag">-d</span></code></pre>
               </div>
             </div>
           </div>
@@ -1290,11 +1298,11 @@ docker compose <span class="flag">--env-file</span> .env up <span class="flag">-
               <p>Deploy the controller via Helm. Point it at your Lago instance with your API key.</p>
               <div class="code-block">
                 <button class="copy-btn" onclick="copyCode(this)">Copy</button>
-                <code>helm upgrade <span class="flag">--install</span> vbilling deploy/helm/vbilling \
+                <pre><code>helm upgrade <span class="flag">--install</span> vbilling deploy/helm/vbilling \
   <span class="flag">--namespace</span> vbilling-system <span class="flag">--create-namespace</span> \
   <span class="flag">--set</span> <span class="string">adapter=lago</span> \
   <span class="flag">--set</span> <span class="string">lago.apiURL=http://lago-api:3000</span> \
-  <span class="flag">--set</span> <span class="string">lago.apiKey=YOUR_LAGO_API_KEY</span></code>
+  <span class="flag">--set</span> <span class="string">lago.apiKey=YOUR_LAGO_API_KEY</span></code></pre>
               </div>
             </div>
           </div>
@@ -1306,7 +1314,7 @@ docker compose <span class="flag">--env-file</span> .env up <span class="flag">-
               <p>vBilling creates a skeleton plan with $0 pricing. Set your rates in the Lago UI or API.</p>
               <div class="code-block">
                 <button class="copy-btn" onclick="copyCode(this)">Copy</button>
-                <code><span class="comment"># In Lago UI → Plans → vCluster Standard</span>
+                <pre><code><span class="comment"># In Lago UI → Plans → vCluster Standard</span>
 <span class="comment"># Set prices per metric:</span>
 CPU Core-Hours          <span class="string">$0.065</span>
 Memory GB-Hours         <span class="string">$0.009</span>
@@ -1314,7 +1322,7 @@ GPU Hours (H100)        <span class="string">$4.50</span>
 Storage GB-Hours        <span class="string">$0.0002</span>
 Network Egress GB       <span class="string">$0.09</span>
 Node Hours              <span class="string">$25.00</span>
-LoadBalancer Hours      <span class="string">$0.025</span></code>
+LoadBalancer Hours      <span class="string">$0.025</span></code></pre>
               </div>
             </div>
           </div>
