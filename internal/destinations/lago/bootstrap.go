@@ -1,6 +1,7 @@
 package lago
 
 import (
+	"context"
 	"log"
 	"strings"
 
@@ -23,7 +24,7 @@ const (
 
 // Bootstrap creates all billable metrics and a default plan in Lago.
 // It is idempotent — safe to call on every startup.
-func Bootstrap(client *Client, cfg *config.Config) error {
+func Bootstrap(ctx context.Context, client *Client, cfg *config.Config) error {
 	log.Println("[bootstrap] setting up Lago billing configuration...")
 
 	// Step 1: Create billable metrics
@@ -95,14 +96,14 @@ func Bootstrap(client *Client, cfg *config.Config) error {
 
 	metricIDs := make(map[string]string) // code -> lago_id
 	for _, m := range metrics {
-		existing, err := client.GetBillableMetric(m.Code)
+		existing, err := client.GetBillableMetric(ctx, m.Code)
 		if err == nil && existing.LagoID != "" {
 			metricIDs[m.Code] = existing.LagoID
 			log.Printf("[bootstrap] metric %q already exists (id=%s)", m.Code, existing.LagoID)
 			continue
 		}
 
-		created, err := client.CreateBillableMetric(m)
+		created, err := client.CreateBillableMetric(ctx, m)
 		if err != nil {
 			// If it already exists (409), try to get it again
 			if strings.Contains(err.Error(), "422") || strings.Contains(err.Error(), "already") {
@@ -116,7 +117,7 @@ func Bootstrap(client *Client, cfg *config.Config) error {
 	}
 
 	// Step 2: Create default plan with charges
-	_, err := client.GetPlan(cfg.DefaultPlanCode)
+	_, err := client.GetPlan(ctx, cfg.DefaultPlanCode)
 	if err == nil {
 		log.Printf("[bootstrap] plan %q already exists", cfg.DefaultPlanCode)
 		return nil
@@ -190,7 +191,7 @@ func Bootstrap(client *Client, cfg *config.Config) error {
 		Charges:        validCharges,
 	}
 
-	created, err := client.CreatePlan(plan)
+	created, err := client.CreatePlan(ctx, plan)
 	if err != nil {
 		if strings.Contains(err.Error(), "422") || strings.Contains(err.Error(), "already") {
 			log.Printf("[bootstrap] plan %q already exists, skipping", cfg.DefaultPlanCode)

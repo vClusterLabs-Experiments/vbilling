@@ -30,7 +30,7 @@ type Adapter struct {
 func (a *Adapter) Name() string { return "lago" }
 
 func (a *Adapter) Bootstrap(ctx context.Context) error {
-	return Bootstrap(a.client, a.cfg)
+	return Bootstrap(ctx, a.client, a.cfg)
 }
 
 func (a *Adapter) EnsureTenant(ctx context.Context, t destinations.Tenant) error {
@@ -44,16 +44,16 @@ func (a *Adapter) EnsureTenant(ctx context.Context, t destinations.Tenant) error
 		Currency:   t.Currency,
 		Metadata:   meta,
 	}
-	if _, err := a.client.UpsertCustomer(cust); err != nil {
+	if _, err := a.client.UpsertCustomer(ctx, cust); err != nil {
 		// Metadata keys may already exist on the customer — retry without metadata.
 		cust.Metadata = nil
-		if _, err2 := a.client.UpsertCustomer(cust); err2 != nil {
+		if _, err2 := a.client.UpsertCustomer(ctx, cust); err2 != nil {
 			return fmt.Errorf("upsert customer: %w", err2)
 		}
 	}
 
 	subID := subscriptionIDFor(t.ExternalID)
-	if _, err := a.client.GetCurrentUsage(t.ExternalID, subID); err == nil {
+	if _, err := a.client.GetCurrentUsage(ctx, t.ExternalID, subID); err == nil {
 		// Subscription already exists.
 		return nil
 	}
@@ -63,14 +63,14 @@ func (a *Adapter) EnsureTenant(ctx context.Context, t destinations.Tenant) error
 		PlanCode:           a.cfg.DefaultPlanCode,
 		ExternalID:         subID,
 	}
-	if _, err := a.client.CreateSubscription(sub); err != nil {
+	if _, err := a.client.CreateSubscription(ctx, sub); err != nil {
 		log.Printf("[lago] warning: could not create subscription %s: %v", subID, err)
 	}
 	return nil
 }
 
 func (a *Adapter) RemoveTenant(ctx context.Context, externalID string) error {
-	return a.client.TerminateSubscription(subscriptionIDFor(externalID))
+	return a.client.TerminateSubscription(ctx, subscriptionIDFor(externalID))
 }
 
 func (a *Adapter) SendEvents(ctx context.Context, events []destinations.UsageEvent) error {
@@ -106,7 +106,7 @@ func (a *Adapter) SendEvents(ctx context.Context, events []destinations.UsageEve
 			end = len(lagoEvents)
 		}
 		batch := lagoEvents[i:end]
-		if err := a.client.SendEvents(batch); err != nil {
+		if err := a.client.SendEvents(ctx, batch); err != nil {
 			return fmt.Errorf("send %d events: %w", len(batch), err)
 		}
 		log.Printf("[lago] sent %d billing events", len(batch))

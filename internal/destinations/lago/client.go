@@ -2,6 +2,7 @@ package lago
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -120,18 +121,18 @@ type apiError struct {
 
 // --- Billable Metrics ---
 
-func (c *Client) CreateBillableMetric(m BillableMetric) (*BillableMetric, error) {
+func (c *Client) CreateBillableMetric(ctx context.Context, m BillableMetric) (*BillableMetric, error) {
 	body := map[string]BillableMetric{"billable_metric": m}
 	var resp billableMetricResp
-	if err := c.post("/api/v1/billable_metrics", body, &resp); err != nil {
+	if err := c.post(ctx, "/api/v1/billable_metrics", body, &resp); err != nil {
 		return nil, fmt.Errorf("create billable metric %q: %w", m.Code, err)
 	}
 	return &resp.BillableMetric, nil
 }
 
-func (c *Client) GetBillableMetric(code string) (*BillableMetric, error) {
+func (c *Client) GetBillableMetric(ctx context.Context, code string) (*BillableMetric, error) {
 	var resp billableMetricResp
-	if err := c.get("/api/v1/billable_metrics/"+code, &resp); err != nil {
+	if err := c.get(ctx, "/api/v1/billable_metrics/"+code, &resp); err != nil {
 		return nil, err
 	}
 	return &resp.BillableMetric, nil
@@ -139,18 +140,18 @@ func (c *Client) GetBillableMetric(code string) (*BillableMetric, error) {
 
 // --- Plans ---
 
-func (c *Client) CreatePlan(p Plan) (*Plan, error) {
+func (c *Client) CreatePlan(ctx context.Context, p Plan) (*Plan, error) {
 	body := map[string]Plan{"plan": p}
 	var resp planResp
-	if err := c.post("/api/v1/plans", body, &resp); err != nil {
+	if err := c.post(ctx, "/api/v1/plans", body, &resp); err != nil {
 		return nil, fmt.Errorf("create plan %q: %w", p.Code, err)
 	}
 	return &resp.Plan, nil
 }
 
-func (c *Client) GetPlan(code string) (*Plan, error) {
+func (c *Client) GetPlan(ctx context.Context, code string) (*Plan, error) {
 	var resp planResp
-	if err := c.get("/api/v1/plans/"+code, &resp); err != nil {
+	if err := c.get(ctx, "/api/v1/plans/"+code, &resp); err != nil {
 		return nil, err
 	}
 	return &resp.Plan, nil
@@ -158,10 +159,10 @@ func (c *Client) GetPlan(code string) (*Plan, error) {
 
 // --- Customers ---
 
-func (c *Client) UpsertCustomer(cust Customer) (*Customer, error) {
+func (c *Client) UpsertCustomer(ctx context.Context, cust Customer) (*Customer, error) {
 	body := map[string]Customer{"customer": cust}
 	var resp customerResp
-	if err := c.post("/api/v1/customers", body, &resp); err != nil {
+	if err := c.post(ctx, "/api/v1/customers", body, &resp); err != nil {
 		return nil, fmt.Errorf("upsert customer %q: %w", cust.ExternalID, err)
 	}
 	return &resp.Customer, nil
@@ -169,41 +170,41 @@ func (c *Client) UpsertCustomer(cust Customer) (*Customer, error) {
 
 // --- Subscriptions ---
 
-func (c *Client) CreateSubscription(sub Subscription) (*Subscription, error) {
+func (c *Client) CreateSubscription(ctx context.Context, sub Subscription) (*Subscription, error) {
 	body := map[string]Subscription{"subscription": sub}
 	var resp subscriptionResp
-	if err := c.post("/api/v1/subscriptions", body, &resp); err != nil {
+	if err := c.post(ctx, "/api/v1/subscriptions", body, &resp); err != nil {
 		return nil, fmt.Errorf("create subscription %q: %w", sub.ExternalID, err)
 	}
 	return &resp.Subscription, nil
 }
 
-func (c *Client) TerminateSubscription(externalID string) error {
-	return c.delete("/api/v1/subscriptions/" + externalID)
+func (c *Client) TerminateSubscription(ctx context.Context, externalID string) error {
+	return c.delete(ctx, "/api/v1/subscriptions/"+externalID)
 }
 
 // --- Events ---
 
-func (c *Client) SendEvent(event Event) error {
+func (c *Client) SendEvent(ctx context.Context, event Event) error {
 	body := map[string]Event{"event": event}
-	return c.post("/api/v1/events", body, nil)
+	return c.post(ctx, "/api/v1/events", body, nil)
 }
 
-func (c *Client) SendEvents(events []Event) error {
+func (c *Client) SendEvents(ctx context.Context, events []Event) error {
 	if len(events) == 0 {
 		return nil
 	}
 	body := map[string][]Event{"events": events}
-	return c.post("/api/v1/events/batch", body, nil)
+	return c.post(ctx, "/api/v1/events/batch", body, nil)
 }
 
 // --- Current Usage ---
 
-func (c *Client) GetCurrentUsage(customerExternalID, subscriptionExternalID string) (int, error) {
+func (c *Client) GetCurrentUsage(ctx context.Context, customerExternalID, subscriptionExternalID string) (int, error) {
 	path := fmt.Sprintf("/api/v1/customers/%s/current_usage?external_subscription_id=%s",
 		customerExternalID, subscriptionExternalID)
 	var resp currentUsageResp
-	if err := c.get(path, &resp); err != nil {
+	if err := c.get(ctx, path, &resp); err != nil {
 		return 0, err
 	}
 	return resp.CustomerUsage.AmountCents, nil
@@ -211,13 +212,13 @@ func (c *Client) GetCurrentUsage(customerExternalID, subscriptionExternalID stri
 
 // --- HTTP helpers ---
 
-func (c *Client) post(path string, body interface{}, result interface{}) error {
+func (c *Client) post(ctx context.Context, path string, body interface{}, result interface{}) error {
 	data, err := json.Marshal(body)
 	if err != nil {
 		return fmt.Errorf("marshal request: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", c.baseURL+path, bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(data))
 	if err != nil {
 		return err
 	}
@@ -250,8 +251,8 @@ func (c *Client) post(path string, body interface{}, result interface{}) error {
 	return nil
 }
 
-func (c *Client) get(path string, result interface{}) error {
-	req, err := http.NewRequest("GET", c.baseURL+path, nil)
+func (c *Client) get(ctx context.Context, path string, result interface{}) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
 	if err != nil {
 		return err
 	}
@@ -280,8 +281,8 @@ func (c *Client) get(path string, result interface{}) error {
 	return nil
 }
 
-func (c *Client) delete(path string) error {
-	req, err := http.NewRequest("DELETE", c.baseURL+path, nil)
+func (c *Client) delete(ctx context.Context, path string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.baseURL+path, nil)
 	if err != nil {
 		return err
 	}
