@@ -245,7 +245,7 @@
 
       <!-- Environment Variables -->
       <h2 id="environment-variables">Environment Variables</h2>
-      <p>When running vBilling as a binary or in a container, the following environment variables control its behavior. All have sensible defaults except <code>LAGO_API_KEY</code>, which is required.</p>
+      <p>When running vBilling as a binary or in a container, the following environment variables control its behavior. All have sensible defaults. <code>LAGO_API_KEY</code> is required when <code>ADAPTER=lago</code> (the default).</p>
 
       <div class="config-table-wrap">
         <table class="config-table">
@@ -258,13 +258,18 @@
           </thead>
           <tbody>
             <tr>
+              <td><code>ADAPTER</code></td>
+              <td>Billing adapter to use. Built-in: <code>lago</code>, <code>noop</code>. More adapters (Metronome, Stripe Meters, OpenMeter) are on the roadmap; custom adapters can be added by implementing the <code>Destination</code> interface.</td>
+              <td class="td-default">lago</td>
+            </tr>
+            <tr>
               <td><code>LAGO_API_URL</code></td>
-              <td>Base URL of the Lago API server</td>
+              <td>Base URL of the Lago API server (used when <code>ADAPTER=lago</code>)</td>
               <td class="td-default">http://localhost:3000</td>
             </tr>
             <tr>
               <td><code>LAGO_API_KEY</code></td>
-              <td><strong>Required.</strong> API key for authenticating with Lago</td>
+              <td><strong>Required when <code>ADAPTER=lago</code>.</strong> API key for authenticating with Lago</td>
               <td class="td-default">(none)</td>
             </tr>
             <tr>

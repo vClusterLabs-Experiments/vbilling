@@ -5,19 +5,20 @@ import (
 	"strings"
 
 	"github.com/loft-sh/vbilling/internal/config"
+	"github.com/loft-sh/vbilling/internal/destinations"
 )
 
-// MetricCodes for all billable metrics.
+// Re-exports of canonical metric codes for in-package use.
 const (
-	MetricCPUCoreHours      = "vcluster_cpu_core_hours"
-	MetricMemoryGBHours     = "vcluster_memory_gb_hours"
-	MetricStorageGBHours    = "vcluster_storage_gb_hours"
-	MetricInstanceHours     = "vcluster_instance_hours"
-	MetricGPUHours          = "vcluster_gpu_hours"
-	MetricGPUUtilization    = "vcluster_gpu_utilization"
-	MetricNetworkEgressGB   = "vcluster_network_egress_gb"
-	MetricLBHours           = "vcluster_lb_hours"
-	MetricPrivateNodeHours  = "vcluster_private_node_hours"
+	MetricCPUCoreHours     = destinations.MetricCPUCoreHours
+	MetricMemoryGBHours    = destinations.MetricMemoryGBHours
+	MetricStorageGBHours   = destinations.MetricStorageGBHours
+	MetricInstanceHours    = destinations.MetricInstanceHours
+	MetricGPUHours         = destinations.MetricGPUHours
+	MetricGPUUtilization   = destinations.MetricGPUUtilization
+	MetricNetworkEgressGB  = destinations.MetricNetworkEgressGB
+	MetricLBHours          = destinations.MetricLBHours
+	MetricPrivateNodeHours = destinations.MetricPrivateNodeHours
 )
 
 // Bootstrap creates all billable metrics and a default plan in Lago.

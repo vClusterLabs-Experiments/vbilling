@@ -8,7 +8,10 @@ import (
 )
 
 type Config struct {
-	// Lago connection
+	// Adapter selects the billing destination ("lago", "noop", future: "metronome", "stripe", "openmeter").
+	Adapter string
+
+	// Lago connection (used when Adapter == "lago")
 	LagoAPIURL string
 	LagoAPIKey string
 
@@ -32,6 +35,7 @@ type Config struct {
 
 func Load() *Config {
 	c := &Config{
+		Adapter:            envOr("ADAPTER", "lago"),
 		LagoAPIURL:         envOr("LAGO_API_URL", "http://localhost:3000"),
 		LagoAPIKey:         envOr("LAGO_API_KEY", ""),
 		CollectionInterval: envDuration("COLLECTION_INTERVAL", 60*time.Second),

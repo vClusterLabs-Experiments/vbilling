@@ -9,9 +9,13 @@ import (
 
 	"github.com/loft-sh/vbilling/internal/config"
 	"github.com/loft-sh/vbilling/internal/controller"
+	"github.com/loft-sh/vbilling/internal/destinations"
 	"github.com/loft-sh/vbilling/internal/discovery"
-	"github.com/loft-sh/vbilling/internal/lago"
 	"github.com/loft-sh/vbilling/internal/metrics"
+
+	// Register built-in adapters via blank import so their init() funcs run.
+	_ "github.com/loft-sh/vbilling/internal/destinations/lago"
+	_ "github.com/loft-sh/vbilling/internal/destinations/noop"
 
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
@@ -25,16 +29,16 @@ func main() {
 	log.Println("vBilling - vCluster Billing Controller")
 	log.Println("=======================================")
 
-	// Load configuration
 	cfg := config.Load()
-	if cfg.LagoAPIKey == "" {
-		log.Fatal("LAGO_API_KEY is required")
-	}
-	log.Printf("Lago API: %s", cfg.LagoAPIURL)
+	log.Printf("Adapter: %s", cfg.Adapter)
 	log.Printf("Plan: %s | Currency: %s", cfg.DefaultPlanCode, cfg.BillingCurrency)
 	log.Printf("Collection: %s | Reconcile: %s", cfg.CollectionInterval, cfg.ReconcileInterval)
 
-	// Create Kubernetes clients
+	dest, err := destinations.New(cfg.Adapter, cfg)
+	if err != nil {
+		log.Fatalf("Failed to initialize billing adapter: %v", err)
+	}
+
 	kubeConfig, err := getKubeConfig()
 	if err != nil {
 		log.Fatalf("Failed to get Kubernetes config: %v", err)
@@ -55,25 +59,18 @@ func main() {
 		log.Fatalf("Failed to create dynamic client: %v", err)
 	}
 
-	// Create Lago client
-	lagoClient := lago.NewClient(cfg.LagoAPIURL, cfg.LagoAPIKey)
-
-	// Bootstrap Lago with billing configuration
-	log.Println("Bootstrapping Lago billing configuration...")
-	if err := lago.Bootstrap(lagoClient, cfg); err != nil {
-		log.Printf("WARNING: Lago bootstrap failed: %v", err)
-		log.Println("The controller will continue but billing may not work correctly.")
-		log.Println("Ensure Lago is running and accessible at", cfg.LagoAPIURL)
-	}
-
-	// Create components
-	disc := discovery.NewDiscoverer(kubeClient, dynamicClient, cfg.WatchNamespaces)
-	coll := metrics.NewCollector(kubeClient, metricsClient, cfg.PrometheusURL, cfg.SpotDiscountPercent)
-	ctrl := controller.New(cfg, lagoClient, disc, coll)
-
-	// Run with graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	log.Printf("Bootstrapping %s adapter...", dest.Name())
+	if err := dest.Bootstrap(ctx); err != nil {
+		log.Printf("WARNING: %s bootstrap failed: %v", dest.Name(), err)
+		log.Println("The controller will continue but billing may not work correctly.")
+	}
+
+	disc := discovery.NewDiscoverer(kubeClient, dynamicClient, cfg.WatchNamespaces)
+	coll := metrics.NewCollector(kubeClient, metricsClient, cfg.PrometheusURL, cfg.SpotDiscountPercent)
+	ctrl := controller.New(cfg, dest, disc, coll)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -93,14 +90,12 @@ func main() {
 }
 
 func getKubeConfig() (*rest.Config, error) {
-	// Try in-cluster config first (running in a pod)
 	cfg, err := rest.InClusterConfig()
 	if err == nil {
 		log.Println("Using in-cluster Kubernetes config")
 		return cfg, nil
 	}
 
-	// Fall back to kubeconfig file (local development)
 	kubeconfig := os.Getenv("KUBECONFIG")
 	if kubeconfig == "" {
 		home, _ := os.UserHomeDir()

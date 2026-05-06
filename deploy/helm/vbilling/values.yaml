@@ -6,10 +6,15 @@ image:
   tag: v0.1.0
   pullPolicy: IfNotPresent
 
-# Lago connection
+# Billing adapter selection. Built-in: "lago", "noop". More adapters (Metronome,
+# Stripe Meters, OpenMeter) are on the roadmap. Customers can also implement the
+# Destination interface and register their own.
+adapter: lago
+
+# Lago connection (used when adapter == "lago")
 lago:
   apiURL: "http://lago-api.lago-system.svc.cluster.local:3000"
-  apiKey: ""  # REQUIRED: set via --set or secret
+  apiKey: ""  # REQUIRED when adapter=lago: set via --set or existingSecret
   # Use existing secret for API key (key: "api-key")
   existingSecret: ""
 

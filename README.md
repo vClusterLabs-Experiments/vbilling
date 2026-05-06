@@ -304,26 +304,57 @@ Features:
 ## Project Structure
 
 ```
-cmd/vbilling/main.go              Entry point
+cmd/vbilling/main.go              Entry point; blank-imports built-in adapters
 internal/
   config/config.go                Configuration from env vars
-  lago/
-    client.go                     Lago HTTP API client (current adapter)
-    bootstrap.go                  Auto-creates metrics + skeleton plan
+  destinations/
+    destination.go                Destination interface, Tenant/UsageEvent types,
+                                  registry, canonical metric codes
+    lago/
+      adapter.go                  Lago adapter (default)
+      client.go                   Lago HTTP API client
+      bootstrap.go                Creates metrics + skeleton plan in Lago
+    noop/
+      adapter.go                  Logs events; useful for dry-run / testing
   discovery/discovery.go          Tenant Cluster discovery (labels + Platform API)
   metrics/collector.go            All metrics: CPU, memory, GPU, storage,
                                   network, DCGM, dedicated nodes, spot/on-demand
-  controller/controller.go        Main reconciliation + event-streaming loop
+  controller/controller.go        Reconciliation + event-streaming loop;
+                                  produces canonical UsageEvent values
 deploy/
   helm/vbilling/                  Helm chart with RBAC
-  lago/                           Docker Compose for Lago
+  lago/                           Docker Compose for Lago (demo only)
 dashboard/index.html              Billing dashboard
 scripts/demo.sh                   End-to-end demo using vind
 Dockerfile                        Multi-stage distroless build
 Makefile                          Build targets
 ```
 
-> Multi-adapter refactor (Source/Destination plugin pattern) is planned. Today Lago is wired directly; future adapters will live under `internal/destinations/<name>/`.
+### Adapter pattern
+
+Adapters live under `internal/destinations/<name>/` and implement a small Go interface:
+
+```go
+type Destination interface {
+    Name() string
+    Bootstrap(ctx context.Context) error
+    EnsureTenant(ctx context.Context, t Tenant) error
+    RemoveTenant(ctx context.Context, externalID string) error
+    SendEvents(ctx context.Context, events []UsageEvent) error
+}
+```
+
+Each adapter package registers itself from `init()`:
+
+```go
+destinations.Register("lago", func(cfg *config.Config) (destinations.Destination, error) {
+    return &Adapter{ /* ... */ }, nil
+})
+```
+
+`cmd/vbilling/main.go` blank-imports the adapters it ships with so the `init()` functions run, and `destinations.New(cfg.Adapter, cfg)` returns the one selected via `ADAPTER`. To add a new backend (Metronome, Stripe Meters, OpenMeter, custom), drop a new package under `internal/destinations/`, register a factory, blank-import it from `main.go`, and rebuild.
+
+Built-in adapters today: **`lago`** (default), **`noop`** (dry-run / testing).
 
 ## Building
 
@@ -365,7 +396,7 @@ Deploy Lago as Kubernetes workloads. Key components: PostgreSQL, Redis, API (Rai
 
 ## Roadmap
 
-- [ ] Source / Destination plugin refactor (adapter pattern)
+- [x] Source / Destination plugin refactor (adapter pattern)
 - [ ] Metronome adapter
 - [ ] Stripe Meters adapter
 - [ ] OpenMeter adapter (native CloudEvents)

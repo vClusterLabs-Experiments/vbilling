@@ -21,6 +21,9 @@ spec:
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           env:
+            - name: ADAPTER
+              value: {{ .Values.adapter | default "lago" | quote }}
+            {{- if eq (.Values.adapter | default "lago") "lago" }}
             - name: LAGO_API_URL
               value: {{ .Values.lago.apiURL | quote }}
             - name: LAGO_API_KEY
@@ -32,6 +35,7 @@ spec:
               {{- else }}
               value: {{ .Values.lago.apiKey | quote }}
               {{- end }}
+            {{- end }}
             - name: DEFAULT_PLAN_CODE
               value: {{ .Values.billing.defaultPlanCode | quote }}
             - name: BILLING_CURRENCY
