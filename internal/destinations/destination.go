@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/loft-sh/vbilling/internal/config"
+	"github.com/vclusterlabs-experiments/vbilling/internal/config"
 )
 
 // Canonical metric codes emitted by the controller. Adapters translate these

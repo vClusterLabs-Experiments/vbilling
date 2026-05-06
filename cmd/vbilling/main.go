@@ -7,15 +7,15 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/loft-sh/vbilling/internal/config"
-	"github.com/loft-sh/vbilling/internal/controller"
-	"github.com/loft-sh/vbilling/internal/destinations"
-	"github.com/loft-sh/vbilling/internal/discovery"
-	"github.com/loft-sh/vbilling/internal/metrics"
+	"github.com/vclusterlabs-experiments/vbilling/internal/config"
+	"github.com/vclusterlabs-experiments/vbilling/internal/controller"
+	"github.com/vclusterlabs-experiments/vbilling/internal/destinations"
+	"github.com/vclusterlabs-experiments/vbilling/internal/discovery"
+	"github.com/vclusterlabs-experiments/vbilling/internal/metrics"
 
 	// Register built-in adapters via blank import so their init() funcs run.
-	_ "github.com/loft-sh/vbilling/internal/destinations/lago"
-	_ "github.com/loft-sh/vbilling/internal/destinations/noop"
+	_ "github.com/vclusterlabs-experiments/vbilling/internal/destinations/lago"
+	_ "github.com/vclusterlabs-experiments/vbilling/internal/destinations/noop"
 
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"

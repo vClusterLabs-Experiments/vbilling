@@ -4,8 +4,8 @@ import (
 	"log"
 	"strings"
 
-	"github.com/loft-sh/vbilling/internal/config"
-	"github.com/loft-sh/vbilling/internal/destinations"
+	"github.com/vclusterlabs-experiments/vbilling/internal/config"
+	"github.com/vclusterlabs-experiments/vbilling/internal/destinations"
 )
 
 // Re-exports of canonical metric codes for in-package use.

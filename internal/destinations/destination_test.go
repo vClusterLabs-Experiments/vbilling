@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/loft-sh/vbilling/internal/config"
+	"github.com/vclusterlabs-experiments/vbilling/internal/config"
 )
 
 type fakeDest struct{ name string }

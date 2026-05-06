@@ -1,4 +1,4 @@
-module github.com/loft-sh/vbilling
+module github.com/vclusterlabs-experiments/vbilling
 
 go 1.22.0
 
