@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"time"
 
 	"github.com/loft-sh/vbilling/internal/config"
 	"github.com/loft-sh/vbilling/internal/destinations"
@@ -98,7 +97,9 @@ func (a *Adapter) SendEvents(ctx context.Context, events []destinations.UsageEve
 		})
 	}
 
-	// Lago's batch endpoint caps at 100 events per call.
+	// Lago's batch endpoint caps at 100 events per call. Each event carries a
+	// unique TransactionID, so Lago dedupes on retry — partial-failure recovery
+	// just resends the whole window.
 	for i := 0; i < len(lagoEvents); i += 100 {
 		end := i + 100
 		if end > len(lagoEvents) {
@@ -148,6 +149,3 @@ func fieldNameFor(code string) string {
 
 // Compile-time check.
 var _ destinations.Destination = (*Adapter)(nil)
-
-// silence unused import in some build configurations
-var _ = time.Second

@@ -23,14 +23,10 @@ type VCluster struct {
 	Labels map[string]string
 }
 
-// ExternalID returns a stable identifier for Lago customer mapping.
+// ExternalID returns a stable identifier for the Tenant Cluster, used as the
+// canonical tenant ID across billing adapters.
 func (v *VCluster) ExternalID() string {
 	return fmt.Sprintf("vcluster-%s-%s", v.Namespace, v.Name)
-}
-
-// SubscriptionID returns a stable subscription identifier.
-func (v *VCluster) SubscriptionID() string {
-	return fmt.Sprintf("sub-vcluster-%s-%s", v.Namespace, v.Name)
 }
 
 // DisplayName returns a human-readable name for the billing customer.
