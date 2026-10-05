@@ -8,6 +8,7 @@ import (
 
 	"github.com/vclusterlabs-experiments/vbilling/internal/config"
 	"github.com/vclusterlabs-experiments/vbilling/internal/destinations"
+	"github.com/vclusterlabs-experiments/vbilling/internal/usage"
 )
 
 func init() {
@@ -20,25 +21,25 @@ type Adapter struct{}
 
 func (a *Adapter) Name() string { return "noop" }
 
-func (a *Adapter) Bootstrap(ctx context.Context) error {
-	log.Println("[noop] bootstrap (no-op)")
+func (a *Adapter) Bootstrap(ctx context.Context, metrics []usage.MetricDef) error {
+	log.Printf("[noop] bootstrap: %d metrics in catalog", len(metrics))
 	return nil
 }
 
-func (a *Adapter) EnsureTenant(ctx context.Context, t destinations.Tenant) error {
-	log.Printf("[noop] ensure tenant %s (%s)", t.ExternalID, t.DisplayName)
+func (a *Adapter) EnsureTenant(ctx context.Context, t usage.Tenant) error {
+	log.Printf("[noop] ensure tenant %s (%s) clusters=%v", t.ID, t.DisplayName, t.Clusters)
 	return nil
 }
 
-func (a *Adapter) RemoveTenant(ctx context.Context, externalID string) error {
-	log.Printf("[noop] remove tenant %s", externalID)
+func (a *Adapter) RemoveTenant(ctx context.Context, t usage.Tenant) error {
+	log.Printf("[noop] remove tenant %s", t.ID)
 	return nil
 }
 
-func (a *Adapter) SendEvents(ctx context.Context, events []destinations.UsageEvent) error {
+func (a *Adapter) SendEvents(ctx context.Context, events []usage.Event) error {
 	for _, ev := range events {
-		log.Printf("[noop] event tenant=%s metric=%s value=%v ts=%s",
-			ev.TenantExternalID, ev.MetricCode, ev.Value, ev.Timestamp.Format("15:04:05"))
+		log.Printf("[noop] event tenant=%s metric=%s qty=%v %s sku=%s region=%s window=%s",
+			ev.Tenant, ev.Metric, ev.Quantity, ev.Unit, ev.SKU, ev.Region, ev.WindowStart.Format("15:04:05"))
 	}
 	return nil
 }

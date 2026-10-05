@@ -6,25 +6,26 @@ import (
 	"strings"
 
 	"github.com/vclusterlabs-experiments/vbilling/internal/config"
-	"github.com/vclusterlabs-experiments/vbilling/internal/destinations"
+	"github.com/vclusterlabs-experiments/vbilling/internal/usage"
 )
 
 // Re-exports of canonical metric codes for in-package use.
 const (
-	MetricCPUCoreHours     = destinations.MetricCPUCoreHours
-	MetricMemoryGBHours    = destinations.MetricMemoryGBHours
-	MetricStorageGBHours   = destinations.MetricStorageGBHours
-	MetricInstanceHours    = destinations.MetricInstanceHours
-	MetricGPUHours         = destinations.MetricGPUHours
-	MetricGPUUtilization   = destinations.MetricGPUUtilization
-	MetricNetworkEgressGB  = destinations.MetricNetworkEgressGB
-	MetricLBHours          = destinations.MetricLBHours
-	MetricPrivateNodeHours = destinations.MetricPrivateNodeHours
+	MetricCPUCoreHours     = usage.MetricCPUCoreHours
+	MetricMemoryGBHours    = usage.MetricMemoryGBHours
+	MetricStorageGBHours   = usage.MetricStorageGBHours
+	MetricInstanceHours    = usage.MetricInstanceHours
+	MetricGPUHours         = usage.MetricGPUHours
+	MetricGPUUtilization   = usage.MetricGPUUtilization
+	MetricNetworkEgressGB  = usage.MetricNetworkEgressGB
+	MetricLBHours          = usage.MetricLBHours
+	MetricPrivateNodeHours = usage.MetricPrivateNodeHours
 )
 
 // Bootstrap creates all billable metrics and a default plan in Lago.
-// It is idempotent — safe to call on every startup.
-func Bootstrap(ctx context.Context, client *Client, cfg *config.Config) error {
+// It is idempotent: safe to call on every startup. Custom metrics from the
+// catalog get a billable metric whose field name is their code.
+func Bootstrap(ctx context.Context, client *Client, cfg *config.Config, catalog []usage.MetricDef) error {
 	log.Println("[bootstrap] setting up Lago billing configuration...")
 
 	// Step 1: Create billable metrics
@@ -94,6 +95,16 @@ func Bootstrap(ctx context.Context, client *Client, cfg *config.Config) error {
 		},
 	}
 
+	for _, def := range catalog {
+		if !def.Custom {
+			continue
+		}
+		metrics = append(metrics, BillableMetric{
+			Name: def.Name, Code: def.Code, Description: def.Description,
+			AggregationType: "sum_agg", FieldName: fieldNameFor(def.Code),
+		})
+	}
+
 	metricIDs := make(map[string]string) // code -> lago_id
 	for _, m := range metrics {
 		existing, err := client.GetBillableMetric(ctx, m.Code)
@@ -125,52 +136,13 @@ func Bootstrap(ctx context.Context, client *Client, cfg *config.Config) error {
 
 	log.Println("[bootstrap] Configure your pricing in the Lago UI or API — all charges default to $0")
 
-	charges := []Charge{
-		{
-			BillableMetricID: metricIDs[MetricCPUCoreHours],
+	var charges []Charge
+	for _, m := range metrics {
+		charges = append(charges, Charge{
+			BillableMetricID: metricIDs[m.Code],
 			ChargeModel:      "standard",
 			Properties:       map[string]string{"amount": "0"},
-		},
-		{
-			BillableMetricID: metricIDs[MetricMemoryGBHours],
-			ChargeModel:      "standard",
-			Properties:       map[string]string{"amount": "0"},
-		},
-		{
-			BillableMetricID: metricIDs[MetricStorageGBHours],
-			ChargeModel:      "standard",
-			Properties:       map[string]string{"amount": "0"},
-		},
-		{
-			BillableMetricID: metricIDs[MetricInstanceHours],
-			ChargeModel:      "standard",
-			Properties:       map[string]string{"amount": "0"},
-		},
-		{
-			BillableMetricID: metricIDs[MetricGPUHours],
-			ChargeModel:      "standard",
-			Properties:       map[string]string{"amount": "0"},
-		},
-		{
-			BillableMetricID: metricIDs[MetricGPUUtilization],
-			ChargeModel:      "standard",
-			Properties:       map[string]string{"amount": "0"},
-		},
-		{
-			BillableMetricID: metricIDs[MetricNetworkEgressGB],
-			ChargeModel:      "standard",
-			Properties:       map[string]string{"amount": "0"},
-		},
-		{
-			BillableMetricID: metricIDs[MetricLBHours],
-			ChargeModel:      "standard",
-			Properties:       map[string]string{"amount": "0"},
-		},
-		{
-			BillableMetricID: metricIDs[MetricPrivateNodeHours],
-			ChargeModel:      "standard",
-			Properties:       map[string]string{"amount": "0"},
-		},
+		})
 	}
 
 	// Filter out charges with empty metric IDs (metric creation may have failed)

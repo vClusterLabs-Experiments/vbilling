@@ -1,847 +1,758 @@
+// Package metrics turns the state of tenant clusters into usage events.
+//
+// Allocation metrics (GPUs, dedicated nodes, storage, load balancers,
+// control plane hours, requests-based CPU/memory) are computed from object
+// lifetimes overlapping each window, to the second. That is what makes
+// backfill after a restart possible and keeps short jobs accurate.
+// Consumption metrics (metrics-server CPU/memory, Prometheus egress and
+// DCGM utilization) are sampled for the latest window only.
 package metrics
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"log"
-	"math"
-	"net/http"
-	"os"
-	"strconv"
-	"strings"
+	"sort"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
-	metricsv1beta1 "k8s.io/metrics/pkg/apis/metrics/v1beta1"
 	metricsclient "k8s.io/metrics/pkg/client/clientset/versioned"
+
+	"github.com/vclusterlabs-experiments/vbilling/internal/discovery"
+	"github.com/vclusterlabs-experiments/vbilling/internal/usage"
 )
 
-// VClusterMetrics contains all billable metrics for a single vCluster namespace.
-type VClusterMetrics struct {
-	Namespace string
-	Timestamp time.Time
+const gib = 1024 * 1024 * 1024
 
-	// Core resources (from metrics-server)
-	CPUCores    float64 // current CPU usage in cores
-	MemoryBytes float64 // current memory usage in bytes
-
-	// Storage (from PVCs)
-	StorageBytes float64 // total requested PVC storage in bytes
-
-	// GPU allocation (from pod resource requests)
-	GPUs []GPUAllocation
-
-	// GPU utilization (from DCGM via Prometheus, optional)
-	GPUUtilization []GPUUtilizationMetric
-
-	// Network (from Prometheus or kubelet, optional)
-	NetworkTxBytes float64 // egress bytes since last collection
-	NetworkRxBytes float64 // ingress bytes since last collection
-
-	// LoadBalancer services
-	LoadBalancerCount int
-
-	// Node cost attribution
-	NodeCostMultiplier float64 // weighted average: 1.0 = on-demand, <1.0 = has spot nodes
-
-	// Private/dedicated nodes allocated to this vCluster
-	PrivateNodes []PrivateNode
+// Options configure metering behavior.
+type Options struct {
+	Region             string
+	RegionFromNode     bool
+	Basis              string // usage | requests | max
+	MeterControlPlane  bool
+	MeterByNamespace   bool
+	GPUResources       []string
+	SKULabel           string
+	CapacityTypeLabel  string
+	UnhealthyTaints    []string
+	DedicatedNodeLabel string
+	PrometheusURL      string
+	PromHeaders        map[string]string // extra request headers (tokens, X-Scope-OrgID)
+	PromTokenFile      string            // bearer token file, re-read per query
+	EgressQuery        string
+	GPUUtilQuery       string // "none" disables GPU utilization
+	GPUCountQuery      string
+	PrometheusPreset   string       // "vcluster-platform": fleet observability label selectors
+	PromMetrics        []PromMetric // operator-defined metrics from PromQL
+	// Tenant clusters with their own nodes: "node" bills each private node
+	// whole (default), "usage" bills the pods running on them instead.
+	PrivateNodeBilling      string
+	TenantExcludeNamespaces []string // usage mode: namespaces never billed (default kube-system)
+	DRAGPUDrivers           []string // DRA drivers whose devices are GPUs (default gpu.nvidia.com, gpu.amd.com)
+	Now                     func() time.Time
 }
 
-// GPUAllocation tracks GPU resources requested by pods.
-type GPUAllocation struct {
-	GPUType  string // e.g. "NVIDIA-A100-SXM4-80GB" from node label
-	Count    int64  // number of GPUs allocated
-	NodeName string
-}
-
-// GPUUtilizationMetric tracks actual GPU utilization from DCGM exporter.
-type GPUUtilizationMetric struct {
-	GPUType       string
-	GPUUUID       string
-	Utilization   float64 // 0-100 percent
-	MemoryUsedMB  float64
-	MemoryTotalMB float64
-	PodName       string
-	PodNamespace  string
-}
-
-// PrivateNode represents a dedicated node allocated to a vCluster tenant.
-// In private node mode, the entire node is billed to the tenant.
-type PrivateNode struct {
-	NodeName     string
-	CPUCores     int64  // total CPU capacity
-	MemoryBytes  int64  // total memory capacity
-	GPUCount     int64  // total GPUs on this node
-	GPUType      string // GPU model from labels
-	StorageBytes int64  // total ephemeral storage capacity
-	IsSpot       bool   // spot/preemptible node
-	InstanceType string // cloud instance type (e.g. p4d.24xlarge)
-}
-
-// Collector gathers resource metrics from the Kubernetes cluster.
+// Collector gathers billable state from the Kubernetes API.
 type Collector struct {
-	kubeClient    kubernetes.Interface
-	metricsClient metricsclient.Interface
-	promClient    *prometheusClient // nil if Prometheus not configured
-	spotDiscount  float64           // percentage discount for spot nodes
+	kube      kubernetes.Interface
+	metrics   metricsclient.Interface // nil disables usage-based CPU/memory
+	prom      *prometheusClient
+	graveyard *Graveyard        // deletions seen between collections; nil = none
+	tenants   TenantAPI         // tenant clusters' own APIs; nil = control plane cluster only
+	dyn       dynamic.Interface // DRA ResourceClaims and ResourceSlices; nil = none
+	opts      Options
+
+	excludedTenantNS map[string]bool
 }
 
-func NewCollector(kubeClient kubernetes.Interface, metricsClient metricsclient.Interface, prometheusURL string, spotDiscount float64) *Collector {
-	var prom *prometheusClient
-	if prometheusURL != "" {
-		prom = newPrometheusClient(prometheusURL)
-		log.Printf("[metrics] Prometheus integration enabled: %s", prometheusURL)
+// UseGraveyard makes the collector bill pods and nodes deleted between
+// collections (see Graveyard).
+func (c *Collector) UseGraveyard(g *Graveyard) { c.graveyard = g }
+
+// UseDynamic enables DRA (ResourceClaim) GPU metering on the control plane cluster.
+func (c *Collector) UseDynamic(d dynamic.Interface) { c.dyn = d }
+
+// baseFn builds an event template for a tenant cluster and node.
+type baseFn func(metric string, n *nodeInfo) usage.Event
+
+// podEntry is a pod to meter; deletedAt is set for pods seen deleted.
+type podEntry struct {
+	pod       *corev1.Pod
+	deletedAt time.Time
+}
+
+// withDeleted adds pods deleted since the last collection to a live list.
+func withDeleted(live []corev1.Pod, gone []deleted[*corev1.Pod]) []podEntry {
+	out := make([]podEntry, 0, len(live)+len(gone))
+	seen := make(map[string]bool, len(live))
+	for i := range live {
+		out = append(out, podEntry{pod: &live[i]})
+		seen[string(live[i].UID)] = true
+	}
+	for _, d := range gone {
+		if !seen[string(d.obj.UID)] {
+			out = append(out, podEntry{pod: d.obj, deletedAt: d.at})
+		}
+	}
+	return out
+}
+
+func entryLabels(pods []podEntry) []map[string]string {
+	out := make([]map[string]string, len(pods))
+	for i := range pods {
+		out[i] = pods[i].pod.Labels
+	}
+	return out
+}
+
+func NewCollector(kube kubernetes.Interface, mc metricsclient.Interface, opts Options) *Collector {
+	if opts.Now == nil {
+		opts.Now = time.Now
+	}
+	if opts.Basis == "" {
+		opts.Basis = "usage"
+	}
+	egress, util, count := defaultEgressQuery, defaultGPUUtilQuery, defaultGPUCountQuery
+	if opts.PrometheusPreset == PresetVClusterPlatform {
+		egress, util, count = platformQueries.egress, platformQueries.util, platformQueries.count
+	}
+	if opts.EgressQuery == "" {
+		opts.EgressQuery = egress
+	}
+	// A custom utilization query usually means a different exporter, so the
+	// DCGM device count only rides along with the default query.
+	if opts.GPUUtilQuery == "" {
+		opts.GPUUtilQuery = util
+		if opts.GPUCountQuery == "" {
+			opts.GPUCountQuery = count
+		}
+	}
+	if opts.PrivateNodeBilling == "" {
+		opts.PrivateNodeBilling = "node"
+	}
+	if opts.TenantExcludeNamespaces == nil {
+		opts.TenantExcludeNamespaces = []string{"kube-system"}
+	}
+	if opts.DRAGPUDrivers == nil {
+		opts.DRAGPUDrivers = DefaultDRAGPUDrivers
+	}
+	c := &Collector{kube: kube, metrics: mc, opts: opts, excludedTenantNS: map[string]bool{}}
+	for _, ns := range opts.TenantExcludeNamespaces {
+		c.excludedTenantNS[ns] = true
+	}
+	if opts.PrometheusURL != "" {
+		c.prom = newPrometheusClient(opts.PrometheusURL, opts.PromHeaders, opts.PromTokenFile)
+	}
+	return c
+}
+
+// Window is a closed metering window. Latest marks the window being
+// collected live (consumption metrics are only sampled for it).
+type Window struct {
+	Start, End time.Time
+	Latest     bool
+}
+
+// Target is a tenant cluster with its resolved billing identity.
+type Target struct {
+	Cluster     discovery.TenantCluster
+	Tenant      string
+	Project     string
+	TenantClass string
+}
+
+// Stats summarize one collection run.
+type Stats struct {
+	Pods         int
+	GPUPods      int
+	NodesDown    int
+	Dedicated    int
+	PromFailures int
+	PrivateNodes int
+	// TenantAPIFailed lists tenant clusters (external IDs) whose own API
+	// could not be read; nothing from it was metered for these windows.
+	TenantAPIFailed []string
+}
+
+// accumulator merges observations with the same identity within one
+// window into one event.
+type accumulator struct {
+	window Window
+	events map[string]*usage.Event
+	order  []string
+}
+
+func newAccumulator(w Window) *accumulator {
+	return &accumulator{window: w, events: map[string]*usage.Event{}}
+}
+
+func (a *accumulator) add(tmpl usage.Event, qty float64, props map[string]any) {
+	if qty <= 0 {
+		return
+	}
+	tmpl.ID = ""
+	tmpl.WindowStart, tmpl.WindowEnd = a.window.Start.UTC(), a.window.End.UTC()
+	key := usage.DeriveID(&tmpl)
+	ev, ok := a.events[key]
+	if !ok {
+		e := tmpl
+		e.Properties = map[string]any{}
+		a.events[key] = &e
+		a.order = append(a.order, key)
+		ev = &e
+	}
+	ev.Quantity += qty
+	for k, v := range props {
+		switch n := v.(type) {
+		case int:
+			prev, _ := ev.Properties[k].(int)
+			ev.Properties[k] = prev + n
+		case float64:
+			prev, _ := ev.Properties[k].(float64)
+			ev.Properties[k] = prev + n
+		default:
+			ev.Properties[k] = v
+		}
+	}
+}
+
+func (a *accumulator) list() []usage.Event {
+	out := make([]usage.Event, 0, len(a.order))
+	for _, k := range a.order {
+		e := *a.events[k]
+		if len(e.Properties) == 0 {
+			e.Properties = nil
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// Collect meters every target over every window. The result maps each
+// window end to its events, ready to commit window by window.
+func (c *Collector) Collect(ctx context.Context, targets []Target, windows []Window) (map[time.Time][]usage.Event, Stats, error) {
+	return c.collect(ctx, targets, windows, false)
+}
+
+func (c *Collector) collect(ctx context.Context, targets []Target, windows []Window, onlyTenantAPI bool) (map[time.Time][]usage.Event, Stats, error) {
+	var st Stats
+	out := map[time.Time][]usage.Event{}
+	if len(windows) == 0 {
+		return out, st, nil
+	}
+	nodeList, err := c.kube.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, st, fmt.Errorf("list nodes: %w", err)
+	}
+	c.graveyard.SeenNodes(nodeList.Items, c.opts.Now())
+	nodes := map[string]*nodeInfo{}
+	for i := range nodeList.Items {
+		ni := c.parseNode(&nodeList.Items[i])
+		nodes[ni.name] = ni
+		if ni.down {
+			st.NodesDown++
+		}
+	}
+	for _, d := range c.graveyard.Nodes() {
+		if _, live := nodes[d.obj.Name]; !live {
+			ni := c.parseNode(d.obj)
+			ni.deletedAt = d.at
+			nodes[ni.name] = ni
+		}
+	}
+
+	dra := c.draFor(ctx, c.dyn, "")
+	applyDRANodes(nodes, dra)
+	accs := map[time.Time]*accumulator{}
+	for _, w := range windows {
+		accs[w.End] = newAccumulator(w)
+	}
+	now := c.opts.Now().UTC()
+	if r, ok := c.tenants.(interface {
+		Retain([]discovery.TenantCluster)
+	}); ok && !onlyTenantAPI {
+		clusters := make([]discovery.TenantCluster, len(targets))
+		for i := range targets {
+			clusters[i] = targets[i].Cluster
+		}
+		r.Retain(clusters)
+	}
+	for _, t := range targets {
+		// External tenant clusters have nothing on this control plane cluster.
+		if !onlyTenantAPI && !t.Cluster.External {
+			if err := c.collectTarget(ctx, t, nodes, dra, windows, accs, &st); err != nil {
+				return nil, st, fmt.Errorf("meter %s: %w", t.Cluster.ExternalID(), err)
+			}
+		}
+		if c.tenants != nil {
+			c.collectTenant(ctx, t, nodes, windows, accs, &st)
+		}
+	}
+	for _, w := range windows {
+		var evs []usage.Event
+		for _, ev := range accs[w.End].list() {
+			ev.Source = "collector"
+			ev.RecordedAt = now
+			if !w.Latest {
+				if ev.Properties == nil {
+					ev.Properties = map[string]any{}
+				}
+				ev.Properties["backfilled"] = true
+			}
+			ev.Finalize()
+			// Never commit an event the backends would reject: a bug here must
+			// surface loudly rather than as dead letters downstream.
+			if err := ev.Validate(); err != nil {
+				return nil, st, fmt.Errorf("invalid event for %s/%s: %w", ev.Tenant, ev.Metric, err)
+			}
+			evs = append(evs, ev)
+		}
+		sort.Slice(evs, func(i, j int) bool { return evs[i].ID < evs[j].ID })
+		out[w.End] = evs
+	}
+	return out, st, nil
+}
+
+func (c *Collector) collectTarget(ctx context.Context, t Target, nodes map[string]*nodeInfo, dra *draIndex, windows []Window, accs map[time.Time]*accumulator, st *Stats) error {
+	cl := t.Cluster
+	ns := cl.Namespace
+	extID := cl.ExternalID()
+
+	base := c.baseFor(t)
+
+	podList, err := c.kube.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("list pods: %w", err)
+	}
+	c.graveyard.SeenPods(podList.Items, c.opts.Now())
+	pods := withDeleted(podList.Items, c.graveyard.Pods(ns))
+	owned := ownedFilter(entryLabels(pods), cl.Name, c.opts.MeterControlPlane)
+
+	// Dedicated nodes: billed whole, so pods on them are not billed again.
+	dedicated := map[string]*nodeInfo{}
+	for name, n := range nodes {
+		if c.dedicatedTo(n, cl.Name, ns, extID) {
+			dedicated[name] = n
+		}
+	}
+	st.Dedicated += len(dedicated)
+
+	var usageByPod map[string][2]float64
+	latest := windows[len(windows)-1]
+	if latest.Latest && c.opts.Basis != "requests" && c.metrics != nil {
+		usageByPod = podUsage(ctx, c.metrics, ns)
+	}
+
+	virtualNS := func(p *corev1.Pod) string { return p.Labels[LabelVirtualNamespace] }
+	c.meterPods(pods, func(p *corev1.Pod) bool { return owned(p.Labels) }, virtualNS,
+		nodes, dedicated, dra, windows, accs, st, base, usageByPod, "shared")
+
+	// Dedicated nodes: full capacity, per node.
+	for name, n := range dedicated {
+		if n.labels[LabelBillable] == "false" {
+			continue // the tenant's own hardware: neither the node nor its pods are billed
+		}
+		c.meterWholeNode(name, n, windows, accs, base, "dedicated_node")
+	}
+
+	// Storage: bound PVCs synced from the tenant cluster, per storage class.
+	pvcs, err := c.kube.CoreV1().PersistentVolumeClaims(ns).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("list pvcs: %w", err)
+	}
+	meterVolumes(pvcs.Items, ownedFilter(pvcLabels(pvcs.Items), cl.Name, c.opts.MeterControlPlane), windows, accs, base)
+
+	// Load balancers with an assigned address.
+	svcs, err := c.kube.CoreV1().Services(ns).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("list services: %w", err)
+	}
+	meterLoadBalancers(svcs.Items, func(svc *corev1.Service) bool {
+		return !isControlPlane(svc.Labels, cl.Name) || c.opts.MeterControlPlane
+	}, windows, accs, base)
+
+	// Control plane hours, only while ready (no charge while provisioning or asleep).
+	if cl.Ready {
+		for _, w := range windows {
+			ov := usage.Overlap(cl.CreatedAt, time.Time{}, w.Start, w.End)
+			accs[w.End].add(base(usage.MetricInstanceHours, nil), ov.Hours(), nil)
+		}
+	}
+
+	if c.prom != nil && latest.Latest {
+		c.collectPrometheus(ctx, t, latest, accs[latest.End], base, st)
+	}
+	return nil
+}
+
+func (c *Collector) collectPrometheus(ctx context.Context, t Target, w Window, acc *accumulator, base baseFn, st *Stats) {
+	size := w.End.Sub(w.Start)
+	vars := varsFor(t, size)
+	id := t.Cluster.ExternalID()
+	res, err := c.prom.Query(ctx, expand(c.opts.EgressQuery, vars), w.End)
+	if err != nil {
+		st.PromFailures++
+		log.Printf("[metrics] %s: egress query failed: %v", id, err)
 	} else {
-		log.Printf("[metrics] Prometheus not configured - DCGM and network metrics unavailable")
-	}
-
-	return &Collector{
-		kubeClient:    kubeClient,
-		metricsClient: metricsClient,
-		promClient:    prom,
-		spotDiscount:  spotDiscount,
-	}
-}
-
-// Collect gathers all billable metrics for a vCluster namespace.
-func (c *Collector) Collect(ctx context.Context, namespace string) (*VClusterMetrics, error) {
-	m := &VClusterMetrics{
-		Namespace:          namespace,
-		Timestamp:          time.Now(),
-		NodeCostMultiplier: 1.0,
-	}
-
-	// Collect all metrics concurrently using goroutines would be nice,
-	// but for clarity and debuggability we do them sequentially.
-	// Each method logs its own errors and returns partial results.
-
-	c.collectCPUMemory(ctx, namespace, m)
-	c.collectStorage(ctx, namespace, m)
-	c.collectGPUAllocation(ctx, namespace, m)
-	c.collectLoadBalancers(ctx, namespace, m)
-	c.collectNodeCostAttribution(ctx, namespace, m)
-
-	// Optional Prometheus-based metrics
-	if c.promClient != nil {
-		c.collectDCGMMetrics(ctx, namespace, m)
-		c.collectNetworkMetrics(ctx, namespace, m)
-	}
-
-	// Collect private/dedicated nodes for this vCluster
-	c.collectPrivateNodes(ctx, namespace, m)
-
-	// If private nodes were found, also fetch their actual CPU/memory usage
-	// from metrics-server so both shared-namespace pods AND private node
-	// usage are captured in the billing totals.
-	if m.HasPrivateNodes() {
-		c.collectPrivateNodeUsage(ctx, namespace, m)
-	}
-
-	return m, nil
-}
-
-// TotalGPUCount returns the total number of GPUs allocated across all types.
-func (m *VClusterMetrics) TotalGPUCount() int64 {
-	var total int64
-	for _, g := range m.GPUs {
-		total += g.Count
-	}
-	return total
-}
-
-// GPUCountByType returns GPU counts grouped by GPU model.
-func (m *VClusterMetrics) GPUCountByType() map[string]int64 {
-	result := make(map[string]int64)
-	for _, g := range m.GPUs {
-		result[g.GPUType] += g.Count
-	}
-	return result
-}
-
-// MemoryGB returns memory usage in GB.
-func (m *VClusterMetrics) MemoryGB() float64 {
-	return m.MemoryBytes / (1024 * 1024 * 1024)
-}
-
-// StorageGB returns storage in GB.
-func (m *VClusterMetrics) StorageGB() float64 {
-	return m.StorageBytes / (1024 * 1024 * 1024)
-}
-
-// NetworkEgressGB returns egress traffic in GB.
-func (m *VClusterMetrics) NetworkEgressGB() float64 {
-	return m.NetworkTxBytes / (1024 * 1024 * 1024)
-}
-
-// HasPrivateNodes returns true if this vCluster has dedicated nodes allocated.
-func (m *VClusterMetrics) HasPrivateNodes() bool {
-	return len(m.PrivateNodes) > 0
-}
-
-// PrivateNodeCount returns the number of private/dedicated nodes.
-func (m *VClusterMetrics) PrivateNodeCount() int {
-	return len(m.PrivateNodes)
-}
-
-// PrivateNodeGPUsByType returns GPU counts on private nodes grouped by GPU model.
-func (m *VClusterMetrics) PrivateNodeGPUsByType() map[string]int64 {
-	result := make(map[string]int64)
-	for _, n := range m.PrivateNodes {
-		if n.GPUCount > 0 && n.GPUType != "" {
-			result[n.GPUType] += n.GPUCount
+		var bytes float64
+		for _, r := range res {
+			bytes += r.Value
 		}
-	}
-	return result
-}
-
-// PrivateNodeTotalCPU returns the total CPU cores across all private nodes.
-func (m *VClusterMetrics) PrivateNodeTotalCPU() int64 {
-	var total int64
-	for _, n := range m.PrivateNodes {
-		total += n.CPUCores
-	}
-	return total
-}
-
-// PrivateNodeTotalMemoryGB returns total memory in GB across all private nodes.
-func (m *VClusterMetrics) PrivateNodeTotalMemoryGB() float64 {
-	var total int64
-	for _, n := range m.PrivateNodes {
-		total += n.MemoryBytes
-	}
-	return float64(total) / (1024 * 1024 * 1024)
-}
-
-// --- CPU and Memory from metrics-server ---
-
-func (c *Collector) collectCPUMemory(ctx context.Context, namespace string, m *VClusterMetrics) {
-	podMetrics, err := c.metricsClient.MetricsV1beta1().PodMetricses(namespace).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		log.Printf("[metrics] warning: cannot get pod metrics for %s: %v", namespace, err)
-		return
+		acc.add(base(usage.MetricNetworkEgressGB, nil), bytes/gib, nil)
 	}
 
-	for _, pod := range podMetrics.Items {
-		for _, container := range pod.Containers {
-			cpu := container.Usage.Cpu()
-			mem := container.Usage.Memory()
-			if cpu != nil {
-				m.CPUCores += float64(cpu.MilliValue()) / 1000.0
-			}
-			if mem != nil {
-				m.MemoryBytes += float64(mem.Value())
-			}
-		}
-	}
-	log.Printf("[metrics] %s: CPU=%.3f cores, Memory=%.2f GB", namespace, m.CPUCores, m.MemoryGB())
-}
-
-// --- Storage from PVCs ---
-
-func (c *Collector) collectStorage(ctx context.Context, namespace string, m *VClusterMetrics) {
-	pvcs, err := c.kubeClient.CoreV1().PersistentVolumeClaims(namespace).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		log.Printf("[metrics] warning: cannot list PVCs in %s: %v", namespace, err)
-		return
+	if c.opts.GPUUtilQuery != "none" {
+		c.collectGPUUtilization(ctx, vars, id, w, acc, base, st)
 	}
 
-	for _, pvc := range pvcs.Items {
-		if pvc.Status.Phase != corev1.ClaimBound {
+	for _, m := range c.opts.PromMetrics {
+		res, err := c.prom.Query(ctx, expand(m.Query, vars), w.End)
+		if err != nil {
+			st.PromFailures++
+			log.Printf("[metrics] %s: %s query failed: %v", id, m.Code, err)
 			continue
 		}
-		storage := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
-		m.StorageBytes += float64(storage.Value())
+		for _, r := range res {
+			ev := base(m.Code, nil)
+			for _, l := range m.Dimensions {
+				if v := r.Labels[l]; v != "" {
+					ev.Dimensions[dimKey(l)] = v
+				}
+			}
+			if m.SKU != "" {
+				ev.SKU = r.Labels[m.SKU]
+			}
+			acc.add(ev, r.Value, nil)
+		}
 	}
-	log.Printf("[metrics] %s: Storage=%.2f GB (%d PVCs)", namespace, m.StorageGB(), len(pvcs.Items))
 }
 
-// --- GPU allocation from pod resource requests ---
-
-func (c *Collector) collectGPUAllocation(ctx context.Context, namespace string, m *VClusterMetrics) {
-	pods, err := c.kubeClient.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
-		FieldSelector: "status.phase=Running",
-	})
+func (c *Collector) collectGPUUtilization(ctx context.Context, vars queryVars, id string, w Window, acc *accumulator, base baseFn, st *Stats) {
+	util, err := c.prom.Query(ctx, expand(c.opts.GPUUtilQuery, vars), w.End)
 	if err != nil {
-		log.Printf("[metrics] warning: cannot list pods in %s: %v", namespace, err)
+		st.PromFailures++
+		log.Printf("[metrics] %s: GPU utilization query failed: %v", id, err)
 		return
 	}
-
-	// Cache node GPU types
-	nodeGPUType := make(map[string]string)
-
-	for _, pod := range pods.Items {
-		gpuCount := podGPUCount(&pod)
-		if gpuCount == 0 {
-			continue
+	countBy := map[string]float64{}
+	if c.opts.GPUCountQuery != "" && len(util) > 0 {
+		counts, _ := c.prom.Query(ctx, expand(c.opts.GPUCountQuery, vars), w.End)
+		for _, r := range counts {
+			countBy[promGPUModel(r.Labels)] = r.Value
 		}
-
-		// Determine GPU type from the node this pod runs on
-		nodeName := pod.Spec.NodeName
-		gpuType, ok := nodeGPUType[nodeName]
-		if !ok {
-			gpuType = c.getNodeGPUType(ctx, nodeName)
-			nodeGPUType[nodeName] = gpuType
-		}
-
-		m.GPUs = append(m.GPUs, GPUAllocation{
-			GPUType:  gpuType,
-			Count:    gpuCount,
-			NodeName: nodeName,
-		})
 	}
-
-	if total := m.TotalGPUCount(); total > 0 {
-		log.Printf("[metrics] %s: GPUs=%d allocated (%v)", namespace, total, m.GPUCountByType())
+	for _, r := range util {
+		model := promGPUModel(r.Labels)
+		ev := base(usage.MetricGPUUtilization, nil)
+		ev.Dimensions[usage.DimGPUType] = model
+		props := map[string]any{"avg_utilization_pct": r.Value}
+		if n, ok := countBy[model]; ok {
+			props["gpu_devices"] = n
+		}
+		acc.add(ev, r.Value*w.End.Sub(w.Start).Hours(), props)
 	}
 }
 
-// podGPUCount returns the total nvidia.com/gpu requests across all containers.
-func podGPUCount(pod *corev1.Pod) int64 {
-	var total int64
-	gpuResource := corev1.ResourceName("nvidia.com/gpu")
-
-	for _, c := range pod.Spec.Containers {
-		if qty, ok := c.Resources.Requests[gpuResource]; ok {
-			total += qty.Value()
-		}
-		if qty, ok := c.Resources.Limits[gpuResource]; ok && total == 0 {
-			total += qty.Value()
-		}
+// promGPUModel reads the GPU model from a utilization result: DCGM's
+// modelName, or gpu_type/model from a custom GPU_UTIL_QUERY.
+func promGPUModel(labels map[string]string) string {
+	if v := firstLabel(labels, "modelName", "gpu_type", "model"); v != "" {
+		return normalizeGPUType(v)
 	}
-	return total
-}
-
-// getNodeGPUType reads the GPU model from node labels.
-func (c *Collector) getNodeGPUType(ctx context.Context, nodeName string) string {
-	if nodeName == "" {
-		return "unknown"
-	}
-
-	node, err := c.kubeClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
-	if err != nil {
-		log.Printf("[metrics] warning: cannot get node %s: %v", nodeName, err)
-		return "unknown"
-	}
-
-	// Check common GPU label conventions
-	gpuLabels := []string{
-		"nvidia.com/gpu.product",           // NVIDIA GPU Operator
-		"nvidia.com/gpu.machine",           // alternative
-		"accelerator",                      // GKE
-		"cloud.google.com/gke-accelerator", // GKE specific
-		"k8s.amazonaws.com/accelerator",    // EKS
-		"node.kubernetes.io/instance-type", // fallback: instance type
-	}
-
-	for _, label := range gpuLabels {
-		if v, ok := node.Labels[label]; ok && v != "" {
-			return sanitizeGPUType(v)
-		}
-	}
-
 	return "unknown"
 }
 
-// sanitizeGPUType normalizes GPU type strings for consistent billing.
-func sanitizeGPUType(raw string) string {
-	// Remove spaces and convert to uppercase for consistency
-	s := strings.TrimSpace(raw)
-	s = strings.ReplaceAll(s, " ", "-")
-	return s
-}
-
-// --- LoadBalancer services ---
-
-func (c *Collector) collectLoadBalancers(ctx context.Context, namespace string, m *VClusterMetrics) {
-	services, err := c.kubeClient.CoreV1().Services(namespace).List(ctx, metav1.ListOptions{})
+// podUsage returns current CPU cores and memory bytes per pod name.
+func podUsage(ctx context.Context, mc metricsclient.Interface, ns string) map[string][2]float64 {
+	out := map[string][2]float64{}
+	list, err := mc.MetricsV1beta1().PodMetricses(ns).List(ctx, metav1.ListOptions{})
 	if err != nil {
-		log.Printf("[metrics] warning: cannot list services in %s: %v", namespace, err)
-		return
+		log.Printf("[metrics] %s: metrics-server unavailable, usage-based CPU/memory skipped: %v", ns, err)
+		return out
 	}
-
-	for _, svc := range services.Items {
-		if svc.Spec.Type == corev1.ServiceTypeLoadBalancer {
-			m.LoadBalancerCount++
-		}
-	}
-
-	if m.LoadBalancerCount > 0 {
-		log.Printf("[metrics] %s: LoadBalancers=%d", namespace, m.LoadBalancerCount)
-	}
-}
-
-// --- Node cost attribution (spot vs on-demand) ---
-
-func (c *Collector) collectNodeCostAttribution(ctx context.Context, namespace string, m *VClusterMetrics) {
-	pods, err := c.kubeClient.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
-		FieldSelector: "status.phase=Running",
-	})
-	if err != nil {
-		return
-	}
-
-	if len(pods.Items) == 0 {
-		return
-	}
-
-	// Cache node spot status
-	nodeSpot := make(map[string]bool)
-	var spotPods, totalPods int
-
-	for _, pod := range pods.Items {
-		nodeName := pod.Spec.NodeName
-		if nodeName == "" {
-			continue
-		}
-
-		isSpot, ok := nodeSpot[nodeName]
-		if !ok {
-			isSpot = c.isSpotNode(ctx, nodeName)
-			nodeSpot[nodeName] = isSpot
-		}
-
-		totalPods++
-		if isSpot {
-			spotPods++
-		}
-	}
-
-	if totalPods > 0 {
-		spotFraction := float64(spotPods) / float64(totalPods)
-		// Cost multiplier: spot pods get discounted, on-demand pods stay at 1.0
-		discount := (c.spotDiscount / 100.0) * spotFraction
-		m.NodeCostMultiplier = 1.0 - discount
-		if spotPods > 0 {
-			log.Printf("[metrics] %s: %d/%d pods on spot nodes, cost multiplier=%.2f",
-				namespace, spotPods, totalPods, m.NodeCostMultiplier)
-		}
-	}
-}
-
-// isSpotNode checks if a node is a spot/preemptible instance.
-func (c *Collector) isSpotNode(ctx context.Context, nodeName string) bool {
-	node, err := c.kubeClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
-	if err != nil {
-		return false
-	}
-
-	spotLabels := []string{
-		"kubernetes.io/lifecycle",           // common: "spot" or "preemptible"
-		"node.kubernetes.io/lifecycle",      // alternative
-		"cloud.google.com/gke-preemptible", // GKE preemptible
-		"cloud.google.com/gke-spot",        // GKE spot
-		"eks.amazonaws.com/capacityType",   // EKS: "SPOT" or "ON_DEMAND"
-		"karpenter.sh/capacity-type",       // Karpenter: "spot" or "on-demand"
-		"node.kubernetes.io/instance-type", // check below
-	}
-
-	spotValues := map[string]bool{
-		"spot":        true,
-		"preemptible": true,
-		"SPOT":        true,
-		"true":        true,
-	}
-
-	for _, label := range spotLabels {
-		if v, ok := node.Labels[label]; ok {
-			if spotValues[v] {
-				return true
+	for _, pm := range list.Items {
+		var cpu, mem float64
+		for _, ctr := range pm.Containers {
+			if q := ctr.Usage.Cpu(); q != nil {
+				cpu += float64(q.MilliValue()) / 1000
+			}
+			if q := ctr.Usage.Memory(); q != nil {
+				mem += float64(q.Value())
 			}
 		}
+		out[pm.Namespace+"/"+pm.Name] = [2]float64{cpu, mem}
 	}
-
-	return false
+	return out
 }
 
-// isSpotNodeFromObj checks if a node object is a spot/preemptible instance
-// without fetching the node from the API (used when we already have the object).
-func isSpotNodeFromObj(node *corev1.Node) bool {
-	spotLabels := []string{
-		"kubernetes.io/lifecycle",
-		"node.kubernetes.io/lifecycle",
-		"cloud.google.com/gke-preemptible",
-		"cloud.google.com/gke-spot",
-		"eks.amazonaws.com/capacityType",
-		"karpenter.sh/capacity-type",
+func podLabels(pods []corev1.Pod) []map[string]string {
+	out := make([]map[string]string, len(pods))
+	for i := range pods {
+		out[i] = pods[i].Labels
 	}
-
-	spotValues := map[string]bool{
-		"spot":        true,
-		"preemptible": true,
-		"SPOT":        true,
-		"true":        true,
-	}
-
-	for _, label := range spotLabels {
-		if v, ok := node.Labels[label]; ok {
-			if spotValues[v] {
-				return true
-			}
-		}
-	}
-
-	return false
+	return out
 }
 
-// --- Private/dedicated node collection ---
-
-// collectPrivateNodes finds nodes dedicated to this vCluster and records their
-// full capacity for billing. In private node mode, the entire node is billed
-// to the tenant regardless of actual utilization.
-func (c *Collector) collectPrivateNodes(ctx context.Context, namespace string, m *VClusterMetrics) {
-	gpuResource := corev1.ResourceName("nvidia.com/gpu")
-	ephemeralResource := corev1.ResourceName("ephemeral-storage")
-
-	// Search for private nodes using multiple strategies.
-	// The label value could be the vCluster name, the namespace, or a custom pattern.
-	// We try all reasonable combinations.
-	selectors := []string{
-		fmt.Sprintf("vcluster.loft.sh/managed-by=%s", namespace),
-		fmt.Sprintf("vcluster.loft.sh/cluster=%s", namespace),
+func pvcLabels(pvcs []corev1.PersistentVolumeClaim) []map[string]string {
+	out := make([]map[string]string, len(pvcs))
+	for i := range pvcs {
+		out[i] = pvcs[i].Labels
 	}
+	return out
+}
 
-	// Also try with the vCluster name derived from the namespace
-	// (strip common prefixes like "vcluster-", "vc-")
-	vclusterName := namespace
-	for _, prefix := range []string{"vcluster-", "vc-"} {
-		if strings.HasPrefix(namespace, prefix) {
-			vclusterName = strings.TrimPrefix(namespace, prefix)
+// ownedFilter decides which host objects belong to a tenant cluster. When
+// the syncer's managed-by label is present in the namespace it is used
+// strictly (several tenant clusters can share a namespace); otherwise every
+// non-control-plane object counts, as in v0.1.
+func ownedFilter(all []map[string]string, clusterName string, includeControlPlane bool) func(map[string]string) bool {
+	labeled := false
+	for _, l := range all {
+		if l[LabelManagedBy] != "" {
+			labeled = true
 			break
 		}
 	}
-	if vclusterName != namespace {
-		selectors = append(selectors,
-			fmt.Sprintf("vcluster.loft.sh/managed-by=%s", vclusterName),
-			fmt.Sprintf("vcluster.loft.sh/cluster=%s", vclusterName),
-		)
-	}
-
-	// Strategy 3: custom label from environment variable.
-	// Format: VCLUSTER_NODE_LABEL=<label-key>=<label-value-pattern>
-	// The value pattern may contain %s which is replaced with the vCluster name.
-	if customLabel := os.Getenv("VCLUSTER_NODE_LABEL"); customLabel != "" {
-		parts := strings.SplitN(customLabel, "=", 2)
-		if len(parts) == 2 {
-			key := parts[0]
-			valPattern := parts[1]
-			val := strings.ReplaceAll(valPattern, "%s", vclusterName)
-			selectors = append(selectors, fmt.Sprintf("%s=%s", key, val))
+	return func(l map[string]string) bool {
+		if isControlPlane(l, clusterName) {
+			return includeControlPlane
 		}
+		if labeled {
+			return l[LabelManagedBy] == clusterName
+		}
+		return true
 	}
+}
 
-	seen := make(map[string]bool)
-
-	for _, sel := range selectors {
-		nodes, err := c.kubeClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{
-			LabelSelector: sel,
-		})
-		if err != nil {
-			log.Printf("[metrics] warning: cannot list nodes with selector %q: %v", sel, err)
+// meterPods meters GPU, CPU and memory time of pods outside the skipped
+// (whole-node billed) nodes. mode is the billing_mode dimension.
+func (c *Collector) meterPods(pods []podEntry, include func(*corev1.Pod) bool, nsOf func(*corev1.Pod) string,
+	nodes, skip map[string]*nodeInfo, dra *draIndex, windows []Window, accs map[time.Time]*accumulator, st *Stats,
+	base baseFn, usageByPod map[string][2]float64, mode string) {
+	for _, e := range pods {
+		p := e.pod
+		if !include(p) {
 			continue
 		}
-
-		for _, node := range nodes.Items {
-			if seen[node.Name] {
-				continue
+		start, end, started := podLifetime(p)
+		if !started {
+			continue
+		}
+		// A pod deleted while running stops being billed when it was deleted.
+		if !e.deletedAt.IsZero() && (end.IsZero() || end.After(e.deletedAt)) {
+			end = e.deletedAt
+		}
+		st.Pods++
+		n := nodes[p.Spec.NodeName]
+		if _, ok := skip[p.Spec.NodeName]; ok {
+			continue
+		}
+		capType := usage.CapacityOnDemand
+		gpuType := "unknown"
+		if n != nil {
+			capType, gpuType = n.capacityType, n.gpuType
+		}
+		vns := nsOf(p)
+		withNS := func(e usage.Event) usage.Event {
+			if c.opts.MeterByNamespace && vns != "" {
+				e.Dimensions[usage.DimNamespace] = vns
 			}
-			seen[node.Name] = true
-
-			pn := PrivateNode{
-				NodeName: node.Name,
-			}
-
-			// CPU capacity
-			if cpu, ok := node.Status.Capacity[corev1.ResourceCPU]; ok {
-				pn.CPUCores = cpu.Value()
-			}
-
-			// Memory capacity
-			if mem, ok := node.Status.Capacity[corev1.ResourceMemory]; ok {
-				pn.MemoryBytes = mem.Value()
-			}
-
-			// GPU count
-			if gpu, ok := node.Status.Capacity[gpuResource]; ok {
-				pn.GPUCount = gpu.Value()
-			}
-
-			// GPU type from label (check multiple label conventions)
-			for _, gpuLabel := range []string{
-				"nvidia.com/gpu.product",
-				"nvidia.com/gpu.machine",
-				"cloud.google.com/gke-accelerator",
-				"k8s.amazonaws.com/accelerator",
-			} {
-				if gpuType, ok := node.Labels[gpuLabel]; ok && gpuType != "" {
-					pn.GPUType = sanitizeGPUType(gpuType)
-					break
+			return e
+		}
+		allocs := append(c.gpuAllocs(p, n), dra.allocs(p.UID)...)
+		if gpuType == "unknown" && dra != nil && dra.gpuType[p.UID] != "" {
+			gpuType = dra.gpuType[p.UID]
+		}
+		if len(allocs) > 0 {
+			st.GPUPods++
+		}
+		reqCPU, reqMem := podRequests(p)
+		for _, w := range windows {
+			acc := accs[w.End]
+			billable, down := n.split(start, end, w.Start, w.End)
+			for _, a := range allocs {
+				sku := gpuType
+				if n != nil && n.sku != "" {
+					sku = n.sku
+				}
+				if a.profile != "full" {
+					sku += "-" + a.profile
+				}
+				ev := withNS(base(usage.MetricGPUHours, n))
+				ev.SKU = sku
+				ev.Dimensions[usage.DimGPUType] = gpuType
+				ev.Dimensions[usage.DimGPUProfile] = a.profile
+				ev.Dimensions[usage.DimCapacityType] = capType
+				ev.Dimensions[usage.DimBillingMode] = mode
+				gpuEq := a.count * a.fraction
+				acc.add(ev, gpuEq*billable.Hours(), map[string]any{"gpu_devices": a.count, "pods": 1})
+				if down > 0 {
+					dt := base(usage.MetricGPUDowntimeHours, n)
+					dt.SKU = sku
+					dt.Dimensions[usage.DimGPUType] = gpuType
+					dt.Dimensions[usage.DimNode] = p.Spec.NodeName
+					acc.add(dt, gpuEq*down.Hours(), map[string]any{"reason": "node not ready or unhealthy"})
 				}
 			}
 
-			// Ephemeral storage capacity
-			if stor, ok := node.Status.Capacity[ephemeralResource]; ok {
-				pn.StorageBytes = stor.Value()
+			var cpu, mem float64
+			switch c.opts.Basis {
+			case "requests":
+				cpu, mem = reqCPU, reqMem
+			case "usage", "max":
+				if !w.Latest {
+					if c.opts.Basis == "max" {
+						cpu, mem = reqCPU, reqMem // usage is unknown for past windows
+					}
+					break
+				}
+				u := usageByPod[p.Namespace+"/"+p.Name]
+				cpu, mem = u[0], u[1]
+				if c.opts.Basis == "max" {
+					cpu, mem = max(cpu, reqCPU), max(mem, reqMem)
+				}
 			}
-
-			// Instance type from label
-			if instType, ok := node.Labels["node.kubernetes.io/instance-type"]; ok {
-				pn.InstanceType = instType
+			for _, m := range []struct {
+				metric string
+				qty    float64
+			}{{usage.MetricCPUCoreHours, cpu}, {usage.MetricMemoryGBHours, mem / gib}} {
+				if m.qty <= 0 {
+					continue
+				}
+				ev := withNS(base(m.metric, n))
+				ev.Dimensions[usage.DimCapacityType] = capType
+				ev.Dimensions[usage.DimBillingMode] = mode
+				acc.add(ev, m.qty*billable.Hours(), map[string]any{"basis": c.opts.Basis})
 			}
-
-			// Spot status
-			pn.IsSpot = isSpotNodeFromObj(&node)
-
-			m.PrivateNodes = append(m.PrivateNodes, pn)
-		}
-	}
-
-	if len(m.PrivateNodes) > 0 {
-		var totalCPU int64
-		var totalGPU int64
-		for _, pn := range m.PrivateNodes {
-			totalCPU += pn.CPUCores
-			totalGPU += pn.GPUCount
-		}
-		log.Printf("[metrics] %s: found %d private node(s): totalCPU=%d cores, totalMemory=%.2f GB, totalGPUs=%d",
-			namespace, len(m.PrivateNodes), totalCPU, m.PrivateNodeTotalMemoryGB(), totalGPU)
-
-		for _, pn := range m.PrivateNodes {
-			spotStr := "on-demand"
-			if pn.IsSpot {
-				spotStr = "spot"
-			}
-			log.Printf("[metrics]   node=%s type=%s cpu=%d mem=%dMi gpus=%d(%s) %s",
-				pn.NodeName, pn.InstanceType, pn.CPUCores,
-				pn.MemoryBytes/(1024*1024), pn.GPUCount, pn.GPUType, spotStr)
 		}
 	}
 }
 
-// collectPrivateNodeUsage queries metrics-server for actual CPU/memory usage
-// on private nodes and adds that usage to the billing totals. This ensures
-// that workloads running directly on dedicated nodes (outside the vCluster
-// namespace) are also captured.
-func (c *Collector) collectPrivateNodeUsage(ctx context.Context, namespace string, m *VClusterMetrics) {
-	var addedCPU float64
-	var addedMem float64
+// meterWholeNode bills a node's full capacity (node-hours, whole GPUs, CPU
+// and memory) to one tenant cluster: dedicated nodes of the control plane
+// cluster and private nodes of the tenant cluster itself.
+func (c *Collector) meterWholeNode(name string, n *nodeInfo, windows []Window, accs map[time.Time]*accumulator, base baseFn, mode string) {
+	for _, w := range windows {
+		acc := accs[w.End]
+		billable, down := n.split(n.created, n.deletedAt, w.Start, w.End)
+		h := billable.Hours()
+		sku := nodeSKU(n)
+		nodeEv := base(usage.MetricPrivateNodeHours, n)
+		nodeEv.ResourceID = name
+		nodeEv.SKU = sku
+		nodeEv.Dimensions[usage.DimCapacityType] = n.capacityType
+		nodeEv.Dimensions[usage.DimBillingMode] = mode
+		nodeEv.Dimensions[usage.DimNode] = name
+		if n.instanceType != "" {
+			nodeEv.Dimensions[usage.DimInstanceType] = n.instanceType
+		}
+		acc.add(nodeEv, h, nil)
+		if gpus := n.physicalGPUs(); gpus > 0 {
+			gev := base(usage.MetricGPUHours, n)
+			gev.ResourceID = name
+			gev.SKU = n.gpuType
+			if n.sku != "" {
+				gev.SKU = n.sku
+			}
+			gev.Dimensions[usage.DimGPUType] = n.gpuType
+			gev.Dimensions[usage.DimGPUProfile] = "full"
+			gev.Dimensions[usage.DimCapacityType] = n.capacityType
+			gev.Dimensions[usage.DimBillingMode] = mode
+			gev.Dimensions[usage.DimNode] = name
+			acc.add(gev, gpus*h, map[string]any{"gpu_devices": float64(n.gpuDevices()), "physical_gpus": gpus})
+			if down > 0 {
+				dt := base(usage.MetricGPUDowntimeHours, n)
+				dt.ResourceID = name
+				dt.SKU = gev.SKU
+				dt.Dimensions[usage.DimGPUType] = n.gpuType
+				dt.Dimensions[usage.DimNode] = name
+				acc.add(dt, gpus*down.Hours(), map[string]any{"reason": "node not ready or unhealthy"})
+			}
+		} else if lost := n.expectedGPUs(); lost > 0 && (h > 0 || down > 0) {
+			// Installed but not allocatable: GPU downtime, never usage.
+			dt := base(usage.MetricGPUDowntimeHours, n)
+			dt.ResourceID = name
+			dt.SKU = n.gpuType
+			if n.sku != "" {
+				dt.SKU = n.sku
+			}
+			dt.Dimensions[usage.DimGPUType] = n.gpuType
+			dt.Dimensions[usage.DimNode] = name
+			reason := "GPUs installed but not allocatable"
+			if h == 0 {
+				reason = "node not ready or unhealthy"
+			}
+			acc.add(dt, lost*(h+down.Hours()), map[string]any{"reason": reason})
+		}
+		for _, m := range []struct {
+			metric string
+			qty    float64
+		}{{usage.MetricCPUCoreHours, n.cpuCapacity}, {usage.MetricMemoryGBHours, n.memCapacity / gib}} {
+			ev := base(m.metric, n)
+			ev.ResourceID = name
+			ev.Dimensions[usage.DimCapacityType] = n.capacityType
+			ev.Dimensions[usage.DimBillingMode] = mode
+			ev.Dimensions[usage.DimNode] = name
+			acc.add(ev, m.qty*h, nil)
+		}
+	}
+}
 
-	for _, pn := range m.PrivateNodes {
-		nodeMetrics, err := c.metricsClient.MetricsV1beta1().NodeMetricses().Get(ctx, pn.NodeName, metav1.GetOptions{})
-		if err != nil {
-			log.Printf("[metrics] warning: cannot get node metrics for private node %s: %v", pn.NodeName, err)
+// meterVolumes bills bound volumes per storage class.
+func meterVolumes(pvcs []corev1.PersistentVolumeClaim, include func(map[string]string) bool, windows []Window, accs map[time.Time]*accumulator, base baseFn) {
+	for _, pvc := range pvcs {
+		if pvc.Status.Phase != corev1.ClaimBound || !include(pvc.Labels) {
 			continue
 		}
-
-		cpu := nodeMetrics.Usage.Cpu()
-		mem := nodeMetrics.Usage.Memory()
-
-		if cpu != nil {
-			cpuVal := float64(cpu.MilliValue()) / 1000.0
-			m.CPUCores += cpuVal
-			addedCPU += cpuVal
+		size := pvc.Status.Capacity[corev1.ResourceStorage]
+		if size.IsZero() {
+			size = pvc.Spec.Resources.Requests[corev1.ResourceStorage]
 		}
-		if mem != nil {
-			memVal := float64(mem.Value())
-			m.MemoryBytes += memVal
-			addedMem += memVal
+		class := "default"
+		if pvc.Spec.StorageClassName != nil && *pvc.Spec.StorageClassName != "" {
+			class = *pvc.Spec.StorageClassName
+		}
+		for _, w := range windows {
+			ov := usage.Overlap(pvc.CreationTimestamp.Time, time.Time{}, w.Start, w.End)
+			ev := base(usage.MetricStorageGBHours, nil)
+			ev.SKU = class
+			accs[w.End].add(ev, float64(size.Value())/gib*ov.Hours(), map[string]any{"volumes": 1})
 		}
 	}
-
-	if addedCPU > 0 || addedMem > 0 {
-		log.Printf("[metrics] %s: added private node usage: CPU=+%.3f cores, Memory=+%.2f GB",
-			namespace, addedCPU, addedMem/(1024*1024*1024))
-	}
 }
 
-// --- DCGM GPU utilization from Prometheus ---
-
-func (c *Collector) collectDCGMMetrics(ctx context.Context, namespace string, m *VClusterMetrics) {
-	if c.promClient == nil {
-		return
-	}
-
-	// Query DCGM GPU utilization for pods in this namespace
-	// DCGM_FI_DEV_GPU_UTIL{namespace="<ns>"} gives GPU utilization 0-100
-	query := fmt.Sprintf(`DCGM_FI_DEV_GPU_UTIL{namespace="%s"}`, namespace)
-	results, err := c.promClient.Query(ctx, query)
-	if err != nil {
-		log.Printf("[metrics] warning: DCGM query failed for %s: %v", namespace, err)
-		return
-	}
-
-	for _, r := range results {
-		util, _ := strconv.ParseFloat(r.Value, 64)
-
-		// Also get memory usage for this GPU
-		var memUsed, memTotal float64
-		memQuery := fmt.Sprintf(`DCGM_FI_DEV_FB_USED{namespace="%s",gpu="%s"}`, namespace, r.Labels["gpu"])
-		memResults, err := c.promClient.Query(ctx, memQuery)
-		if err == nil && len(memResults) > 0 {
-			memUsed, _ = strconv.ParseFloat(memResults[0].Value, 64)
+// meterLoadBalancers bills LoadBalancer services that have an address.
+func meterLoadBalancers(svcs []corev1.Service, include func(*corev1.Service) bool, windows []Window, accs map[time.Time]*accumulator, base baseFn) {
+	for i := range svcs {
+		svc := &svcs[i]
+		if svc.Spec.Type != corev1.ServiceTypeLoadBalancer || len(svc.Status.LoadBalancer.Ingress) == 0 || !include(svc) {
+			continue
 		}
-		memTotalQuery := fmt.Sprintf(`DCGM_FI_DEV_FB_FREE{namespace="%s",gpu="%s"} + DCGM_FI_DEV_FB_USED{namespace="%s",gpu="%s"}`,
-			namespace, r.Labels["gpu"], namespace, r.Labels["gpu"])
-		memTotalResults, err := c.promClient.Query(ctx, memTotalQuery)
-		if err == nil && len(memTotalResults) > 0 {
-			memTotal, _ = strconv.ParseFloat(memTotalResults[0].Value, 64)
+		for _, w := range windows {
+			ov := usage.Overlap(svc.CreationTimestamp.Time, time.Time{}, w.Start, w.End)
+			accs[w.End].add(base(usage.MetricLBHours, nil), ov.Hours(), map[string]any{"load_balancers": 1})
 		}
-
-		m.GPUUtilization = append(m.GPUUtilization, GPUUtilizationMetric{
-			GPUType:       r.Labels["modelName"],
-			GPUUUID:       r.Labels["UUID"],
-			Utilization:   util,
-			MemoryUsedMB:  memUsed,
-			MemoryTotalMB: memTotal,
-			PodName:       r.Labels["pod"],
-			PodNamespace:  r.Labels["namespace"],
-		})
 	}
+}
 
-	if len(m.GPUUtilization) > 0 {
-		avgUtil := 0.0
-		for _, g := range m.GPUUtilization {
-			avgUtil += g.Utilization
+// baseFor returns the event template builder for a tenant cluster.
+func (c *Collector) baseFor(t Target) baseFn {
+	extID := t.Cluster.ExternalID()
+	return func(metric string, n *nodeInfo) usage.Event {
+		e := usage.Event{
+			Tenant: t.Tenant, Metric: metric, Project: t.Project, ResourceID: extID,
+			Region:     n.regionOr(c.opts.Region, c.opts.RegionFromNode),
+			Dimensions: map[string]string{usage.DimTenantCluster: extID},
 		}
-		avgUtil /= float64(len(m.GPUUtilization))
-		log.Printf("[metrics] %s: DCGM GPU utilization: %d GPUs, avg=%.1f%%",
-			namespace, len(m.GPUUtilization), avgUtil)
-	}
-}
-
-// --- Network egress from Prometheus ---
-
-func (c *Collector) collectNetworkMetrics(ctx context.Context, namespace string, m *VClusterMetrics) {
-	if c.promClient == nil {
-		return
-	}
-
-	// Query total network transmit bytes (egress) over the last collection interval
-	// Using rate over 5m to get bytes/sec, then we'll multiply by our interval
-	txQuery := fmt.Sprintf(
-		`sum(rate(container_network_transmit_bytes_total{namespace="%s"}[5m])) * 300`,
-		namespace,
-	)
-	txResults, err := c.promClient.Query(ctx, txQuery)
-	if err != nil {
-		log.Printf("[metrics] warning: network tx query failed for %s: %v", namespace, err)
-		return
-	}
-	if len(txResults) > 0 {
-		m.NetworkTxBytes, _ = strconv.ParseFloat(txResults[0].Value, 64)
-	}
-
-	// Also get rx for completeness (not billed by default but tracked)
-	rxQuery := fmt.Sprintf(
-		`sum(rate(container_network_receive_bytes_total{namespace="%s"}[5m])) * 300`,
-		namespace,
-	)
-	rxResults, err := c.promClient.Query(ctx, rxQuery)
-	if err == nil && len(rxResults) > 0 {
-		m.NetworkRxBytes, _ = strconv.ParseFloat(rxResults[0].Value, 64)
-	}
-
-	if m.NetworkTxBytes > 0 {
-		log.Printf("[metrics] %s: Network egress=%.2f MB",
-			namespace, m.NetworkTxBytes/(1024*1024))
-	}
-}
-
-// --- Prometheus client for DCGM and network metrics ---
-
-type prometheusClient struct {
-	baseURL    string
-	httpClient *http.Client
-}
-
-func newPrometheusClient(baseURL string) *prometheusClient {
-	return &prometheusClient{
-		baseURL: strings.TrimRight(baseURL, "/"),
-		httpClient: &http.Client{
-			Timeout: 10 * time.Second,
-		},
-	}
-}
-
-type promQueryResponse struct {
-	Status string `json:"status"`
-	Data   struct {
-		ResultType string `json:"resultType"`
-		Result     []struct {
-			Metric map[string]string `json:"metric"`
-			Value  []interface{}     `json:"value"`
-		} `json:"result"`
-	} `json:"data"`
-}
-
-type promResult struct {
-	Labels map[string]string
-	Value  string
-}
-
-func (p *prometheusClient) Query(ctx context.Context, query string) ([]promResult, error) {
-	url := fmt.Sprintf("%s/api/v1/query?query=%s", p.baseURL, query)
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	resp, err := p.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("prometheus query: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	var promResp promQueryResponse
-	if err := json.Unmarshal(body, &promResp); err != nil {
-		return nil, fmt.Errorf("decode prometheus response: %w", err)
-	}
-
-	if promResp.Status != "success" {
-		return nil, fmt.Errorf("prometheus query failed: %s", string(body))
-	}
-
-	var results []promResult
-	for _, r := range promResp.Data.Result {
-		val := ""
-		if len(r.Value) >= 2 {
-			val = fmt.Sprintf("%v", r.Value[1])
+		if t.TenantClass != "" {
+			e.Dimensions[usage.DimTenantClass] = t.TenantClass
 		}
-		results = append(results, promResult{
-			Labels: r.Metric,
-			Value:  val,
-		})
+		if n != nil && n.zone != "" {
+			e.Dimensions[usage.DimZone] = n.zone
+		}
+		return e
 	}
-
-	return results, nil
 }
-
-// --- Helpers ---
-
-// round rounds a float to n decimal places.
-func round(val float64, precision int) float64 {
-	ratio := math.Pow(10, float64(precision))
-	return math.Round(val*ratio) / ratio
-}
-
-// parseQuantity safely parses a Kubernetes resource quantity.
-func parseQuantity(s string) float64 {
-	q, err := resource.ParseQuantity(s)
-	if err != nil {
-		return 0
-	}
-	return float64(q.Value())
-}
-
-// Ensure metricsv1beta1 is used (compile check)
-var _ *metricsv1beta1.PodMetrics

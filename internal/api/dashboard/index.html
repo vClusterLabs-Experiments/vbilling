@@ -1,0 +1,411 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vBilling</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 28 28'%3E%3Cpath d='M4 7L14 21L24 7' stroke='%23FF6600' stroke-width='3.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<style>
+/* Served by the vBilling pod itself: no external fonts or scripts, so it
+   works in air-gapped and sovereign regions. */
+:root {
+  color-scheme: light;
+  --bg: #EDEFF3;
+  --surface: #FFFFFF;
+  --border: #E6E7E9;
+  --text: #050B24;
+  --text-2: #505466;
+  --text-3: #828592;
+  --brand: #FF6600;
+  --mark: #CC5100;        /* single-series data marks: validated >= 3:1 on --surface */
+  --grid: #E6E7E9;
+  --good: #0ca30c; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b;
+  --code: #48B5FF;
+  --shadow: 0 2px 8px 1px rgba(0,0,0,.06);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #050B24; --surface: #0B1430; --border: #1E233A;
+    --text: #FFFFFF; --text-2: #B4B6BD; --text-3: #828592;
+    --mark: #E85D00; --grid: #1E233A; --shadow: none;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #050B24; --surface: #0B1430; --border: #1E233A;
+  --text: #FFFFFF; --text-2: #B4B6BD; --text-3: #828592;
+  --mark: #E85D00; --grid: #1E233A; --shadow: none;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--text);
+  font: 14px/1.5 Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+code, .mono { font-family: "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+header {
+  display: flex; flex-wrap: wrap; gap: 12px 24px; align-items: center; justify-content: space-between;
+  padding: 16px 24px; background: var(--surface); border-bottom: 1px solid var(--border);
+}
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 800; font-size: 18px; }
+.brand svg { flex: none; }
+.meta { display: flex; flex-wrap: wrap; gap: 6px 16px; color: var(--text-2); font-size: 13px; }
+.meta b { color: var(--text); font-weight: 600; }
+main { max-width: 1280px; margin: 0 auto; padding: 20px 16px 48px; display: grid; gap: 16px; }
+.toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.toolbar .spacer { flex: 1; }
+button, select, input {
+  font: inherit; color: var(--text); background: var(--surface); border: 1px solid var(--border);
+  border-radius: 8px; padding: 6px 12px; min-height: 34px;
+}
+button { cursor: pointer; }
+button.primary { background: var(--brand); border-color: var(--brand); color: #fff; font-weight: 600; }
+button:hover { border-color: var(--text-3); }
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.seg button { border: 0; border-radius: 0; background: var(--surface); }
+.seg button[aria-pressed="true"] { background: var(--text); color: var(--surface); }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 16px; box-shadow: var(--shadow); min-width: 0; }
+.tile .label { color: var(--text-2); font-size: 12.5px; }
+.tile .value { font-size: 26px; font-weight: 700; letter-spacing: -.02em; margin-top: 2px; }
+.tile .sub { color: var(--text-3); font-size: 12px; }
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 16px; }
+h2 { font-size: 15px; margin: 0 0 2px; }
+.desc { color: var(--text-3); font-size: 12.5px; margin: 0 0 12px; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { text-align: left; color: var(--text-2); font-weight: 600; padding: 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+td { padding: 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.scroll { overflow-x: auto; }
+.badge { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; font-size: 12.5px; white-space: nowrap; }
+.badge svg { flex: none; }
+.empty { color: var(--text-3); padding: 12px 0; }
+.chart { width: 100%; height: auto; display: block; }
+.chart text { fill: var(--text-2); font-size: 11px; }
+.chart .value-label { fill: var(--text); font-weight: 600; }
+.tooltip {
+  position: fixed; pointer-events: none; z-index: 10; background: var(--text); color: var(--surface);
+  border-radius: 8px; padding: 6px 10px; font-size: 12px; display: none; max-width: 280px;
+}
+#auth { display: none; }
+#auth.show { display: flex; }
+.err { color: var(--critical); }
+@media (max-width: 640px) { header, main { padding-left: 16px; padding-right: 16px; } .tile .value { font-size: 22px; } }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <svg width="28" height="28" viewBox="0 0 28 28" aria-hidden="true"><path d="M4 7L14 21L24 7" stroke="#FF6600" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    vBilling
+  </div>
+  <div class="meta" id="meta">Loading...</div>
+</header>
+<main>
+  <div class="toolbar" role="toolbar" aria-label="Filters">
+    <div class="seg" id="range" role="group" aria-label="Time range">
+      <button data-range="24h" aria-pressed="true">Last 24h</button>
+      <button data-range="7d" aria-pressed="false">Last 7 days</button>
+      <button data-range="mtd" aria-pressed="false">Month to date</button>
+    </div>
+    <select id="tenant" aria-label="Tenant"><option value="">All tenants</option></select>
+    <span class="spacer"></span>
+    <button id="csv">Export usage CSV</button>
+    <button id="jsonl">Export events (JSONL)</button>
+    <button id="theme" aria-label="Toggle dark mode">Theme</button>
+  </div>
+  <form class="toolbar card" id="auth" aria-label="API token">
+    <span>This vBilling API requires a token.</span>
+    <input id="token" type="password" placeholder="API token" autocomplete="off" size="28">
+    <button class="primary" type="submit">Connect</button>
+  </form>
+
+  <section class="tiles" aria-label="Summary">
+    <div class="card tile"><div class="label">Tenants</div><div class="value" id="t-tenants">-</div><div class="sub" id="t-clusters">-</div></div>
+    <div class="card tile"><div class="label">GPU-hours</div><div class="value" id="t-gpu">-</div><div class="sub" id="t-gpu-sub">last 24 hours</div></div>
+    <div class="card tile"><div class="label">Destinations</div><div class="value" id="t-dest">-</div><div class="sub" id="t-dest-sub">-</div></div>
+    <div class="card tile"><div class="label">Ledger</div><div class="value" id="t-ledger">-</div><div class="sub" id="t-ledger-sub">-</div></div>
+  </section>
+
+  <section class="grid2">
+    <div class="card">
+      <h2>GPU-hours by SKU</h2>
+      <p class="desc">GPU-equivalent hours; MIG and time-sliced GPUs count at their fraction.</p>
+      <svg class="chart" id="sku-chart" role="img" aria-label="GPU-hours by SKU"></svg>
+    </div>
+    <div class="card">
+      <h2>GPU-hours per hour, last 24 hours</h2>
+      <p class="desc">Hourly totals from the ledger (UTC).</p>
+      <svg class="chart" id="hour-chart" role="img" aria-label="GPU-hours per hour"></svg>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Usage by tenant</h2>
+    <p class="desc">Unrated quantities from the vBilling ledger. Prices and invoices come from your billing backend.</p>
+    <div class="scroll"><table id="usage"><thead></thead><tbody></tbody></table></div>
+  </section>
+
+  <section class="grid2">
+    <div class="card">
+      <h2>Destinations</h2>
+      <p class="desc">Each destination reads the ledger through its own cursor.</p>
+      <div class="scroll"><table id="dests"><thead><tr><th>Destination</th><th>Status</th><th class="num">Delivered</th><th class="num">Lag</th><th class="num">Dead letters</th></tr></thead><tbody></tbody></table></div>
+    </div>
+    <div class="card">
+      <h2>Billing state</h2>
+      <p class="desc">From Stripe and Metronome webhooks. <span id="mode"></span></p>
+      <div class="scroll"><table id="states"><thead><tr><th>Tenant</th><th>State</th><th>Reason</th><th>Since</th></tr></thead><tbody></tbody></table></div>
+    </div>
+  </section>
+</main>
+<div class="tooltip" id="tip" role="status"></div>
+<script>
+"use strict";
+const $ = (s) => document.querySelector(s);
+const store = {
+  get(k) { try { return sessionStorage.getItem(k); } catch (e) { return null; } },
+  set(k, v) { try { sessionStorage.setItem(k, v); } catch (e) {} },
+};
+let token = store.get("vbilling-token") || "";
+let range = "24h";
+let names = {}; // tenant ID -> display name
+
+const METRICS = [
+  ["vcluster_gpu_hours", "GPU-h"],
+  ["vcluster_cpu_core_hours", "Core-h"],
+  ["vcluster_memory_gb_hours", "Mem GiB-h"],
+  ["vcluster_storage_gb_hours", "Storage GiB-h"],
+  ["vcluster_instance_hours", "Cluster-h"],
+  ["vcluster_private_node_hours", "Node-h"],
+  ["vcluster_network_egress_gb", "Egress GiB"],
+];
+
+async function api(path) {
+  const res = await fetch(path, { headers: token ? { Authorization: "Bearer " + token } : {} });
+  if (res.status === 401) {
+    $("#auth").classList.add("show");
+    $("#meta").textContent = "Authentication required";
+    throw new Error("unauthorized");
+  }
+  if (!res.ok) throw new Error(path + ": HTTP " + res.status);
+  return res;
+}
+const json = async (path) => (await api(path)).json();
+
+function bounds() {
+  const now = new Date();
+  let from;
+  if (range === "24h") from = new Date(now - 24 * 3600e3);
+  else if (range === "7d") from = new Date(now - 7 * 24 * 3600e3);
+  else from = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  return { from: from.toISOString().replace(/\.\d+Z$/, "Z"), to: now.toISOString().replace(/\.\d+Z$/, "Z") };
+}
+function qs(extra) {
+  const b = bounds();
+  const p = new URLSearchParams({ from: b.from, to: b.to, ...extra });
+  const t = $("#tenant").value;
+  if (t) p.set("tenant", t);
+  return p.toString();
+}
+const fmt = (n, d = 2) => n >= 1000 ? n.toLocaleString(undefined, { maximumFractionDigits: 0 }) : n.toLocaleString(undefined, { maximumFractionDigits: d });
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const ago = (t) => { if (!t) return "never"; const s = (Date.now() - new Date(t)) / 1000; return s < 90 ? Math.round(s) + "s ago" : s < 5400 ? Math.round(s / 60) + "m ago" : Math.round(s / 3600) + "h ago"; };
+
+const ICONS = {
+  good: '<path d="M3 8.5l3 3 7-7" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>',
+  warning: '<path d="M8 2l6.5 11.5h-13z" fill="currentColor"/><path d="M8 6v3.5M8 11.6v.4" stroke="#050B24" stroke-width="1.6" stroke-linecap="round"/>',
+  serious: '<circle cx="8" cy="8" r="6.5" fill="currentColor"/><path d="M8 4.5v4M8 11v.4" stroke="#050B24" stroke-width="1.6" stroke-linecap="round"/>',
+  critical: '<path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>',
+};
+function badge(level, label) {
+  return '<span class="badge" style="color:var(--' + level + ')"><svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">' + ICONS[level] +
+    '</svg><span style="color:var(--text)">' + esc(label) + "</span></span>";
+}
+function tenantCell(id) {
+  const n = names[id];
+  return n && n !== id ? esc(n) + '<div class="desc mono" style="margin:0">' + esc(id) + "</div>" : esc(id);
+}
+const STATE_LEVEL = { active: "good", warning: "warning", delinquent: "serious", suspended: "critical" };
+
+// --- tooltip ---
+const tip = $("#tip");
+function showTip(e, html) { tip.innerHTML = html; tip.style.display = "block"; moveTip(e); }
+function moveTip(e) {
+  const x = Math.min(e.clientX + 14, window.innerWidth - tip.offsetWidth - 8);
+  tip.style.left = x + "px"; tip.style.top = (e.clientY + 14) + "px";
+}
+function hideTip() { tip.style.display = "none"; }
+window.addEventListener("scroll", hideTip, { passive: true });
+function bindTips(svg) {
+  svg.querySelectorAll("[data-tip]").forEach((el) => {
+    el.addEventListener("mouseenter", (e) => showTip(e, el.dataset.tip));
+    el.addEventListener("mousemove", moveTip);
+    el.addEventListener("mouseleave", hideTip);
+    el.addEventListener("focus", (e) => { const r = el.getBoundingClientRect(); showTip({ clientX: r.x + r.width / 2, clientY: r.y }, el.dataset.tip); });
+    el.addEventListener("blur", hideTip);
+  });
+}
+
+// --- charts (single series: one hue, no legend; the title names it) ---
+function barsH(svg, rows) {
+  if (!rows.length) { svg.setAttribute("viewBox", "0 0 600 40"); svg.innerHTML = '<text x="0" y="24">No GPU usage in this range.</text>'; return; }
+  const W = 600, rowH = 26, gap = 8, labelW = 210, valueW = 70, top = 4;
+  const H = top + rows.length * (rowH + gap);
+  const max = Math.max(...rows.map((r) => r.quantity)) || 1;
+  const plotW = W - labelW - valueW;
+  let out = "";
+  rows.forEach((r, i) => {
+    const y = top + i * (rowH + gap);
+    const w = Math.max(2, (r.quantity / max) * plotW);
+    const label = r.sku || "unknown";
+    // Hit target spans the whole row, larger than the mark.
+    out += '<g tabindex="0" data-tip="' + esc("<b>" + label + "</b><br>" + fmt(r.quantity, 3) + " GPU-hours") + '">' +
+      '<rect x="0" y="' + y + '" width="' + W + '" height="' + rowH + '" fill="transparent"/>' +
+      '<text x="0" y="' + (y + rowH / 2 + 4) + '">' + esc(label.length > 30 ? label.slice(0, 29) + "..." : label) + "</text>" +
+      '<path d="' + roundedRight(labelW, y + 6, w, rowH - 12, 4) + '" fill="var(--mark)"/>' +
+      '<text class="value-label" x="' + (labelW + w + 6) + '" y="' + (y + rowH / 2 + 4) + '">' + fmt(r.quantity) + "</text></g>";
+  });
+  svg.setAttribute("viewBox", "0 0 " + W + " " + H);
+  svg.innerHTML = out;
+  bindTips(svg);
+}
+function roundedRight(x, y, w, h, r) {
+  r = Math.min(r, w, h / 2);
+  return "M" + x + "," + y + "h" + (w - r) + "a" + r + "," + r + " 0 0 1 " + r + "," + r + "v" + (h - 2 * r) + "a" + r + "," + r + " 0 0 1 -" + r + "," + r + "h-" + (w - r) + "z";
+}
+function roundedTop(x, y, w, h, r) {
+  r = Math.min(r, w / 2, h);
+  return "M" + x + "," + (y + h) + "v-" + (h - r) + "a" + r + "," + r + " 0 0 1 " + r + ",-" + r + "h" + (w - 2 * r) + "a" + r + "," + r + " 0 0 1 " + r + "," + r + "v" + (h - r) + "z";
+}
+function columns(svg, rows) {
+  const W = 600, H = 220, left = 40, bottom = 24, top = 10;
+  const now = new Date(); now.setUTCMinutes(0, 0, 0);
+  const hours = [];
+  for (let i = 23; i >= 0; i--) hours.push(new Date(now - i * 3600e3).toISOString().slice(0, 13) + ":00Z");
+  const byHour = Object.fromEntries(rows.map((r) => [r.hour, r.quantity]));
+  const vals = hours.map((h) => byHour[h] || 0);
+  const max = Math.max(...vals);
+  if (!max) { svg.setAttribute("viewBox", "0 0 600 40"); svg.innerHTML = '<text x="0" y="24">No GPU usage in the last 24 hours.</text>'; return; }
+  const plotH = H - bottom - top, plotW = W - left;
+  const slot = plotW / 24, bw = Math.max(2, slot - 2); // 2px surface gap between bars
+  let out = "";
+  for (const f of [0, 0.5, 1]) {
+    const y = top + plotH * (1 - f);
+    out += '<line x1="' + left + '" x2="' + W + '" y1="' + y + '" y2="' + y + '" stroke="var(--grid)" stroke-width="1"/>' +
+      '<text x="' + (left - 6) + '" y="' + (y + 4) + '" text-anchor="end">' + fmt(max * f, 1) + "</text>";
+  }
+  vals.forEach((v, i) => {
+    const x = left + i * slot + 1;
+    const h = (v / max) * plotH;
+    const label = hours[i].slice(11, 16) + " UTC";
+    out += '<g tabindex="0" data-tip="' + esc("<b>" + label + "</b><br>" + fmt(v, 3) + " GPU-hours") + '">' +
+      '<rect x="' + (left + i * slot) + '" y="' + top + '" width="' + slot + '" height="' + plotH + '" fill="transparent"/>' +
+      (v > 0 ? '<path d="' + roundedTop(x, top + plotH - h, bw, Math.max(h, 2), 4) + '" fill="var(--mark)"/>' : "") + "</g>";
+    if (i % 6 === 0) out += '<text x="' + (x + bw / 2) + '" y="' + (H - 6) + '" text-anchor="middle">' + hours[i].slice(11, 16) + "</text>";
+  });
+  svg.setAttribute("viewBox", "0 0 " + W + " " + H);
+  svg.innerHTML = out;
+  bindTips(svg);
+}
+
+// --- sections ---
+async function loadStatus() {
+  const s = await json("/api/v1/status");
+  $("#meta").innerHTML = [
+    ["Region", s.region], ["Cluster", s.cluster], ["Window", s.window],
+    ["Destinations", (s.adapters || []).join(", ")], ["Last window", s.last_window_end ? ago(s.last_window_end) : "pending"], ["Version", s.version],
+  ].map(([k, v]) => k + " <b>" + esc(v) + "</b>").join("");
+  $("#t-tenants").textContent = s.tenants;
+  $("#t-clusters").textContent = (s.tenant_clusters ?? 0) + " tenant clusters";
+  const dests = s.destinations || [];
+  const healthy = dests.filter((d) => d.ready && !d.consecutive_failures).length;
+  $("#t-dest").textContent = healthy + " / " + dests.length;
+  $("#t-dest-sub").textContent = healthy === dests.length ? "all delivering" : "check destinations below";
+  $("#dests tbody").innerHTML = dests.map((d) => {
+    let st = d.ready ? (d.consecutive_failures ? badge("serious", "Retrying") : badge("good", "Delivering")) : badge("warning", "Bootstrapping");
+    const title = d.last_error ? ' title="' + esc(d.last_error) + '"' : "";
+    return "<tr><td><code>" + esc(d.name) + "</code></td><td" + title + ">" + st + '<div class="desc" style="margin:0">' + (d.last_success ? "last success " + ago(d.last_success) : "") +
+      "</div></td><td class=num>" + fmt(d.delivered_events, 0) + "</td><td class=num>" + fmt(d.lag_records, 0) + "</td><td class=num>" + fmt(d.dead_lettered_events, 0) + "</td></tr>";
+  }).join("") || '<tr><td colspan=5 class="empty">No destinations.</td></tr>';
+}
+async function loadLedger() {
+  const v = await json("/api/v1/ledger/verify").catch(() => null);
+  if (!v) return;
+  $("#t-ledger").innerHTML = v.ok ? badge("good", "Verified") : badge("critical", "Broken chain");
+  $("#t-ledger-sub").textContent = fmt(v.records, 0) + " hash-chained records";
+}
+async function loadTenants() {
+  const t = await json("/api/v1/tenants");
+  const sel = $("#tenant"), cur = sel.value;
+  names = Object.fromEntries((t.tenants || []).map((x) => [x.id, x.display_name || x.id]));
+  sel.innerHTML = '<option value="">All tenants</option>' + (t.tenants || []).map((x) => '<option value="' + esc(x.id) + '">' + esc(x.display_name || x.id) + "</option>").join("");
+  sel.value = cur;
+}
+async function loadUsage() {
+  const u = await json("/api/v1/usage?" + qs({ group_by: "tenant" }));
+  const byTenant = {};
+  let gpu = 0;
+  for (const r of u.rows) {
+    (byTenant[r.tenant] ||= {})[r.metric] = r.quantity;
+    if (r.metric === "vcluster_gpu_hours") gpu += r.quantity;
+  }
+  $("#t-gpu").textContent = fmt(gpu);
+  $("#t-gpu-sub").textContent = { "24h": "last 24 hours", "7d": "last 7 days", mtd: "month to date" }[range];
+  const used = METRICS.filter(([m]) => u.rows.some((r) => r.metric === m));
+  $("#usage thead").innerHTML = "<tr><th>Tenant</th>" + used.map(([, l]) => '<th class="num">' + l + "</th>").join("") + "</tr>";
+  const tenants = Object.keys(byTenant).sort();
+  $("#usage tbody").innerHTML = tenants.map((t) => "<tr><td>" + tenantCell(t) + "</td>" + used.map(([m]) => "<td class=num>" + (byTenant[t][m] != null ? fmt(byTenant[t][m], 3) : "-") + "</td>").join("") + "</tr>").join("") ||
+    '<tr><td class="empty">No usage in this range yet.</td></tr>';
+
+  const sku = await json("/api/v1/usage?" + qs({ group_by: "sku", metric: "vcluster_gpu_hours" }));
+  barsH($("#sku-chart"), sku.rows.sort((a, b) => b.quantity - a.quantity).slice(0, 10));
+  const now = new Date();
+  const p = new URLSearchParams({ group_by: "hour", metric: "vcluster_gpu_hours", from: new Date(now - 24 * 3600e3).toISOString().replace(/\.\d+Z$/, "Z"), to: now.toISOString().replace(/\.\d+Z$/, "Z") });
+  if ($("#tenant").value) p.set("tenant", $("#tenant").value);
+  columns($("#hour-chart"), (await json("/api/v1/usage?" + p)).rows);
+}
+async function loadStates() {
+  const s = await json("/api/v1/billing-states");
+  $("#mode").textContent = s.mode ? "Enforcement mode: " + s.mode + "." : "Enforcement is disabled (no webhook secret configured).";
+  $("#states tbody").innerHTML = (s.states || []).map((x) => "<tr><td>" + tenantCell(x.tenant) + "</td><td>" + badge(STATE_LEVEL[x.state] || "warning", x.state) +
+    "</td><td>" + esc(x.reason) + "</td><td>" + ago(x.since) + "</td></tr>").join("") || '<tr><td colspan=4 class="empty">All tenants in good standing.</td></tr>';
+}
+async function refresh() {
+  try {
+    await Promise.all([loadStatus(), loadTenants(), loadLedger(), loadStates()]);
+    await loadUsage();
+    $("#auth").classList.remove("show");
+  } catch (e) {
+    if (e.message !== "unauthorized") $("#meta").innerHTML = '<span class="err">' + esc(e.message) + "</span>";
+  }
+}
+async function download(path, name) {
+  const res = await api(path);
+  const url = URL.createObjectURL(await res.blob());
+  const a = Object.assign(document.createElement("a"), { href: url, download: name });
+  a.click(); URL.revokeObjectURL(url);
+}
+
+$("#range").addEventListener("click", (e) => {
+  const b = e.target.closest("button"); if (!b) return;
+  range = b.dataset.range;
+  document.querySelectorAll("#range button").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
+  loadUsage().catch(() => {});
+});
+$("#tenant").addEventListener("change", () => loadUsage().catch(() => {}));
+$("#csv").addEventListener("click", () => download("/api/v1/usage?" + qs({ group_by: "tenant,sku,region", format: "csv" }), "vbilling-usage.csv"));
+$("#jsonl").addEventListener("click", () => download("/api/v1/events?" + qs({}), "vbilling-events.jsonl"));
+$("#theme").addEventListener("click", () => {
+  const dark = getComputedStyle(document.documentElement).colorScheme === "dark";
+  document.documentElement.dataset.theme = dark ? "light" : "dark";
+  try { localStorage.setItem("vbilling-theme", document.documentElement.dataset.theme); } catch (e) {}
+});
+try { const t = localStorage.getItem("vbilling-theme"); if (t) document.documentElement.dataset.theme = t; } catch (e) {}
+$("#auth").addEventListener("submit", (e) => { e.preventDefault(); token = $("#token").value.trim(); store.set("vbilling-token", token); refresh(); });
+
+refresh();
+setInterval(refresh, 60000);
+</script>
+</body>
+</html>
