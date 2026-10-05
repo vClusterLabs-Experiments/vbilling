@@ -1,0 +1,12 @@
+{{- if .Values.prometheus.metrics }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "vbilling.fullname" . }}-prometheus-metrics
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "vbilling.labels" . | nindent 4 }}
+data:
+  metrics.yaml: |
+    {{- toYaml .Values.prometheus.metrics | nindent 4 }}
+{{- end }}

@@ -1,0 +1,35 @@
+{{- if .Values.enforcement.admissionPolicy.enabled }}
+# Blocks new pods in namespaces vBilling labeled suspended (ENFORCEMENT_MODE=enforce).
+# Running workloads keep running; the tenant cluster's own control plane may restart.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ include "vbilling.fullname" . }}-suspended-tenants
+  labels:
+    {{- include "vbilling.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    namespaceSelector:
+      matchLabels:
+        vbilling.vcluster.com/suspended: "true"
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["pods"]
+  validations:
+    - expression: "has(object.metadata.labels) && 'app' in object.metadata.labels && object.metadata.labels['app'] == 'vcluster'"
+      message: "This tenant is suspended for billing. New workloads are blocked until the account is current; running workloads are not affected."
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ include "vbilling.fullname" . }}-suspended-tenants
+  labels:
+    {{- include "vbilling.labels" . | nindent 4 }}
+spec:
+  policyName: {{ include "vbilling.fullname" . }}-suspended-tenants
+  validationActions: [Deny]
+{{- end }}

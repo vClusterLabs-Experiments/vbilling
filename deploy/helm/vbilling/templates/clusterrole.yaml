@@ -5,31 +5,50 @@ metadata:
   labels:
     {{- include "vbilling.labels" . | nindent 4 }}
 rules:
-  # Discover vClusters via StatefulSets and Deployments
+  # Discover tenant clusters (StatefulSet or Deployment control planes).
   - apiGroups: ["apps"]
     resources: ["statefulsets", "deployments"]
-    verbs: ["list", "watch", "get"]
-  # Read pod details for GPU allocation and node mapping
+    verbs: ["get", "list", "watch"]
+  # Meter synced workloads, volumes, load balancers and nodes; read namespace
+  # metadata. watch: pods and nodes deleted between windows are still billed.
   - apiGroups: [""]
-    resources: ["pods"]
-    verbs: ["list", "get"]
-  # Read PVCs for storage billing
+    resources: ["pods", "persistentvolumeclaims", "services", "nodes", "namespaces"]
+    verbs: ["get", "list", "watch"]
+  # GPUs allocated through Dynamic Resource Allocation.
+  - apiGroups: ["resource.k8s.io"]
+    resources: ["resourceclaims", "resourceslices"]
+    verbs: ["get", "list"]
+  {{- if .Values.tenantAPI.enabled }}
+  # Tenant clusters with their own nodes: only the read-only kubeconfig
+  # vCluster exports for vBilling.
   - apiGroups: [""]
-    resources: ["persistentvolumeclaims"]
-    verbs: ["list", "get"]
-  # Read services for LoadBalancer billing
+    resources: ["secrets"]
+    resourceNames: [{{ .Values.tenantAPI.secretName | quote }}]
+    verbs: ["get"]
+  {{- if .Values.tenantAPI.adminFallback }}
+  # tenantAPI.adminFallback: tenant clusters' admin kubeconfigs (vc-<name>).
   - apiGroups: [""]
-    resources: ["services"]
-    verbs: ["list", "get"]
-  # Read nodes for GPU type detection and spot/on-demand status
-  - apiGroups: [""]
-    resources: ["nodes"]
-    verbs: ["list", "get"]
-  # Read namespaces for vCluster namespace enumeration
-  - apiGroups: [""]
-    resources: ["namespaces"]
-    verbs: ["list", "get"]
-  # Read pod metrics from metrics-server
+    resources: ["secrets"]
+    verbs: ["get"]
+  {{- end }}
+  {{- end }}
+  # Usage-based CPU and memory from metrics-server.
   - apiGroups: ["metrics.k8s.io"]
     resources: ["pods"]
-    verbs: ["list", "get"]
+    verbs: ["get", "list"]
+  # Optional enrichment from vCluster Platform (project, display name).
+  - apiGroups: ["management.loft.sh"]
+    resources: ["virtualclusterinstances"]
+    verbs: ["get", "list"]
+  {{- if ne .Values.enforcement.mode "observe" }}
+  # Billing-state enforcement: annotate tenant clusters, label namespaces, emit events.
+  - apiGroups: ["apps"]
+    resources: ["statefulsets", "deployments"]
+    verbs: ["patch"]
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["patch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create"]
+  {{- end }}

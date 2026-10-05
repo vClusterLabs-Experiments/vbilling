@@ -34,7 +34,7 @@ services:
       REDIS_URL: redis://redis:6379
       SECRET_KEY_BASE: your-secret-key-base-for-demo-only-change-in-production-1234567890
       LAGO_API_URL: http://localhost:3000
-      LAGO_FRONT_URL: http://localhost:8080
+      LAGO_FRONT_URL: http://localhost:8081
       LAGO_RSA_PRIVATE_KEY: ${LAGO_RSA_PRIVATE_KEY}
       LAGO_ENCRYPTION_PRIMARY_KEY: demo-encryption-primary-key-at-least-32-chars-long-for-safety
       LAGO_ENCRYPTION_DETERMINISTIC_KEY: demo-deterministic-key-at-least-32-chars-long-for-safety
@@ -88,7 +88,7 @@ services:
       API_URL: http://localhost:3000
       APP_ENV: production
     ports:
-      - "8080:80"
+      - "8081:80"
 
 volumes:
   lago_pg_data:
