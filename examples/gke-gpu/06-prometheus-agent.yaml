@@ -1,0 +1,69 @@
+# Prometheus in agent mode inside the tenant cluster with private nodes. It
+# scrapes DCGM on the private nodes and remote-writes to the central
+# Prometheus, labelling every series with the tenant cluster, so vBilling can
+# select them with {{vcluster}}. Apply it inside the tenant cluster.
+# Replace PROMETHEUS_INGEST_IP with the IP of the prometheus-ingest Service.
+apiVersion: v1
+kind: Namespace
+metadata: {name: monitoring}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: prometheus-agent, namespace: monitoring}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: prometheus-agent}
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: prometheus-agent}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: prometheus-agent}
+subjects: [{kind: ServiceAccount, name: prometheus-agent, namespace: monitoring}]
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: prometheus-agent, namespace: monitoring}
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 10s
+      external_labels: {vcluster: private-a100}   # the tenant cluster's name
+    scrape_configs:
+      - job_name: dcgm-exporter
+        kubernetes_sd_configs: [{role: pod, namespaces: {names: [gpu-operator]}}]
+        relabel_configs:
+          - {source_labels: [__meta_kubernetes_pod_label_app], regex: nvidia-dcgm-exporter, action: keep}
+          - {source_labels: [__meta_kubernetes_pod_container_port_number], regex: "9400", action: keep}
+          - {source_labels: [__meta_kubernetes_namespace], target_label: namespace}
+          - {source_labels: [__meta_kubernetes_pod_name], target_label: pod}
+          - {source_labels: [__meta_kubernetes_pod_node_name], target_label: node}
+    remote_write:
+      - url: http://PROMETHEUS_INGEST_IP:9090/api/v1/write
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: prometheus-agent, namespace: monitoring}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: prometheus-agent}}
+  template:
+    metadata: {labels: {app: prometheus-agent}}
+    spec:
+      serviceAccountName: prometheus-agent
+      securityContext: {runAsUser: 65534, runAsNonRoot: true, fsGroup: 65534}
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v3.13.4
+          args: [--agent, --config.file=/etc/prometheus/prometheus.yml, --storage.agent.path=/data]
+          resources: {requests: {cpu: 100m, memory: 256Mi}}
+          volumeMounts:
+            - {name: config, mountPath: /etc/prometheus}
+            - {name: data, mountPath: /data}
+      volumes:
+        - {name: config, configMap: {name: prometheus-agent}}
+        - {name: data, emptyDir: {}}

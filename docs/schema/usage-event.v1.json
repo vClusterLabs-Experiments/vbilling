@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/vClusterLabs-Experiments/vbilling/blob/main/docs/schema/usage-event.v1.json",
+  "title": "vBilling usage event",
+  "description": "One metered quantity for one tenant over one closed window. Versioning policy: schema_version changes only on breaking changes (removed or retyped fields, changed ID derivation). New optional fields and dimensions are additive and do not bump it. Consumers must ignore unknown fields.",
+  "type": "object",
+  "required": ["schema_version", "id", "tenant", "metric", "quantity", "unit", "window_start", "window_end", "recorded_at"],
+  "properties": {
+    "schema_version": {"const": "vbilling.usage/v1"},
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._:\\-]{1,100}$",
+      "description": "Stable identifier. For collector events: \"vb1_\" + the first 128 bits (hex) of SHA-256 over schema_version, tenant, metric, window_start, window_end (RFC 3339, UTC), region, project, sku, resource_id and the sorted dimensions, NUL-separated. Quantity and properties are excluded, so re-measuring a window yields the same ID. Ingested events either supply their own ID or receive the derived one. Deduplicate on this field."
+    },
+    "tenant": {"type": "string", "minLength": 1, "maxLength": 128, "description": "Billing customer ID."},
+    "metric": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,99}$", "description": "Metric code, see GET /api/v1/catalog."},
+    "quantity": {"type": "number", "minimum": 0, "description": "Amount of the metric in unit, accumulated over the window. Rounded to 9 decimal places."},
+    "unit": {"type": "string", "examples": ["gpu-hours", "core-hours", "gib-hours", "node-hours", "hours", "gib", "tokens"]},
+    "window_start": {"type": "string", "format": "date-time", "description": "Inclusive start, UTC. Collector windows are aligned to multiples of the window size since the Unix epoch."},
+    "window_end": {"type": "string", "format": "date-time", "description": "Exclusive end, UTC."},
+    "region": {"type": "string", "description": "Region of the control plane cluster that metered the event (REGION)."},
+    "project": {"type": "string", "description": "Cost-attribution project (vCluster Platform project or the vbilling.vcluster.com/project annotation)."},
+    "sku": {"type": "string", "description": "Billable SKU: GPU model (+ \"-mig-<profile>\" / \"-timeslice-<n>\"), node SKU or instance type, or storage class."},
+    "resource_id": {"type": "string", "description": "Tenant cluster ID for cluster-level metrics, node name for per-node metrics."},
+    "dimensions": {
+      "type": "object",
+      "additionalProperties": {"type": "string"},
+      "description": "Identity-bearing attributes for grouping and pricing.",
+      "properties": {
+        "tenant_cluster": {"type": "string"},
+        "gpu_type": {"type": "string"},
+        "gpu_profile": {"type": "string", "examples": ["full", "mig-1g.10gb", "timeslice-4"]},
+        "capacity_type": {"enum": ["on-demand", "spot", "preemptible", "reserved"]},
+        "billing_mode": {"enum": ["shared", "dedicated_node", "private_node"]},
+        "tenant_class": {"type": "string"},
+        "zone": {"type": "string"},
+        "namespace": {"type": "string", "description": "Namespace inside the tenant cluster (METER_BY_NAMESPACE)."},
+        "node": {"type": "string"},
+        "instance_type": {"type": "string"}
+      }
+    },
+    "properties": {"type": "object", "description": "Informational context (device counts, basis, backfilled flag). Never part of the identity."},
+    "source": {"type": "string", "description": "\"collector\", or \"ingest:<client>\" for events pushed through POST /api/v1/events."},
+    "recorded_at": {"type": "string", "format": "date-time"}
+  }
+}

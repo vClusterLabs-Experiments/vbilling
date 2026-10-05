@@ -74,6 +74,8 @@ echo ""
 echo ">>> Step 3: Starting Lago (billing engine)..."
 mkdir -p "$LAGO_DIR"
 
+# Lago signs its tokens with an RSA key: generate one for this demo, never commit one.
+RSA_KEY="$(openssl genrsa -traditional 2048 2>/dev/null || openssl genrsa 2048 2>/dev/null)"
 cat > "$LAGO_DIR/docker-compose.yml" <<'COMPOSE'
 version: "3.8"
 
@@ -113,35 +115,9 @@ services:
       REDIS_URL: redis://redis:6379
       SECRET_KEY_BASE: your-secret-key-base-for-demo-only-change-in-production
       LAGO_API_URL: http://localhost:3000
-      LAGO_FRONT_URL: http://localhost:8080
+      LAGO_FRONT_URL: http://localhost:8081
       RSA_PRIVATE_KEY: |
-        -----BEGIN RSA PRIVATE KEY-----
-        MIIEowIBAAKCAQEA0Z3VS5JJcds3xfn/yGJB+W7mmMCD+sCGpjdOdLqhwFOdhsrB
-        UtIhcezLbfCHA2Dc3bMwj7NPHM2GIFvZMh6tQ18BG9VLbgBrplIaS3VNwfdYLlWF
-        VNGURYDF0mWXw9MxXR7a+kT8GbdQMP7j62riBsTELY1SFSYB/FEM6gZlPysl7vEq
-        ktSpPbCIKbhsfGRaBJAjS0ISlvCi/l4o/JKMoXDbnGaPwbps/ZuMWjPqC0Nv2Y2B
-        MTbUUfR7kzVGUVQ7d/FY0vYxqDEsBQ6P7MhmN0JG/uaF3VbUfVpR9P+0Bmby+E2T
-        E1AQMRPN5jBseXlqwA3CkFsDJnAP7BfLBcCe8QIDAQABAoIBAE2W7Fz6cV3kQPbC
-        r3PvEa4B+c8VZF8RR1G0jWGCN+bCMi+o3yB7SXQKKQGZ3D3P1GWI4CTZY3EThG0
-        oOzfFYXC/Rd09+bHxTBylHFdKRwTnaY5dStk+YjZEy1MNKFL4UcGIB94msGJzPEG
-        F0aBhxTqBSCkzZ3ID+NP3sRk5ZIlx+RqGqr0FFCIYgVBT3A8AS/XRaOL1END/yOo
-        SU7K9+zzW6sL6dqR3VIoK0vVkfxYX3mFzVISYYRvJO6kHU8HHaLFLCHzGlnxfJl7
-        EQIuP42K3Bl3m7vX3MFN7i9N7a/FNNqXHBBYJBizGQ8dKf+a3u0P1zAj3o+y1K0E
-        mMEZ2QECgYEA56smzRdNllokVsKuGbBx5IRxlOjxjT9MEVXF3JCCYqe2+3Ku0xJK
-        OUBlr7GD6pFjw1FBBTCDFX+t0j+xrMmia5dFtAPjZ78VLe/1mlp90B24ezPOclfa
-        bYGwlFDI2FTQJBYa/i7T4M7VbL7s+n4V2XfyPJJYzZ+PuDDhnJ4EoECgYEA53T1
-        T5mf7APvGa2j5b0W/g5KPHsrM6V9j0pNsMY7RYTLvlMkxDEgYrfMinYx6YWP9DEh
-        h2VU7Pq6VkCF+y6MiSIF0l4tXwK7C7xOSUCB1MfmXz/BOJPyGiw7PBqsW/R9A6u
-        G7N+G7kj7nKl1OZVbn3YZkjlm/U/e2nR1F+BhmECgYBkZ+hs5rlWp2dnVv/f0GhI
-        ihbR+MVP0zR5BPNpNPiIxx6BTZJNPU3x4W5eUaNfPqfV0ovGpWSP/hue1pS5LfTf
-        Y5N1MwHXlpYTFNYHXqZS0oB3mTBhxDLxI07CVGd+RXWmpHBfEgz6KOKVGL7IYR+d
-        n2xRMPJ5xpN3xT+D08F3AQKBgCoNNgNJ4MGBA1NJia9lM+EBvI9FKb+09MjQFfl1
-        t3bCqRhLmsLfId9+BGlhY3L6pq3l+r3di2YhxtRBr/B3mKT4xZgoB78DFc7zuH9I
-        CILMi7C5I2JwIgaFF9uqjPdi6gW+vmJbPk5MTAd/yHp2SohcEJFVtKAHQ8GRWWN/
-        2z2hAoGBAMsHqW/dwLe0p/LrhGqEPp3iiKcCSvZLfJSe3h9cQ1SmFiPVbMgPcEaJ
-        kfDEsi9VwT31mLNjVdNjBBh5LSb0S2lInJC3dcSn3BN+WYnJH1SOEH7OYLZQ+Jxz
-        bGiW1JqQ5dIJdMrm/5+BRY87qB7TRPFhHqUOqaxMiZwH/ZVvuKR6
-        -----END RSA PRIVATE KEY-----
+        __RSA_PRIVATE_KEY__
       LAGO_ENCRYPTION_PRIMARY_KEY: demo-encryption-primary-key
       LAGO_ENCRYPTION_DETERMINISTIC_KEY: demo-encryption-deterministic-key
       LAGO_ENCRYPTION_KEY_DERIVATION_SALT: demo-encryption-derivation-salt
@@ -192,11 +168,13 @@ services:
       API_URL: http://api:3000
       APP_ENV: production
     ports:
-      - "8080:80"
+      - "8081:80"
 
 volumes:
   lago_pg_data:
 COMPOSE
+RSA_KEY="$RSA_KEY" awk '/__RSA_PRIVATE_KEY__/ { n = split(ENVIRON["RSA_KEY"], k, "\n"); for (i = 1; i <= n; i++) print "        " k[i]; next } { print }' \
+  "$LAGO_DIR/docker-compose.yml" > "$LAGO_DIR/docker-compose.yml.tmp" && mv "$LAGO_DIR/docker-compose.yml.tmp" "$LAGO_DIR/docker-compose.yml"
 
 cd "$LAGO_DIR"
 docker compose up -d
@@ -208,13 +186,13 @@ for i in $(seq 1 60); do
     fi
     sleep 2
 done
-echo "    Lago UI: http://localhost:8080"
+echo "    Lago UI: http://localhost:8081"
 echo "    Lago API: http://localhost:3000"
 echo ""
 
 # --- Step 4: Get Lago API key ---
 echo ">>> Step 4: Setting up Lago API key..."
-echo "    NOTE: On first use, open http://localhost:8080 to create an organization."
+echo "    NOTE: On first use, open http://localhost:8081 to create an organization."
 echo "    Then go to Developer > API Keys to get your API key."
 echo ""
 echo "    For this demo, you can set it via:"
@@ -306,11 +284,11 @@ echo "   │   └── vCluster: team-gpu    (ML training)"
 echo "   │"
 echo "   └── Lago (billing engine)"
 echo "       ├── API:  http://localhost:3000"
-echo "       └── UI:   http://localhost:8080"
+echo "       └── UI:   http://localhost:8081"
 echo ""
 echo "Next steps:"
 echo ""
-echo "1. Open Lago UI: http://localhost:8080"
+echo "1. Open Lago UI: http://localhost:8081"
 echo "   - Create an organization (first-time setup)"
 echo "   - Go to Developer > API Keys > copy the API key"
 echo ""

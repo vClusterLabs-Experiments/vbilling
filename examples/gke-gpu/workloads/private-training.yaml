@@ -1,0 +1,22 @@
+# Apply inside the private-nodes tenant cluster. One replica uses the whole
+# GPU; with MIG single strategy (all-1g.5gb) each replica gets one slice.
+apiVersion: v1
+kind: Namespace
+metadata: {name: training}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: nbody, namespace: training}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: nbody}}
+  template:
+    metadata: {labels: {app: nbody}}
+    spec:
+      containers:
+        - name: nbody
+          image: nvcr.io/nvidia/k8s/cuda-sample:nbody-cuda11.7.1
+          command: [sh, -c, "while true; do /cuda-samples/sample -benchmark -numbodies=2048000 >/dev/null 2>&1 || sleep 5; done"]
+          resources:
+            requests: {cpu: "1", memory: 2Gi}
+            limits: {nvidia.com/gpu: 1}

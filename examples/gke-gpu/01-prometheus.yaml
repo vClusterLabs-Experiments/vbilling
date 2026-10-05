@@ -1,0 +1,95 @@
+# Central Prometheus for the control plane cluster ("bring your own Prometheus").
+# - Scrapes GKE's managed DCGM exporter on the shared GPU nodes. Its target
+#   labels win, so DCGM's namespace/pod labels become exported_namespace/exported_pod.
+# - Accepts remote writes from tenant clusters with private nodes, whose DCGM
+#   never reaches this cluster otherwise (see 06-prometheus-agent.yaml).
+apiVersion: v1
+kind: Namespace
+metadata: {name: monitoring}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: prometheus, namespace: monitoring}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: prometheus-sd}
+rules:
+  - apiGroups: [""]
+    resources: [pods, nodes, endpoints, services]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: prometheus-sd}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: prometheus-sd}
+subjects: [{kind: ServiceAccount, name: prometheus, namespace: monitoring}]
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: prometheus, namespace: monitoring}
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 10s
+    scrape_configs:
+      - job_name: dcgm-exporter
+        kubernetes_sd_configs: [{role: pod}]
+        relabel_configs:
+          # GKE's managed exporter (GKE 1.32+ deploys it on GPU nodes) or NVIDIA's.
+          - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name, __meta_kubernetes_pod_label_app]
+            regex: (gke-managed-dcgm-exporter;.*|.*;(nvidia-)?dcgm-exporter)
+            action: keep
+          - {source_labels: [__meta_kubernetes_pod_container_port_number], regex: "9400", action: keep}
+          - {source_labels: [__meta_kubernetes_namespace], target_label: namespace}
+          - {source_labels: [__meta_kubernetes_pod_name], target_label: pod}
+          - {source_labels: [__meta_kubernetes_pod_node_name], target_label: node}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: prometheus, namespace: monitoring}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: prometheus}}
+  template:
+    metadata: {labels: {app: prometheus}}
+    spec:
+      serviceAccountName: prometheus
+      securityContext: {runAsUser: 65534, runAsNonRoot: true, fsGroup: 65534}
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v3.13.4
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.path=/prometheus
+            - --storage.tsdb.retention.time=2d
+            - --web.enable-remote-write-receiver
+          ports: [{containerPort: 9090, name: http}]
+          resources: {requests: {cpu: 200m, memory: 512Mi}}
+          volumeMounts:
+            - {name: config, mountPath: /etc/prometheus}
+            - {name: data, mountPath: /prometheus}
+      volumes:
+        - {name: config, configMap: {name: prometheus}}
+        - {name: data, emptyDir: {}}   # use a PersistentVolumeClaim beyond a demo
+---
+apiVersion: v1
+kind: Service
+metadata: {name: prometheus, namespace: monitoring}
+spec:
+  selector: {app: prometheus}
+  ports: [{name: http, port: 9090, targetPort: 9090}]
+---
+# Remote-write endpoint for private nodes: an internal load balancer, reachable
+# only from the VPC. Restrict the source range to your nodes' subnet.
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus-ingest
+  namespace: monitoring
+  annotations: {networking.gke.io/load-balancer-type: Internal}
+spec:
+  type: LoadBalancer
+  loadBalancerSourceRanges: [10.128.0.0/20]   # the default us-central1 subnet; change to yours
+  selector: {app: prometheus}
+  ports: [{name: http, port: 9090, targetPort: 9090}]

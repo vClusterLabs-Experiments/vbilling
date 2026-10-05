@@ -228,7 +228,8 @@
         <a href="getting-started.html">Getting Started</a>
         <a href="configuration.html" class="active">Configuration</a>
         <a href="metrics.html">Metrics Reference</a>
-        <a href="private-nodes.html">Private Nodes</a>
+        <a href="private-nodes.html">Dedicated and Private Nodes</a>
+        <a href="example-gke.html">Example: GKE with GPUs</a>
         <a href="troubleshooting.html">Troubleshooting</a>
       </div>
       <div class="sidebar-section">
@@ -241,275 +242,546 @@
 
     <main class="content">
       <h1>Configuration</h1>
-      <p class="subtitle">All the knobs for tuning vBilling behavior: environment variables, Helm chart values, and Lago pricing setup.</p>
+      <p class="subtitle">Every setting for vBilling v0.2: environment variables, Helm chart values, and pricing setup in your billing backend.</p>
 
       <!-- Environment Variables -->
       <h2 id="environment-variables">Environment Variables</h2>
-      <p>When running vBilling as a binary or in a container, the following environment variables control its behavior. All have sensible defaults. <code>LAGO_API_KEY</code> is required when <code>ADAPTER=lago</code> (the default).</p>
-
+      <p>vBilling reads its configuration from environment variables; the Helm chart sets them from <code>values.yaml</code>. Credentials come from Kubernetes Secrets (see <code>existingSecret</code> in each section of the chart).</p>
+      <h3>Destinations</h3>
       <div class="config-table-wrap">
         <table class="config-table">
           <thead>
-            <tr>
-              <th>Variable</th>
-              <th>Description</th>
-              <th>Default</th>
-            </tr>
+            <tr><th>Variable</th><th>Description</th><th>Default</th></tr>
           </thead>
           <tbody>
             <tr>
-              <td><code>ADAPTER</code></td>
-              <td>Billing adapter to use. Built-in: <code>lago</code>, <code>noop</code>. More adapters (Metronome, Stripe Meters, OpenMeter) are on the roadmap; custom adapters can be added by implementing the <code>Destination</code> interface.</td>
+              <td><code>ADAPTERS</code></td>
+              <td>Comma-separated destinations usage fans out to: <code>stripe</code>, <code>metronome</code>, <code>lago</code>, <code>webhook</code>, <code>noop</code>. Each destination reads the ledger through its own cursor.</td>
               <td class="td-default">lago</td>
             </tr>
             <tr>
-              <td><code>LAGO_API_URL</code></td>
-              <td>Base URL of the Lago API server (used when <code>ADAPTER=lago</code>)</td>
-              <td class="td-default">http://localhost:3000</td>
+              <td><code>ADAPTER</code></td>
+              <td>Deprecated v0.1 single-adapter form, used only when <code>ADAPTERS</code> is empty.</td>
+              <td class="td-default">(none)</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <h3>Identity and region</h3>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead>
+            <tr><th>Variable</th><th>Description</th><th>Default</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>REGION</code></td>
+              <td>Region stamped on every event (for example <code>ap-southeast-2</code>). Run one vBilling per control plane cluster.</td>
+              <td class="td-default">default</td>
             </tr>
             <tr>
-              <td><code>LAGO_API_KEY</code></td>
-              <td><strong>Required when <code>ADAPTER=lago</code>.</strong> API key for authenticating with Lago</td>
+              <td><code>CLUSTER_NAME</code></td>
+              <td>Name of this control plane cluster; used as the CloudEvents source.</td>
+              <td class="td-default">control-plane</td>
+            </tr>
+            <tr>
+              <td><code>ZONE</code></td>
+              <td>Default zone when nodes carry no <code>topology.kubernetes.io/zone</code> label.</td>
               <td class="td-default">(none)</td>
             </tr>
             <tr>
+              <td><code>REGION_FROM_NODE</code></td>
+              <td>Use the node's <code>topology.kubernetes.io/region</code> label instead of <code>REGION</code>.</td>
+              <td class="td-default">false</td>
+            </tr>
+            <tr>
+              <td><code>DEFAULT_TENANT_CLASS</code></td>
+              <td>Tenant class stamped on events when a tenant cluster has none (public, enterprise, government, dev, ...).</td>
+              <td class="td-default">(none)</td>
+            </tr>
+            <tr>
+              <td><code>TENANT_SOURCE</code></td>
+              <td><code>cluster</code>: one customer per tenant cluster. <code>project</code>: one per vCluster Platform project. The <code>vbilling.vcluster.com/tenant</code> label always wins.</td>
+              <td class="td-default">cluster</td>
+            </tr>
+            <tr>
+              <td><code>PLATFORM_CLUSTER</code></td>
+              <td>vCluster Platform cluster name of this control plane cluster, so Platform enrichment only applies to local tenant clusters.</td>
+              <td class="td-default">(none)</td>
+            </tr>
+            <tr>
+              <td><code>WATCH_NAMESPACES</code></td>
+              <td>Comma-separated namespaces to discover tenant clusters in. Empty watches all namespaces.</td>
+              <td class="td-default">(all)</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <h3>Ledger</h3>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead>
+            <tr><th>Variable</th><th>Description</th><th>Default</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>DATA_DIR</code></td>
+              <td>Directory for the ledger and adapter state. Keep it on a persistent volume.</td>
+              <td class="td-default">/var/lib/vbilling</td>
+            </tr>
+            <tr>
+              <td><code>RETENTION</code></td>
+              <td>How long closed ledger segments are kept once every destination has consumed them.</td>
+              <td class="td-default">168h</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <h3>Metering</h3>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead>
+            <tr><th>Variable</th><th>Description</th><th>Default</th></tr>
+          </thead>
+          <tbody>
+            <tr>
               <td><code>COLLECTION_INTERVAL</code></td>
-              <td>How often to scrape metrics and send usage events to Lago. Accepts Go duration strings (e.g. <code>60s</code>, <code>5m</code>)</td>
+              <td>Metering window size, aligned to the wall clock. Must be 10s to 1h and divide an hour.</td>
               <td class="td-default">60s</td>
             </tr>
             <tr>
               <td><code>RECONCILE_INTERVAL</code></td>
-              <td>How often to scan for new or removed vClusters and sync billing entities. Accepts Go duration strings</td>
+              <td>How often tenant clusters are rediscovered.</td>
               <td class="td-default">30s</td>
             </tr>
             <tr>
+              <td><code>MAX_BACKFILL</code></td>
+              <td>Windows missed during downtime are backfilled up to this age.</td>
+              <td class="td-default">6h</td>
+            </tr>
+            <tr>
+              <td><code>OFFBOARD_GRACE</code></td>
+              <td>A tenant must have no tenant clusters for this long before destinations offboard it.</td>
+              <td class="td-default">1h</td>
+            </tr>
+            <tr>
+              <td><code>CPU_MEMORY_BASIS</code></td>
+              <td><code>usage</code> (metrics-server), <code>requests</code>, or <code>max</code> of both.</td>
+              <td class="td-default">usage</td>
+            </tr>
+            <tr>
+              <td><code>METER_CONTROL_PLANE</code></td>
+              <td>Also bill the tenant cluster's own control plane pods and data PVCs (normally covered by instance hours).</td>
+              <td class="td-default">false</td>
+            </tr>
+            <tr>
+              <td><code>METER_BY_NAMESPACE</code></td>
+              <td>Add the namespace inside the tenant cluster as a dimension, for tenant-side chargeback.</td>
+              <td class="td-default">false</td>
+            </tr>
+            <tr>
+              <td><code>GPU_RESOURCES</code></td>
+              <td>Full-GPU resource names. MIG (<code>nvidia.com/mig-*</code>) and <code>nvidia.com/gpu.shared</code> are always detected.</td>
+              <td class="td-default">nvidia.com/gpu,amd.com/gpu</td>
+            </tr>
+            <tr>
+              <td><code>SKU_LABEL</code></td>
+              <td>Node label whose value is the SKU (for example <code>vbilling.vcluster.com/sku</code>).</td>
+              <td class="td-default">(none)</td>
+            </tr>
+            <tr>
+              <td><code>CAPACITY_TYPE_LABEL</code></td>
+              <td>Node label for <code>on-demand</code>, <code>spot</code>, <code>preemptible</code> or <code>reserved</code>; beats cloud-provider labels.</td>
+              <td class="td-default">vbilling.vcluster.com/capacity-type</td>
+            </tr>
+            <tr>
+              <td><code>UNHEALTHY_NODE_TAINTS</code></td>
+              <td>Taints that mark a node down: its GPU time is recorded as downtime, not billed. Add your GPU health taints.</td>
+              <td class="td-default">node.kubernetes.io/not-ready,node.kubernetes.io/unreachable</td>
+            </tr>
+            <tr>
+              <td><code>VCLUSTER_NODE_LABEL</code></td>
+              <td>Extra dedicated-node selector, <code>key=%s</code> where <code>%s</code> is the tenant cluster name. See <a href="private-nodes.html">Dedicated nodes</a>.</td>
+              <td class="td-default">(none)</td>
+            </tr>
+            <tr>
+              <td><code>CUSTOM_METRICS</code></td>
+              <td>Operator metrics accepted by the ingest API, <code>code:unit[:key|key],...</code></td>
+              <td class="td-default">(none)</td>
+            </tr>
+            <tr>
+              <td><code>PROMETHEUS_URL</code></td>
+              <td>Any Prometheus HTTP API (Prometheus, Thanos, Mimir, VictoriaMetrics). Enables egress and GPU utilization metrics.</td>
+              <td class="td-default">(none)</td>
+            </tr>
+            <tr>
+              <td><code>EGRESS_QUERY</code></td>
+              <td>PromQL template for egress bytes. Placeholders: <code>{{namespace}}</code>, <code>{{vcluster}}</code>, <code>{{instance}}</code>, <code>{{project}}</code>, <code>{{tenant}}</code>, <code>{{tenant_cluster}}</code>, <code>{{window}}</code> (e.g. <code>60s</code>), <code>{{window_seconds}}</code> (e.g. <code>60</code>).</td>
+              <td class="td-default">container_network_transmit_bytes_total increase</td>
+            </tr>
+            <tr>
+              <td><code>GPU_UTIL_QUERY</code>, <code>GPU_COUNT_QUERY</code></td>
+              <td>Replace the GPU utilization queries (same placeholders, results grouped by <code>modelName</code> or <code>gpu_type</code>). <code>none</code> disables utilization.</td>
+              <td class="td-default">DCGM, <code>namespace</code> or <code>exported_namespace</code></td>
+            </tr>
+            <tr>
+              <td><code>PROMETHEUS_HEADERS</code></td>
+              <td>Extra query headers, <code>Name=value,...</code>, e.g. <code>X-Scope-OrgID</code> for Mimir or <code>Authorization</code>. Basic auth also works in the URL.</td>
+              <td class="td-default">(none)</td>
+            </tr>
+            <tr>
+              <td><code>PROMETHEUS_PRESET</code></td>
+              <td><code>vcluster-platform</code> reads vCluster Platform fleet observability: egress and GPU utilization selected by the <code>vcluster_platform_instance</code> and <code>vcluster_platform_project</code> labels.</td>
+              <td class="td-default">(none)</td>
+            </tr>
+            <tr>
+              <td><code>PROMETHEUS_METRICS_FILE</code></td>
+              <td>Metrics defined by PromQL, evaluated per tenant cluster at every window end (billable ones are created in the billing backends).</td>
+              <td class="td-default">(none)</td>
+            </tr>
+            <tr>
+              <td><code>PROMETHEUS_BEARER_TOKEN_FILE</code></td>
+              <td>Bearer token file, re-read on every query (for example a service account token for an OpenShift Thanos querier).</td>
+              <td class="td-default">(none)</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <h3>Tenant clusters with their own nodes</h3>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead><tr><th>Variable</th><th>Description</th><th>Default</th></tr></thead>
+          <tbody>
+            <tr><td><code>TENANT_API</code></td><td>Meter tenant clusters with their own nodes (Private Nodes, Auto Nodes, Standalone) through their own API.</td><td class="td-default">true</td></tr>
+            <tr><td><code>TENANT_KUBECONFIG_SECRET</code></td><td>Secret in each tenant cluster's namespace holding a read-only kubeconfig (vCluster <code>exportKubeConfig.additionalSecrets</code>).</td><td class="td-default">vbilling-kubeconfig</td></tr>
+            <tr><td><code>TENANT_ADMIN_FALLBACK</code></td><td>Also accept the admin kubeconfig <code>vc-&lt;name&gt;</code> (needs Secret read access).</td><td class="td-default">false</td></tr>
+            <tr><td><code>TENANT_CLUSTERS_FILE</code></td><td>YAML list of external tenant clusters: <code>name</code>, <code>kubeconfig</code>, <code>tenant</code>, <code>displayName</code>, <code>project</code>, <code>metadata</code>.</td><td class="td-default">(none)</td></tr>
+            <tr><td><code>PRIVATE_NODE_BILLING</code></td><td><code>node</code> bills each private node whole; <code>usage</code> bills the pods on them.</td><td class="td-default">node</td></tr>
+            <tr><td><code>TENANT_EXCLUDE_NAMESPACES</code></td><td>Usage mode: namespaces never billed.</td><td class="td-default">kube-system</td></tr>
+            <tr><td><code>WATCH_DELETIONS</code></td><td>Bill pods and nodes deleted between windows until the moment they were deleted.</td><td class="td-default">true</td></tr>
+            <tr><td><code>DRA_GPU_DRIVERS</code></td><td>DRA drivers whose devices are GPUs (ResourceClaim metering).</td><td class="td-default">gpu.nvidia.com,gpu.amd.com</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <h3>API and enforcement</h3>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead>
+            <tr><th>Variable</th><th>Description</th><th>Default</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>LISTEN_ADDR</code></td>
+              <td>HTTP listen address for the API, dashboard, metrics and webhooks.</td>
+              <td class="td-default">:8080</td>
+            </tr>
+            <tr>
+              <td><code>API_TOKEN</code></td>
+              <td>Bearer token for <code>/api/*</code>. Empty leaves the API unauthenticated (keep the Service internal).</td>
+              <td class="td-default">(none)</td>
+            </tr>
+            <tr>
+              <td><code>INGEST_TOKEN</code></td>
+              <td>Bearer token for <code>POST /api/v1/events</code>; defaults to <code>API_TOKEN</code>. Ingest is disabled without a token.</td>
+              <td class="td-default">(none)</td>
+            </tr>
+            <tr>
+              <td><code>ENFORCEMENT_MODE</code></td>
+              <td><code>observe</code>, <code>annotate</code> or <code>enforce</code>. See the README.</td>
+              <td class="td-default">observe</td>
+            </tr>
+            <tr>
+              <td><code>ENFORCEMENT_RULES</code></td>
+              <td>Overrides, <code>event.type=state,...</code> (for example <code>alerts.spend_threshold_reached=suspended</code>).</td>
+              <td class="td-default">(none)</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <h3>Stripe</h3>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead>
+            <tr><th>Variable</th><th>Description</th><th>Default</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>STRIPE_API_KEY</code></td>
+              <td>Secret or restricted key. Test-mode keys default to 20 requests/s.</td>
+              <td class="td-default">(none)</td>
+            </tr>
+            <tr>
+              <td><code>STRIPE_WEBHOOK_SECRET</code></td>
+              <td>Enables <code>/webhooks/stripe</code> (dunning and usage alerts).</td>
+              <td class="td-default">(none)</td>
+            </tr>
+            <tr>
+              <td><code>STRIPE_SPLIT_METERS_BY</code></td>
+              <td>Event fields that get their own meter (Stripe meters cannot price on dimensions).</td>
+              <td class="td-default">sku</td>
+            </tr>
+            <tr>
+              <td><code>STRIPE_AUTO_SUBSCRIBE</code></td>
+              <td>Subscribe tenants to active metered prices tagged <code>metadata[vbilling_plan]=&lt;plan&gt;</code>.</td>
+              <td class="td-default">false</td>
+            </tr>
+            <tr>
+              <td><code>STRIPE_MAX_RPS</code></td>
+              <td>Request rate cap; 0 picks 20 (test) or 200 (live).</td>
+              <td class="td-default">0</td>
+            </tr>
+            <tr>
+              <td><code>STRIPE_CANCEL_ON_REMOVE</code></td>
+              <td>Cancel the tenant's subscription at period end when it is offboarded.</td>
+              <td class="td-default">false</td>
+            </tr>
+            <tr>
+              <td><code>STRIPE_API_VERSION</code></td>
+              <td>Pinned Stripe API version.</td>
+              <td class="td-default">2026-09-30.endive</td>
+            </tr>
+            <tr>
+              <td><code>STRIPE_API_BASE</code></td>
+              <td>API base URL (stripe-mock for tests).</td>
+              <td class="td-default">https://api.stripe.com</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <h3>Metronome</h3>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead>
+            <tr><th>Variable</th><th>Description</th><th>Default</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>METRONOME_API_TOKEN</code></td>
+              <td>Bearer token.</td>
+              <td class="td-default">(none)</td>
+            </tr>
+            <tr>
+              <td><code>METRONOME_WEBHOOK_SECRET</code></td>
+              <td>Enables <code>/webhooks/metronome</code> (spend, usage and credit alerts).</td>
+              <td class="td-default">(none)</td>
+            </tr>
+            <tr>
+              <td><code>METRONOME_RATE_CARD</code></td>
+              <td>Rate card alias or ID; creates a contract per tenant. A tenant's <code>plan</code> annotation overrides it.</td>
+              <td class="td-default">(none)</td>
+            </tr>
+            <tr>
+              <td><code>METRONOME_STRIPE_LINK</code></td>
+              <td>Create each tenant's Stripe customer and link it for invoicing (needs <code>STRIPE_API_KEY</code>).</td>
+              <td class="td-default">false</td>
+            </tr>
+            <tr>
+              <td><code>METRONOME_STRIPE_COLLECTION_METHOD</code></td>
+              <td><code>charge_automatically</code> or <code>send_invoice</code>.</td>
+              <td class="td-default">charge_automatically</td>
+            </tr>
+            <tr>
+              <td><code>METRONOME_API_BASE</code></td>
+              <td>API base URL.</td>
+              <td class="td-default">https://api.metronome.com</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <h3>Lago</h3>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead>
+            <tr><th>Variable</th><th>Description</th><th>Default</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>LAGO_API_URL</code></td>
+              <td>Lago API base URL.</td>
+              <td class="td-default">http://localhost:3000</td>
+            </tr>
+            <tr>
+              <td><code>LAGO_API_KEY</code></td>
+              <td>Required when the lago adapter is enabled.</td>
+              <td class="td-default">(none)</td>
+            </tr>
+            <tr>
               <td><code>DEFAULT_PLAN_CODE</code></td>
-              <td>Lago plan code to assign to newly discovered vClusters</td>
+              <td>Plan code for new tenants (Lago plan; Stripe <code>vbilling_plan</code> tag).</td>
               <td class="td-default">vcluster-standard</td>
             </tr>
             <tr>
               <td><code>BILLING_CURRENCY</code></td>
-              <td>ISO 4217 currency code for all billing operations</td>
+              <td>ISO 4217 currency for customers and plans.</td>
               <td class="td-default">USD</td>
             </tr>
+          </tbody>
+        </table>
+      </div>
+      <h3>Webhook</h3>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead>
+            <tr><th>Variable</th><th>Description</th><th>Default</th></tr>
+          </thead>
+          <tbody>
             <tr>
-              <td><code>PROMETHEUS_URL</code></td>
-              <td>Prometheus server URL for DCGM GPU utilization and network egress metrics. Leave empty to disable</td>
-              <td class="td-default">(empty)</td>
+              <td><code>WEBHOOK_URL</code></td>
+              <td>Endpoint receiving CloudEvents 1.0 batches.</td>
+              <td class="td-default">(none)</td>
             </tr>
+            <tr>
+              <td><code>WEBHOOK_SECRET</code></td>
+              <td>HMAC secret for the <code>X-VBilling-Signature</code> header (Stripe-compatible scheme).</td>
+              <td class="td-default">(none)</td>
+            </tr>
+            <tr>
+              <td><code>WEBHOOK_HEADERS</code></td>
+              <td>Extra headers, <code>k=v,k=v</code>.</td>
+              <td class="td-default">(none)</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <h3>Deprecated</h3>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead>
+            <tr><th>Variable</th><th>Description</th><th>Default</th></tr>
+          </thead>
+          <tbody>
             <tr>
               <td><code>SPOT_DISCOUNT_PERCENT</code></td>
-              <td>Percentage discount applied to workloads running on spot/preemptible nodes. A value of 60 means spot nodes cost 40% of on-demand</td>
-              <td class="td-default">60</td>
-            </tr>
-            <tr>
-              <td><code>WATCH_NAMESPACES</code></td>
-              <td>Comma-separated list of namespaces to monitor for vClusters. Empty means watch all namespaces</td>
-              <td class="td-default">(all namespaces)</td>
-            </tr>
-            <tr>
-              <td><code>VCLUSTER_NODE_LABEL</code></td>
-              <td>Custom node label selector for private node detection. Format: <code>key=value-pattern</code> where <code>%s</code> is replaced with the vCluster name. See <a href="private-nodes.html">Private Nodes</a></td>
+              <td>Ignored since v0.2. Price <code>capacity_type</code> in your billing backend instead, so quantities stay physical and reconcilable.</td>
               <td class="td-default">(none)</td>
             </tr>
           </tbody>
         </table>
       </div>
 
-      <div class="callout callout-info">
-        <div class="callout-icon">i</div>
-        <div><code>COLLECTION_INTERVAL</code> directly affects billing granularity and accuracy. Shorter intervals produce more events but more precise billing. The default of 60 seconds is a good balance.</div>
-      </div>
-
       <!-- Helm Values -->
       <h2 id="helm-values">Helm Chart Values</h2>
-      <p>When deploying via Helm, all configuration is specified through <code>values.yaml</code> or <code>--set</code> flags. The Helm chart translates these into the environment variables shown above.</p>
-
-      <h3>Lago connection</h3>
+      <p>The chart deploys a StatefulSet with a persistent ledger volume, a Service, RBAC (enforcement verbs only outside <code>observe</code> mode), and optionally a ValidatingAdmissionPolicy and ServiceMonitor.</p>
       <div class="config-table-wrap">
         <table class="config-table">
           <thead>
-            <tr><th>Value</th><th>Description</th><th>Default</th></tr>
+            <tr><th>Value</th><th>Sets</th><th>Default</th></tr>
           </thead>
           <tbody>
             <tr>
-              <td><code>lago.apiURL</code></td>
-              <td>Lago API URL (in-cluster service address)</td>
-              <td class="td-default">http://lago-api.lago-system.svc.cluster.local:3000</td>
+              <td><code>adapters</code></td>
+              <td>ADAPTERS</td>
+              <td class="td-default">[lago]</td>
             </tr>
             <tr>
-              <td><code>lago.apiKey</code></td>
-              <td>Lago API key (plaintext, use <code>--set</code>)</td>
-              <td class="td-default">(empty)</td>
+              <td><code>region / clusterName</code></td>
+              <td>REGION / CLUSTER_NAME</td>
+              <td class="td-default">default / control-plane</td>
             </tr>
             <tr>
-              <td><code>lago.existingSecret</code></td>
-              <td>Name of an existing Kubernetes Secret containing the API key (key: <code>api-key</code>). Preferred over <code>lago.apiKey</code> for production</td>
-              <td class="td-default">(empty)</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-
-      <h3>Billing settings</h3>
-      <div class="config-table-wrap">
-        <table class="config-table">
-          <thead>
-            <tr><th>Value</th><th>Description</th><th>Default</th></tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td><code>billing.defaultPlanCode</code></td>
-              <td>Lago plan code for new vClusters</td>
-              <td class="td-default">vcluster-standard</td>
+              <td><code>tenantClass / tenantSource</code></td>
+              <td>DEFAULT_TENANT_CLASS / TENANT_SOURCE</td>
+              <td class="td-default">&quot;&quot; / cluster</td>
             </tr>
             <tr>
-              <td><code>billing.currency</code></td>
-              <td>Billing currency (ISO 4217)</td>
-              <td class="td-default">USD</td>
+              <td><code>billing.collectionInterval / reconcileInterval / maxBackfill / offboardGrace</code></td>
+              <td>COLLECTION_INTERVAL, RECONCILE_INTERVAL, MAX_BACKFILL, OFFBOARD_GRACE</td>
+              <td class="td-default">60s / 30s / 6h / 1h</td>
             </tr>
             <tr>
-              <td><code>billing.collectionInterval</code></td>
-              <td>Metrics scrape interval</td>
-              <td class="td-default">60s</td>
+              <td><code>billing.defaultPlanCode / currency</code></td>
+              <td>DEFAULT_PLAN_CODE / BILLING_CURRENCY</td>
+              <td class="td-default">vcluster-standard / USD</td>
             </tr>
             <tr>
-              <td><code>billing.reconcileInterval</code></td>
-              <td>vCluster discovery interval</td>
-              <td class="td-default">30s</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-
-      <h3>Pricing defaults</h3>
-      <div class="config-table-wrap">
-        <table class="config-table">
-          <thead>
-            <tr><th>Value</th><th>Description</th><th>Default</th></tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td><code>pricing.cpuPerCoreHour</code></td>
-              <td>Price per CPU core-hour</td>
-              <td class="td-default">0.05</td>
+              <td><code>metering.*</code></td>
+              <td>CPU_MEMORY_BASIS, METER_*, GPU_RESOURCES, SKU_LABEL, CAPACITY_TYPE_LABEL, UNHEALTHY_NODE_TAINTS, VCLUSTER_NODE_LABEL, REGION_FROM_NODE, CUSTOM_METRICS</td>
+              <td class="td-default">see above</td>
             </tr>
             <tr>
-              <td><code>pricing.memoryPerGBHour</code></td>
-              <td>Price per memory GB-hour</td>
-              <td class="td-default">0.01</td>
+              <td><code>prometheus.url / egressQuery / gpuUtilQuery / gpuCountQuery / headers / existingSecret / bearerTokenFile / preset / metrics</code></td>
+              <td>PROMETHEUS_URL / EGRESS_QUERY / GPU_UTIL_QUERY / GPU_COUNT_QUERY / PROMETHEUS_HEADERS (chart Secret) / PROMETHEUS_BEARER_TOKEN_FILE / PROMETHEUS_PRESET / PROMETHEUS_METRICS_FILE (ConfigMap)</td>
+              <td class="td-default">(none)</td>
             </tr>
             <tr>
-              <td><code>pricing.storagePerGBHour</code></td>
-              <td>Price per storage GB-hour</td>
-              <td class="td-default">0.001</td>
+              <td><code>tenantAPI.enabled / secretName / adminFallback / privateNodeBilling / excludeNamespaces / externalClustersSecret</code></td>
+              <td>TENANT_API / TENANT_KUBECONFIG_SECRET / TENANT_ADMIN_FALLBACK / PRIVATE_NODE_BILLING / TENANT_EXCLUDE_NAMESPACES / TENANT_CLUSTERS_FILE (Secret mounted at /etc/vbilling/tenants)</td>
+              <td class="td-default">true / vbilling-kubeconfig / false / node / [kube-system] / ""</td>
             </tr>
             <tr>
-              <td><code>pricing.instancePerHour</code></td>
-              <td>Flat hourly charge per vCluster instance</td>
-              <td class="td-default">0.10</td>
+              <td><code>metering.watchDeletions / draGPUDrivers</code></td>
+              <td>WATCH_DELETIONS / DRA_GPU_DRIVERS</td>
+              <td class="td-default">true / [gpu.nvidia.com, gpu.amd.com]</td>
             </tr>
             <tr>
-              <td><code>pricing.gpuDefaultPerHour</code></td>
-              <td>Default GPU price per hour (when type not in <code>gpuPrices</code>)</td>
-              <td class="td-default">2.50</td>
+              <td><code>platform.cluster</code></td>
+              <td>PLATFORM_CLUSTER</td>
+              <td class="td-default">(none)</td>
             </tr>
             <tr>
-              <td><code>pricing.networkEgressPerGB</code></td>
-              <td>Price per GB of network egress</td>
-              <td class="td-default">0.05</td>
+              <td><code>lago.apiURL / apiKey / existingSecret (key api-key)</code></td>
+              <td>LAGO_API_URL / LAGO_API_KEY</td>
+              <td class="td-default">(none)</td>
             </tr>
             <tr>
-              <td><code>pricing.lbPerHour</code></td>
-              <td>Price per LoadBalancer service-hour</td>
-              <td class="td-default">0.025</td>
+              <td><code>stripe.apiKey / webhookSecret / existingSecret (keys api-key, webhook-secret)</code></td>
+              <td>STRIPE_API_KEY / STRIPE_WEBHOOK_SECRET</td>
+              <td class="td-default">(none)</td>
             </tr>
             <tr>
-              <td><code>pricing.gpuPrices</code></td>
-              <td>Comma-separated GPU type-specific pricing in <code>TYPE:PRICE</code> format</td>
-              <td class="td-default" style="white-space:normal; font-size:0.75rem;">NVIDIA-A100-SXM4-80GB:3.50,NVIDIA-H100-80GB-HBM3:5.00,NVIDIA-H100-SXM5-80GB:5.50,NVIDIA-L40S:1.80,NVIDIA-A10G:1.20,NVIDIA-T4:0.75</td>
+              <td><code>stripe.splitMetersBy / autoSubscribe / maxRPS / cancelOnRemove / apiVersion / apiBase</code></td>
+              <td>STRIPE_*</td>
+              <td class="td-default">[sku] / false / 0 / false</td>
             </tr>
             <tr>
-              <td><code>pricing.spotDiscountPercent</code></td>
-              <td>Spot instance discount percentage</td>
-              <td class="td-default">60</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-
-      <h3>Optional integrations</h3>
-      <div class="config-table-wrap">
-        <table class="config-table">
-          <thead>
-            <tr><th>Value</th><th>Description</th><th>Default</th></tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td><code>prometheus.url</code></td>
-              <td>Prometheus URL for DCGM and network metrics</td>
-              <td class="td-default">(empty)</td>
+              <td><code>metronome.apiToken / webhookSecret / existingSecret (keys api-token, webhook-secret)</code></td>
+              <td>METRONOME_API_TOKEN / METRONOME_WEBHOOK_SECRET</td>
+              <td class="td-default">(none)</td>
             </tr>
             <tr>
-              <td><code>watchNamespaces</code></td>
-              <td>List of namespaces to watch (YAML array)</td>
-              <td class="td-default">[] (all)</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-
-      <h3>Deployment settings</h3>
-      <div class="config-table-wrap">
-        <table class="config-table">
-          <thead>
-            <tr><th>Value</th><th>Description</th><th>Default</th></tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td><code>image.repository</code></td>
-              <td>Container image repository</td>
-              <td class="td-default">ghcr.io/vclusterlabs-experiments/vbilling</td>
+              <td><code>metronome.rateCard / stripeLink / stripeCollectionMethod / apiBase</code></td>
+              <td>METRONOME_*</td>
+              <td class="td-default">(none)</td>
             </tr>
             <tr>
-              <td><code>image.tag</code></td>
-              <td>Container image tag</td>
-              <td class="td-default">v0.1.0</td>
+              <td><code>webhook.url / secret / headers / existingSecret (key secret)</code></td>
+              <td>WEBHOOK_*</td>
+              <td class="td-default">(none)</td>
             </tr>
             <tr>
-              <td><code>image.pullPolicy</code></td>
-              <td>Image pull policy</td>
-              <td class="td-default">IfNotPresent</td>
+              <td><code>api.port / token / ingestToken / existingSecret (keys api-token, ingest-token)</code></td>
+              <td>LISTEN_ADDR / API_TOKEN / INGEST_TOKEN</td>
+              <td class="td-default">8080</td>
             </tr>
             <tr>
-              <td><code>replicaCount</code></td>
-              <td>Number of replicas (only 1 recommended)</td>
-              <td class="td-default">1</td>
+              <td><code>api.service.type / port</code></td>
+              <td>Service</td>
+              <td class="td-default">ClusterIP / 8080</td>
             </tr>
             <tr>
-              <td><code>serviceAccount.create</code></td>
-              <td>Create a ServiceAccount for the deployment</td>
-              <td class="td-default">true</td>
+              <td><code>enforcement.mode / rules</code></td>
+              <td>ENFORCEMENT_MODE / ENFORCEMENT_RULES</td>
+              <td class="td-default">observe</td>
             </tr>
             <tr>
-              <td><code>resources.requests.cpu</code></td>
-              <td>CPU request</td>
-              <td class="td-default">50m</td>
+              <td><code>enforcement.admissionPolicy.enabled</code></td>
+              <td>ValidatingAdmissionPolicy blocking new pods in suspended namespaces (Kubernetes 1.30+)</td>
+              <td class="td-default">false</td>
             </tr>
             <tr>
-              <td><code>resources.requests.memory</code></td>
-              <td>Memory request</td>
-              <td class="td-default">64Mi</td>
+              <td><code>persistence.enabled / size / storageClass / retention</code></td>
+              <td>Ledger PVC (StatefulSet volumeClaimTemplate) / RETENTION</td>
+              <td class="td-default">true / 5Gi / &quot;&quot; / 168h</td>
             </tr>
             <tr>
-              <td><code>resources.limits.cpu</code></td>
-              <td>CPU limit</td>
-              <td class="td-default">200m</td>
+              <td><code>serviceMonitor.enabled / interval</code></td>
+              <td>Prometheus Operator ServiceMonitor</td>
+              <td class="td-default">false / 30s</td>
             </tr>
             <tr>
-              <td><code>resources.limits.memory</code></td>
-              <td>Memory limit</td>
-              <td class="td-default">128Mi</td>
+              <td><code>image.repository / tag / pullPolicy</code></td>
+              <td>Container image</td>
+              <td class="td-default">ghcr.io/vclusterlabs-experiments/vbilling / v0.2.0</td>
             </tr>
           </tbody>
         </table>
@@ -517,14 +789,14 @@
 
       <h3>Example Helm install</h3>
       <div class="code-block"><code><span class="cmd">helm</span> upgrade <span class="flag">--install</span> vbilling deploy/helm/vbilling \
-  <span class="flag">--namespace</span> vbilling-system <span class="flag">--create-namespace</span> \
-  <span class="flag">--set</span> lago.existingSecret=<span class="string">"vbilling-lago-secret"</span> \
-  <span class="flag">--set</span> billing.collectionInterval=<span class="string">"120s"</span> \
-  <span class="flag">--set</span> prometheus.url=<span class="string">"http://prometheus.monitoring.svc.cluster.local:9090"</span> \
-  <span class="flag">--set</span> pricing.cpuPerCoreHour=<span class="string">"0.08"</span> \
-  <span class="flag">--set</span> pricing.gpuDefaultPerHour=<span class="string">"3.00"</span></code></div>
+  <span class="flag">-n</span> vbilling-system <span class="flag">--create-namespace</span> \
+  <span class="flag">--set</span> adapters=<span class="string">'{metronome,webhook}'</span> \
+  <span class="flag">--set</span> metronome.existingSecret=metronome-credentials \
+  <span class="flag">--set</span> metronome.rateCard=payg-aud <span class="flag">--set</span> metronome.stripeLink=true \
+  <span class="flag">--set</span> stripe.existingSecret=stripe-credentials \
+  <span class="flag">--set</span> webhook.url=https://data.example.com/usage \
+  <span class="flag">--set</span> region=ap-southeast-2 <span class="flag">--set</span> api.existingSecret=vbilling-api</code></div>
 
-      <!-- Lago Pricing Configuration -->
       <h2 id="lago-pricing">Lago Pricing Configuration</h2>
       <p>vBilling bootstraps 9 billable metrics and a <code>vcluster-standard</code> plan on startup. All charges default to <strong>$0.00</strong> per unit. You must configure pricing in the Lago UI or API to actually generate non-zero invoices.</p>
 
@@ -595,9 +867,9 @@
         </table>
       </div>
 
-      <h3>Example: Neocloud pricing</h3>
-      <p>For a GPU-focused neocloud selling compute to AI teams, you might set higher GPU prices and include a premium for dedicated infrastructure:</p>
-      <div class="code-block"><code><span class="comment"># Neocloud pricing example</span>
+      <h3>Example: AI Cloud pricing</h3>
+      <p>For a GPU-focused AI Cloud selling compute to AI teams, you might set higher GPU prices and include a premium for dedicated infrastructure:</p>
+      <div class="code-block"><code><span class="comment"># AI Cloud pricing example</span>
 CPU Core-Hours:        <span class="string">$0.08</span>   <span class="comment"># higher due to bare-metal premium</span>
 Memory GB-Hours:       <span class="string">$0.015</span>  <span class="comment"># ECC memory cost</span>
 Storage GB-Hours:      <span class="string">$0.002</span>  <span class="comment"># NVMe SSD storage</span>
@@ -624,6 +896,13 @@ Private Node Hours:    <span class="string">$0.50</span>   <span class="comment"
         <div class="callout-icon">!</div>
         <div>If you see usage events in Lago but invoices show $0.00, it means the charge amounts are still set to their defaults ($0). Edit the plan charges in the Lago UI.</div>
       </div>
+
+      <p>To price H100 hours differently from L40S hours in Lago, add <strong>charge filters</strong> on the <code>sku</code> (or <code>gpu_type</code>) event property. vBilling sends every dimension as an event property: <code>sku</code>, <code>region</code>, <code>capacity_type</code>, <code>billing_mode</code>, <code>tenant_class</code> and <code>tenant_cluster</code>. Spot and preemptible discounts are a filter on <code>capacity_type</code>.</p>
+
+      <h2 id="stripe-metronome-pricing">Stripe and Metronome Pricing</h2>
+      <p><strong>Stripe:</strong> vBilling creates a Billing Meter per metric and, because Stripe meters cannot price on dimensions, a meter per SKU as new SKUs appear (for example <code>vcluster_gpu_hours__nvidia_h100_80gb_hbm3</code>). Create a metered price on each meter you charge for. To subscribe new tenants automatically, tag the prices <code>metadata[vbilling_plan]=vcluster-standard</code> (or the tenant's <code>plan</code> annotation) and enable <code>stripe.autoSubscribe</code>.</p>
+      <p><strong>Metronome:</strong> vBilling creates SUM billable metrics named <code>&lt;Metric&gt; [&lt;code&gt;]</code>, each with one compound group key: <code>region, sku, capacity_type, billing_mode, tenant_cluster</code> for GPU hours. On your rate card, add a usage product per metric with <code>pricing_group_key</code> set to the dimensions you price on (for example <code>[region, sku, capacity_type]</code>) and <code>presentation_group_key: [tenant_cluster]</code> for invoice lines per tenant cluster. Rate cards carry the currency, so use one rate card per currency (for example AUD and NZD). Point <code>metronome.rateCard</code> or a tenant's <code>plan</code> annotation at it.</p>
+
 
     </main>
   </div>

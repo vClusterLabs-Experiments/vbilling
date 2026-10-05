@@ -1,49 +1,168 @@
+# vBilling Helm values. Every value maps to an environment variable; see
+# docs/configuration.html for the full reference.
+
 replicaCount: 1
 
 image:
-  # Build and push your own image: docker buildx build --platform linux/amd64,linux/arm64 -t <your-registry>/vbilling:latest --push .
   repository: ghcr.io/vclusterlabs-experiments/vbilling
-  tag: v0.1.0
+  tag: v0.2.0
   pullPolicy: IfNotPresent
 
-# Billing adapter selection. Built-in: "lago", "noop". More adapters (Metronome,
-# Stripe Meters, OpenMeter) are on the roadmap. Customers can also implement the
-# Destination interface and register their own.
-adapter: lago
+# Destinations usage fans out to. Built-in: stripe, metronome, lago, webhook, noop.
+# Each destination has its own cursor into the ledger, so one backend being
+# down never blocks another.
+adapters:
+  - lago
+# Deprecated single-adapter form from v0.1; used only when `adapters` is empty.
+adapter: ""
 
-# Lago connection (used when adapter == "lago")
+# Where this vBilling instance meters. Run one vBilling per control plane
+# cluster (region): usage, ledger and billing state stay in that region.
+region: default
+clusterName: control-plane
+# Default tenant class stamped on events (public, enterprise, government, dev, ...).
+tenantClass: ""
+# How tenant clusters map to billing customers: "cluster" (one customer per
+# tenant cluster) or "project" (one per vCluster Platform project). The
+# vbilling.vcluster.com/tenant label always wins.
+tenantSource: cluster
+
+billing:
+  defaultPlanCode: vcluster-standard # Lago plan code / Stripe plan tag
+  currency: USD
+  collectionInterval: 60s # metering window; must divide an hour
+  reconcileInterval: 30s
+  maxBackfill: 6h # windows missed during downtime are backfilled up to this age
+  offboardGrace: 1h # a tenant must be gone this long before RemoveTenant runs
+
+metering:
+  cpuMemoryBasis: usage # usage | requests | max
+  meterControlPlane: false # also bill the tenant cluster's own control plane pods
+  meterByNamespace: false # add the tenant cluster namespace as a dimension (internal chargeback)
+  gpuResources: [nvidia.com/gpu, amd.com/gpu] # MIG resources (nvidia.com/mig-*) are always detected
+  skuLabel: "" # node label whose value is the SKU (e.g. vbilling.vcluster.com/sku)
+  capacityTypeLabel: vbilling.vcluster.com/capacity-type # on-demand | spot | preemptible | reserved
+  unhealthyNodeTaints: [node.kubernetes.io/not-ready, node.kubernetes.io/unreachable]
+  dedicatedNodeLabel: "" # extra dedicated-node selector, "key=%s" (%s = tenant cluster name)
+  regionFromNode: false # use topology.kubernetes.io/region from nodes instead of `region`
+  # Operator metrics accepted by the ingest API, "code:unit[:key|key],..."
+  # e.g. "inference_output_tokens:tokens:model|region,slurm_gpu_hours:gpu-hours"
+  customMetrics: ""
+  watchDeletions: true # bill pods and nodes deleted between windows (short jobs, Auto Nodes scale-down)
+  draGPUDrivers: [gpu.nvidia.com, gpu.amd.com] # DRA drivers whose devices are GPUs
+
+# Tenant clusters with their own nodes (vCluster Private Nodes, Auto Nodes,
+# Standalone) run workloads the control plane cluster never sees. vBilling
+# meters them through their own API, using a read-only kubeconfig that vCluster
+# exports into secretName (exportKubeConfig.additionalSecrets, see README).
+# Nodes that also exist in the control plane cluster are never billed twice.
+tenantAPI:
+  enabled: true
+  secretName: vbilling-kubeconfig
+  adminFallback: false # also use vc-<name> admin kubeconfigs (grants vBilling read access to Secrets)
+  privateNodeBilling: node # node: bill private nodes whole | usage: bill the pods running on them
+  excludeNamespaces: [kube-system] # usage mode: namespaces never billed
+  # Tenant clusters outside this control plane cluster (vCluster Standalone):
+  # a Secret holding clusters.yaml plus the kubeconfig files it lists, mounted
+  # at /etc/vbilling/tenants.
+  externalClustersSecret: ""
+
+prometheus:
+  # Any Prometheus HTTP API (Prometheus, Thanos, Mimir, VictoriaMetrics). Enables
+  # egress and GPU utilization, e.g. http://prometheus.monitoring.svc:9090
+  url: ""
+  egressQuery: "" # PromQL template with {{namespace}}, {{vcluster}}, {{window}}
+  # GPU utilization. The default reads DCGM_FI_DEV_GPU_UTIL with either the
+  # namespace or exported_namespace label. Same templates; "none" disables it.
+  gpuUtilQuery: ""
+  gpuCountQuery: "" # devices per GPU model, used with the default utilization query
+  # Auth. Headers are stored in the chart Secret, e.g. {X-Scope-OrgID: tenant-1}
+  # for Mimir or {Authorization: "Basic ..."}. Or point existingSecret at a
+  # Secret with key "headers" in "Name=value,Name2=value2" form.
+  headers: {}
+  existingSecret: ""
+  bearerTokenFile: "" # re-read per query, e.g. /var/run/secrets/kubernetes.io/serviceaccount/token
+  # "vcluster-platform": read vCluster Platform fleet observability, whose write
+  # gateway labels every series with vcluster_platform_instance/project.
+  preset: ""
+  # Metrics defined by PromQL, evaluated per tenant cluster at every window end.
+  # Templates: {{namespace}} {{vcluster}} {{instance}} {{project}} {{tenant}} {{tenant_cluster}} {{window}} {{window_seconds}}
+  metrics: []
+  # - code: inference_output_tokens
+  #   name: Inference output tokens
+  #   unit: tokens
+  #   billable: true
+  #   dimensions: [model_name]
+  #   sku: model_name
+  #   query: sum by (model_name) (increase(vllm:generation_tokens_total{namespace="{{namespace}}"}[{{window}}]))
+
+platform:
+  cluster: "" # vCluster Platform cluster name of this control plane cluster (multi-cluster setups)
+
+watchNamespaces: []
+
 lago:
   apiURL: "http://lago-api.lago-system.svc.cluster.local:3000"
-  apiKey: ""  # REQUIRED when adapter=lago: set via --set or existingSecret
-  # Use existing secret for API key (key: "api-key")
-  existingSecret: ""
+  apiKey: ""
+  existingSecret: "" # key: api-key
 
-# Billing configuration
-billing:
-  defaultPlanCode: "vcluster-standard"
-  currency: "USD"
-  collectionInterval: "60s"
-  reconcileInterval: "30s"
+stripe:
+  apiKey: "" # sk_test_... / sk_live_... / rk_... (restricted keys work)
+  existingSecret: "" # keys: api-key, webhook-secret
+  apiBase: https://api.stripe.com
+  apiVersion: "2026-09-30.endive"
+  # Stripe meters cannot price on dimensions, so meters are split by these
+  # event fields (H100 and L40S GPU-hours get separate meters and prices).
+  splitMetersBy: [sku]
+  autoSubscribe: false # subscribe tenants to metered prices tagged metadata[vbilling_plan]=<plan>
+  maxRPS: 0 # 0 = 20 in test mode, 200 in live mode
+  cancelOnRemove: false
+  webhookSecret: "" # whsec_... enables /webhooks/stripe (dunning, alerts)
 
-# Pricing per unit (string format for decimal precision)
-pricing:
-  cpuPerCoreHour: "0.05"
-  memoryPerGBHour: "0.01"
-  storagePerGBHour: "0.001"
-  instancePerHour: "0.10"
-  gpuDefaultPerHour: "2.50"
-  networkEgressPerGB: "0.05"
-  lbPerHour: "0.025"
-  # GPU type-specific pricing (comma-separated TYPE:PRICE)
-  gpuPrices: "NVIDIA-A100-SXM4-80GB:3.50,NVIDIA-H100-80GB-HBM3:5.00,NVIDIA-H100-SXM5-80GB:5.50,NVIDIA-L40S:1.80,NVIDIA-A10G:1.20,NVIDIA-T4:0.75"
-  spotDiscountPercent: 60
+metronome:
+  apiToken: ""
+  existingSecret: "" # keys: api-token, webhook-secret
+  apiBase: https://api.metronome.com
+  rateCard: "" # rate card alias or ID: creates a contract per tenant
+  # Create a Stripe customer per tenant and link it in Metronome, so Metronome
+  # rates and Stripe collects payment, invoices and tax. Needs stripe.apiKey.
+  stripeLink: false
+  stripeCollectionMethod: charge_automatically
+  webhookSecret: "" # enables /webhooks/metronome (spend and credit alerts)
 
-# Optional: Prometheus URL for DCGM + network metrics
-prometheus:
-  url: ""  # e.g. "http://prometheus.monitoring.svc.cluster.local:9090"
+webhook:
+  url: "" # CloudEvents batches to your data platform
+  secret: ""
+  existingSecret: "" # key: secret
+  headers: {}
 
-# Namespace filter (empty = watch all namespaces)
-watchNamespaces: []
+api:
+  port: 8080
+  token: "" # protects usage and admin endpoints
+  ingestToken: "" # enables POST /api/v1/events (defaults to token)
+  existingSecret: "" # keys: api-token, ingest-token
+  service:
+    type: ClusterIP
+    port: 8080
+
+enforcement:
+  # observe: record billing state only. annotate: also annotate tenant
+  # clusters and label their namespaces. enforce: also label suspended
+  # namespaces so the admission policy below blocks new pods.
+  mode: observe
+  rules: "" # "event.type=state,..." e.g. "alerts.spend_threshold_reached=suspended"
+  admissionPolicy:
+    enabled: false # ValidatingAdmissionPolicy (Kubernetes 1.30+) blocking new pods in suspended namespaces
+
+persistence:
+  enabled: true # the ledger is the durable outbox: keep it on a volume
+  size: 5Gi
+  storageClass: ""
+  retention: 168h
+
+serviceMonitor:
+  enabled: false
+  interval: 30s
 
 serviceAccount:
   create: true
@@ -53,10 +172,18 @@ serviceAccount:
 resources:
   requests:
     cpu: 50m
-    memory: 64Mi
+    memory: 96Mi
   limits:
-    cpu: 200m
-    memory: 128Mi
+    cpu: 500m
+    memory: 256Mi
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
 
 nodeSelector: {}
 tolerations: []

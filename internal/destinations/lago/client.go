@@ -9,6 +9,8 @@ import (
 	"log"
 	"net/http"
 	"time"
+
+	"github.com/vclusterlabs-experiments/vbilling/internal/destinations"
 )
 
 // Client is an HTTP client for the Lago billing API.
@@ -40,11 +42,11 @@ type BillableMetric struct {
 }
 
 type Charge struct {
-	BillableMetricID string            `json:"billable_metric_id,omitempty"`
-	BillableMetricCode string          `json:"billable_metric_code,omitempty"`
-	ChargeModel      string            `json:"charge_model"`
-	PayInAdvance     bool              `json:"pay_in_advance"`
-	Properties       map[string]string `json:"properties"`
+	BillableMetricID   string            `json:"billable_metric_id,omitempty"`
+	BillableMetricCode string            `json:"billable_metric_code,omitempty"`
+	ChargeModel        string            `json:"charge_model"`
+	PayInAdvance       bool              `json:"pay_in_advance"`
+	Properties         map[string]string `json:"properties"`
 }
 
 type Plan struct {
@@ -59,11 +61,11 @@ type Plan struct {
 }
 
 type Customer struct {
-	ExternalID string            `json:"external_id"`
-	Name       string            `json:"name"`
-	Email      string            `json:"email,omitempty"`
-	Currency   string            `json:"currency,omitempty"`
-	Metadata   []CustomerMeta    `json:"metadata,omitempty"`
+	ExternalID string         `json:"external_id"`
+	Name       string         `json:"name"`
+	Email      string         `json:"email,omitempty"`
+	Currency   string         `json:"currency,omitempty"`
+	Metadata   []CustomerMeta `json:"metadata,omitempty"`
 }
 
 type CustomerMeta struct {
@@ -234,11 +236,7 @@ func (c *Client) post(ctx context.Context, path string, body interface{}, result
 	respBody, _ := io.ReadAll(resp.Body)
 
 	if resp.StatusCode >= 400 {
-		var apiErr apiError
-		if json.Unmarshal(respBody, &apiErr) == nil && apiErr.Code != "" {
-			return fmt.Errorf("lago API error %d: %s - %s", resp.StatusCode, apiErr.Code, apiErr.Message)
-		}
-		return fmt.Errorf("lago API error %d: %s", resp.StatusCode, string(respBody))
+		return destinations.StatusError(http.MethodPost, path, resp.StatusCode, respBody)
 	}
 
 	if result != nil && len(respBody) > 0 {
@@ -247,7 +245,6 @@ func (c *Client) post(ctx context.Context, path string, body interface{}, result
 		}
 	}
 
-	log.Printf("[lago] POST %s -> %d", path, resp.StatusCode)
 	return nil
 }
 

@@ -264,7 +264,8 @@
         <a href="getting-started.html" class="active">Getting Started</a>
         <a href="configuration.html">Configuration</a>
         <a href="metrics.html">Metrics Reference</a>
-        <a href="private-nodes.html">Private Nodes</a>
+        <a href="private-nodes.html">Dedicated and Private Nodes</a>
+        <a href="example-gke.html">Example: GKE with GPUs</a>
         <a href="troubleshooting.html">Troubleshooting</a>
       </div>
       <div class="sidebar-section">
@@ -294,7 +295,7 @@
 
       <div class="callout callout-info">
         <div class="callout-icon">i</div>
-        <div>vBilling auto-discovers vClusters by scanning for StatefulSets/Deployments with the <code>app=vcluster</code> label, or via the vCluster Platform API if available. Make sure you have at least one vCluster running before starting.</div>
+        <div>vBilling auto-discovers tenant clusters by scanning for StatefulSets/Deployments with the <code>app=vcluster</code> label, or via the vCluster Platform API if available. Make sure you have at least one vCluster running before starting.</div>
       </div>
 
       <!-- Step 1: Deploy Lago -->
@@ -352,7 +353,7 @@
 # (1 row)</span>
 
 <span class="comment"># Save it for later</span>
-<span class="cmd">export</span> LAGO_API_KEY=<span class="string">"a1b2c3d4-e5f6-7890-abcd-ef1234567890"</span></code></div>
+<span class="cmd">export</span> LAGO_API_KEY=<span class="string">"&lt;your-lago-api-key&gt;"</span></code></div>
 
       <div class="callout callout-warn">
         <div class="callout-icon">!</div>
@@ -365,11 +366,11 @@
 
       <h3>Option A: Helm chart (recommended)</h3>
 
-      <p>First, build and push the container image (if not using a pre-built image):</p>
+      <p>The chart defaults to the published image <code>ghcr.io/vclusterlabs-experiments/vbilling:v0.2.0</code> (<code>linux/amd64</code> and <code>linux/arm64</code>). Build your own only to run local changes:</p>
       <div class="code-block"><code><span class="comment"># Build multi-arch image</span>
 <span class="cmd">docker</span> buildx build \
   <span class="flag">--platform</span> linux/amd64,linux/arm64 \
-  <span class="flag">-t</span> ghcr.io/vclusterlabs-experiments/vbilling:latest \
+  <span class="flag">-t</span> &lt;your-registry&gt;/vbilling:dev \
   <span class="flag">--push</span> .
 
 <span class="output"># Or single-arch for local testing:
@@ -412,7 +413,7 @@
 
 <span class="comment"># Run with environment variables</span>
 <span class="cmd">export</span> LAGO_API_URL=<span class="string">"http://localhost:3000"</span>
-<span class="cmd">export</span> LAGO_API_KEY=<span class="string">"a1b2c3d4-e5f6-7890-abcd-ef1234567890"</span>
+<span class="cmd">export</span> LAGO_API_KEY=<span class="string">"&lt;your-lago-api-key&gt;"</span>
 <span class="cmd">./bin/vbilling</span>
 
 <span class="output"># Expected output:
@@ -432,7 +433,7 @@
 
       <div class="callout callout-info">
         <div class="callout-icon">i</div>
-        <div>When running locally, vBilling uses your <code>~/.kube/config</code> to connect to the cluster. Make sure your kubeconfig context points to the cluster with your vClusters.</div>
+        <div>When running locally, vBilling uses your <code>~/.kube/config</code> to connect to the cluster. Make sure your kubeconfig context points to the cluster with your tenant clusters.</div>
       </div>
 
       <!-- Step 3: Configure Pricing -->
@@ -467,7 +468,7 @@
 
       <!-- Step 4: Verify -->
       <h2 id="step-4"><span class="step-marker">4</span>Verify It Works</h2>
-      <p>Once vBilling is running, it will auto-discover your vClusters and start sending usage events within one reconcile cycle (default: 30 seconds).</p>
+      <p>Once vBilling is running, it will auto-discover your tenant clusters and start sending usage events within one reconcile cycle (default: 30 seconds).</p>
 
       <h3>Check vBilling logs</h3>
       <div class="code-block"><code><span class="comment"># If running via Helm:</span>
@@ -516,8 +517,8 @@
       <h2 id="try-with-vind">Try It Locally with vind</h2>
       <p>You can test the full pipeline on your laptop using <strong>vind</strong> (vCluster in Docker) -- no cloud cluster needed.</p>
 
-      <h3>Create a vind host cluster</h3>
-      <div class="code-block"><code><span class="comment"># Set Docker driver and create a host cluster</span>
+      <h3>Create a vind control plane cluster</h3>
+      <div class="code-block"><code><span class="comment"># Set Docker driver and create a control plane cluster</span>
 <span class="cmd">vcluster</span> use driver docker
 <span class="cmd">vcluster</span> create vbilling-host <span class="flag">--connect=true</span>
 
@@ -526,7 +527,7 @@
 <span class="cmd">kubectl</span> patch deployment metrics-server <span class="flag">-n</span> kube-system <span class="flag">--type=json</span> \
   <span class="flag">-p=</span><span class="string">'[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'</span></code></div>
 
-      <h3>Create nested vClusters</h3>
+      <h3>Create nested tenant clusters</h3>
       <div class="code-block"><code><span class="cmd">vcluster</span> use driver helm
 <span class="cmd">vcluster</span> create team-alpha <span class="flag">--namespace</span> vcluster-team-alpha <span class="flag">--connect=false</span>
 <span class="cmd">vcluster</span> create team-beta <span class="flag">--namespace</span> vcluster-team-beta <span class="flag">--connect=false</span>
@@ -555,20 +556,19 @@
   <span class="flag">--set</span> lago.existingSecret=lago-credentials</code></div>
 
       <h3>Verify</h3>
-      <div class="code-block"><code><span class="cmd">kubectl</span> logs <span class="flag">-n</span> vbilling-system deployment/vbilling
+      <div class="code-block"><code><span class="cmd">kubectl</span> logs <span class="flag">-n</span> vbilling-system statefulset/vbilling
 
-<span class="output"># Expected output:
+<span class="output"># Expected output (v0.2):
 # Using in-cluster Kubernetes config
-# [discovery] found 3 vCluster(s)
-# [controller] new vCluster discovered: vcluster-team-alpha/team-alpha
-# [controller] ensured customer vcluster-vcluster-team-alpha-team-alpha
-# [metrics] vcluster-team-alpha: CPU=0.048 cores, Memory=0.33 GB
-# [metrics] vcluster-team-alpha: Storage=5.00 GB (1 PVCs)
-# [controller] sent 12 billing events to Lago</span></code></div>
+# [controller] starting (adapters=[lago], window=1m0s, reconcile=30s, region=default)
+# API listening on :8080
+# [bootstrap] setting up Lago billing configuration...
+# [controller] window 10:18:20: 17 events for 3 tenant cluster(s) (11 pods, 5 GPU pods, 0 nodes down)
+# [lago] subscribed tenant acme to plan vcluster-standard</span></code></div>
 
       <div class="callout callout-success">
         <div class="callout-icon">&#10003;</div>
-        <div>This is the exact output from a verified test. vBilling runs as a real Kubernetes Deployment with in-cluster ServiceAccount, discovers vClusters via RBAC, collects metrics, and sends events to Lago.</div>
+        <div>This is output from a verified end-to-end test. vBilling runs as a StatefulSet with a persistent ledger and an in-cluster ServiceAccount, discovers tenant clusters via RBAC, and delivers events to Lago. Check delivery with <code>kubectl -n vbilling-system port-forward svc/vbilling 8080</code> and <code>curl localhost:8080/api/v1/status</code>.</div>
       </div>
 
       <h3>Clean up</h3>
@@ -580,7 +580,7 @@
       <ul>
         <li><a href="configuration.html">Configuration</a> -- tune intervals, namespaces, and pricing</li>
         <li><a href="metrics.html">Metrics Reference</a> -- understand all 9 billable metrics</li>
-        <li><a href="private-nodes.html">Private Nodes</a> -- set up dedicated node billing</li>
+        <li><a href="private-nodes.html">Dedicated and Private Nodes</a> -- set up dedicated node billing</li>
         <li><a href="troubleshooting.html">Troubleshooting</a> -- common issues and fixes</li>
       </ul>
 

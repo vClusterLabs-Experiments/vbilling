@@ -1,0 +1,242 @@
+{{- $adapters := include "vbilling.adapters" . | splitList "," -}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "vbilling.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "vbilling.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  serviceName: {{ include "vbilling.fullname" . }}
+  selector:
+    matchLabels:
+      {{- include "vbilling.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "vbilling.selectorLabels" . | nindent 8 }}
+      annotations:
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        checksum/prometheus-metrics: {{ toYaml .Values.prometheus.metrics | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "vbilling.serviceAccountName" . }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: vbilling
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          ports:
+            - name: http
+              containerPort: {{ .Values.api.port }}
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 20
+          env:
+            - name: ADAPTERS
+              value: {{ include "vbilling.adapters" . | quote }}
+            - name: REGION
+              value: {{ .Values.region | quote }}
+            - name: CLUSTER_NAME
+              value: {{ .Values.clusterName | quote }}
+            - name: DEFAULT_TENANT_CLASS
+              value: {{ .Values.tenantClass | quote }}
+            - name: TENANT_SOURCE
+              value: {{ .Values.tenantSource | quote }}
+            - name: DATA_DIR
+              value: /var/lib/vbilling
+            - name: RETENTION
+              value: {{ .Values.persistence.retention | quote }}
+            - name: LISTEN_ADDR
+              value: ":{{ .Values.api.port }}"
+            - name: DEFAULT_PLAN_CODE
+              value: {{ .Values.billing.defaultPlanCode | quote }}
+            - name: BILLING_CURRENCY
+              value: {{ .Values.billing.currency | quote }}
+            - name: COLLECTION_INTERVAL
+              value: {{ .Values.billing.collectionInterval | quote }}
+            - name: RECONCILE_INTERVAL
+              value: {{ .Values.billing.reconcileInterval | quote }}
+            - name: MAX_BACKFILL
+              value: {{ .Values.billing.maxBackfill | quote }}
+            - name: OFFBOARD_GRACE
+              value: {{ .Values.billing.offboardGrace | quote }}
+            - name: CPU_MEMORY_BASIS
+              value: {{ .Values.metering.cpuMemoryBasis | quote }}
+            - name: METER_CONTROL_PLANE
+              value: {{ .Values.metering.meterControlPlane | quote }}
+            - name: METER_BY_NAMESPACE
+              value: {{ .Values.metering.meterByNamespace | quote }}
+            - name: GPU_RESOURCES
+              value: {{ join "," .Values.metering.gpuResources | default "none" | quote }}
+            - name: SKU_LABEL
+              value: {{ .Values.metering.skuLabel | quote }}
+            - name: CAPACITY_TYPE_LABEL
+              value: {{ .Values.metering.capacityTypeLabel | quote }}
+            - name: UNHEALTHY_NODE_TAINTS
+              value: {{ join "," .Values.metering.unhealthyNodeTaints | default "none" | quote }}
+            - name: VCLUSTER_NODE_LABEL
+              value: {{ .Values.metering.dedicatedNodeLabel | quote }}
+            - name: REGION_FROM_NODE
+              value: {{ .Values.metering.regionFromNode | quote }}
+            - name: CUSTOM_METRICS
+              value: {{ .Values.metering.customMetrics | quote }}
+            - name: WATCH_DELETIONS
+              value: {{ .Values.metering.watchDeletions | quote }}
+            - name: DRA_GPU_DRIVERS
+              value: {{ join "," .Values.metering.draGPUDrivers | default "none" | quote }}
+            - name: TENANT_API
+              value: {{ .Values.tenantAPI.enabled | quote }}
+            - name: TENANT_KUBECONFIG_SECRET
+              value: {{ .Values.tenantAPI.secretName | quote }}
+            - name: TENANT_ADMIN_FALLBACK
+              value: {{ .Values.tenantAPI.adminFallback | quote }}
+            - name: PRIVATE_NODE_BILLING
+              value: {{ .Values.tenantAPI.privateNodeBilling | quote }}
+            - name: TENANT_EXCLUDE_NAMESPACES
+              value: {{ join "," .Values.tenantAPI.excludeNamespaces | default "none" | quote }}
+            {{- if .Values.tenantAPI.externalClustersSecret }}
+            - name: TENANT_CLUSTERS_FILE
+              value: /etc/vbilling/tenants/clusters.yaml
+            {{- end }}
+            - name: PLATFORM_CLUSTER
+              value: {{ .Values.platform.cluster | quote }}
+            - name: WATCH_NAMESPACES
+              value: {{ join "," .Values.watchNamespaces | quote }}
+            - name: ENFORCEMENT_MODE
+              value: {{ .Values.enforcement.mode | quote }}
+            - name: ENFORCEMENT_RULES
+              value: {{ .Values.enforcement.rules | quote }}
+            {{- if .Values.prometheus.url }}
+            - name: PROMETHEUS_URL
+              value: {{ .Values.prometheus.url | quote }}
+            - name: EGRESS_QUERY
+              value: {{ .Values.prometheus.egressQuery | quote }}
+            - name: GPU_UTIL_QUERY
+              value: {{ .Values.prometheus.gpuUtilQuery | quote }}
+            - name: GPU_COUNT_QUERY
+              value: {{ .Values.prometheus.gpuCountQuery | quote }}
+            - name: PROMETHEUS_PRESET
+              value: {{ .Values.prometheus.preset | quote }}
+            {{- if .Values.prometheus.metrics }}
+            - name: PROMETHEUS_METRICS_FILE
+              value: /etc/vbilling/prometheus/metrics.yaml
+            {{- end }}
+            {{- if .Values.prometheus.bearerTokenFile }}
+            - name: PROMETHEUS_BEARER_TOKEN_FILE
+              value: {{ .Values.prometheus.bearerTokenFile | quote }}
+            {{- end }}
+            {{- include "vbilling.secretEnv" (dict "env" "PROMETHEUS_HEADERS" "existing" .Values.prometheus.existingSecret "key" "headers" "inline" .Values.prometheus.headers "chartKey" "prometheus-headers" "root" .) | nindent 12 }}
+            {{- end }}
+            {{- include "vbilling.secretEnv" (dict "env" "API_TOKEN" "existing" .Values.api.existingSecret "key" "api-token" "inline" .Values.api.token "chartKey" "api-token" "root" .) | nindent 12 }}
+            {{- include "vbilling.secretEnv" (dict "env" "INGEST_TOKEN" "existing" .Values.api.existingSecret "key" "ingest-token" "inline" .Values.api.ingestToken "chartKey" "ingest-token" "root" .) | nindent 12 }}
+            {{- if has "lago" $adapters }}
+            - name: LAGO_API_URL
+              value: {{ .Values.lago.apiURL | quote }}
+            {{- include "vbilling.secretEnv" (dict "env" "LAGO_API_KEY" "existing" .Values.lago.existingSecret "key" "api-key" "inline" .Values.lago.apiKey "chartKey" "lago-api-key" "root" .) | nindent 12 }}
+            {{- end }}
+            {{- if or (has "stripe" $adapters) .Values.metronome.stripeLink }}
+            - name: STRIPE_API_BASE
+              value: {{ .Values.stripe.apiBase | quote }}
+            - name: STRIPE_API_VERSION
+              value: {{ .Values.stripe.apiVersion | quote }}
+            - name: STRIPE_SPLIT_METERS_BY
+              value: {{ join "," .Values.stripe.splitMetersBy | default "none" | quote }}
+            - name: STRIPE_AUTO_SUBSCRIBE
+              value: {{ .Values.stripe.autoSubscribe | quote }}
+            - name: STRIPE_MAX_RPS
+              value: {{ .Values.stripe.maxRPS | quote }}
+            - name: STRIPE_CANCEL_ON_REMOVE
+              value: {{ .Values.stripe.cancelOnRemove | quote }}
+            {{- include "vbilling.secretEnv" (dict "env" "STRIPE_API_KEY" "existing" .Values.stripe.existingSecret "key" "api-key" "inline" .Values.stripe.apiKey "chartKey" "stripe-api-key" "root" .) | nindent 12 }}
+            {{- end }}
+            {{- include "vbilling.secretEnv" (dict "env" "STRIPE_WEBHOOK_SECRET" "existing" .Values.stripe.existingSecret "key" "webhook-secret" "inline" .Values.stripe.webhookSecret "chartKey" "stripe-webhook-secret" "root" .) | nindent 12 }}
+            {{- if has "metronome" $adapters }}
+            - name: METRONOME_API_BASE
+              value: {{ .Values.metronome.apiBase | quote }}
+            - name: METRONOME_RATE_CARD
+              value: {{ .Values.metronome.rateCard | quote }}
+            - name: METRONOME_STRIPE_LINK
+              value: {{ .Values.metronome.stripeLink | quote }}
+            - name: METRONOME_STRIPE_COLLECTION_METHOD
+              value: {{ .Values.metronome.stripeCollectionMethod | quote }}
+            {{- include "vbilling.secretEnv" (dict "env" "METRONOME_API_TOKEN" "existing" .Values.metronome.existingSecret "key" "api-token" "inline" .Values.metronome.apiToken "chartKey" "metronome-api-token" "root" .) | nindent 12 }}
+            {{- end }}
+            {{- include "vbilling.secretEnv" (dict "env" "METRONOME_WEBHOOK_SECRET" "existing" .Values.metronome.existingSecret "key" "webhook-secret" "inline" .Values.metronome.webhookSecret "chartKey" "metronome-webhook-secret" "root" .) | nindent 12 }}
+            {{- if has "webhook" $adapters }}
+            - name: WEBHOOK_URL
+              value: {{ .Values.webhook.url | quote }}
+            {{- if .Values.webhook.headers }}
+            - name: WEBHOOK_HEADERS
+              value: {{ $h := list }}{{ range $k, $v := .Values.webhook.headers }}{{ $h = append $h (printf "%s=%s" $k $v) }}{{ end }}{{ join "," $h | quote }}
+            {{- end }}
+            {{- include "vbilling.secretEnv" (dict "env" "WEBHOOK_SECRET" "existing" .Values.webhook.existingSecret "key" "secret" "inline" .Values.webhook.secret "chartKey" "webhook-secret" "root" .) | nindent 12 }}
+            {{- end }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/vbilling
+            {{- if .Values.tenantAPI.externalClustersSecret }}
+            - name: tenant-clusters
+              mountPath: /etc/vbilling/tenants
+              readOnly: true
+            {{- end }}
+            {{- if .Values.prometheus.metrics }}
+            - name: prometheus-metrics
+              mountPath: /etc/vbilling/prometheus
+              readOnly: true
+            {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- if or (not .Values.persistence.enabled) .Values.tenantAPI.externalClustersSecret .Values.prometheus.metrics }}
+      volumes:
+        {{- if not .Values.persistence.enabled }}
+        - name: data
+          emptyDir: {}
+        {{- end }}
+        {{- if .Values.tenantAPI.externalClustersSecret }}
+        - name: tenant-clusters
+          secret:
+            secretName: {{ .Values.tenantAPI.externalClustersSecret }}
+        {{- end }}
+        {{- if .Values.prometheus.metrics }}
+        - name: prometheus-metrics
+          configMap:
+            name: {{ include "vbilling.fullname" . }}-prometheus-metrics
+        {{- end }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  {{- if .Values.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- with .Values.persistence.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size }}
+  {{- end }}
