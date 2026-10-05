@@ -1,0 +1,46 @@
+# vcluster.yaml for a tenant cluster with private nodes. GPU machines join this
+# tenant cluster directly; nothing is synced to the control plane cluster, so
+# vBilling reads the tenant cluster's own API with a read-only kubeconfig.
+# Private Nodes needs a vCluster Platform license: register the tenant cluster
+# with the Platform (vcluster create adds it when the CLI is logged in).
+privateNodes:
+  enabled: true
+controlPlane:
+  service:
+    annotations:
+      networking.gke.io/load-balancer-type: Internal   # VPC-only join endpoint
+    spec:
+      type: LoadBalancer
+networking:
+  # Must not overlap the VPC (GCP's default subnets use 10.128.0.0/9).
+  podCIDR: 172.20.0.0/16
+  serviceCIDR: 172.21.0.0/16
+
+# vBilling: export a kubeconfig for a read-only service account into the
+# Secret vbilling-kubeconfig in this tenant cluster's control plane cluster
+# namespace. vBilling's RBAC can read only that Secret name.
+exportKubeConfig:
+  additionalSecrets:
+    - name: vbilling-kubeconfig
+      serviceAccount:
+        name: vbilling-reader
+        namespace: kube-system
+        clusterRole: vbilling-reader
+experimental:
+  deploy:
+    vcluster:
+      manifests: |-
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: ClusterRole
+        metadata:
+          name: vbilling-reader
+        rules:
+          - apiGroups: [""]
+            resources: [nodes, pods, persistentvolumeclaims, services]
+            verbs: [get, list, watch]
+          - apiGroups: [resource.k8s.io]
+            resources: [resourceclaims, resourceslices]
+            verbs: [get, list]
+          - apiGroups: [metrics.k8s.io]
+            resources: [pods]
+            verbs: [get, list]

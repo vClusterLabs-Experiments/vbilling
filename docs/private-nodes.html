@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Private Nodes - vBilling Docs</title>
+  <title>Dedicated and Private Nodes - vBilling Docs</title>
   <meta name="description" content="How vBilling detects and bills dedicated bare-metal or virtual nodes allocated to individual vCluster tenants.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -252,7 +252,8 @@
         <a href="getting-started.html">Getting Started</a>
         <a href="configuration.html">Configuration</a>
         <a href="metrics.html">Metrics Reference</a>
-        <a href="private-nodes.html" class="active">Private Nodes</a>
+        <a href="private-nodes.html" class="active">Dedicated and Private Nodes</a>
+        <a href="example-gke.html">Example: GKE with GPUs</a>
         <a href="troubleshooting.html">Troubleshooting</a>
       </div>
       <div class="sidebar-section">
@@ -264,338 +265,103 @@
     </nav>
 
     <main class="content">
-      <h1>Private Node Billing</h1>
-      <p class="subtitle">How vBilling detects and bills dedicated bare-metal or virtual machines allocated to individual vCluster tenants. Ideal for neoclouds, GPU clusters, and high-isolation environments.</p>
+      <h1>Dedicated and Private Node Billing</h1>
+      <p class="subtitle">How vBilling bills nodes that belong to one tenant cluster for their full capacity, whether they sit in the control plane cluster (dedicated nodes) or join the tenant cluster itself (vCluster Private Nodes, Auto Nodes, Standalone), without ever billing the workloads on them twice.</p>
 
-      <!-- What are private nodes -->
-      <h2 id="what-are-private-nodes">What Are Private Nodes?</h2>
-      <p>Private nodes are dedicated Kubernetes nodes (physical servers, cloud VMs, or bare-metal machines) allocated exclusively to a single vCluster tenant. Unlike the default shared model where vCluster pods run alongside other workloads on shared nodes, private nodes give a tenant the entire machine.</p>
-
-      <div class="info-grid">
-        <div class="info-box">
-          <h4>Shared Mode (default)</h4>
-          <p>vCluster pods run in a namespace on shared nodes. Billing is based on actual pod resource usage (CPU, memory) as reported by metrics-server.</p>
-        </div>
-        <div class="info-box">
-          <h4>Private Node Mode</h4>
-          <p>Entire nodes are dedicated to one tenant. Billing is based on the full node capacity (CPU, memory, GPUs, storage) regardless of actual utilization.</p>
-        </div>
+      <h2 id="what">What dedicated nodes are</h2>
+      <p>A dedicated node is a physical server, VM or bare-metal machine reserved for one tenant cluster. AI Clouds typically sell them by SKU (for example <code>bm.gpu.h100.8</code>), billing the whole machine regardless of utilization. Shared nodes, by contrast, are billed by what each pod allocates.</p>
+      <div class="callout callout-info">
+        <div class="callout-icon">i</div>
+        <div>Dedicated nodes are control plane cluster nodes reserved through labels. With vCluster <strong>Private Nodes</strong>, nodes join the tenant cluster directly and the control plane cluster never sees them or their pods; see <a href="#private">Private Nodes, Auto Nodes and Standalone</a>.</div>
       </div>
 
-      <p>Common use cases for private nodes:</p>
-      <ul>
-        <li><strong>GPU workloads</strong> -- Tenants get dedicated GPU nodes (e.g., 8x A100 or 8x H100)</li>
-        <li><strong>Security isolation</strong> -- Tenants require physical machine-level isolation</li>
-        <li><strong>Performance</strong> -- No noisy-neighbor effects from shared infrastructure</li>
-        <li><strong>Bare-metal providers</strong> -- Neoclouds selling entire servers to tenants</li>
-      </ul>
-
-      <!-- How detection works -->
-      <h2 id="detection">How vBilling Detects Private Nodes</h2>
-      <p>vBilling discovers private nodes by searching for Kubernetes nodes with specific labels that associate them with a vCluster. The detection uses multiple strategies in order:</p>
-
-      <h3>Strategy 1: Direct namespace match</h3>
-      <p>vBilling searches for nodes with these label selectors (where the value matches the vCluster namespace):</p>
-      <div class="code-block"><code><span class="comment"># Label selectors tried for namespace "vcluster-team-gpu":</span>
-vcluster.loft.sh/managed-by=<span class="string">vcluster-team-gpu</span>
-vcluster.loft.sh/cluster=<span class="string">vcluster-team-gpu</span></code></div>
-
-      <h3>Strategy 2: Name with prefix stripping</h3>
-      <p>If the namespace starts with a common prefix (<code>vcluster-</code> or <code>vc-</code>), vBilling also tries the name with the prefix stripped:</p>
-      <div class="code-block"><code><span class="comment"># For namespace "vcluster-team-gpu", the prefix "vcluster-" is stripped:</span>
-<span class="comment"># vCluster name derived = "team-gpu"</span>
-<span class="comment"># Additional selectors tried:</span>
-vcluster.loft.sh/managed-by=<span class="string">team-gpu</span>
-vcluster.loft.sh/cluster=<span class="string">team-gpu</span></code></div>
-
-      <div class="callout callout-warn">
-        <div class="callout-icon">!</div>
-        <div>This prefix stripping is a common source of label mismatch issues. If your namespace is <code>vcluster-team-gpu</code> and you label nodes with <code>vcluster.loft.sh/managed-by=vcluster-team-gpu</code>, it will match via Strategy 1. But if you label with just <code>team-gpu</code>, it matches via Strategy 2. See <a href="troubleshooting.html#private-nodes-not-detected">Troubleshooting</a> for details.</div>
-      </div>
-
-      <h3>Strategy 3: Custom label via environment variable</h3>
-      <p>For non-standard setups, you can specify a custom label selector via the <code>VCLUSTER_NODE_LABEL</code> environment variable:</p>
-      <div class="code-block"><code><span class="comment"># Format: VCLUSTER_NODE_LABEL=label-key=value-pattern</span>
-<span class="comment"># Use %s as a placeholder for the vCluster name (after prefix stripping)</span>
-
-<span class="comment"># Example: nodes labeled with "tenant=team-gpu"</span>
-<span class="cmd">export</span> VCLUSTER_NODE_LABEL=<span class="string">"tenant=%s"</span>
-
-<span class="comment"># Example: nodes labeled with "dedicated-to=team-gpu"</span>
-<span class="cmd">export</span> VCLUSTER_NODE_LABEL=<span class="string">"dedicated-to=%s"</span>
-
-<span class="comment"># In Helm values:</span>
-<span class="comment"># env:</span>
-<span class="comment">#   - name: VCLUSTER_NODE_LABEL</span>
-<span class="comment">#     value: "tenant=%s"</span></code></div>
-
-      <h3>Detection flow diagram</h3>
-      <div class="flow-diagram">
-<pre><span class="flow-dim">For each tracked vCluster namespace:</span>
-
-  <span class="flow-highlight">Namespace</span> = "vcluster-team-gpu"
-      <span class="flow-arrow">|</span>
-      <span class="flow-arrow">|--></span> Try: <span class="flow-highlight">vcluster.loft.sh/managed-by</span>=vcluster-team-gpu
-      <span class="flow-arrow">|--></span> Try: <span class="flow-highlight">vcluster.loft.sh/cluster</span>=vcluster-team-gpu
-      <span class="flow-arrow">|</span>
-      <span class="flow-arrow">|--></span> Strip prefix "vcluster-" <span class="flow-arrow">--></span> Name = "team-gpu"
-      <span class="flow-arrow">|--></span> Try: <span class="flow-highlight">vcluster.loft.sh/managed-by</span>=team-gpu
-      <span class="flow-arrow">|--></span> Try: <span class="flow-highlight">vcluster.loft.sh/cluster</span>=team-gpu
-      <span class="flow-arrow">|</span>
-      <span class="flow-arrow">|--></span> Try: Custom label (<span class="flow-highlight">VCLUSTER_NODE_LABEL</span>=%s <span class="flow-arrow">--></span> "team-gpu")
-      <span class="flow-arrow">|</span>
-      <span class="flow-arrow">v</span>
-  <span class="flow-dim">Deduplicate matched nodes by name</span></pre>
-      </div>
-
-      <!-- What gets billed -->
-      <h2 id="what-gets-billed">What Gets Billed</h2>
-      <p>When private nodes are detected for a vCluster, the <strong>full node capacity</strong> is billed to the tenant. The following data is extracted from each node:</p>
-
+      <h2 id="detection">How vBilling detects them</h2>
+      <p>A node is dedicated to a tenant cluster when any of these labels match. The namespace is the tenant cluster's control plane cluster namespace; the name is the tenant cluster's name.</p>
       <div class="config-table-wrap">
         <table class="config-table">
-          <thead>
-            <tr><th>Resource</th><th>Source</th><th>Lago Metric</th></tr>
-          </thead>
+          <thead><tr><th>Label</th><th>Matches</th></tr></thead>
           <tbody>
-            <tr>
-              <td>CPU (total cores)</td>
-              <td><code>node.status.capacity["cpu"]</code></td>
-              <td><code>vcluster_cpu_core_hours</code> (billing_mode=private_node)</td>
-            </tr>
-            <tr>
-              <td>Memory (total bytes)</td>
-              <td><code>node.status.capacity["memory"]</code></td>
-              <td><code>vcluster_memory_gb_hours</code> (billing_mode=private_node)</td>
-            </tr>
-            <tr>
-              <td>GPU count + type</td>
-              <td><code>node.status.capacity["nvidia.com/gpu"]</code> + node labels</td>
-              <td><code>vcluster_gpu_hours</code> (billing_mode=private_node)</td>
-            </tr>
-            <tr>
-              <td>Ephemeral storage</td>
-              <td><code>node.status.capacity["ephemeral-storage"]</code></td>
-              <td>Tracked internally (not a separate Lago metric)</td>
-            </tr>
-            <tr>
-              <td>Node count</td>
-              <td>Number of matched nodes</td>
-              <td><code>vcluster_private_node_hours</code></td>
-            </tr>
-            <tr>
-              <td>Spot/on-demand status</td>
-              <td>Node labels (see below)</td>
-              <td>Used to determine <code>IsSpot</code> flag</td>
-            </tr>
-            <tr>
-              <td>Instance type</td>
-              <td><code>node.kubernetes.io/instance-type</code></td>
-              <td>Tracked in <code>InstanceType</code> field</td>
-            </tr>
+            <tr><td><code>vbilling.vcluster.com/tenant-cluster</code></td><td>The tenant cluster ID (<code>vcluster-&lt;namespace&gt;-&lt;name&gt;</code>) or name. Recommended.</td></tr>
+            <tr><td><code>vcluster.loft.sh/managed-by</code></td><td>Namespace or name (also the name with a <code>vcluster-</code> or <code>vc-</code> namespace prefix stripped)</td></tr>
+            <tr><td><code>vcluster.loft.sh/cluster</code></td><td>As above</td></tr>
+            <tr><td><code>VCLUSTER_NODE_LABEL</code> pattern</td><td>Any <code>key=value</code> where <code>%s</code> is replaced with the candidate names, e.g. <code>tenant=%s</code></td></tr>
           </tbody>
         </table>
       </div>
+      <p>Taint dedicated nodes (for example <code>dedicated=team-b:NoSchedule</code>) and give the tenant's workloads a matching toleration, so other tenants cannot land on them.</p>
+      <div class="code-block"><code><span class="cmd">kubectl</span> label node bm-h100-01 vbilling.vcluster.com/tenant-cluster=vcluster-team-b-team-b
+<span class="cmd">kubectl</span> label node bm-h100-01 vbilling.vcluster.com/sku=bm.gpu.h100.8 vbilling.vcluster.com/capacity-type=reserved
+<span class="cmd">kubectl</span> taint node bm-h100-01 dedicated=team-b:NoSchedule</code></div>
 
-      <p>Additionally, vBilling queries metrics-server for the <strong>actual CPU and memory usage</strong> on private nodes (via node-level metrics) and adds that to the billing totals. This ensures workloads running directly on dedicated nodes outside the vCluster namespace are also captured.</p>
-
-      <!-- GPU type detection -->
-      <h2 id="gpu-detection">GPU Type Detection on Private Nodes</h2>
-      <p>vBilling checks multiple node labels to determine the GPU model on a private node. Labels are checked in priority order -- the first match wins:</p>
-
+      <h2 id="billed">What gets billed</h2>
+      <p>Each dedicated node produces its own events every window (<code>resource_id</code> = node name):</p>
       <div class="config-table-wrap">
         <table class="config-table">
-          <thead>
-            <tr><th>Label</th><th>Platform</th><th>Example Value</th></tr>
-          </thead>
+          <thead><tr><th>Metric</th><th>Quantity</th><th>Dimensions</th></tr></thead>
           <tbody>
-            <tr>
-              <td><code>nvidia.com/gpu.product</code></td>
-              <td>NVIDIA GPU Operator (any platform)</td>
-              <td>NVIDIA-A100-SXM4-80GB</td>
-            </tr>
-            <tr>
-              <td><code>nvidia.com/gpu.machine</code></td>
-              <td>Alternative NVIDIA label</td>
-              <td>NVIDIA-DGX-A100</td>
-            </tr>
-            <tr>
-              <td><code>cloud.google.com/gke-accelerator</code></td>
-              <td>Google Kubernetes Engine (GKE)</td>
-              <td>nvidia-tesla-t4</td>
-            </tr>
-            <tr>
-              <td><code>k8s.amazonaws.com/accelerator</code></td>
-              <td>Amazon Elastic Kubernetes Service (EKS)</td>
-              <td>nvidia-tesla-a100</td>
-            </tr>
+            <tr><td><code>vcluster_private_node_hours</code></td><td>Hours the node was healthy</td><td><code>sku</code> (SKU label, instance type, or <code>&lt;n&gt;x&lt;GPU model&gt;</code>), <code>capacity_type</code>, <code>instance_type</code>, <code>node</code></td></tr>
+            <tr><td><code>vcluster_gpu_hours</code></td><td>GPU capacity &times; hours</td><td><code>billing_mode=dedicated_node</code>, <code>sku</code>, <code>gpu_type</code></td></tr>
+            <tr><td><code>vcluster_cpu_core_hours</code></td><td>CPU capacity &times; hours</td><td><code>billing_mode=dedicated_node</code></td></tr>
+            <tr><td><code>vcluster_memory_gb_hours</code></td><td>Memory capacity (GiB) &times; hours</td><td><code>billing_mode=dedicated_node</code></td></tr>
           </tbody>
         </table>
       </div>
+      <p>Price either the node-hours by SKU, or the capacity components by <code>billing_mode</code>, whichever matches how you sell. Set the other to zero.</p>
 
-      <p>GPU type strings are normalized: spaces are replaced with hyphens and leading/trailing whitespace is trimmed.</p>
+      <h2 id="no-double-billing">No double billing</h2>
+      <p>Pods that run on the tenant's own dedicated nodes are not metered again as shared usage: the node allocation already covers them. (v0.1 billed both the pods and the node.) A pod from a different tenant that lands on an untainted dedicated node is billed to its own tenant as shared usage.</p>
 
-      <!-- Spot / On-Demand -->
-      <h2 id="spot-detection">Spot / On-Demand Detection</h2>
-      <p>Each private node is checked for spot/preemptible status using the following labels:</p>
+      <h2 id="fairness">Downtime</h2>
+      <p>If a dedicated node is NotReady, or carries a taint listed in <code>UNHEALTHY_NODE_TAINTS</code>, its node-hours stop and its GPUs are recorded as <code>vcluster_gpu_downtime_hours</code> (informational, never invoiced), from the moment the condition or taint appeared.</p>
 
+      <h2 id="private">Private Nodes, Auto Nodes and Standalone</h2>
+      <p>With Private Nodes, vCluster syncs nothing to the control plane cluster: the nodes, their pods and their volumes exist only in the tenant cluster. vBilling meters these tenant clusters through their own API. Every node the tenant cluster's API reports that the control plane cluster does not have (and that is not one of vCluster's placeholder nodes, labeled <code>vcluster.loft.sh/fake-node</code>) is a private node, billed like a dedicated node with <code>billing_mode=private_node</code>. The tenant cluster's volumes and load balancers are billed as well. Shared tenant clusters are never billed twice, even when vBilling can read their API.</p>
+      <p>vBilling reads one Secret per tenant cluster, <code>vbilling-kubeconfig</code> in its namespace, and its RBAC is pinned to that name. Let vCluster write it with a read-only service account:</p>
+      <div class="code-block"><code>exportKubeConfig:
+  additionalSecrets:
+    - name: vbilling-kubeconfig
+      serviceAccount:
+        name: vbilling-reader
+        namespace: kube-system
+        clusterRole: vbilling-reader
+experimental:
+  deploy:
+    vcluster:
+      manifests: |-
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: ClusterRole
+        metadata:
+          name: vbilling-reader
+        rules:
+          - apiGroups: [""]
+            resources: [nodes, pods, persistentvolumeclaims, services]
+            verbs: [get, list, watch]
+          - apiGroups: [resource.k8s.io]
+            resources: [resourceclaims, resourceslices]
+            verbs: [get, list]
+          - apiGroups: [metrics.k8s.io]
+            resources: [pods]
+            verbs: [get, list]</code></div>
+      <p>vCluster writes kubeconfigs for <code>localhost</code>; vBilling connects to the tenant cluster's Service and verifies TLS against <code>&lt;name&gt;.&lt;namespace&gt;</code>. Tenant clusters outside the control plane cluster (vCluster Standalone, or any other cluster) are listed in <code>TENANT_CLUSTERS_FILE</code> with their own kubeconfig.</p>
       <div class="config-table-wrap">
         <table class="config-table">
-          <thead>
-            <tr><th>Label</th><th>Spot Values</th><th>Platform</th></tr>
-          </thead>
+          <thead><tr><th>Setting</th><th>Effect</th></tr></thead>
           <tbody>
-            <tr>
-              <td><code>kubernetes.io/lifecycle</code></td>
-              <td>"spot", "preemptible"</td>
-              <td>Common / generic</td>
-            </tr>
-            <tr>
-              <td><code>node.kubernetes.io/lifecycle</code></td>
-              <td>"spot", "preemptible"</td>
-              <td>Alternative generic</td>
-            </tr>
-            <tr>
-              <td><code>cloud.google.com/gke-preemptible</code></td>
-              <td>"true"</td>
-              <td>GKE preemptible VMs</td>
-            </tr>
-            <tr>
-              <td><code>cloud.google.com/gke-spot</code></td>
-              <td>"true"</td>
-              <td>GKE Spot VMs</td>
-            </tr>
-            <tr>
-              <td><code>eks.amazonaws.com/capacityType</code></td>
-              <td>"SPOT"</td>
-              <td>Amazon EKS</td>
-            </tr>
-            <tr>
-              <td><code>karpenter.sh/capacity-type</code></td>
-              <td>"spot"</td>
-              <td>Karpenter autoscaler</td>
-            </tr>
+            <tr><td><code>PRIVATE_NODE_BILLING=node</code> (default)</td><td>Each private node is billed whole: node-hours, whole GPUs, CPU and memory capacity.</td></tr>
+            <tr><td><code>PRIVATE_NODE_BILLING=usage</code></td><td>The pods on private nodes are billed instead, like shared usage (namespaces in <code>TENANT_EXCLUDE_NAMESPACES</code>, default <code>kube-system</code>, are skipped).</td></tr>
+            <tr><td><code>vbilling.vcluster.com/billable=false</code> node label</td><td>Exempts a node, for example hardware the tenant owns. Works for dedicated nodes too.</td></tr>
+            <tr><td><code>TENANT_ADMIN_FALLBACK=true</code></td><td>Also accepts the tenant cluster's admin kubeconfig (<code>vc-&lt;name&gt;</code>). Requires read access to Secrets; prefer the read-only export.</td></tr>
           </tbody>
         </table>
       </div>
+      <p><strong>Outages.</strong> If a tenant cluster's API cannot be read, everything else is still metered and the gap is recorded under <code>DATA_DIR</code>. As soon as the API answers, exactly the missed windows are metered and appended as late events, deduplicated by ID, up to <code>MAX_BACKFILL</code>.</p>
+      <p><strong>Scale-down.</strong> Nodes deleted between two windows (Auto Nodes scaling down, a machine removed) are billed until the second they were deleted. A deletion noticed only after a watch reconnects is dated to the last time vBilling saw the node, never later.</p>
 
-      <p>The spot/on-demand status is stored in the <code>IsSpot</code> field of each private node. This information can be used for pricing differentiation.</p>
+      <h2 id="whole-gpus">Whole GPUs, however they are carved</h2>
+      <p>Dedicated and private nodes are billed for physical GPUs. MIG slices (mixed or single strategy, GKE GPU partitions) and time-slicing replicas (NVIDIA or GKE time-sharing) are converted back: a node exposing 56 MIG slices of 1g.10gb, or 32 time-sliced devices with 4 replicas, bills 8 GPUs. GPUs offered only through DRA ResourceSlices count too.</p>
 
-      <!-- Example: GKE with T4 -->
-      <h2 id="example-gke-t4">Example: GKE Test with T4 GPU</h2>
-      <p>Here is a real-world example of setting up private node billing on GKE with NVIDIA T4 GPUs.</p>
-
-      <h3>Label the node</h3>
-      <div class="code-block"><code><span class="comment"># Identify the GPU node</span>
-<span class="cmd">kubectl</span> get nodes <span class="flag">-l</span> cloud.google.com/gke-accelerator=nvidia-tesla-t4
-
-<span class="output"># NAME                                      STATUS   AGE
-# gke-cluster-gpu-pool-abc12345-def0        Ready    2d</span>
-
-<span class="comment"># Label the node as belonging to the vCluster</span>
-<span class="cmd">kubectl</span> label node gke-cluster-gpu-pool-abc12345-def0 \
-  vcluster.loft.sh/managed-by=<span class="string">team-gpu</span></code></div>
-
-      <h3>Verify detection</h3>
-      <div class="code-block"><code><span class="comment"># Check that the node has the right labels</span>
-<span class="cmd">kubectl</span> get node gke-cluster-gpu-pool-abc12345-def0 <span class="flag">--show-labels</span>
-
-<span class="output"># Labels include:
-#   cloud.google.com/gke-accelerator=nvidia-tesla-t4
-#   vcluster.loft.sh/managed-by=team-gpu
-#   node.kubernetes.io/instance-type=n1-standard-8</span>
-
-<span class="comment"># Check vBilling logs (namespace: vcluster-team-gpu)</span>
-<span class="cmd">kubectl</span> logs <span class="flag">-n</span> vbilling-system <span class="flag">-l</span> app=vbilling <span class="flag">-f</span>
-
-<span class="output"># Expected output:
-# [metrics] vcluster-team-gpu: found 1 private node(s): totalCPU=8 cores, totalMemory=30.00 GB, totalGPUs=1
-# [metrics]   node=gke-cluster-gpu-pool-abc12345-def0 type=n1-standard-8 cpu=8 mem=30720Mi gpus=1(nvidia-tesla-t4) on-demand
-# [metrics] vcluster-team-gpu: added private node usage: CPU=+2.150 cores, Memory=+8.45 GB
-# [controller] sent 6 billing events to Lago</span></code></div>
-
-      <h3>Resulting Lago events</h3>
-      <p>With a 60-second collection interval (0.01667 hours), the following events are sent:</p>
-      <div class="code-block"><code><span class="comment"># CPU core-hours from private node (8 cores x 0.01667h)</span>
-{ "code": "vcluster_cpu_core_hours",
-  "properties": { "cpu_core_hours": 0.133333, "raw_cpu_cores": 8.0,
-                  "billing_mode": "private_node" } }
-
-<span class="comment"># Memory GB-hours from private node (30 GB x 0.01667h)</span>
-{ "code": "vcluster_memory_gb_hours",
-  "properties": { "memory_gb_hours": 0.5, "raw_memory_gb": 30.0,
-                  "billing_mode": "private_node" } }
-
-<span class="comment"># GPU hours (1 T4 x 0.01667h)</span>
-{ "code": "vcluster_gpu_hours",
-  "properties": { "gpu_hours": 0.016667, "gpu_count": 1,
-                  "gpu_type": "nvidia-tesla-t4", "billing_mode": "private_node" } }
-
-<span class="comment"># Private node hours (1 node x 0.01667h)</span>
-{ "code": "vcluster_private_node_hours",
-  "properties": { "private_node_hours": 0.016667, "node_count": 1,
-                  "billing_mode": "private_node" } }</code></div>
-
-      <!-- How to set up -->
-      <h2 id="setup">How to Set Up Private Nodes</h2>
-      <p>Follow these steps to enable private node billing for a vCluster:</p>
-
-      <h3>1. Label your nodes</h3>
-      <div class="code-block"><code><span class="comment"># Option A: Use the standard label</span>
-<span class="cmd">kubectl</span> label node &lt;node-name&gt; \
-  vcluster.loft.sh/managed-by=<span class="string">&lt;vcluster-name&gt;</span>
-
-<span class="comment"># Option B: Use the cluster label</span>
-<span class="cmd">kubectl</span> label node &lt;node-name&gt; \
-  vcluster.loft.sh/cluster=<span class="string">&lt;vcluster-name&gt;</span>
-
-<span class="comment"># For multiple nodes:</span>
-<span class="cmd">kubectl</span> label node node-1 node-2 node-3 \
-  vcluster.loft.sh/managed-by=<span class="string">team-gpu</span></code></div>
-
-      <h3>2. Ensure the label value matches</h3>
-      <div class="callout callout-warn">
-        <div class="callout-icon">!</div>
-        <div>
-          The label value must match what vBilling expects. vBilling tries several values:
-          <ul style="margin-top: 8px; margin-bottom: 0;">
-            <li>The full namespace name (e.g., <code>vcluster-team-gpu</code>)</li>
-            <li>The namespace with <code>vcluster-</code> or <code>vc-</code> prefix stripped (e.g., <code>team-gpu</code>)</li>
-            <li>The custom label pattern from <code>VCLUSTER_NODE_LABEL</code></li>
-          </ul>
-        </div>
-      </div>
-
-      <h3>3. Verify with kubectl</h3>
-      <div class="code-block"><code><span class="comment"># Check which nodes match the label</span>
-<span class="cmd">kubectl</span> get nodes <span class="flag">-l</span> vcluster.loft.sh/managed-by=team-gpu
-
-<span class="output"># NAME                     STATUS   ROLES    AGE   VERSION
-# gpu-node-001             Ready    &lt;none&gt;   5d    v1.29.2
-# gpu-node-002             Ready    &lt;none&gt;   5d    v1.29.2</span>
-
-<span class="comment"># Inspect node details</span>
-<span class="cmd">kubectl</span> describe node gpu-node-001 | <span class="cmd">grep</span> <span class="flag">-A5</span> <span class="string">"Capacity:"</span>
-
-<span class="output"># Capacity:
-#   cpu:                    96
-#   ephemeral-storage:      1844592Ki
-#   hugepages-1Gi:          0
-#   memory:                 1056718848Ki
-#   nvidia.com/gpu:         8</span></code></div>
-
-      <h3>4. Check vBilling logs</h3>
-      <div class="code-block"><code><span class="cmd">kubectl</span> logs <span class="flag">-n</span> vbilling-system <span class="flag">-l</span> app=vbilling | <span class="cmd">grep</span> <span class="string">"private node"</span>
-
-<span class="output"># [metrics] vcluster-team-gpu: found 2 private node(s): totalCPU=192 cores, totalMemory=2013.12 GB, totalGPUs=16
-# [metrics]   node=gpu-node-001 type=p4d.24xlarge cpu=96 mem=1006559Mi gpus=8(NVIDIA-A100-SXM4-80GB) on-demand
-# [metrics]   node=gpu-node-002 type=p4d.24xlarge cpu=96 mem=1006559Mi gpus=8(NVIDIA-A100-SXM4-80GB) on-demand</span></code></div>
-
-      <div class="callout callout-success">
-        <div class="callout-icon">&#10003;</div>
-        <div>Private node billing happens automatically alongside shared-namespace billing. Both shared and private metrics are sent to Lago simultaneously. The <code>billing_mode=private_node</code> property lets you distinguish them in Lago.</div>
-      </div>
-
+      <h2 id="gpu-detection">GPU model detection</h2>
+      <p>The first label present wins: <code>nvidia.com/gpu.product</code>, <code>nvidia.com/gpu.machine</code>, <code>amd.com/gpu.product-name</code>, <code>cloud.google.com/gke-accelerator</code>, <code>k8s.amazonaws.com/accelerator</code>, <code>accelerator</code>. Spaces are replaced with dashes (<code>NVIDIA H100 80GB HBM3</code> becomes <code>NVIDIA-H100-80GB-HBM3</code>). The <code>-SHARED</code> and <code>-MIG-&lt;profile&gt;</code> suffixes GPU Feature Discovery adds are removed, so the SKU is always the base GPU; DRA devices use their <code>productName</code> attribute.</p>
     </main>
   </div>
 

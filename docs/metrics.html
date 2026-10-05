@@ -253,7 +253,8 @@
         <a href="getting-started.html">Getting Started</a>
         <a href="configuration.html">Configuration</a>
         <a href="metrics.html" class="active">Metrics Reference</a>
-        <a href="private-nodes.html">Private Nodes</a>
+        <a href="private-nodes.html">Dedicated and Private Nodes</a>
+        <a href="example-gke.html">Example: GKE with GPUs</a>
         <a href="troubleshooting.html">Troubleshooting</a>
       </div>
       <div class="sidebar-section">
@@ -266,354 +267,297 @@
 
     <main class="content">
       <h1>Metrics Reference</h1>
-      <p class="subtitle">vBilling tracks 9 billable metrics across CPU, memory, storage, GPU, network, and infrastructure. Each metric is sent to Lago as a usage event with specific properties.</p>
+      <p class="subtitle">Every metric vBilling v0.2 emits, how it is measured, and the dimensions billing backends can price on.</p>
 
       <div class="callout callout-info">
         <div class="callout-icon">i</div>
-        <div>All metrics are aggregated using Lago's <code>sum_agg</code> aggregation type. Values are multiplied by the collection interval (in hours) to convert from instantaneous readings to hourly units.</div>
+        <div>vBilling meters closed windows (60s by default) aligned to the wall clock. Allocation metrics come from object lifetimes, to the second, so missed windows can be backfilled exactly after a restart. Every event also carries <code>tenant</code>, <code>region</code>, <code>project</code>, <code>resource_id</code>, <code>tenant_cluster</code>, <code>tenant_class</code> and a deterministic <code>id</code>. Schema: <a href="schema/usage-event.v1.json">usage-event.v1.json</a>.</div>
       </div>
 
-      <!-- 1. CPU Core-Hours -->
-      <h2 id="cpu-core-hours">1. CPU Core-Hours</h2>
-      <div class="metric-card">
-        <div class="metric-card-header">
-          <h3><code>vcluster_cpu_core_hours</code></h3>
-          <div class="metric-card-badges">
-            <span class="metric-badge shared">Shared Mode</span>
-            <span class="metric-badge private">Private Node Mode</span>
-          </div>
-        </div>
-        <div class="metric-card-body">
-          <dl class="metric-detail">
-            <dt>Source</dt>
-            <dd>Kubernetes Metrics Server (PodMetrics API)</dd>
-            <dt>Unit</dt>
-            <dd>Core-hours</dd>
-            <dt>Formula</dt>
-            <dd><code>current_cpu_cores x interval_hours x cost_multiplier</code></dd>
-            <dt>Lago Field</dt>
-            <dd><code>cpu_core_hours</code></dd>
-          </dl>
-          <p>Measures the actual CPU usage of all pods running in the vCluster namespace. The collector queries the metrics-server PodMetrics API, sums up the CPU usage (in millicores) across all containers, and converts to core-hours by multiplying by the collection interval in hours.</p>
-          <p>In <strong>shared mode</strong>, only namespace pods are counted. In <strong>private node mode</strong>, the full CPU capacity of dedicated nodes is also added to the total.</p>
-          <p>The <code>cost_multiplier</code> adjusts for spot vs. on-demand pricing. If 50% of pods run on spot nodes with a 60% discount, the multiplier is 0.70.</p>
-
-          <h4>Lago event properties</h4>
-          <table class="props-table">
-            <thead><tr><th>Property</th><th>Type</th><th>Description</th></tr></thead>
-            <tbody>
-              <tr><td><code>cpu_core_hours</code></td><td>float</td><td>Billable core-hours (with cost multiplier applied)</td></tr>
-              <tr><td><code>raw_cpu_cores</code></td><td>float</td><td>Instantaneous CPU usage in cores</td></tr>
-              <tr><td><code>cost_multiplier</code></td><td>float</td><td>Spot/on-demand cost adjustment factor</td></tr>
-              <tr><td><code>vcluster_name</code></td><td>string</td><td>Name of the vCluster</td></tr>
-              <tr><td><code>vcluster_namespace</code></td><td>string</td><td>Namespace of the vCluster</td></tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      <!-- 2. Memory GB-Hours -->
-      <h2 id="memory-gb-hours">2. Memory GB-Hours</h2>
-      <div class="metric-card">
-        <div class="metric-card-header">
-          <h3><code>vcluster_memory_gb_hours</code></h3>
-          <div class="metric-card-badges">
-            <span class="metric-badge shared">Shared Mode</span>
-            <span class="metric-badge private">Private Node Mode</span>
-          </div>
-        </div>
-        <div class="metric-card-body">
-          <dl class="metric-detail">
-            <dt>Source</dt>
-            <dd>Kubernetes Metrics Server (PodMetrics API)</dd>
-            <dt>Unit</dt>
-            <dd>GB-hours</dd>
-            <dt>Formula</dt>
-            <dd><code>current_memory_gb x interval_hours x cost_multiplier</code></dd>
-            <dt>Lago Field</dt>
-            <dd><code>memory_gb_hours</code></dd>
-          </dl>
-          <p>Measures actual memory consumption of all pods in the vCluster namespace. Memory is read from the metrics-server in bytes, converted to GB (bytes / 1024^3), then multiplied by the interval to produce GB-hours.</p>
-          <p>In <strong>private node mode</strong>, the total memory capacity of dedicated nodes is added on top of shared-namespace pod usage.</p>
-
-          <h4>Lago event properties</h4>
-          <table class="props-table">
-            <thead><tr><th>Property</th><th>Type</th><th>Description</th></tr></thead>
-            <tbody>
-              <tr><td><code>memory_gb_hours</code></td><td>float</td><td>Billable GB-hours (with cost multiplier)</td></tr>
-              <tr><td><code>raw_memory_gb</code></td><td>float</td><td>Instantaneous memory usage in GB</td></tr>
-              <tr><td><code>vcluster_name</code></td><td>string</td><td>Name of the vCluster</td></tr>
-              <tr><td><code>vcluster_namespace</code></td><td>string</td><td>Namespace of the vCluster</td></tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      <!-- 3. Storage GB-Hours -->
-      <h2 id="storage-gb-hours">3. Storage GB-Hours</h2>
-      <div class="metric-card">
-        <div class="metric-card-header">
-          <h3><code>vcluster_storage_gb_hours</code></h3>
-          <div class="metric-card-badges">
-            <span class="metric-badge shared">Shared Mode</span>
-          </div>
-        </div>
-        <div class="metric-card-body">
-          <dl class="metric-detail">
-            <dt>Source</dt>
-            <dd>PersistentVolumeClaims (PVC <code>spec.resources.requests</code>)</dd>
-            <dt>Unit</dt>
-            <dd>GB-hours</dd>
-            <dt>Formula</dt>
-            <dd><code>total_pvc_storage_gb x interval_hours</code></dd>
-            <dt>Lago Field</dt>
-            <dd><code>storage_gb_hours</code></dd>
-          </dl>
-          <p>Sums the requested storage size of all bound PVCs in the vCluster namespace. Only PVCs with <code>status.phase == Bound</code> are counted. Storage billing is not affected by spot/on-demand node cost multipliers.</p>
-
-          <h4>Lago event properties</h4>
-          <table class="props-table">
-            <thead><tr><th>Property</th><th>Type</th><th>Description</th></tr></thead>
-            <tbody>
-              <tr><td><code>storage_gb_hours</code></td><td>float</td><td>Billable storage GB-hours</td></tr>
-              <tr><td><code>raw_storage_gb</code></td><td>float</td><td>Total PVC storage in GB at time of collection</td></tr>
-              <tr><td><code>vcluster_name</code></td><td>string</td><td>Name of the vCluster</td></tr>
-              <tr><td><code>vcluster_namespace</code></td><td>string</td><td>Namespace of the vCluster</td></tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      <!-- 4. GPU Hours -->
-      <h2 id="gpu-hours">4. GPU Hours</h2>
+      <h2 id="gpu-hours">1. GPU Hours</h2>
       <div class="metric-card">
         <div class="metric-card-header">
           <h3><code>vcluster_gpu_hours</code></h3>
           <div class="metric-card-badges">
-            <span class="metric-badge shared">Shared Mode</span>
-            <span class="metric-badge private">Private Node Mode</span>
+            <span class="metric-badge shared">Shared nodes</span> <span class="metric-badge private">Dedicated nodes</span>
           </div>
         </div>
         <div class="metric-card-body">
           <dl class="metric-detail">
             <dt>Source</dt>
-            <dd>Pod <code>nvidia.com/gpu</code> resource requests + node labels for GPU type</dd>
+            <dd>Pod <code>nvidia.com/gpu</code>, <code>amd.com/gpu</code>, <code>nvidia.com/mig-*</code> and <code>nvidia.com/gpu.shared</code> requests, and GPUs allocated through DRA ResourceClaims; node labels (or DRA <code>productName</code>) for the GPU model</dd>
             <dt>Unit</dt>
-            <dd>GPU-hours</dd>
-            <dt>Formula</dt>
-            <dd><code>gpu_count x interval_hours</code> (per GPU type)</dd>
-            <dt>Lago Field</dt>
-            <dd><code>gpu_hours</code></dd>
+            <dd>gpu-hours</dd>
+            <dt>Quantity</dt>
+            <dd>devices &times; GPU fraction &times; seconds running in the window / 3600</dd>
           </dl>
-          <p>Counts the number of <code>nvidia.com/gpu</code> resources requested by running pods, grouped by GPU type. The GPU type is detected from node labels on the node where the pod is scheduled. One event is sent per distinct GPU type.</p>
-
-          <h4>GPU type detection (label priority order)</h4>
-          <ol>
-            <li><code>nvidia.com/gpu.product</code> -- NVIDIA GPU Operator (e.g., "NVIDIA-A100-SXM4-80GB")</li>
-            <li><code>nvidia.com/gpu.machine</code> -- alternative NVIDIA label</li>
-            <li><code>accelerator</code> -- GKE generic accelerator label</li>
-            <li><code>cloud.google.com/gke-accelerator</code> -- GKE-specific (e.g., "nvidia-tesla-t4")</li>
-            <li><code>k8s.amazonaws.com/accelerator</code> -- EKS (e.g., "nvidia-tesla-a100")</li>
-            <li><code>node.kubernetes.io/instance-type</code> -- fallback: cloud instance type</li>
-          </ol>
-          <p>In <strong>private node mode</strong>, GPU counts are read from the node's <code>status.capacity["nvidia.com/gpu"]</code> field, and GPU types are detected using the same label priority.</p>
-
-          <h4>Lago event properties</h4>
+          <p>Billing starts at the first container start (image pulls and scheduling are free) and stops when the last container finishes. Pods that started or finished mid-window are billed for exactly the seconds they ran.</p>
+          <p><strong>Fractional GPUs:</strong> a MIG slice counts as slices/7 of a GPU (A30: /4), e.g. <code>mig-1g.10gb</code> = 1/7. This works for the MIG mixed strategy (<code>nvidia.com/mig-*</code> resources), the single strategy (slices exposed as <code>nvidia.com/gpu</code>, product label ending in <code>-MIG-&lt;profile&gt;</code>) and GKE GPU partitions (<code>cloud.google.com/gke-gpu-partition-size</code>). On time-sliced nodes (<code>nvidia.com/gpu.replicas</code> &gt; 1, or GKE <code>cloud.google.com/gke-max-shared-clients-per-gpu</code> with time-sharing or MPS) a device counts as 1/replicas. A DRA claim counts the devices allocated to it (a MIG device at its profile's fraction), split across the pods it is reserved for. The SKU becomes <code>&lt;model&gt;-mig-&lt;profile&gt;</code> or <code>&lt;model&gt;-timeslice-&lt;n&gt;</code>, always against the base GPU model (the <code>-SHARED</code> and <code>-MIG-</code> label suffixes are dropped).</p>
+          <p><strong>Dedicated and private nodes:</strong> the node's GPU capacity is billed in whole GPUs with <code>billing_mode=dedicated_node</code> (control plane cluster nodes reserved for the tenant) or <code>billing_mode=private_node</code> (vCluster Private Nodes, Auto Nodes and Standalone, metered through the tenant cluster's own API): MIG slices and time-slicing replicas are converted back, so 8 GPUs shared 4 ways bill as 8, not 32. Pods on those nodes are not billed again. See <a href="private-nodes.html">Dedicated and Private Nodes</a>.</p>
+          <p><strong>Fair metering:</strong> GPU time on a node that is NotReady or carries an <code>UNHEALTHY_NODE_TAINTS</code> taint is emitted as <code>vcluster_gpu_downtime_hours</code> instead. So is a dedicated or private node's GPU time while its GPUs are installed (GPU Feature Discovery's <code>nvidia.com/gpu.count</code>) but not allocatable, for example while the driver rebuilds after a reboot or a MIG change.</p>
+          <h4>Dimensions</h4>
           <table class="props-table">
-            <thead><tr><th>Property</th><th>Type</th><th>Description</th></tr></thead>
+            <thead><tr><th>Key</th><th>Meaning</th></tr></thead>
             <tbody>
-              <tr><td><code>gpu_hours</code></td><td>float</td><td>Billable GPU-hours for this GPU type</td></tr>
-              <tr><td><code>gpu_count</code></td><td>int</td><td>Number of GPUs of this type</td></tr>
-              <tr><td><code>gpu_type</code></td><td>string</td><td>GPU model name (normalized)</td></tr>
-              <tr><td><code>billing_mode</code></td><td>string</td><td>"private_node" when from dedicated nodes, absent in shared mode</td></tr>
-              <tr><td><code>vcluster_name</code></td><td>string</td><td>Name of the vCluster</td></tr>
-              <tr><td><code>vcluster_namespace</code></td><td>string</td><td>Namespace of the vCluster</td></tr>
+              <tr><td><code>sku</code></td><td>GPU model (or the node's SKU label), plus the fractional profile</td></tr>
+              <tr><td><code>gpu_type</code></td><td>Normalized GPU model</td></tr>
+              <tr><td><code>gpu_profile</code></td><td>full, mig-&lt;profile&gt;, timeslice-&lt;n&gt;</td></tr>
+              <tr><td><code>capacity_type</code></td><td>on-demand, spot, preemptible, reserved</td></tr>
+              <tr><td><code>billing_mode</code></td><td>shared, dedicated_node or private_node</td></tr>
+              <tr><td><code>zone</code></td><td>Node zone</td></tr>
             </tbody>
           </table>
         </div>
       </div>
 
-      <!-- 5. GPU Utilization -->
-      <h2 id="gpu-utilization">5. GPU Utilization</h2>
+      <h2 id="cpu-core-hours">2. CPU Core-Hours</h2>
       <div class="metric-card">
         <div class="metric-card-header">
-          <h3><code>vcluster_gpu_utilization</code></h3>
+          <h3><code>vcluster_cpu_core_hours</code></h3>
           <div class="metric-card-badges">
-            <span class="metric-badge shared">Shared Mode</span>
-            <span class="metric-badge optional">Requires Prometheus</span>
+            <span class="metric-badge shared">Shared nodes</span> <span class="metric-badge private">Dedicated nodes</span>
           </div>
         </div>
         <div class="metric-card-body">
           <dl class="metric-detail">
             <dt>Source</dt>
-            <dd>DCGM Exporter via Prometheus (<code>DCGM_FI_DEV_GPU_UTIL</code>)</dd>
+            <dd><code>CPU_MEMORY_BASIS</code>: metrics-server usage, container requests, or the larger of both; node capacity for dedicated nodes</dd>
             <dt>Unit</dt>
-            <dd>Percentage-hours (utilization score)</dd>
-            <dt>Formula</dt>
-            <dd><code>avg_utilization_percent x interval_hours</code></dd>
-            <dt>Lago Field</dt>
-            <dd><code>gpu_util_score</code></dd>
+            <dd>core-hours</dd>
+            <dt>Quantity</dt>
+            <dd>cores &times; seconds in the window / 3600</dd>
           </dl>
-          <p>Queries DCGM GPU utilization from Prometheus for all GPUs in the vCluster namespace. The average utilization percentage is multiplied by the interval to produce a utilization score. Requires <code>PROMETHEUS_URL</code> to be configured and the DCGM Exporter running in the cluster.</p>
-          <p>Also queries <code>DCGM_FI_DEV_FB_USED</code> and <code>DCGM_FI_DEV_FB_FREE</code> for GPU memory usage tracking. This metric is primarily informational and can be used for billing adjustments or overuse surcharges.</p>
-
-          <h4>Lago event properties</h4>
+          <p><code>usage</code> samples metrics-server for the live window only and is never extrapolated into backfilled windows. <code>requests</code> is computed from pod lifetimes, so it is backfilled exactly. <code>max</code> bills the larger of usage and requests per pod.</p>
+          <p>The tenant cluster's own control plane pods (<code>app=vcluster</code>) are covered by instance hours and excluded unless <code>METER_CONTROL_PLANE=true</code>.</p>
+          <h4>Dimensions</h4>
           <table class="props-table">
-            <thead><tr><th>Property</th><th>Type</th><th>Description</th></tr></thead>
+            <thead><tr><th>Key</th><th>Meaning</th></tr></thead>
             <tbody>
-              <tr><td><code>gpu_util_score</code></td><td>float</td><td>Utilization score (avg% x hours)</td></tr>
-              <tr><td><code>avg_utilization_pct</code></td><td>float</td><td>Average GPU utilization percentage (0-100)</td></tr>
-              <tr><td><code>gpu_count</code></td><td>int</td><td>Number of GPUs with utilization data</td></tr>
-              <tr><td><code>vcluster_name</code></td><td>string</td><td>Name of the vCluster</td></tr>
-              <tr><td><code>vcluster_namespace</code></td><td>string</td><td>Namespace of the vCluster</td></tr>
+              <tr><td><code>capacity_type</code></td><td>Capacity type of the node</td></tr>
+              <tr><td><code>billing_mode</code></td><td>shared, dedicated_node or private_node</td></tr>
+              <tr><td><code>namespace</code></td><td>Namespace inside the tenant cluster (with METER_BY_NAMESPACE)</td></tr>
             </tbody>
           </table>
         </div>
       </div>
 
-      <!-- 6. Network Egress -->
-      <h2 id="network-egress">6. Network Egress</h2>
+      <h2 id="memory-gb-hours">3. Memory GiB-Hours</h2>
       <div class="metric-card">
         <div class="metric-card-header">
-          <h3><code>vcluster_network_egress_gb</code></h3>
+          <h3><code>vcluster_memory_gb_hours</code></h3>
           <div class="metric-card-badges">
-            <span class="metric-badge shared">Shared Mode</span>
-            <span class="metric-badge optional">Requires Prometheus</span>
+            <span class="metric-badge shared">Shared nodes</span> <span class="metric-badge private">Dedicated nodes</span>
           </div>
         </div>
         <div class="metric-card-body">
           <dl class="metric-detail">
             <dt>Source</dt>
-            <dd>Prometheus <code>container_network_transmit_bytes_total</code></dd>
+            <dd>As CPU: usage, requests or max; node capacity for dedicated nodes</dd>
             <dt>Unit</dt>
-            <dd>GB</dd>
-            <dt>Formula</dt>
-            <dd><code>sum(rate(container_network_transmit_bytes_total{namespace}[5m])) x 300</code> / 1024^3</dd>
-            <dt>Lago Field</dt>
-            <dd><code>egress_gb</code></dd>
+            <dd>gib-hours</dd>
+            <dt>Quantity</dt>
+            <dd>GiB &times; seconds / 3600</dd>
           </dl>
-          <p>Measures outbound (transmit) network traffic for all containers in the vCluster namespace. Uses a 5-minute rate window from Prometheus to estimate bytes per second, then multiplies by 300 seconds. Requires <code>PROMETHEUS_URL</code> to be set.</p>
-          <p>Ingress traffic (<code>container_network_receive_bytes_total</code>) is also collected and tracked internally but not billed by default.</p>
-
-          <h4>Lago event properties</h4>
+          <p>1 GiB = 1024<sup>3</sup> bytes.</p>
+          <h4>Dimensions</h4>
           <table class="props-table">
-            <thead><tr><th>Property</th><th>Type</th><th>Description</th></tr></thead>
+            <thead><tr><th>Key</th><th>Meaning</th></tr></thead>
             <tbody>
-              <tr><td><code>egress_gb</code></td><td>float</td><td>Egress traffic in GB</td></tr>
-              <tr><td><code>vcluster_name</code></td><td>string</td><td>Name of the vCluster</td></tr>
-              <tr><td><code>vcluster_namespace</code></td><td>string</td><td>Namespace of the vCluster</td></tr>
+              <tr><td><code>capacity_type</code></td><td>Capacity type of the node</td></tr>
+              <tr><td><code>billing_mode</code></td><td>shared, dedicated_node or private_node</td></tr>
             </tbody>
           </table>
         </div>
       </div>
 
-      <!-- 7. LoadBalancer Hours -->
+      <h2 id="private-node-hours">4. Dedicated Node Hours</h2>
+      <div class="metric-card">
+        <div class="metric-card-header">
+          <h3><code>vcluster_private_node_hours</code></h3>
+          <div class="metric-card-badges">
+            <span class="metric-badge private">Dedicated nodes</span>
+          </div>
+        </div>
+        <div class="metric-card-body">
+          <dl class="metric-detail">
+            <dt>Source</dt>
+            <dd>Nodes dedicated to the tenant cluster (see Dedicated nodes)</dd>
+            <dt>Unit</dt>
+            <dd>node-hours</dd>
+            <dt>Quantity</dt>
+            <dd>seconds the node existed and was healthy in the window / 3600, one event per node</dd>
+          </dl>
+          <p>Downtime on an unhealthy node is not billed.</p>
+          <h4>Dimensions</h4>
+          <table class="props-table">
+            <thead><tr><th>Key</th><th>Meaning</th></tr></thead>
+            <tbody>
+              <tr><td><code>sku</code></td><td>SKU label, instance type, or &lt;n&gt;x&lt;GPU model&gt;</td></tr>
+              <tr><td><code>capacity_type</code></td><td>Capacity type of the node</td></tr>
+              <tr><td><code>node</code></td><td>Node name (also resource_id)</td></tr>
+              <tr><td><code>instance_type</code></td><td>node.kubernetes.io/instance-type</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <h2 id="storage-gb-hours">5. Storage GiB-Hours</h2>
+      <div class="metric-card">
+        <div class="metric-card-header">
+          <h3><code>vcluster_storage_gb_hours</code></h3>
+          <div class="metric-card-badges">
+            <span class="metric-badge shared">Shared nodes</span>
+          </div>
+        </div>
+        <div class="metric-card-body">
+          <dl class="metric-detail">
+            <dt>Source</dt>
+            <dd>Bound PVCs synced from the tenant cluster (provisioned capacity, else the request)</dd>
+            <dt>Unit</dt>
+            <dd>gib-hours</dd>
+            <dt>Quantity</dt>
+            <dd>GiB &times; seconds bound in the window / 3600</dd>
+          </dl>
+          <p>The tenant cluster's own data volume is excluded unless <code>METER_CONTROL_PLANE=true</code>.</p>
+          <h4>Dimensions</h4>
+          <table class="props-table">
+            <thead><tr><th>Key</th><th>Meaning</th></tr></thead>
+            <tbody>
+              <tr><td><code>sku</code></td><td>Storage class</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <h2 id="instance-hours">6. Tenant Cluster Hours</h2>
+      <div class="metric-card">
+        <div class="metric-card-header">
+          <h3><code>vcluster_instance_hours</code></h3>
+          <div class="metric-card-badges">
+            <span class="metric-badge shared">Shared nodes</span> <span class="metric-badge private">Dedicated nodes</span>
+          </div>
+        </div>
+        <div class="metric-card-body">
+          <dl class="metric-detail">
+            <dt>Source</dt>
+            <dd>Tenant cluster control plane readiness</dd>
+            <dt>Unit</dt>
+            <dd>hours</dd>
+            <dt>Quantity</dt>
+            <dd>seconds ready in the window / 3600</dd>
+          </dl>
+          <p>No charge while a tenant cluster is provisioning or asleep (no ready replica).</p>
+          <h4>Dimensions</h4>
+          <table class="props-table">
+            <thead><tr><th>Key</th><th>Meaning</th></tr></thead>
+            <tbody>
+              <tr><td><code>tenant_class</code></td><td>Tenant class</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
       <h2 id="lb-hours">7. LoadBalancer Hours</h2>
       <div class="metric-card">
         <div class="metric-card-header">
           <h3><code>vcluster_lb_hours</code></h3>
           <div class="metric-card-badges">
-            <span class="metric-badge shared">Shared Mode</span>
+            <span class="metric-badge shared">Shared nodes</span>
           </div>
         </div>
         <div class="metric-card-body">
           <dl class="metric-detail">
             <dt>Source</dt>
-            <dd>Kubernetes Services with <code>spec.type == LoadBalancer</code></dd>
+            <dd>Services of type LoadBalancer with an assigned address</dd>
             <dt>Unit</dt>
-            <dd>Hours</dd>
-            <dt>Formula</dt>
-            <dd><code>loadbalancer_count x interval_hours</code></dd>
-            <dt>Lago Field</dt>
-            <dd><code>lb_hours</code></dd>
+            <dd>hours</dd>
+            <dt>Quantity</dt>
+            <dd>load balancers &times; seconds / 3600</dd>
           </dl>
-          <p>Counts the number of Services of type <code>LoadBalancer</code> in the vCluster namespace. Each LoadBalancer service incurs an hourly charge. This covers the cost of cloud load balancer resources (e.g., AWS NLB/ALB, GCP LB) provisioned by the vCluster.</p>
-
-          <h4>Lago event properties</h4>
-          <table class="props-table">
-            <thead><tr><th>Property</th><th>Type</th><th>Description</th></tr></thead>
-            <tbody>
-              <tr><td><code>lb_hours</code></td><td>float</td><td>Total LoadBalancer service-hours</td></tr>
-              <tr><td><code>lb_count</code></td><td>int</td><td>Number of LoadBalancer services</td></tr>
-              <tr><td><code>vcluster_name</code></td><td>string</td><td>Name of the vCluster</td></tr>
-              <tr><td><code>vcluster_namespace</code></td><td>string</td><td>Namespace of the vCluster</td></tr>
-            </tbody>
-          </table>
+          <p>A load balancer that is still pending (no IP) is not billed.</p>
         </div>
       </div>
 
-      <!-- 8. Instance Hours -->
-      <h2 id="instance-hours">8. Instance Hours</h2>
+      <h2 id="network-egress">8. Network Egress GiB</h2>
       <div class="metric-card">
         <div class="metric-card-header">
-          <h3><code>vcluster_instance_hours</code></h3>
+          <h3><code>vcluster_network_egress_gb</code></h3>
           <div class="metric-card-badges">
-            <span class="metric-badge shared">Shared Mode</span>
-            <span class="metric-badge private">Private Node Mode</span>
+            <span class="metric-badge optional">Prometheus / informational</span>
           </div>
         </div>
         <div class="metric-card-body">
           <dl class="metric-detail">
             <dt>Source</dt>
-            <dd>Per-vCluster (always sent for every tracked vCluster)</dd>
+            <dd>Prometheus: <code>increase(container_network_transmit_bytes_total{namespace})</code> over the window, evaluated at the window end, or your <code>EGRESS_QUERY</code></dd>
             <dt>Unit</dt>
-            <dd>Hours</dd>
-            <dt>Formula</dt>
-            <dd><code>interval_hours</code> (flat 1x per vCluster)</dd>
-            <dt>Lago Field</dt>
-            <dd><code>instance_hours</code></dd>
+            <dd>gib</dd>
+            <dt>Quantity</dt>
+            <dd>bytes / 1024<sup>3</sup></dd>
           </dl>
-          <p>A flat hourly charge for running a vCluster instance. This event is always sent for every tracked vCluster, regardless of resource usage. It represents the base cost of operating a vCluster -- the platform overhead, control plane resources, and management infrastructure.</p>
-
-          <h4>Lago event properties</h4>
-          <table class="props-table">
-            <thead><tr><th>Property</th><th>Type</th><th>Description</th></tr></thead>
-            <tbody>
-              <tr><td><code>instance_hours</code></td><td>float</td><td>Hours the vCluster was running</td></tr>
-              <tr><td><code>vcluster_name</code></td><td>string</td><td>Name of the vCluster</td></tr>
-              <tr><td><code>vcluster_namespace</code></td><td>string</td><td>Namespace of the vCluster</td></tr>
-            </tbody>
-          </table>
+          <p>The default counts all transmitted bytes. To bill only internet egress, point <code>EGRESS_QUERY</code> at flow metrics from your CNI or fabric.</p>
         </div>
       </div>
 
-      <!-- 9. Private Node Hours -->
-      <h2 id="private-node-hours">9. Private Node Hours</h2>
+      <h2 id="gpu-utilization">9. GPU Utilization (informational)</h2>
       <div class="metric-card">
         <div class="metric-card-header">
-          <h3><code>vcluster_private_node_hours</code></h3>
+          <h3><code>vcluster_gpu_utilization</code></h3>
           <div class="metric-card-badges">
-            <span class="metric-badge private">Private Node Mode Only</span>
+            <span class="metric-badge optional">Prometheus / informational</span>
           </div>
         </div>
         <div class="metric-card-body">
           <dl class="metric-detail">
             <dt>Source</dt>
-            <dd>Node labels: <code>vcluster.loft.sh/managed-by</code>, <code>vcluster.loft.sh/cluster</code></dd>
+            <dd>DCGM exporter via Prometheus (<code>DCGM_FI_DEV_GPU_UTIL</code>; for GPUs in MIG mode, which DCGM reports per instance, <code>DCGM_FI_PROF_GR_ENGINE_ACTIVE</code>), matched on the workload's <code>namespace</code> or, where Prometheus renames it (kube-prometheus-stack), <code>exported_namespace</code>. <code>GPU_UTIL_QUERY</code> replaces the query for other exporters; <code>none</code> turns it off.</dd>
             <dt>Unit</dt>
-            <dd>Node-hours</dd>
-            <dt>Formula</dt>
-            <dd><code>private_node_count x interval_hours</code></dd>
-            <dt>Lago Field</dt>
-            <dd><code>private_node_hours</code></dd>
+            <dd>util-hours</dd>
+            <dt>Quantity</dt>
+            <dd>average utilization % &times; hours, per GPU model</dd>
           </dl>
-          <p>Counts the number of dedicated/private nodes allocated to a vCluster tenant. Only sent when private nodes are detected via node labels. This represents the cost of reserving entire physical or virtual machines for a single tenant.</p>
-          <p>For full details on how private nodes are detected and billed, see the <a href="private-nodes.html">Private Nodes</a> guide.</p>
-
-          <h4>Lago event properties</h4>
+          <p>Informational: delivered to the ledger, webhooks and exports, never to Stripe or Metronome (Lago keeps it for v0.1 plans).</p>
+          <h4>Dimensions</h4>
           <table class="props-table">
-            <thead><tr><th>Property</th><th>Type</th><th>Description</th></tr></thead>
+            <thead><tr><th>Key</th><th>Meaning</th></tr></thead>
             <tbody>
-              <tr><td><code>private_node_hours</code></td><td>float</td><td>Total node-hours (count x interval)</td></tr>
-              <tr><td><code>node_count</code></td><td>int</td><td>Number of dedicated nodes</td></tr>
-              <tr><td><code>billing_mode</code></td><td>string</td><td>Always "private_node"</td></tr>
-              <tr><td><code>vcluster_name</code></td><td>string</td><td>Name of the vCluster</td></tr>
-              <tr><td><code>vcluster_namespace</code></td><td>string</td><td>Namespace of the vCluster</td></tr>
+              <tr><td><code>gpu_type</code></td><td>GPU model</td></tr>
             </tbody>
           </table>
         </div>
       </div>
 
+      <h2 id="gpu-downtime">10. GPU Downtime Hours (informational)</h2>
+      <div class="metric-card">
+        <div class="metric-card-header">
+          <h3><code>vcluster_gpu_downtime_hours</code></h3>
+          <div class="metric-card-badges">
+            <span class="metric-badge optional">Prometheus / informational</span>
+          </div>
+        </div>
+        <div class="metric-card-body">
+          <dl class="metric-detail">
+            <dt>Source</dt>
+            <dd>Allocated GPU time on NotReady or unhealthy nodes</dd>
+            <dt>Unit</dt>
+            <dd>gpu-hours</dd>
+            <dt>Quantity</dt>
+            <dd>as GPU hours</dd>
+          </dl>
+          <p>An auditable record of the time tenants were not charged for, never sent to billing backends.</p>
+          <h4>Dimensions</h4>
+          <table class="props-table">
+            <thead><tr><th>Key</th><th>Meaning</th></tr></thead>
+            <tbody>
+              <tr><td><code>gpu_type</code></td><td>GPU model</td></tr>
+              <tr><td><code>node</code></td><td>Node</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <h2 id="custom-metrics">Custom metrics</h2>
+      <p>Declare operator metrics with <code>CUSTOM_METRICS="code:unit[:key|key],..."</code> (for example <code>inference_output_tokens:tokens:model|region</code>) and push closed windows to <code>POST /api/v1/events</code>. Billing backends create meters and billable metrics for them at startup.</p>
     </main>
   </div>
 

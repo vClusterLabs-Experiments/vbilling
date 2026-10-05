@@ -1,0 +1,7 @@
+# vcluster.yaml for a tenant cluster on shared nodes: its pods sync to the
+# control plane cluster and run on its (time-sliced) GPU nodes, where vBilling
+# meters them. No extra configuration is needed for vBilling.
+controlPlane:
+  statefulSet:
+    resources:
+      requests: {cpu: 200m, memory: 256Mi}

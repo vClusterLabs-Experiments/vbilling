@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Example: GKE with GPUs - vBilling Docs</title>
+  <meta name="description" content="A complete example: GKE as the control plane cluster, a shared-nodes tenant cluster on a time-sliced L4, a private-nodes tenant cluster with an A100, DCGM through Prometheus, and vBilling billing both in Stripe test mode.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Roboto+Mono:wght@500&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+      --primary: #FF6600; --primary-dark: #CC5100; --primary-darker: #993D00;
+      --primary-light: #FFF5EB; --primary-light-2: #FFE0CC; --accent: #FF8433;
+      --text-dark: #050B24; --text-gray: #505466; --text-light: #828592;
+      --white: #ffffff; --bg-code: #050B24; --border: #E6E7E9;
+      --shadow-sm: 0 1px 2px rgba(0,0,0,0.05);
+      --shadow-md: 0 4px 6px -1px rgba(0,0,0,0.07), 0 2px 4px -2px rgba(0,0,0,0.05);
+      --shadow-lg: 0 10px 15px -3px rgba(0,0,0,0.08), 0 4px 6px -4px rgba(0,0,0,0.04);
+      --radius: 12px; --radius-lg: 16px; --sidebar-width: 260px;
+    }
+
+    html { scroll-behavior: smooth; scroll-padding-top: 80px; }
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      color: var(--text-dark); line-height: 1.6; background: var(--white);
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .header {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 1000;
+      background: rgba(255,255,255,0.92); backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px); border-bottom: 1px solid var(--border);
+    }
+    .header.scrolled { box-shadow: var(--shadow-md); }
+    .header-inner {
+      max-width: 1400px; margin: 0 auto; padding: 0 24px;
+      display: flex; align-items: center; justify-content: space-between; height: 64px;
+    }
+    .header-logo {
+      display: flex; align-items: center; gap: 10px;
+      text-decoration: none; color: var(--text-dark);
+    }
+    .header-logo-icon {
+      width: 32px; height: 32px; border-radius: 8px;
+      background: linear-gradient(135deg, var(--primary-dark), var(--primary));
+      display: flex; align-items: center; justify-content: center;
+      color: var(--white); font-weight: 700; font-size: 0.9rem;
+    }
+    .header-logo-text { font-size: 1.15rem; font-weight: 700; letter-spacing: -0.5px; }
+    .header-logo-text span { color: var(--primary-dark); }
+    .header-nav { display: flex; align-items: center; gap: 20px; }
+    .header-nav a {
+      text-decoration: none; color: var(--text-gray); font-size: 0.88rem;
+      font-weight: 500; transition: color 0.2s;
+    }
+    .header-nav a:hover { color: var(--primary-dark); }
+    .header-nav .gh-link {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: var(--bg-code); color: var(--white); padding: 6px 14px;
+      border-radius: 8px; font-size: 0.82rem; font-weight: 600; transition: opacity 0.2s;
+    }
+    .header-nav .gh-link:hover { opacity: 0.85; color: var(--white); }
+
+    .docs-layout { display: flex; margin-top: 64px; min-height: calc(100vh - 64px); }
+
+    .sidebar {
+      width: var(--sidebar-width); flex-shrink: 0;
+      border-right: 1px solid var(--border); background: var(--primary-light);
+      padding: 32px 0; position: fixed; top: 64px; bottom: 0; overflow-y: auto;
+    }
+    .sidebar-section { margin-bottom: 28px; }
+    .sidebar-label {
+      padding: 0 24px; font-size: 0.72rem; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 1px; color: var(--primary-darker);
+      margin-bottom: 8px;
+    }
+    .sidebar a {
+      display: block; padding: 7px 24px; text-decoration: none;
+      font-size: 0.88rem; color: var(--text-gray); font-weight: 500;
+      transition: all 0.15s; border-left: 3px solid transparent;
+    }
+    .sidebar a:hover { color: var(--primary-dark); background: var(--primary-light-2); }
+    .sidebar a.active {
+      color: var(--primary-dark); background: var(--primary-light-2);
+      border-left-color: var(--primary); font-weight: 600;
+    }
+    .sidebar-back {
+      display: flex; align-items: center; gap: 6px; margin: 0 24px 24px;
+      padding: 8px 12px; border-radius: 8px; text-decoration: none;
+      font-size: 0.85rem; color: var(--text-light); font-weight: 500;
+      border: 1px solid var(--border); transition: all 0.2s;
+    }
+    .sidebar-back:hover { border-color: var(--primary); color: var(--primary-dark); }
+
+    .content {
+      flex: 1; margin-left: var(--sidebar-width);
+      padding: 48px 64px 80px; max-width: 900px;
+    }
+    .content h1 {
+      font-size: 2.2rem; font-weight: 800; letter-spacing: -1px;
+      margin-bottom: 12px; color: var(--text-dark);
+    }
+    .content .subtitle {
+      font-size: 1.1rem; color: var(--text-gray); line-height: 1.7;
+      margin-bottom: 40px; max-width: 640px;
+    }
+    .content h2 {
+      font-size: 1.5rem; font-weight: 700; letter-spacing: -0.5px;
+      margin: 48px 0 16px; color: var(--text-dark);
+      padding-bottom: 8px; border-bottom: 2px solid var(--primary-light-2);
+    }
+    .content h3 {
+      font-size: 1.15rem; font-weight: 700; margin: 32px 0 12px; color: var(--text-dark);
+    }
+    .content h4 {
+      font-size: 0.95rem; font-weight: 700; margin: 20px 0 8px; color: var(--text-dark);
+    }
+    .content p {
+      font-size: 0.95rem; color: var(--text-gray); line-height: 1.7; margin-bottom: 16px;
+    }
+    .content ul, .content ol {
+      margin: 0 0 16px 24px; color: var(--text-gray); font-size: 0.95rem;
+    }
+    .content li { margin-bottom: 6px; line-height: 1.6; }
+    .content code {
+      background: var(--primary-light-2); padding: 2px 7px; border-radius: 4px;
+      font-family: 'Roboto Mono', 'SF Mono', 'Fira Code', monospace;
+      font-size: 0.85rem; color: var(--primary-darker);
+    }
+    .content a { color: var(--primary-dark); text-decoration: none; font-weight: 500; }
+    .content a:hover { text-decoration: underline; }
+
+    .code-block {
+      background: var(--bg-code); border-radius: var(--radius);
+      padding: 20px 24px; overflow-x: auto; margin-bottom: 20px; position: relative;
+    }
+    .code-block code {
+      color: #e2e8f0; background: none; padding: 0;
+      font-family: 'Roboto Mono', 'SF Mono', 'Fira Code', monospace;
+      font-size: 0.84rem; line-height: 1.7; white-space: pre;
+    }
+    .code-block .comment { color: #64748b; }
+    .code-block .cmd { color: #FF8433; }
+    .code-block .flag { color: #a5b4fc; }
+    .code-block .string { color: #86efac; }
+    .code-block .output { color: #94a3b8; }
+
+    .callout {
+      padding: 16px 20px; border-radius: var(--radius); margin-bottom: 20px;
+      font-size: 0.9rem; line-height: 1.6; display: flex; gap: 12px;
+    }
+    .callout-icon { flex-shrink: 0; font-size: 1.1rem; margin-top: 1px; }
+    .callout-info { background: #eff6ff; border: 1px solid #bfdbfe; color: #1e40af; }
+    .callout-warn { background: var(--primary-light); border: 1px solid var(--primary-light-2); color: var(--primary-darker); }
+    .callout-success { background: #f0fdf4; border: 1px solid #bbf7d0; color: #166534; }
+
+    /* ── Info boxes ── */
+    .info-grid {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px;
+    }
+    .info-box {
+      background: var(--primary-light); border: 1px solid var(--primary-light-2);
+      border-radius: var(--radius); padding: 20px;
+    }
+    .info-box h4 {
+      margin: 0 0 8px; font-size: 0.9rem; color: var(--primary-darker);
+    }
+    .info-box p {
+      margin: 0; font-size: 0.88rem; color: var(--text-gray);
+    }
+
+    /* ── Flow diagram ── */
+    .flow-diagram {
+      background: var(--bg-code); border-radius: var(--radius-lg);
+      padding: 28px 32px; margin-bottom: 24px; overflow-x: auto;
+    }
+    .flow-diagram pre {
+      color: #e2e8f0; font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 0.82rem; line-height: 1.8; margin: 0; white-space: pre;
+    }
+    .flow-diagram .flow-arrow { color: var(--primary); }
+    .flow-diagram .flow-highlight { color: #FF8433; }
+    .flow-diagram .flow-dim { color: #64748b; }
+
+    .config-table-wrap {
+      overflow-x: auto; border-radius: var(--radius); border: 1px solid var(--border);
+      box-shadow: var(--shadow-sm); margin-bottom: 24px;
+    }
+    .config-table {
+      width: 100%; border-collapse: collapse; font-size: 0.88rem;
+    }
+    .config-table thead { background: var(--primary-light); }
+    .config-table th {
+      padding: 12px 16px; text-align: left; font-weight: 700;
+      color: var(--primary-darker); font-size: 0.78rem;
+      text-transform: uppercase; letter-spacing: 0.5px;
+      border-bottom: 2px solid var(--primary-light-2);
+    }
+    .config-table td {
+      padding: 10px 16px; border-bottom: 1px solid var(--border);
+      color: var(--text-gray); vertical-align: top;
+    }
+    .config-table tr:last-child td { border-bottom: none; }
+    .config-table tr:hover td { background: var(--primary-light); }
+
+    .mobile-sidebar-toggle {
+      display: none; position: fixed; bottom: 24px; right: 24px; z-index: 999;
+      width: 48px; height: 48px; border-radius: 50%;
+      background: linear-gradient(135deg, var(--primary-dark), var(--primary));
+      color: var(--white); border: none; font-size: 1.3rem; cursor: pointer;
+      box-shadow: var(--shadow-lg);
+    }
+
+    @media (max-width: 900px) {
+      .sidebar {
+        transform: translateX(-100%); transition: transform 0.3s ease;
+        z-index: 900; width: 280px;
+      }
+      .sidebar.open { transform: translateX(0); }
+      .content { margin-left: 0; padding: 32px 24px 80px; }
+      .mobile-sidebar-toggle { display: flex; align-items: center; justify-content: center; }
+      .content h1 { font-size: 1.7rem; }
+      .content h2 { font-size: 1.3rem; }
+      .info-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+  <header class="header" id="header">
+    <div class="header-inner">
+      <a href="index.html" class="header-logo">
+        <svg width="28" height="28" viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0"><path d="M4 7L14 21L24 7" stroke="#FF6600" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <div class="header-logo-text">v<span>Billing</span> Docs</div>
+      </a>
+      <nav class="header-nav">
+        <a href="index.html">Home</a>
+        <a href="getting-started.html">Guide</a>
+        <a href="https://github.com/vClusterLabs-Experiments/vbilling" class="gh-link" target="_blank">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <div class="docs-layout">
+    <nav class="sidebar" id="sidebar">
+      <a href="index.html" class="sidebar-back">&#8592; Back to main site</a>
+      <div class="sidebar-section">
+        <div class="sidebar-label">Documentation</div>
+        <a href="getting-started.html">Getting Started</a>
+        <a href="configuration.html">Configuration</a>
+        <a href="metrics.html">Metrics Reference</a>
+        <a href="private-nodes.html">Dedicated and Private Nodes</a>
+        <a href="example-gke.html" class="active">Example: GKE with GPUs</a>
+        <a href="troubleshooting.html">Troubleshooting</a>
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-label">Resources</div>
+        <a href="https://github.com/vClusterLabs-Experiments/vbilling" target="_blank">GitHub Repository</a>
+        <a href="https://www.getlago.com/docs" target="_blank">Lago Docs</a>
+        <a href="https://www.vcluster.com/docs" target="_blank">vCluster Docs</a>
+      </div>
+    </nav>
+
+    <main class="content">
+      <h1>Example: GKE with shared and private GPU nodes</h1>
+      <p class="subtitle">Both vCluster tenancy models on GPUs, metered by vBilling and invoiced by Stripe test mode, from an empty Google Cloud project. The manifests, values files and commands are the ones from a recorded run, with every key, token and account ID left out.</p>
+
+      <h2 id="what">What you build</h2>
+      <ul>
+        <li><strong>GKE</strong> as the control plane cluster, with a spot L4 node pool time-shared four ways.</li>
+        <li><strong><code>shared-l4</code></strong>, a tenant cluster on shared nodes: its pods run on the L4 and are billed per pod, a quarter GPU each.</li>
+        <li><strong><code>private-a100</code></strong>, a tenant cluster with private nodes: an A100 VM joins it directly and is billed whole, read through the tenant cluster's own API with a read-only kubeconfig.</li>
+        <li><strong>Prometheus</strong> reading DCGM: GKE's exporter on shared nodes, and a Prometheus agent that remote-writes from the private node.</li>
+        <li><strong>vBilling</strong> sending usage to Stripe: customers, one meter per metric and SKU, subscriptions, invoices.</li>
+      </ul>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead><tr><th>File (<a href="https://github.com/vClusterLabs-Experiments/vbilling/tree/main/examples/gke-gpu/">examples/gke-gpu</a>)</th><th>What it is</th></tr></thead>
+          <tbody>
+            <tr><td><a href="https://github.com/vClusterLabs-Experiments/vbilling/blob/main/examples/gke-gpu/01-prometheus.yaml"><code>01-prometheus.yaml</code></a></td><td>Central Prometheus: scrapes GKE's DCGM exporter, accepts remote writes</td></tr>
+            <tr><td><a href="https://github.com/vClusterLabs-Experiments/vbilling/blob/main/examples/gke-gpu/02-tenant-shared.yaml"><code>02-tenant-shared.yaml</code></a></td><td><code>vcluster.yaml</code> for the shared-nodes tenant cluster</td></tr>
+            <tr><td><a href="https://github.com/vClusterLabs-Experiments/vbilling/blob/main/examples/gke-gpu/03-tenant-private.yaml"><code>03-tenant-private.yaml</code></a></td><td><code>vcluster.yaml</code> with Private Nodes and the read-only <code>vbilling-kubeconfig</code> export</td></tr>
+            <tr><td><a href="https://github.com/vClusterLabs-Experiments/vbilling/blob/main/examples/gke-gpu/04-node-startup.sh"><code>04-node-startup.sh</code></a></td><td>VM startup script that joins the GPU machine as a private node</td></tr>
+            <tr><td><a href="https://github.com/vClusterLabs-Experiments/vbilling/blob/main/examples/gke-gpu/05-gpu-operator-values.yaml"><code>05-gpu-operator-values.yaml</code></a></td><td>NVIDIA GPU Operator inside the private tenant cluster</td></tr>
+            <tr><td><a href="https://github.com/vClusterLabs-Experiments/vbilling/blob/main/examples/gke-gpu/06-prometheus-agent.yaml"><code>06-prometheus-agent.yaml</code></a></td><td>Prometheus agent in the private tenant cluster, remote-writing DCGM</td></tr>
+            <tr><td><a href="https://github.com/vClusterLabs-Experiments/vbilling/blob/main/examples/gke-gpu/07-vbilling-values.yaml"><code>07-vbilling-values.yaml</code></a></td><td>vBilling Helm values: Stripe, DCGM queries, a PromQL billable metric</td></tr>
+            <tr><td><a href="https://github.com/vClusterLabs-Experiments/vbilling/blob/main/examples/gke-gpu/workloads/"><code>workloads/</code></a></td><td>Sample GPU workloads for each tenant cluster</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout callout-warn">
+        <div class="callout-icon">!</div>
+        <div>No file in the example contains a key, token or account ID. Keep yours out of Git too: the Stripe key goes into a Kubernetes Secret from a local file, and the node join token only into the VM's metadata, removed after the join.</div>
+      </div>
+
+      <h2 id="prerequisites">Prerequisites</h2>
+      <ul>
+        <li><code>gcloud</code> with a project selected, <code>kubectl</code>, <code>helm</code>, and the <code>vcluster</code> CLI (0.36 or later).</li>
+        <li><strong>vCluster Platform</strong> for the Private Nodes license. The CLI must be logged in with a key that can register tenant clusters (a scoped key fails with <code>denied by loft access key scope</code>). vCluster 0.36.2 and later need Platform 4.11.3 or later.</li>
+        <li>A <strong>Stripe test-mode</strong> secret key saved in a local file, for example <code>~/.stripe-test-key</code>.</li>
+        <li>GPU quota in the zone for one L4 and one A100 (spot capacity is enough).</li>
+      </ul>
+      <div class="code-block"><code><span class="cmd">export</span> ZONE=us-central1-a CLUSTER=vbilling-demo
+<span class="cmd">git</span> clone https://github.com/vClusterLabs-Experiments/vbilling &amp;&amp; cd vbilling/examples/gke-gpu</code></div>
+
+      <h2 id="cluster">1. Control plane cluster</h2>
+      <div class="code-block"><code><span class="cmd">gcloud</span> container clusters create $CLUSTER --zone $ZONE --release-channel regular \
+  --machine-type e2-standard-4 --num-nodes 2
+<span class="cmd">gcloud</span> container node-pools create l4-spot --cluster $CLUSTER --zone $ZONE \
+  --machine-type g2-standard-8 --spot --num-nodes 1 \
+  --accelerator type=nvidia-l4,count=1,gpu-driver-version=default,gpu-sharing-strategy=time-sharing,max-shared-clients-per-gpu=4 \
+  --node-labels vbilling.vcluster.com/capacity-type=spot
+<span class="cmd">gcloud</span> container clusters get-credentials $CLUSTER --zone $ZONE</code></div>
+
+      <h2 id="prometheus">2. Prometheus</h2>
+      <p>One Prometheus for the control plane cluster. GKE (1.32 and later) runs a managed DCGM exporter on GPU nodes; scraped with the exporter's own target labels, the workload's namespace arrives as <code>exported_namespace</code>, which vBilling's default queries match. An internal load balancer accepts remote writes from private nodes.</p>
+      <div class="code-block"><code><span class="cmd">kubectl</span> apply -f 01-prometheus.yaml
+<span class="cmd">INGEST_IP=</span>$(kubectl -n monitoring get svc prometheus-ingest -o jsonpath='{.status.loadBalancer.ingress[0].ip}')</code></div>
+
+      <h2 id="tenants">3. Tenant clusters</h2>
+      <div class="code-block"><code><span class="cmd">vcluster</span> platform login https://&lt;your-platform-host&gt;   <span class="comment">  # browser login, no key on the command line</span>
+<span class="cmd">vcluster</span> create shared-l4 -n shared-l4 -f 02-tenant-shared.yaml --connect=false
+<span class="cmd">vcluster</span> create private-a100 -n private-a100 -f 03-tenant-private.yaml --connect=false</code></div>
+      <p>When the CLI is logged in, <code>vcluster create</code> registers each tenant cluster with the Platform, which is what licenses Private Nodes. A tenant cluster created before logging in is registered with <code>vcluster platform add vcluster private-a100 -n private-a100 --project default</code>. The private tenant cluster's <code>exportKubeConfig.additionalSecrets</code> writes the read-only Secret <code>vbilling-kubeconfig</code> that vBilling reads (see <a href="private-nodes.html#private">Private Nodes</a>).</p>
+      <p>Tell vBilling who the tenants are (the emails use the reserved <code>.example</code> domain):</p>
+      <div class="code-block"><code><span class="cmd">kubectl</span> annotate ns shared-l4 vbilling.vcluster.com/tenant=acme-ai "vbilling.vcluster.com/display-name=Acme AI" \
+  vbilling.vcluster.com/email=billing@acme-ai.example vbilling.vcluster.com/plan=gpu-cloud
+<span class="cmd">kubectl</span> annotate ns private-a100 vbilling.vcluster.com/tenant=initech "vbilling.vcluster.com/display-name=Initech" \
+  vbilling.vcluster.com/email=billing@initech.example vbilling.vcluster.com/plan=gpu-cloud</code></div>
+
+      <h2 id="node">4. A private GPU node</h2>
+      <p>Create a join token, put the join command it prints into the startup script, and boot the machine. The VM must reach the tenant cluster's internal load balancer, so keep it in the same VPC and region.</p>
+      <div class="code-block"><code><span class="cmd">vcluster</span> connect private-a100 -n private-a100 -- vcluster token create --expires 2h | grep node/join &gt; join.txt
+<span class="cmd">awk</span> -v cmd="$(cat join.txt)" '$0 == "JOIN_COMMAND" { print cmd; next } { print }' 04-node-startup.sh &gt; startup.sh
+<span class="cmd">gcloud</span> compute instances create gpu-node-1 --zone $ZONE --machine-type a2-highgpu-1g \
+  --provisioning-model SPOT --instance-termination-action STOP --maintenance-policy TERMINATE \
+  --image-family ubuntu-2204-lts --image-project ubuntu-os-cloud --boot-disk-size 150GB \
+  --no-service-account --no-scopes --metadata-from-file startup-script=startup.sh</code></div>
+      <p>Once <code>gpu-node-1</code> is Ready in the tenant cluster, remove the token from the instance and from disk, and label the node so it gets an SKU:</p>
+      <div class="code-block"><code><span class="cmd">gcloud</span> compute instances remove-metadata gpu-node-1 --zone $ZONE --keys startup-script
+<span class="cmd">rm</span> join.txt startup.sh
+<span class="cmd">vcluster</span> connect private-a100 -n private-a100 -- kubectl label node gpu-node-1 \
+  node.kubernetes.io/instance-type=a2-highgpu-1g vbilling.vcluster.com/capacity-type=spot</code></div>
+
+      <h2 id="gpu-operator">5. GPU Operator and DCGM in the private tenant cluster</h2>
+      <div class="code-block"><code><span class="cmd">helm</span> repo add nvidia https://helm.ngc.nvidia.com/nvidia &amp;&amp; helm repo update
+<span class="cmd">vcluster</span> connect private-a100 -n private-a100 -- \
+  <span class="cmd">helm</span> install gpu-operator nvidia/gpu-operator -n gpu-operator --create-namespace -f 05-gpu-operator-values.yaml
+<span class="cmd">sed</span> "s/PROMETHEUS_INGEST_IP/$INGEST_IP/" 06-prometheus-agent.yaml &gt; agent.yaml
+<span class="cmd">vcluster</span> connect private-a100 -n private-a100 -- kubectl apply -f agent.yaml</code></div>
+      <p>The driver container compiles for the node's kernel, about five minutes. The agent adds the external label <code>vcluster=private-a100</code> to every series it sends, which is what <code>07-vbilling-values.yaml</code> selects with <code>{{vcluster}}</code>.</p>
+      <div class="callout callout-info">
+        <div class="callout-icon">i</div>
+        <div><strong>MIG on Compute Engine.</strong> Label the node <code>nvidia.com/mig.config=all-1g.5gb</code> to split the A100 into seven slices. The GPU cannot be reset from inside a Compute Engine VM, so the MIG manager reports <code>failed</code> until the VM is rebooted (<code>gcloud compute instances reset</code>). A stop and start can move the VM to a GPU without MIG mode. Under MIG, vBilling still bills one whole A100, and DCGM utilization comes from each instance's engine activity.</div>
+      </div>
+
+      <h2 id="vbilling">6. vBilling</h2>
+      <div class="code-block"><code><span class="cmd">kubectl</span> create namespace vbilling
+<span class="cmd">kubectl</span> -n vbilling create secret generic vbilling-stripe --from-file=api-key=$HOME/.stripe-test-key
+<span class="cmd">helm</span> install vbilling ../../deploy/helm/vbilling -n vbilling -f 07-vbilling-values.yaml
+<span class="cmd">vcluster</span> connect shared-l4 -n shared-l4 -- kubectl apply -f workloads/shared-inference.yaml
+<span class="cmd">vcluster</span> connect private-a100 -n private-a100 -- kubectl apply -f workloads/private-training.yaml</code></div>
+      <p>vBilling creates the Stripe customers and meters on the first windows. Give the meters prices tagged with the plan, then restart vBilling so it subscribes the tenants:</p>
+      <div class="code-block"><code><span class="cmd">export</span> STRIPE_API_KEY="$(cat ~/.stripe-test-key)"
+<span class="cmd">curl</span> -s https://api.stripe.com/v1/billing/meters -u "$STRIPE_API_KEY:" | grep -E '"(id|event_name)"'
+<span class="cmd">curl</span> -s https://api.stripe.com/v1/prices -u "$STRIPE_API_KEY:" \
+  -d currency=usd -d unit_amount_decimal=220 \
+  -d "recurring[interval]=month" -d "recurring[usage_type]=metered" -d "recurring[meter]=&lt;meter id&gt;" \
+  -d "product_data[name]=A100 40GB GPU-hour" -d "metadata[vbilling_plan]=gpu-cloud"
+<span class="cmd">kubectl</span> -n vbilling rollout restart statefulset/vbilling</code></div>
+
+      <h2 id="check">7. Check it</h2>
+      <div class="code-block"><code><span class="cmd">kubectl</span> -n vbilling port-forward svc/vbilling 8080:8080 &amp;
+<span class="comment"># dashboard: http://localhost:8080/</span>
+<span class="cmd">curl</span> -s "localhost:8080/api/v1/events?from=$(date -u +%Y-%m-%dT%H:00:00Z)" | head
+<span class="cmd">curl</span> -s "localhost:8080/api/v1/reconcile?from=&lt;start&gt;&amp;to=&lt;end&gt;"   <span class="comment">  # ledger vs Stripe, per tenant and metric</span></code></div>
+      <p>One 30 second window:</p>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead><tr><th>Tenant</th><th>Metric</th><th>Quantity</th><th>Why</th></tr></thead>
+          <tbody>
+            <tr><td>acme-ai</td><td><code>vcluster_gpu_hours</code> (sku <code>nvidia-l4-timeslice-4</code>)</td><td>0.004166667</td><td>2 pods × ¼ GPU × 30 s</td></tr>
+            <tr><td>initech</td><td><code>vcluster_gpu_hours</code> (sku <code>NVIDIA-A100-SXM4-40GB</code>)</td><td>0.008333333</td><td>The whole A100, also under MIG</td></tr>
+            <tr><td>initech</td><td><code>vcluster_private_node_hours</code> (sku <code>a2-highgpu-1g</code>)</td><td>0.008333333</td><td>The node, billed whole</td></tr>
+            <tr><td>initech</td><td><code>vcluster_cpu_core_hours</code></td><td>0.1</td><td>All 12 cores</td></tr>
+            <tr><td>initech</td><td><code>gpu_energy_kwh</code></td><td>≈ 0.0015</td><td>≈ 177 W for 30 s, from DCGM</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p><img src="images/dashboard-gke.png" alt="vBilling dashboard for the GKE example: GPU-hours by SKU, usage per tenant, Stripe delivering with no lag and no dead letters, verified ledger" style="width: 100%; border-radius: 12px; border: 1px solid var(--border); margin: 8px 0 18px;"></p>
+      <p>If the spot A100 is reclaimed, the window in which the node becomes unreachable bills only the seconds before it, and the rest becomes <code>vcluster_gpu_downtime_hours</code> until the node and its GPUs are back.</p>
+
+      <h2 id="cleanup">Clean up</h2>
+      <div class="code-block"><code><span class="cmd">gcloud</span> compute instances delete gpu-node-1 --zone $ZONE --quiet
+<span class="cmd">vcluster</span> delete shared-l4 -n shared-l4 --delete-namespace
+<span class="cmd">vcluster</span> delete private-a100 -n private-a100 --delete-namespace
+<span class="cmd">kubectl</span> delete namespace monitoring vbilling   <span class="comment">  # removes the load balancers and volumes GKE created</span>
+<span class="cmd">gcloud</span> container clusters delete $CLUSTER --zone $ZONE --quiet</code></div>
+    </main>
+  </div>
+
+  <button class="mobile-sidebar-toggle" id="mobileSidebarToggle" aria-label="Toggle sidebar">&#9776;</button>
+
+  <script>
+    const header = document.getElementById('header');
+    window.addEventListener('scroll', () => { header.classList.toggle('scrolled', window.scrollY > 10); });
+    const sidebar = document.getElementById('sidebar');
+    const toggle = document.getElementById('mobileSidebarToggle');
+    toggle.addEventListener('click', () => { sidebar.classList.toggle('open'); });
+    document.addEventListener('click', (e) => {
+      if (!sidebar.contains(e.target) && !toggle.contains(e.target)) sidebar.classList.remove('open');
+    });
+  </script>
+</body>
+</html>

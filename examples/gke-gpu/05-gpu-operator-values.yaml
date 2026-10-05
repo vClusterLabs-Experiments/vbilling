@@ -1,0 +1,9 @@
+# NVIDIA GPU Operator inside the tenant cluster, on its private GPU nodes.
+# It installs the driver, container toolkit, device plugin, GPU Feature
+# Discovery (the nvidia.com/gpu.* labels vBilling reads), DCGM and the MIG manager.
+driver: {enabled: true}
+toolkit: {enabled: true}
+mig: {strategy: single}
+dcgmExporter:
+  enabled: true
+  serviceMonitor: {enabled: false}   # scraped by 06-prometheus-agent.yaml instead

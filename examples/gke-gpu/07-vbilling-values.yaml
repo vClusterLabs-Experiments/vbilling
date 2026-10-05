@@ -1,0 +1,41 @@
+# vBilling on the GKE control plane cluster, delivering to Stripe test mode.
+# The Stripe key lives only in the Secret vbilling-stripe (key api-key); this
+# file holds no credentials.
+adapters: [stripe]
+region: us-central1
+clusterName: gke-us-central1
+billing:
+  defaultPlanCode: gpu-cloud   # tenants subscribe to prices tagged metadata[vbilling_plan]=gpu-cloud
+  currency: USD
+  collectionInterval: 30s      # 60s in production keeps the DCGM math steadier
+  maxBackfill: 2h
+metering:
+  cpuMemoryBasis: requests
+tenantAPI:
+  enabled: true                # private nodes, through each tenant cluster's vbilling-kubeconfig
+prometheus:
+  url: http://prometheus.monitoring.svc:9090
+  # The defaults (namespace or exported_namespace, MIG instances included),
+  # plus tenant clusters with private nodes, whose Prometheus agent
+  # remote-writes with the external label vcluster=<tenant cluster>.
+  gpuUtilQuery: 'avg by (modelName) (avg_over_time(DCGM_FI_DEV_GPU_UTIL{exported_namespace="{{namespace}}"}[{{window}}]) or avg_over_time(DCGM_FI_DEV_GPU_UTIL{namespace="{{namespace}}"}[{{window}}]) or avg_over_time(DCGM_FI_DEV_GPU_UTIL{vcluster="{{vcluster}}"}[{{window}}]) or 100 * avg_over_time(DCGM_FI_PROF_GR_ENGINE_ACTIVE{exported_namespace="{{namespace}}",GPU_I_ID!=""}[{{window}}]) or 100 * avg_over_time(DCGM_FI_PROF_GR_ENGINE_ACTIVE{namespace="{{namespace}}",GPU_I_ID!=""}[{{window}}]) or 100 * avg_over_time(DCGM_FI_PROF_GR_ENGINE_ACTIVE{vcluster="{{vcluster}}",GPU_I_ID!=""}[{{window}}]))'
+  gpuCountQuery: 'count by (modelName) (group by (modelName, UUID, gpu, Hostname, hostname) (DCGM_FI_DEV_GPU_UTIL{exported_namespace="{{namespace}}"} or DCGM_FI_DEV_GPU_UTIL{namespace="{{namespace}}"} or DCGM_FI_DEV_GPU_UTIL{vcluster="{{vcluster}}"} or DCGM_FI_PROF_GR_ENGINE_ACTIVE{exported_namespace="{{namespace}}",GPU_I_ID!=""} or DCGM_FI_PROF_GR_ENGINE_ACTIVE{namespace="{{namespace}}",GPU_I_ID!=""} or DCGM_FI_PROF_GR_ENGINE_ACTIVE{vcluster="{{vcluster}}",GPU_I_ID!=""}))'
+  metrics:
+    # A billable metric defined in PromQL: energy drawn by a tenant cluster's
+    # private GPUs. Power is integrated over the window because the DCGM
+    # exporter refreshes every 30s, and device-level fields repeat on every
+    # MIG instance, so one series per GPU (UUID) is kept before summing.
+    - code: gpu_energy_kwh
+      name: GPU energy
+      unit: kWh
+      description: Energy drawn by the tenant cluster's private GPUs, from DCGM
+      billable: true
+      dimensions: [modelName]
+      sku: modelName
+      query: sum by (modelName) (max by (modelName, UUID, gpu, Hostname, hostname) (avg_over_time(DCGM_FI_DEV_POWER_USAGE{vcluster="{{vcluster}}"}[{{window}}]))) * {{window_seconds}} / 3.6e6
+stripe:
+  existingSecret: vbilling-stripe
+  autoSubscribe: true
+persistence:
+  enabled: true
+  size: 5Gi
