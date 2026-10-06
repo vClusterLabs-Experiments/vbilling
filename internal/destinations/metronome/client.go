@@ -264,6 +264,100 @@ func (c *Client) CreateContract(ctx context.Context, req CreateContractRequest) 
 	return resp.Data.ID, nil
 }
 
+// Contract is the part of a contract vBilling reads back.
+type Contract struct {
+	ID            string `json:"id"`
+	UniquenessKey string `json:"uniqueness_key"`
+	StartingAt    string `json:"starting_at"`
+	EndingBefore  string `json:"ending_before"`
+	ArchivedAt    string `json:"archived_at"`
+}
+
+type listContractsRequest struct {
+	CustomerID      string `json:"customer_id"`
+	IncludeArchived bool   `json:"include_archived"`
+	Limit           int    `json:"limit"`
+	Cursor          string `json:"cursor,omitempty"`
+}
+
+// ListContracts pages through a customer's contracts, archived ones included.
+func (c *Client) ListContracts(ctx context.Context, customerID string) ([]Contract, error) {
+	var out []Contract
+	req := listContractsRequest{CustomerID: customerID, IncludeArchived: true, Limit: 20}
+	for page := 0; page < 100; page++ {
+		var resp struct {
+			Data   []Contract `json:"data"`
+			Cursor *string    `json:"cursor"`
+		}
+		if err := c.do(ctx, http.MethodPost, "/v2/contracts/list", nil, req, &resp); err != nil {
+			return nil, err
+		}
+		out = append(out, resp.Data...)
+		if resp.Cursor == nil || *resp.Cursor == "" {
+			break
+		}
+		req.Cursor = *resp.Cursor
+	}
+	return out, nil
+}
+
+// EndContract sets a contract's (exclusive) end.
+func (c *Client) EndContract(ctx context.Context, customerID, contractID string, endingBefore time.Time) error {
+	req := struct {
+		CustomerID   string `json:"customer_id"`
+		ContractID   string `json:"contract_id"`
+		EndingBefore string `json:"ending_before"`
+	}{customerID, contractID, rfc3339(endingBefore)}
+	return c.do(ctx, http.MethodPost, "/v1/contracts/updateEndDate", nil, req, nil)
+}
+
+// ArchiveContract removes a contract that should never have run. Finalized
+// invoices are kept.
+func (c *Client) ArchiveContract(ctx context.Context, customerID, contractID string) error {
+	req := struct {
+		CustomerID   string `json:"customer_id"`
+		ContractID   string `json:"contract_id"`
+		VoidInvoices bool   `json:"void_invoices"`
+	}{customerID, contractID, false}
+	return c.do(ctx, http.MethodPost, "/v1/contracts/archive", nil, req, nil)
+}
+
+// --- billing provider configurations ---
+
+// CustomerBillingConfig is a billing provider configuration of a customer.
+type CustomerBillingConfig struct {
+	ID              string         `json:"id"`
+	BillingProvider string         `json:"billing_provider"`
+	Configuration   map[string]any `json:"configuration"`
+	ArchivedAt      string         `json:"archived_at"`
+}
+
+// BillingProviderConfigs lists a customer's active billing provider configurations.
+func (c *Client) BillingProviderConfigs(ctx context.Context, customerID string) ([]CustomerBillingConfig, error) {
+	req := struct {
+		CustomerID string `json:"customer_id"`
+	}{customerID}
+	var resp struct {
+		Data []CustomerBillingConfig `json:"data"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/v1/getCustomerBillingProviderConfigurations", nil, req, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Data, nil
+}
+
+// SetBillingProviderConfig adds a billing provider configuration to a customer.
+func (c *Client) SetBillingProviderConfig(ctx context.Context, customerID string, cfg BillingProviderConfig) error {
+	type entry struct {
+		CustomerID string `json:"customer_id"`
+		BillingProviderConfig
+	}
+	req := struct {
+		Data []entry `json:"data"`
+	}{[]entry{{customerID, cfg}}}
+	return c.do(ctx, http.MethodPost, "/v1/setCustomerBillingProviderConfigurations", nil, req, nil)
+}
+
 // --- usage (reconciliation) ---
 
 type UsageRequest struct {
