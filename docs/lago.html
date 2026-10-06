@@ -362,7 +362,7 @@
       <h2 id="limits">Good to know</h2>
       <ul>
         <li><code>GET /api/v1/reconcile</code> covers Stripe and Metronome. For Lago, compare the ledger (<code>GET /api/v1/usage</code>) with Lago's current usage for the subscription.</li>
-        <li>Billing states and enforcement come from Stripe and Metronome webhooks, and are only enabled when one of their webhook secrets is set. A Lago-only setup has no billing states.</li>
+        <li>Lago sends no billing signals to vBilling. Set billing states from your own automation with <code>PUT /api/v1/billing-states/{tenant}</code>, for example <code>{"state": "suspended", "reason": "invoice overdue"}</code>.</li>
         <li>Lago also receives <code>vcluster_gpu_utilization</code>, an informational metric that v0.1 created in Lago and existing plans may still reference. Leave it unpriced.</li>
       </ul>
 

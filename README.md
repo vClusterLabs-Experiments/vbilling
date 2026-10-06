@@ -290,7 +290,7 @@ Override any mapping with `ENFORCEMENT_RULES`, for example `alerts.spend_thresho
 - **`annotate`**: also annotate the tenant cluster, label its namespace `vbilling.vcluster.com/billing-state`, and emit a Kubernetes event.
 - **`enforce`**: also label suspended namespaces `vbilling.vcluster.com/suspended=true`. With `enforcement.admissionPolicy.enabled=true` (Kubernetes 1.30+), a ValidatingAdmissionPolicy then denies **new** pods in those namespaces. Running workloads keep running, the tenant sees the reason as a sync error inside their tenant cluster, and a paid invoice lifts it automatically. The policy acts in the control plane cluster, so it holds tenant clusters on shared or dedicated nodes; tenant clusters with their own nodes (Private Nodes, Auto Nodes, Standalone) run their pods only inside the tenant cluster, so act on their billing state with your own automation.
 
-Payment failures on invoices that Stripe collects arrive through Stripe's webhooks, so in Metronome + Stripe mode, send Stripe's webhooks to vBilling as well. Billing states are enabled once `STRIPE_WEBHOOK_SECRET` or `METRONOME_WEBHOOK_SECRET` is set.
+Payment failures on invoices that Stripe collects arrive through Stripe's webhooks, so in Metronome + Stripe mode, send Stripe's webhooks to vBilling as well. Billing states are always available: Stripe and Metronome webhooks set them once `STRIPE_WEBHOOK_SECRET` or `METRONOME_WEBHOOK_SECRET` is set, and `PUT /api/v1/billing-states/{tenant}` sets them from anything else, such as Lago or a custom billing platform.
 
 ## Custom usage: tokens, Slurm, storage, network
 
