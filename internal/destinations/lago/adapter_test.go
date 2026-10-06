@@ -71,3 +71,22 @@ func TestDuplicateTransactionIDCountsAsDelivered(t *testing.T) {
 		t.Fatal("lago filter: downtime is informational; utilization is kept for v0.1 plans")
 	}
 }
+
+func TestRemoveTenantTreatsMissingSubscriptionAsDone(t *testing.T) {
+	status := http.StatusNotFound
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete || r.URL.Path != "/api/v1/subscriptions/sub-acme" {
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(status)
+	}))
+	defer srv.Close()
+	a := &Adapter{client: NewClient(srv.URL, "key"), cfg: &config.Config{}}
+	if err := a.RemoveTenant(context.Background(), usage.Tenant{ID: "acme"}); err != nil {
+		t.Fatalf("an already terminated subscription is nothing to end: %v", err)
+	}
+	status = http.StatusBadGateway
+	if err := a.RemoveTenant(context.Background(), usage.Tenant{ID: "acme"}); err == nil || destinations.IsPermanent(err) {
+		t.Fatalf("HTTP 502: got %v, want a retryable error", err)
+	}
+}

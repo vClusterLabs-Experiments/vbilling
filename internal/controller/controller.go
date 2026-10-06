@@ -53,7 +53,8 @@ type Controller struct {
 
 	mu         sync.Mutex
 	clusters   []discovery.TenantCluster
-	lastSeen   map[string]time.Time // tenant -> last time it had a tenant cluster
+	lastSeen   map[string]time.Time       // tenant -> last time it had a tenant cluster
+	offboarded map[string]map[string]bool // tenant -> destinations done offboarding it
 	discovered bool
 	lastWindow time.Time
 
@@ -76,7 +77,7 @@ func New(cfg *config.Config, disc Discoverer, coll Collector, sp *spool.Spool, t
 		}
 	}
 	return &Controller{cfg: cfg, disc: disc, coll: coll, spool: sp, tenants: tenants, dests: dests, tel: tel,
-		now: time.Now, lastSeen: map[string]time.Time{}, gaps: gaps}
+		now: time.Now, lastSeen: map[string]time.Time{}, offboarded: map[string]map[string]bool{}, gaps: gaps}
 }
 
 // Run reconciles tenants every ReconcileInterval and closes a metering
@@ -166,6 +167,7 @@ func (c *Controller) Reconcile(ctx context.Context) {
 	c.discovered = true
 	for _, t := range tenants {
 		c.lastSeen[t.ID] = now
+		delete(c.offboarded, t.ID) // back before offboarding finished: start over next time
 	}
 	var gone []usage.Tenant
 	current := map[string]bool{}
@@ -181,9 +183,27 @@ func (c *Controller) Reconcile(ctx context.Context) {
 	c.mu.Unlock()
 
 	for _, t := range gone {
+		// Each destination offboards a tenant once. A permanent rejection is
+		// final too: retrying it every pass would never succeed.
+		c.mu.Lock()
+		done := c.offboarded[t.ID]
+		if done == nil {
+			done = map[string]bool{}
+			c.offboarded[t.ID] = done
+		}
+		c.mu.Unlock()
 		ok := true
 		for _, d := range c.dests {
-			if err := d.RemoveTenant(ctx, t); err != nil {
+			if done[d.Name()] {
+				continue
+			}
+			switch err := d.RemoveTenant(ctx, t); {
+			case err == nil:
+				done[d.Name()] = true
+			case destinations.IsPermanent(err):
+				log.Printf("[controller] offboard %s from %s: %v (rejected, not retried)", t.ID, d.Name(), err)
+				done[d.Name()] = true
+			default:
 				log.Printf("[controller] offboard %s from %s: %v (will retry)", t.ID, d.Name(), err)
 				ok = false
 			}
@@ -193,6 +213,7 @@ func (c *Controller) Reconcile(ctx context.Context) {
 			c.tenants.Delete(t.ID)
 			c.mu.Lock()
 			delete(c.lastSeen, t.ID)
+			delete(c.offboarded, t.ID)
 			c.mu.Unlock()
 		}
 	}

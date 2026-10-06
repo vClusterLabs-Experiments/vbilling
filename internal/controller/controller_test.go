@@ -329,3 +329,41 @@ func TestTenantAPIGapsSurviveRestart(t *testing.T) {
 		t.Fatalf("gap after restart = %v, %v", g, ok)
 	}
 }
+
+// rejectDest permanently rejects every offboarding, like a receiver that
+// will never accept the event.
+type rejectDest struct {
+	fakeDest
+	calls int
+}
+
+func (d *rejectDest) Name() string { return "picky" }
+func (d *rejectDest) RemoveTenant(context.Context, usage.Tenant) error {
+	d.calls++
+	return destinations.Permanent(errors.New("HTTP 400: unknown event type"))
+}
+
+func TestOffboardingIsFinalPerDestination(t *testing.T) {
+	h := newHarness(t)
+	picky := &rejectDest{}
+	h.c.dests = append(h.c.dests, picky)
+	ctx := context.Background()
+	h.disc.clusters = []discovery.TenantCluster{cluster("team-a", "train", nil)}
+	h.c.Reconcile(ctx)
+
+	h.disc.clusters = nil
+	h.now = h.now.Add(2 * time.Hour)
+	h.dest.failRm = 1
+	h.c.Reconcile(ctx) // fake is down (retried); picky rejects for good (final)
+	h.c.Reconcile(ctx) // fake succeeds; picky is not asked again
+	h.c.Reconcile(ctx)
+	if picky.calls != 1 {
+		t.Fatalf("a permanent rejection was retried: %d calls", picky.calls)
+	}
+	if len(h.dest.removed) != 1 {
+		t.Fatalf("removed = %v", h.dest.removed)
+	}
+	if _, ok := h.reg.Get("vcluster-team-a-train"); ok {
+		t.Fatal("tenant still registered after offboarding")
+	}
+}

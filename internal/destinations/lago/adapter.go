@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"strings"
 
 	"github.com/vclusterlabs-experiments/vbilling/internal/config"
@@ -87,7 +88,12 @@ func (a *Adapter) EnsureTenant(ctx context.Context, t usage.Tenant) error {
 // RemoveTenant terminates the subscription, which makes Lago issue the final
 // invoice. vBilling only calls it after the offboarding grace period.
 func (a *Adapter) RemoveTenant(ctx context.Context, t usage.Tenant) error {
-	return a.client.TerminateSubscription(ctx, subscriptionIDFor(t.ID))
+	err := a.client.TerminateSubscription(ctx, subscriptionIDFor(t.ID))
+	var httpErr *destinations.HTTPError
+	if errors.As(err, &httpErr) && httpErr.Status == http.StatusNotFound {
+		return nil // already terminated, or never created: nothing to end
+	}
+	return err
 }
 
 // ToEvent converts a canonical event to Lago's wire format. Dimensions and
