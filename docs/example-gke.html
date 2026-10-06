@@ -96,7 +96,7 @@
     .sidebar-back:hover { border-color: var(--primary); color: var(--primary-dark); }
 
     .content {
-      flex: 1; margin-left: var(--sidebar-width);
+      flex: 1; min-width: 0; margin-left: var(--sidebar-width);
       padding: 48px 64px 80px; max-width: 900px;
     }
     .content h1 {
@@ -128,7 +128,7 @@
     .content code {
       background: var(--primary-light-2); padding: 2px 7px; border-radius: 4px;
       font-family: 'Roboto Mono', 'SF Mono', 'Fira Code', monospace;
-      font-size: 0.85rem; color: var(--primary-darker);
+      font-size: 0.85rem; color: var(--primary-darker); overflow-wrap: anywhere;
     }
     .content a { color: var(--primary-dark); text-decoration: none; font-weight: 500; }
     .content a:hover { text-decoration: underline; }
@@ -257,10 +257,19 @@
         <a href="troubleshooting.html">Troubleshooting</a>
       </div>
       <div class="sidebar-section">
+        <div class="sidebar-label">Billing Adapters</div>
+        <a href="stripe.html">Stripe</a>
+        <a href="metronome.html">Metronome</a>
+        <a href="lago.html">Lago</a>
+        <a href="custom-adapter.html">Custom Billing Adapter</a>
+      </div>
+      <div class="sidebar-section">
         <div class="sidebar-label">Resources</div>
         <a href="https://github.com/vClusterLabs-Experiments/vbilling" target="_blank">GitHub Repository</a>
-        <a href="https://www.getlago.com/docs" target="_blank">Lago Docs</a>
         <a href="https://www.vcluster.com/docs" target="_blank">vCluster Docs</a>
+        <a href="https://docs.stripe.com/billing/subscriptions/usage-based" target="_blank">Stripe Billing Docs</a>
+        <a href="https://docs.metronome.com/" target="_blank">Metronome Docs</a>
+        <a href="https://www.getlago.com/docs" target="_blank">Lago Docs</a>
       </div>
     </nav>
 

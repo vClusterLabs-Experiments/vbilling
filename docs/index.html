@@ -558,7 +558,7 @@
     }
     .qs-step {
       display: grid;
-      grid-template-columns: 40px 1fr;
+      grid-template-columns: 40px minmax(0, 1fr);
       gap: 24px;
       align-items: start;
     }
@@ -732,13 +732,13 @@
     .section-dark .section-title { color: var(--text-reversed); }
     .section-dark .section-body  { color: rgba(255,255,255,0.65); }
 
-    .AI Cloud-grid {
+    .ai-cloud-grid {
       display: grid;
       grid-template-columns: 1fr 1fr;
       gap: 64px;
       align-items: center;
     }
-    .AI Cloud-copy .section-body { max-width: 100%; margin-bottom: 32px; }
+    .ai-cloud-copy .section-body { max-width: 100%; margin-bottom: 32px; }
     .checklist {
       list-style: none;
       display: flex;
@@ -893,7 +893,7 @@
       .section-title { font-size: 32px; }
       .steps { grid-template-columns: repeat(2, 1fr); }
       .features-grid { grid-template-columns: repeat(2, 1fr); }
-      .AI Cloud-grid { grid-template-columns: 1fr; gap: 40px; }
+      .ai-cloud-grid { grid-template-columns: 1fr; gap: 40px; }
       .main-nav { display: none; }
       .footer-top { grid-template-columns: 1fr 1fr; gap: 40px; }
     }
@@ -995,7 +995,7 @@
           <a href="getting-started.html" class="btn-secondary">Read the docs</a>
           <a href="https://github.com/vClusterLabs-Experiments/vbilling" class="btn-secondary">View on GitHub</a>
         </div>
-        <p class="hero-new"><strong>New in v0.2:</strong> Stripe and Metronome, a verifiable ledger, vCluster Private Nodes, and DCGM through your own Prometheus. <a href="example-gke.html">See it on GKE with shared and private GPUs &#8594;</a></p>
+        <p class="hero-new"><strong>New in v0.2:</strong> Stripe and Metronome, a verifiable ledger, vCluster Private Nodes, and DCGM through your own Prometheus. <a href="example-gke.html">See it end to end on GKE with real GPUs &#8594;</a></p>
       </div>
 
       <div class="hero-visual">
@@ -1051,12 +1051,12 @@
     <div class="container">
       <div class="section-header">
         <p class="section-label">Adapter-agnostic</p>
-        <h2 class="section-title">Ships to your billing backend</h2>
+        <h2 class="section-title">Ships to your billing platform</h2>
         <p class="section-body">vBilling is the pipe, not the billing engine. Meter tenant clusters once and route events to whichever billing adapter you run.</p>
       </div>
 
       <svg class="hero-flow" viewBox="0 0 820 240" xmlns="http://www.w3.org/2000/svg" role="img"
-           aria-label="vCluster and vMetal feed vBilling which routes usage events to Lago, Metronome, Stripe, or a webhook">
+           aria-label="vCluster and vMetal feed vBilling which routes usage events to Lago, Metronome, Stripe, or a custom billing adapter">
         <defs>
           <marker id="arrow-gray" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
             <path d="M0,0 L10,5 L0,10 z" fill="#B4B6BD"/>
@@ -1102,7 +1102,7 @@
         </g>
         <g>
           <rect x="640" y="160" width="180" height="44" rx="10" fill="#FFFFFF" stroke="#E6E7E9"/>
-          <text x="730" y="186" text-anchor="middle" font-family="Inter, sans-serif" font-size="14" font-weight="600" fill="#050B24">Webhook / Custom</text>
+          <text x="730" y="186" text-anchor="middle" font-family="Inter, sans-serif" font-size="14" font-weight="600" fill="#050B24">Custom Adapter</text>
         </g>
       </svg>
     </div>
@@ -1128,7 +1128,7 @@
             <path d="M9 13l2 2 4-4" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
           <h3>Choose Billing Platform</h3>
-          <p>Pick the billing backend you already run: Stripe, Metronome (with Stripe for payments), Lago, or your own pipeline through a signed webhook. Send to several at once.</p>
+          <p>Pick the billing platform you already run: Stripe, Metronome (with Stripe for payments), Lago, or your own pipeline through a signed webhook. Send to several at once.</p>
         </div>
         <div class="step">
           <p class="step-number">02 · Configure</p>
@@ -1148,7 +1148,7 @@
             <path d="M26 26l4-4a5.66 5.66 0 10-8-8l-4 4" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
           <h3>Connect vBilling Adapter</h3>
-          <p>Deploy vBilling and point it at your backend. Tenant clusters are auto-discovered, and usage starts flowing from the next closed window.</p>
+          <p>Deploy vBilling and point it at your billing platform. Tenant clusters are auto-discovered, and usage starts flowing from the next closed window.</p>
         </div>
       </div>
     </div>
@@ -1160,7 +1160,7 @@
       <div class="section-header">
         <p class="section-label">Features</p>
         <h2 class="section-title">Everything you need to bill tenants</h2>
-        <p class="section-body">vBilling meters shared and dedicated GPU capacity, commits it to a durable ledger, and delivers it to every billing backend you run, exactly once.</p>
+        <p class="section-body">vBilling meters GPU capacity in every tenancy model, commits it to a durable ledger, and delivers it to every billing platform you run, exactly once.</p>
       </div>
 
       <div class="features-grid">
@@ -1192,7 +1192,7 @@
         <div class="feature-card">
           <span class="feature-icon">grid_view</span>
           <h3>Fractional GPUs</h3>
-          <p>MIG slices and time-sliced GPUs are metered at their fraction, so shared GPUs can be sold by the slice.</p>
+          <p>MIG slices and time-sliced GPUs are metered at their fraction of a GPU, so every slice can carry its own price.</p>
         </div>
 
         <div class="feature-card">
@@ -1203,8 +1203,8 @@
 
         <div class="feature-card">
           <span class="feature-icon">admin_panel_settings</span>
-          <h3>Dedicated nodes</h3>
-          <p>Bill whole bare-metal nodes by SKU or instance type, without double-billing the pods that run on them.</p>
+          <h3>Node capacity tracking</h3>
+          <p>Meter the full capacity of dedicated nodes (CPU, memory and GPU SKUs), billed by SKU or instance type, without double-billing the pods that run on them.</p>
         </div>
 
         <div class="feature-card">
@@ -1252,7 +1252,7 @@
         <div class="feature-card">
           <span class="feature-icon">autorenew</span>
           <h3>Auto-discovery</h3>
-          <p>Finds tenant clusters and vCluster Platform projects. Customers, meters and metrics are created in your backend automatically.</p>
+          <p>Finds tenant clusters and vCluster Platform projects. Customers, meters and metrics are created in your billing platform automatically.</p>
         </div>
 
       </div>
@@ -1265,11 +1265,11 @@
       <div class="section-header">
         <p class="section-label">Architecture</p>
         <h2 class="section-title">How the pieces fit together</h2>
-        <p class="section-body">vBilling runs as a controller in your Control Plane Cluster. It watches tenant clusters, collects capacity and usage metrics, and streams events to the billing adapter you choose.</p>
+        <p class="section-body">vBilling runs as a controller in your control plane cluster. It watches tenant clusters, collects capacity and usage metrics, and streams events to the billing adapter you choose.</p>
       </div>
 
       <div class="arch-diagram">
-        <div><span class="highlight">Control Plane Cluster</span></div>
+        <div><span class="highlight">control plane cluster</span></div>
         <div class="dim">─────────────────────────────────────────────</div>
         <div>&nbsp;</div>
         <div><span class="highlight">tenant cluster</span> team-alpha &middot; private &middot; 4x A100</div>
@@ -1297,7 +1297,7 @@
       <div class="section-header">
         <p class="section-label">Quick start</p>
         <h2 class="section-title">Up and running in 3 steps</h2>
-        <p class="section-body">Pick your billing adapter below. Each tab walks through deploy, install, and pricing for that platform.</p>
+        <p class="section-body">Pick your billing adapter below. Each tab walks through deploy, install, and pricing for that platform; the full guides cover <a href="stripe.html">Stripe</a>, <a href="metronome.html">Metronome</a>, <a href="lago.html">Lago</a> and a <a href="custom-adapter.html">custom billing adapter</a>.</p>
       </div>
 
       <div class="callout">
@@ -1452,11 +1452,11 @@ helm upgrade <span class="flag">--install</span> vbilling deploy/helm/vbilling <
             <div class="qs-num">2</div>
             <div class="qs-content">
               <h3>Price on dimensions</h3>
-              <p>vBilling creates SUM billable metrics grouped on region, sku, capacity_type, billing_mode and tenant_cluster. Add rate card products with pricing group keys.</p>
+              <p>vBilling creates SUM billable metrics, each with one compound group key (for GPU hours: region, sku, capacity_type, billing_mode, tenant_cluster). Add rate card products whose pricing and presentation group keys together form it.</p>
               <div class="code-block">
                 <button class="copy-btn" onclick="copyCode(this)">Copy</button>
                 <pre><code><span class="comment"># Metronome product on vcluster_gpu_hours</span>
-pricing_group_key:      [region, sku, capacity_type]
+pricing_group_key:      [region, sku, capacity_type, billing_mode]
 presentation_group_key: [tenant_cluster]</code></pre>
               </div>
             </div>
@@ -1480,8 +1480,8 @@ presentation_group_key: [tenant_cluster]</code></pre>
       <div class="qs-panel" data-panel="custom" role="tabpanel" hidden>
         <div class="qs-placeholder">
           <h3>Build your own adapter</h3>
-          <p>vBilling is structured so any HTTP billing API can plug in. Implement the <code style="font-family:var(--font-code); background:var(--bg-lightest); padding:2px 6px; border-radius:4px; border:1px solid var(--stroke-subtle);">Destination</code> interface in a small Go package, rebuild the image, and point vBilling at your endpoint.</p>
-          <p>Or skip Go entirely: the <code style="font-family:var(--font-code);">webhook</code> destination streams signed CloudEvents batches to any HTTP endpoint, and the ingest API accepts usage from your own services.</p>
+          <p>vBilling is structured so any HTTP billing API can plug in. Implement the <code style="font-family:var(--font-code); background:var(--bg-lightest); padding:2px 6px; border-radius:4px; border:1px solid var(--stroke-subtle);">Destination</code> interface in a Go package in your fork of vBilling, register it, rebuild the image, and select it in <code style="font-family:var(--font-code);">adapters</code>.</p>
+          <p>Or skip Go entirely: the <code style="font-family:var(--font-code);">webhook</code> destination streams signed CloudEvents batches to any HTTP endpoint, and the ingest API accepts usage from your own services. See the <a href="custom-adapter.html">Custom Billing Adapter guide</a>.</p>
         </div>
       </div>
 
@@ -1525,21 +1525,21 @@ presentation_group_key: [tenant_cluster]</code></pre>
   <!-- ── AI Clouds (dark) ── -->
   <section id="ai-clouds" class="section-dark">
     <div class="container">
-      <div class="AI Cloud-grid">
+      <div class="ai-cloud-grid">
 
-        <div class="AI Cloud-copy">
+        <div class="ai-cloud-copy">
           <p class="section-label">For AI Clouds</p>
           <h2 class="section-title">Built for AI Clouds</h2>
-          <p class="section-body">If you run an AI cloud on Kubernetes, vBilling gives you the billing pipe, without forcing a billing backend on you.</p>
+          <p class="section-body">If you run an AI Cloud on Kubernetes, vBilling gives you the billing pipe, without forcing a billing platform on you.</p>
           <br>
-          <p class="section-body" style="font-size:16px; margin-bottom:28px;">AI Clouds give each customer a tenant cluster with dedicated GPU nodes. vBilling detects the hardware, meters node capacity by GPU SKU, and streams events into whichever billing adapter you run.</p>
+          <p class="section-body" style="font-size:16px; margin-bottom:28px;">AI Clouds give each customer an isolated tenant cluster with its own GPU nodes. vBilling detects the hardware, meters node capacity by GPU SKU, and streams events into whichever billing adapter you run.</p>
 
           <ul class="checklist">
-            <li>Shared, fractional (MIG, time-sliced) and dedicated GPUs, metered to the second</li>
+            <li>Whole GPU nodes (Private Nodes, Standalone, dedicated nodes) and fractional GPUs (MIG, time-slicing), metered to the second</li>
             <li>SKU, region and capacity-type dimensions priced in your billing platform</li>
             <li>No charges for provisioning, image pulls, or unhealthy hardware</li>
             <li>Durable ledger, backfill and reconciliation: metering held to financial-data standards</li>
-            <li>Stripe, Metronome, Lago or a webhook: keep your existing billing backend</li>
+            <li>Stripe, Metronome, Lago or a custom billing adapter: keep your existing billing platform</li>
           </ul>
 
           <div style="display:flex; gap:12px; flex-wrap:wrap;">
@@ -1557,7 +1557,7 @@ presentation_group_key: [tenant_cluster]</code></pre>
           <span class="hi">+ private nodes (8x H100)</span>
           <div class="dim">↓</div>
           vBilling auto-discovers
-          <span class="hi">detects dedicated nodes</span>
+          <span class="hi">reads its private nodes</span>
           <div class="dim">↓</div>
           Meters every 60s window, per hour:
           <span class="hi">  8 GPU-hours (H100)</span>
@@ -1613,7 +1613,7 @@ presentation_group_key: [tenant_cluster]</code></pre>
       </div>
 
       <div class="footer-bottom">
-        <span>© 2026 vCluster. All rights reserved.</span>
+        <span>© 2026 vCluster Labs. All rights reserved.</span>
         <div class="footer-legal">
           <a href="https://www.vcluster.com/legal/privacy">Privacy Policy</a>
           <a href="https://www.vcluster.com/legal/terms">Terms of Service</a>

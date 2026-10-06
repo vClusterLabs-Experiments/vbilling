@@ -5,7 +5,7 @@ set -euo pipefail
 # Sets up a complete demo environment using vind (vCluster in Docker):
 # - vind cluster as the "host" Kubernetes cluster (no kind needed!)
 # - Lago (billing engine) via docker-compose
-# - Nested vClusters inside the vind cluster
+# - Tenant clusters nested inside the vind cluster
 # - vBilling controller metering everything
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -26,8 +26,8 @@ for cmd in docker kubectl vcluster; do
     fi
 done
 
-# --- Step 1: Create vind cluster (host cluster via Docker) ---
-echo ">>> Step 1: Creating vind host cluster '$VIND_CLUSTER'..."
+# --- Step 1: Create vind cluster (control plane cluster via Docker) ---
+echo ">>> Step 1: Creating vind control plane cluster '$VIND_CLUSTER'..."
 echo "    This replaces kind - a full K8s cluster runs in Docker via vCluster."
 echo ""
 
@@ -54,7 +54,7 @@ EOF
 fi
 
 echo ""
-echo "    vind host cluster is ready!"
+echo "    vind control plane cluster is ready!"
 kubectl cluster-info 2>/dev/null || true
 kubectl get nodes 2>/dev/null || true
 echo ""
@@ -199,12 +199,12 @@ echo "    For this demo, you can set it via:"
 echo "    export LAGO_API_KEY=<your-api-key>"
 echo ""
 
-# --- Step 5: Switch to kubernetes driver and create nested vClusters ---
-echo ">>> Step 5: Creating nested vClusters inside the vind host cluster..."
-echo "    These are vClusters-inside-vCluster - billing targets for vBilling."
+# --- Step 5: Switch to kubernetes driver and create nested tenant clusters ---
+echo ">>> Step 5: Creating tenant clusters inside the vind control plane cluster..."
+echo "    These tenant clusters run inside vind: the billing targets for vBilling."
 echo ""
 
-# Switch driver back to kubernetes for creating nested vClusters
+# Switch driver back to kubernetes for creating nested tenant clusters
 vcluster use driver kubernetes 2>/dev/null || true
 
 # Team Alpha - a development team
@@ -226,14 +226,14 @@ vcluster create team-gpu \
     --connect=false 2>/dev/null || echo "    team-gpu may already exist"
 
 echo ""
-echo "    Nested vClusters created inside vind host:"
+echo "    Tenant clusters created inside the vind control plane cluster:"
 kubectl get statefulsets -A -l app=vcluster 2>/dev/null || true
 echo ""
 
 # --- Step 6: Deploy some workloads to generate metrics ---
 echo ">>> Step 6: Deploying sample workloads for billing..."
 
-# Deploy a simple workload directly in each vCluster's host namespace
+# Deploy a simple workload directly in each tenant cluster's namespace of the control plane cluster
 # so metrics-server picks it up immediately
 for ns in vcluster-team-alpha vcluster-team-beta vcluster-team-gpu; do
     kubectl create namespace "$ns" 2>/dev/null || true
@@ -277,7 +277,7 @@ echo ""
 echo " Architecture:"
 echo ""
 echo "   Docker"
-echo "   ├── vind host cluster ($VIND_CLUSTER)"
+echo "   ├── vind control plane cluster ($VIND_CLUSTER)"
 echo "   │   ├── vCluster: team-alpha  (web workloads)"
 echo "   │   ├── vCluster: team-beta   (data processing)"
 echo "   │   └── vCluster: team-gpu    (ML training)"
@@ -298,7 +298,7 @@ echo "   export LAGO_API_URL=http://localhost:3000"
 echo "   ./bin/vbilling"
 echo ""
 echo "3. Watch the magic:"
-echo "   - vBilling discovers 3 vClusters automatically"
+echo "   - vBilling discovers 3 tenant clusters automatically"
 echo "   - Creates billing customers in Lago"
 echo "   - Meters CPU, memory, storage every 60s"
 echo "   - Check Lago UI > Customers for live billing data"

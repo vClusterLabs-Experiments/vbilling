@@ -12,3 +12,11 @@ deploy/lago/lago_rsa*
 deploy/lago/.env
 deploy/lago/entrypoint.sh
 .claude/
+
+# Key files the docs tell you to create next to the chart
+stripe-*-key
+stripe-key
+stripe-webhook-secret
+metronome-token
+lago-api-key
+webhook-secret

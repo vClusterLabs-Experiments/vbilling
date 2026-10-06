@@ -4,12 +4,12 @@ Destinations: {{ include "vbilling.adapters" . }}
   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "vbilling.fullname" . }} {{ .Values.api.service.port }}
   curl -s localhost:{{ .Values.api.service.port }}/api/v1/status          # destinations, lag, last window
   curl -s localhost:{{ .Values.api.service.port }}/api/v1/usage?group_by=tenant,sku
-  curl -s localhost:{{ .Values.api.service.port }}/api/v1/reconcile       # ledger vs billing backend, previous UTC day
+  curl -s localhost:{{ .Values.api.service.port }}/api/v1/reconcile       # ledger vs billing platform, previous UTC day
   open http://localhost:{{ .Values.api.service.port }}/                   # usage dashboard
 {{- if not .Values.persistence.enabled }}
 
 WARNING: persistence is disabled. The ledger is the durable outbox for usage that
-has not reached your billing backend yet; without a volume it is lost on restart.
+has not reached your billing platform yet; without a volume it is lost on restart.
 {{- end }}
 {{- if not .Values.api.token }}
 

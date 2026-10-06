@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Dedicated and Private Nodes - vBilling Docs</title>
-  <meta name="description" content="Node capacity tracking: how vBilling bills dedicated nodes and vCluster Private Nodes, Auto Nodes and Standalone for their full capacity, by SKU, without double billing.">
+  <title>Lago - vBilling Docs</title>
+  <meta name="description" content="Open source usage-based billing with Lago: run Lago, connect vBilling, price tenant clusters with charge filters, and run the whole pipeline on a laptop with vind.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Roboto+Mono:wght@500&display=swap" rel="stylesheet">
@@ -252,7 +252,7 @@
         <a href="getting-started.html">Getting Started</a>
         <a href="configuration.html">Configuration</a>
         <a href="metrics.html">Metrics Reference</a>
-        <a href="private-nodes.html" class="active">Dedicated and Private Nodes</a>
+        <a href="private-nodes.html">Dedicated and Private Nodes</a>
         <a href="example-gke.html">Example: GKE with GPUs</a>
         <a href="troubleshooting.html">Troubleshooting</a>
       </div>
@@ -260,7 +260,7 @@
         <div class="sidebar-label">Billing Adapters</div>
         <a href="stripe.html">Stripe</a>
         <a href="metronome.html">Metronome</a>
-        <a href="lago.html">Lago</a>
+        <a href="lago.html" class="active">Lago</a>
         <a href="custom-adapter.html">Custom Billing Adapter</a>
       </div>
       <div class="sidebar-section">
@@ -274,103 +274,138 @@
     </nav>
 
     <main class="content">
-      <h1>Dedicated and Private Node Billing</h1>
-      <p class="subtitle">How vBilling bills nodes that belong to one tenant cluster for their full capacity, whether they sit in the control plane cluster (dedicated nodes) or join the tenant cluster itself (vCluster Private Nodes, Auto Nodes, Standalone), without ever billing the workloads on them twice.</p>
+      <h1>Lago</h1>
+      <p class="subtitle">Usage-based billing on open source from end to end. Lago rates and invoices, vBilling meters your tenant clusters and sends Lago the events, and both can run on a laptop next to your tenant clusters.</p>
 
-      <h2 id="what">What dedicated nodes are</h2>
-      <p>A dedicated node is a physical server, VM or bare-metal machine assigned to one tenant cluster. AI Clouds typically sell them by SKU (for example <code>bm.gpu.h100.8</code>), billing the whole machine regardless of utilization. Shared nodes, by contrast, are billed by what each pod allocates.</p>
-      <div class="callout callout-info">
-        <div class="callout-icon">i</div>
-        <div>Dedicated nodes are control plane cluster nodes assigned through labels. With vCluster <strong>Private Nodes</strong>, nodes join the tenant cluster directly and the control plane cluster never sees them or their pods; see <a href="#private">Private Nodes, Auto Nodes and Standalone</a>.</div>
-      </div>
-
-      <h2 id="detection">How vBilling detects them</h2>
-      <p>A node is dedicated to a tenant cluster when any of these labels match. The namespace is the tenant cluster's control plane cluster namespace; the name is the tenant cluster's name.</p>
+      <h2 id="how-it-works">What vBilling sets up</h2>
       <div class="config-table-wrap">
         <table class="config-table">
-          <thead><tr><th>Label</th><th>Matches</th></tr></thead>
+          <thead><tr><th>In Lago</th><th>Created by vBilling</th></tr></thead>
           <tbody>
-            <tr><td><code>vbilling.vcluster.com/tenant-cluster</code></td><td>The tenant cluster ID (<code>vcluster-&lt;namespace&gt;-&lt;name&gt;</code>) or name. Recommended.</td></tr>
-            <tr><td><code>vcluster.loft.sh/managed-by</code></td><td>Namespace or name (also the name with a <code>vcluster-</code> or <code>vc-</code> namespace prefix stripped)</td></tr>
-            <tr><td><code>vcluster.loft.sh/cluster</code></td><td>As above</td></tr>
-            <tr><td><code>VCLUSTER_NODE_LABEL</code> pattern</td><td>Any <code>key=value</code> where <code>%s</code> is replaced with the candidate names, e.g. <code>tenant=%s</code></td></tr>
+            <tr><td>Billable metrics</td><td>One per vBilling metric (<code>vcluster_gpu_hours</code>, <code>vcluster_cpu_core_hours</code>, ...), summing a field named after it (<code>gpu_hours</code>, <code>cpu_core_hours</code>, ...)</td></tr>
+            <tr><td>Plan</td><td><code>vcluster-standard</code> (<code>billing.defaultPlanCode</code>) with one charge per metric at $0, for you to price</td></tr>
+            <tr><td>Customers</td><td>One per tenant: <code>external_id</code> is the tenant ID, with its name, email, currency and metadata</td></tr>
+            <tr><td>Subscriptions</td><td><code>sub-&lt;tenant ID&gt;</code> on the tenant's plan (<code>vbilling.vcluster.com/plan</code>, or the default plan)</td></tr>
+            <tr><td>Events</td><td>Batches of up to 100. <code>transaction_id</code> is the vBilling event ID, so a resent event is never counted twice.</td></tr>
           </tbody>
         </table>
       </div>
-      <p>Taint dedicated nodes (for example <code>dedicated=team-b:NoSchedule</code>) and give the tenant's workloads a matching toleration, so other tenants cannot land on them.</p>
-      <div class="code-block"><code><span class="cmd">kubectl</span> label node bm-h100-01 vbilling.vcluster.com/tenant-cluster=vcluster-team-b-team-b
-<span class="cmd">kubectl</span> label node bm-h100-01 vbilling.vcluster.com/sku=bm.gpu.h100.8 vbilling.vcluster.com/capacity-type=reserved
-<span class="cmd">kubectl</span> taint node bm-h100-01 dedicated=team-b:NoSchedule</code></div>
+      <p>Prices, invoices, taxes and the payment provider stay in Lago.</p>
 
-      <h2 id="billed">What gets billed</h2>
-      <p>Each dedicated node produces its own events every window (<code>resource_id</code> = node name):</p>
+      <h2 id="run-lago">Run Lago locally</h2>
+      <p>The repository ships a Docker Compose file for Lago 1.17, with the UI on <code>:8081</code> and the API on <code>:3000</code> (vBilling's own dashboard uses <code>:8080</code>). Lago signs its tokens with an RSA key: generate one, and never commit it. From the repository root:</p>
+      <div class="code-block"><code><span class="cmd">git</span> clone https://github.com/vClusterLabs-Experiments/vbilling.git &amp;&amp; <span class="cmd">cd</span> vbilling
+<span class="cmd">openssl</span> genrsa 2048 &gt; deploy/lago/lago_rsa.key
+<span class="cmd">echo</span> <span class="string">"LAGO_RSA_PRIVATE_KEY=$(base64 -i deploy/lago/lago_rsa.key | tr -d '\n')"</span> &gt; deploy/lago/.env
+<span class="cmd">docker</span> compose <span class="flag">-f</span> deploy/lago/docker-compose.yml <span class="flag">--env-file</span> deploy/lago/.env up <span class="flag">-d</span></code></div>
+      <p>Open <code>http://localhost:8081</code> and sign up to create the organization. Then copy the API key from <strong>Developers</strong>, <strong>API keys</strong> into a file (paste it, press Enter, then Ctrl-D):</p>
+      <div class="code-block"><code><span class="cmd">cat</span> &gt; ./lago-api-key</code></div>
+      <p>For a shared or production setup, run Lago in Kubernetes with its Helm chart (see the <a href="https://www.getlago.com/docs" target="_blank">Lago docs</a>) and point <code>lago.apiURL</code> at its API Service.</p>
+
+      <h2 id="install">Install vBilling with Lago</h2>
+      <div class="code-block"><code><span class="cmd">kubectl</span> create namespace vbilling-system
+<span class="cmd">kubectl</span> <span class="flag">-n</span> vbilling-system create secret generic vbilling-lago <span class="flag">--from-file</span>=api-key=./lago-api-key
+<span class="cmd">helm</span> upgrade <span class="flag">--install</span> vbilling deploy/helm/vbilling <span class="flag">-n</span> vbilling-system \
+  <span class="flag">--set</span> adapters=<span class="string">'{lago}'</span> \
+  <span class="flag">--set</span> lago.apiURL=http://lago-api.lago-system.svc.cluster.local:3000 \
+  <span class="flag">--set</span> lago.existingSecret=vbilling-lago</code></div>
       <div class="config-table-wrap">
         <table class="config-table">
-          <thead><tr><th>Metric</th><th>Quantity</th><th>Dimensions</th></tr></thead>
+          <thead><tr><th>Helm value</th><th>Environment variable</th><th>Default</th><th>Effect</th></tr></thead>
           <tbody>
-            <tr><td><code>vcluster_private_node_hours</code></td><td>Hours the node was healthy</td><td><code>sku</code> (SKU label, instance type, or <code>&lt;n&gt;x&lt;GPU model&gt;</code>), <code>capacity_type</code>, <code>instance_type</code>, <code>node</code></td></tr>
-            <tr><td><code>vcluster_gpu_hours</code></td><td>GPU capacity &times; hours</td><td><code>billing_mode=dedicated_node</code>, <code>sku</code>, <code>gpu_type</code></td></tr>
-            <tr><td><code>vcluster_cpu_core_hours</code></td><td>CPU capacity &times; hours</td><td><code>billing_mode=dedicated_node</code></td></tr>
-            <tr><td><code>vcluster_memory_gb_hours</code></td><td>Memory capacity (GiB) &times; hours</td><td><code>billing_mode=dedicated_node</code></td></tr>
+            <tr><td><code>lago.apiURL</code></td><td><code>LAGO_API_URL</code></td><td><code>http://lago-api.lago-system.svc.cluster.local:3000</code></td><td>Lago API, reachable from the vBilling pod. Use <code>http://host.docker.internal:3000</code> for Lago in Docker on the same machine as a vind control plane cluster.</td></tr>
+            <tr><td><code>lago.existingSecret</code></td><td></td><td></td><td>Secret with the key <code>api-key</code>. Use it instead of <code>lago.apiKey</code>.</td></tr>
+            <tr><td><code>lago.apiKey</code></td><td><code>LAGO_API_KEY</code></td><td></td><td>Lago API key.</td></tr>
+            <tr><td><code>billing.defaultPlanCode</code></td><td><code>DEFAULT_PLAN_CODE</code></td><td><code>vcluster-standard</code></td><td>Plan that vBilling creates, and that tenants without a <code>plan</code> annotation subscribe to.</td></tr>
+            <tr><td><code>billing.currency</code></td><td><code>BILLING_CURRENCY</code></td><td><code>USD</code></td><td>Currency of the plan and of tenants without a <code>currency</code> annotation.</td></tr>
           </tbody>
         </table>
       </div>
-      <p>Price either the node-hours by SKU, or the capacity components by <code>billing_mode</code>, whichever matches how you sell. Set the other to zero.</p>
+      <p>Check that vBilling bootstrapped Lago and subscribed the first tenants:</p>
+      <div class="code-block"><code><span class="cmd">kubectl</span> <span class="flag">-n</span> vbilling-system logs statefulset/vbilling | grep <span class="flag">-E</span> <span class="string">'\[(bootstrap|lago)\]'</span>
+<span class="output">[bootstrap] created metric "vcluster_gpu_hours" (id=...)
+[bootstrap] created plan "vcluster-standard" (id=...) with ... charges
+[lago] subscribed tenant vcluster-team-a-team-a to plan vcluster-standard</span>
+<span class="cmd">curl</span> <span class="flag">-s</span> http://localhost:3000/api/v1/customers <span class="flag">-H</span> <span class="string">"Authorization: Bearer $(cat ./lago-api-key)"</span> | jq <span class="string">'.customers[].external_id'</span></code></div>
 
-      <h2 id="no-double-billing">No double billing</h2>
-      <p>Pods that run on the tenant's own dedicated nodes are not metered again as shared usage: the node allocation already covers them. (v0.1 billed both the pods and the node.) A pod from a different tenant that lands on an untainted dedicated node is billed to its own tenant as shared usage.</p>
+      <h2 id="pricing">Configure pricing</h2>
+      <p>Every charge on <code>vcluster-standard</code> starts at $0, so invoices stay at $0.00 until you price them. In the Lago UI, open <strong>Plans</strong>, <strong>vCluster Standard</strong>, and set a price per unit on each charge. vBilling sends every dimension as an event property, so <strong>charge filters</strong> can price one metric several ways:</p>
+      <ul>
+        <li><code>sku</code> (or <code>gpu_type</code>): H100 hours differently from L40S hours</li>
+        <li><code>capacity_type</code>: a discount for <code>spot</code> and <code>preemptible</code>, or a <code>reserved</code> rate</li>
+        <li><code>region</code>, <code>billing_mode</code>, <code>tenant_class</code> and <code>tenant_cluster</code></li>
+      </ul>
+      <p>To price tenants differently, create more plans and set <code>vbilling.vcluster.com/plan</code> on their tenant clusters. <a href="configuration.html#lago-pricing">Lago pricing</a> lists the charges to configure, with example price lists.</p>
 
-      <h2 id="fairness">Downtime</h2>
-      <p>If a dedicated node is NotReady, or carries a taint listed in <code>UNHEALTHY_NODE_TAINTS</code>, its node-hours stop and its GPUs are recorded as <code>vcluster_gpu_downtime_hours</code> (informational, never invoiced), from the moment the condition or taint appeared.</p>
+      <h2 id="events">Events in Lago</h2>
+      <p>Each event carries the quantity under the metric's field name, which the billable metric sums, and every dimension as a property (trimmed here):</p>
+      <div class="code-block"><code>{
+  "transaction_id": "vb1_3f9c...",
+  "external_subscription_id": "sub-vcluster-team-a-team-a",
+  "code": "vcluster_gpu_hours",
+  "timestamp": 1791216000,
+  "properties": {
+    "gpu_hours": 0.25,
+    "sku": "NVIDIA-H100-80GB-HBM3",
+    "capacity_type": "on-demand",
+    "billing_mode": "shared",
+    "region": "us-east-1",
+    "tenant_cluster": "vcluster-team-a-team-a",
+    "vcluster": "vcluster-team-a-team-a"
+  }
+}</code></div>
+      <p>The timestamp is the window start. <code>vcluster</code> repeats <code>tenant_cluster</code> so that charge filters written for v0.1 keep working.</p>
 
-      <h2 id="private">Private Nodes, Auto Nodes and Standalone</h2>
-      <p>With Private Nodes, vCluster syncs nothing to the control plane cluster: the nodes, their pods and their volumes exist only in the tenant cluster. vBilling meters these tenant clusters through their own API. Every node the tenant cluster's API reports that the control plane cluster does not have (and that is not one of vCluster's placeholder nodes, labeled <code>vcluster.loft.sh/fake-node</code>) is a private node, billed like a dedicated node with <code>billing_mode=private_node</code>. The tenant cluster's volumes and load balancers are billed as well. Shared tenant clusters are never billed twice, even when vBilling can read their API.</p>
-      <p>vBilling reads one Secret per tenant cluster, <code>vbilling-kubeconfig</code> in its namespace, and its RBAC is pinned to that name. Let vCluster write it with a read-only service account:</p>
-      <div class="code-block"><code>exportKubeConfig:
-  additionalSecrets:
-    - name: vbilling-kubeconfig
-      serviceAccount:
-        name: vbilling-reader
-        namespace: kube-system
-        clusterRole: vbilling-reader
-experimental:
-  deploy:
-    vcluster:
-      manifests: |-
-        apiVersion: rbac.authorization.k8s.io/v1
-        kind: ClusterRole
-        metadata:
-          name: vbilling-reader
-        rules:
-          - apiGroups: [""]
-            resources: [nodes, pods, persistentvolumeclaims, services]
-            verbs: [get, list, watch]
-          - apiGroups: [resource.k8s.io]
-            resources: [resourceclaims, resourceslices]
-            verbs: [get, list]
-          - apiGroups: [metrics.k8s.io]
-            resources: [pods]
-            verbs: [get, list]</code></div>
-      <p>vCluster writes kubeconfigs for <code>localhost</code>; vBilling connects to the tenant cluster's Service and verifies TLS against <code>&lt;name&gt;.&lt;namespace&gt;</code>. Tenant clusters outside the control plane cluster (vCluster Standalone, or any other cluster) are listed in <code>TENANT_CLUSTERS_FILE</code> with their own kubeconfig.</p>
-      <div class="config-table-wrap">
-        <table class="config-table">
-          <thead><tr><th>Setting</th><th>Effect</th></tr></thead>
-          <tbody>
-            <tr><td><code>PRIVATE_NODE_BILLING=node</code> (default)</td><td>Each private node is billed whole: node-hours, whole GPUs, CPU and memory capacity.</td></tr>
-            <tr><td><code>PRIVATE_NODE_BILLING=usage</code></td><td>The pods on private nodes are billed instead, like shared usage (namespaces in <code>TENANT_EXCLUDE_NAMESPACES</code>, default <code>kube-system</code>, are skipped).</td></tr>
-            <tr><td><code>vbilling.vcluster.com/billable=false</code> node label</td><td>Exempts a node, for example hardware the tenant owns. Works for dedicated nodes too.</td></tr>
-            <tr><td><code>TENANT_ADMIN_FALLBACK=true</code></td><td>Also accepts the tenant cluster's admin kubeconfig (<code>vc-&lt;name&gt;</code>). Requires read access to Secrets; prefer the read-only export.</td></tr>
-          </tbody>
-        </table>
-      </div>
-      <p><strong>Outages.</strong> If a tenant cluster's API cannot be read, everything else is still metered and the gap is recorded under <code>DATA_DIR</code>. As soon as the API answers, exactly the missed windows are metered and appended as late events, deduplicated by ID, up to <code>MAX_BACKFILL</code>.</p>
-      <p><strong>Scale-down.</strong> Nodes deleted between two windows (Auto Nodes scaling down, a machine removed) are billed until the second they were deleted. A deletion noticed only after a watch reconnects is dated to the last time vBilling saw the node, never later.</p>
+      <h2 id="offboarding">Offboarding</h2>
+      <p>When a tenant has been gone for <code>billing.offboardGrace</code> (default 1h), vBilling terminates its subscription and Lago issues the final invoice.</p>
 
-      <h2 id="whole-gpus">Whole GPUs, however they are carved</h2>
-      <p>Dedicated and private nodes are billed for physical GPUs. MIG slices (mixed or single strategy, GKE GPU partitions) and time-slicing replicas (NVIDIA or GKE time-sharing) are converted back: a node exposing 56 MIG slices of 1g.10gb, or 32 time-sliced devices with 4 replicas, bills 8 GPUs. GPUs offered only through DRA ResourceSlices count too.</p>
+      <h2 id="limits">Good to know</h2>
+      <ul>
+        <li><code>GET /api/v1/reconcile</code> covers Stripe and Metronome. For Lago, compare the ledger (<code>GET /api/v1/usage</code>) with Lago's current usage for the subscription.</li>
+        <li>Billing states and enforcement come from Stripe and Metronome webhooks, and are only enabled when one of their webhook secrets is set. A Lago-only setup has no billing states.</li>
+        <li>Lago also receives <code>vcluster_gpu_utilization</code>, an informational metric that v0.1 created in Lago and existing plans may still reference. Leave it unpriced.</li>
+      </ul>
 
-      <h2 id="gpu-detection">GPU model detection</h2>
-      <p>The first label present wins: <code>nvidia.com/gpu.product</code>, <code>nvidia.com/gpu.machine</code>, <code>amd.com/gpu.product-name</code>, <code>cloud.google.com/gke-accelerator</code>, <code>k8s.amazonaws.com/accelerator</code>, <code>accelerator</code>. Spaces are replaced with dashes (<code>NVIDIA H100 80GB HBM3</code> becomes <code>NVIDIA-H100-80GB-HBM3</code>). The <code>-SHARED</code> and <code>-MIG-&lt;profile&gt;</code> suffixes GPU Feature Discovery adds are removed, so the SKU is always the base GPU; DRA devices use their <code>productName</code> attribute.</p>
+      <h2 id="laptop">Run it all on a laptop with vind</h2>
+      <p>vind runs vCluster in Docker, so a control plane cluster, three tenant clusters, vBilling and Lago fit on one machine. Start Lago as above, then, from the repository root:</p>
+      <div class="code-block"><code><span class="comment"># a control plane cluster in Docker, with metrics-server</span>
+<span class="cmd">vcluster</span> use driver docker
+<span class="cmd">vcluster</span> create vbilling-host <span class="flag">--connect=true</span>
+<span class="cmd">kubectl</span> apply <span class="flag">-f</span> https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+<span class="cmd">kubectl</span> patch deployment metrics-server <span class="flag">-n</span> kube-system <span class="flag">--type=json</span> \
+  <span class="flag">-p=</span><span class="string">'[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'</span>
+
+<span class="comment"># three tenant clusters inside it</span>
+<span class="cmd">vcluster</span> use driver helm
+<span class="cmd">vcluster</span> create team-alpha <span class="flag">--namespace</span> vcluster-team-alpha <span class="flag">--connect=false</span>
+<span class="cmd">vcluster</span> create team-beta <span class="flag">--namespace</span> vcluster-team-beta <span class="flag">--connect=false</span>
+<span class="cmd">vcluster</span> create team-gpu <span class="flag">--namespace</span> vcluster-team-gpu <span class="flag">--connect=false</span>
+
+<span class="comment"># vBilling, sending to Lago on the host</span>
+<span class="cmd">kubectl</span> create namespace vbilling-system
+<span class="cmd">kubectl</span> <span class="flag">-n</span> vbilling-system create secret generic vbilling-lago <span class="flag">--from-file</span>=api-key=./lago-api-key
+<span class="cmd">helm</span> upgrade <span class="flag">--install</span> vbilling deploy/helm/vbilling <span class="flag">-n</span> vbilling-system \
+  <span class="flag">--set</span> adapters=<span class="string">'{lago}'</span> \
+  <span class="flag">--set</span> lago.apiURL=http://host.docker.internal:3000 \
+  <span class="flag">--set</span> lago.existingSecret=vbilling-lago</code></div>
+      <p>Within a minute or two the log shows a window line for the three tenant clusters and a subscription per tenant:</p>
+      <div class="code-block"><code><span class="cmd">kubectl</span> <span class="flag">-n</span> vbilling-system logs statefulset/vbilling
+<span class="output">[controller] starting (adapters=[lago], window=1m0s, reconcile=30s, region=default)
+API listening on :8080
+[controller] window ...: ... events for 3 tenant cluster(s) (...)
+[lago] subscribed tenant vcluster-vcluster-team-alpha-team-alpha to plan vcluster-standard</span></code></div>
+      <p>Open the dashboard with <code>kubectl -n vbilling-system port-forward svc/vbilling 8080</code> and <code>http://localhost:8080/</code>, and the customers in Lago at <code>http://localhost:8081</code>. To clean up:</p>
+      <div class="code-block"><code><span class="cmd">vcluster</span> use driver docker
+<span class="cmd">vcluster</span> delete vbilling-host
+<span class="cmd">docker</span> compose <span class="flag">-f</span> deploy/lago/docker-compose.yml down <span class="flag">-v</span></code></div>
+
+      <h2 id="troubleshooting">Troubleshooting</h2>
+      <ul>
+        <li><a href="troubleshooting.html#lago-connection-failed">Lago connection failed</a></li>
+        <li><a href="troubleshooting.html#zero-dollar-invoices">Events sent but $0.00 in Lago</a></li>
+        <li><a href="troubleshooting.html#duplicate-subscriptions">Duplicate subscriptions</a></li>
+        <li><a href="troubleshooting.html#cors-issues">CORS errors with the Lago UI</a></li>
+      </ul>
     </main>
   </div>
 
