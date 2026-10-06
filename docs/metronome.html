@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Metronome - vBilling Docs</title>
+  <meta name="description" content="Ship vBilling usage to Metronome: customers, billable metrics and contracts created for you, pricing on dimensions, Stripe for payments, reconciliation and billing-state webhooks.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Roboto+Mono:wght@500&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+      --primary: #FF6600; --primary-dark: #CC5100; --primary-darker: #993D00;
+      --primary-light: #FFF5EB; --primary-light-2: #FFE0CC; --accent: #FF8433;
+      --text-dark: #050B24; --text-gray: #505466; --text-light: #828592;
+      --white: #ffffff; --bg-code: #050B24; --border: #E6E7E9;
+      --shadow-sm: 0 1px 2px rgba(0,0,0,0.05);
+      --shadow-md: 0 4px 6px -1px rgba(0,0,0,0.07), 0 2px 4px -2px rgba(0,0,0,0.05);
+      --shadow-lg: 0 10px 15px -3px rgba(0,0,0,0.08), 0 4px 6px -4px rgba(0,0,0,0.04);
+      --radius: 12px; --radius-lg: 16px; --sidebar-width: 260px;
+    }
+
+    html { scroll-behavior: smooth; scroll-padding-top: 80px; }
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      color: var(--text-dark); line-height: 1.6; background: var(--white);
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .header {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 1000;
+      background: rgba(255,255,255,0.92); backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px); border-bottom: 1px solid var(--border);
+    }
+    .header.scrolled { box-shadow: var(--shadow-md); }
+    .header-inner {
+      max-width: 1400px; margin: 0 auto; padding: 0 24px;
+      display: flex; align-items: center; justify-content: space-between; height: 64px;
+    }
+    .header-logo {
+      display: flex; align-items: center; gap: 10px;
+      text-decoration: none; color: var(--text-dark);
+    }
+    .header-logo-icon {
+      width: 32px; height: 32px; border-radius: 8px;
+      background: linear-gradient(135deg, var(--primary-dark), var(--primary));
+      display: flex; align-items: center; justify-content: center;
+      color: var(--white); font-weight: 700; font-size: 0.9rem;
+    }
+    .header-logo-text { font-size: 1.15rem; font-weight: 700; letter-spacing: -0.5px; }
+    .header-logo-text span { color: var(--primary-dark); }
+    .header-nav { display: flex; align-items: center; gap: 20px; }
+    .header-nav a {
+      text-decoration: none; color: var(--text-gray); font-size: 0.88rem;
+      font-weight: 500; transition: color 0.2s;
+    }
+    .header-nav a:hover { color: var(--primary-dark); }
+    .header-nav .gh-link {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: var(--bg-code); color: var(--white); padding: 6px 14px;
+      border-radius: 8px; font-size: 0.82rem; font-weight: 600; transition: opacity 0.2s;
+    }
+    .header-nav .gh-link:hover { opacity: 0.85; color: var(--white); }
+
+    .docs-layout { display: flex; margin-top: 64px; min-height: calc(100vh - 64px); }
+
+    .sidebar {
+      width: var(--sidebar-width); flex-shrink: 0;
+      border-right: 1px solid var(--border); background: var(--primary-light);
+      padding: 32px 0; position: fixed; top: 64px; bottom: 0; overflow-y: auto;
+    }
+    .sidebar-section { margin-bottom: 28px; }
+    .sidebar-label {
+      padding: 0 24px; font-size: 0.72rem; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 1px; color: var(--primary-darker);
+      margin-bottom: 8px;
+    }
+    .sidebar a {
+      display: block; padding: 7px 24px; text-decoration: none;
+      font-size: 0.88rem; color: var(--text-gray); font-weight: 500;
+      transition: all 0.15s; border-left: 3px solid transparent;
+    }
+    .sidebar a:hover { color: var(--primary-dark); background: var(--primary-light-2); }
+    .sidebar a.active {
+      color: var(--primary-dark); background: var(--primary-light-2);
+      border-left-color: var(--primary); font-weight: 600;
+    }
+    .sidebar-back {
+      display: flex; align-items: center; gap: 6px; margin: 0 24px 24px;
+      padding: 8px 12px; border-radius: 8px; text-decoration: none;
+      font-size: 0.85rem; color: var(--text-light); font-weight: 500;
+      border: 1px solid var(--border); transition: all 0.2s;
+    }
+    .sidebar-back:hover { border-color: var(--primary); color: var(--primary-dark); }
+
+    .content {
+      flex: 1; min-width: 0; margin-left: var(--sidebar-width);
+      padding: 48px 64px 80px; max-width: 900px;
+    }
+    .content h1 {
+      font-size: 2.2rem; font-weight: 800; letter-spacing: -1px;
+      margin-bottom: 12px; color: var(--text-dark);
+    }
+    .content .subtitle {
+      font-size: 1.1rem; color: var(--text-gray); line-height: 1.7;
+      margin-bottom: 40px; max-width: 640px;
+    }
+    .content h2 {
+      font-size: 1.5rem; font-weight: 700; letter-spacing: -0.5px;
+      margin: 48px 0 16px; color: var(--text-dark);
+      padding-bottom: 8px; border-bottom: 2px solid var(--primary-light-2);
+    }
+    .content h3 {
+      font-size: 1.15rem; font-weight: 700; margin: 32px 0 12px; color: var(--text-dark);
+    }
+    .content h4 {
+      font-size: 0.95rem; font-weight: 700; margin: 20px 0 8px; color: var(--text-dark);
+    }
+    .content p {
+      font-size: 0.95rem; color: var(--text-gray); line-height: 1.7; margin-bottom: 16px;
+    }
+    .content ul, .content ol {
+      margin: 0 0 16px 24px; color: var(--text-gray); font-size: 0.95rem;
+    }
+    .content li { margin-bottom: 6px; line-height: 1.6; }
+    .content code {
+      background: var(--primary-light-2); padding: 2px 7px; border-radius: 4px;
+      font-family: 'Roboto Mono', 'SF Mono', 'Fira Code', monospace;
+      font-size: 0.85rem; color: var(--primary-darker); overflow-wrap: anywhere;
+    }
+    .content a { color: var(--primary-dark); text-decoration: none; font-weight: 500; }
+    .content a:hover { text-decoration: underline; }
+
+    .code-block {
+      background: var(--bg-code); border-radius: var(--radius);
+      padding: 20px 24px; overflow-x: auto; margin-bottom: 20px; position: relative;
+    }
+    .code-block code {
+      color: #e2e8f0; background: none; padding: 0;
+      font-family: 'Roboto Mono', 'SF Mono', 'Fira Code', monospace;
+      font-size: 0.84rem; line-height: 1.7; white-space: pre;
+    }
+    .code-block .comment { color: #64748b; }
+    .code-block .cmd { color: #FF8433; }
+    .code-block .flag { color: #a5b4fc; }
+    .code-block .string { color: #86efac; }
+    .code-block .output { color: #94a3b8; }
+
+    .callout {
+      padding: 16px 20px; border-radius: var(--radius); margin-bottom: 20px;
+      font-size: 0.9rem; line-height: 1.6; display: flex; gap: 12px;
+    }
+    .callout-icon { flex-shrink: 0; font-size: 1.1rem; margin-top: 1px; }
+    .callout-info { background: #eff6ff; border: 1px solid #bfdbfe; color: #1e40af; }
+    .callout-warn { background: var(--primary-light); border: 1px solid var(--primary-light-2); color: var(--primary-darker); }
+    .callout-success { background: #f0fdf4; border: 1px solid #bbf7d0; color: #166534; }
+
+    /* ── Info boxes ── */
+    .info-grid {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px;
+    }
+    .info-box {
+      background: var(--primary-light); border: 1px solid var(--primary-light-2);
+      border-radius: var(--radius); padding: 20px;
+    }
+    .info-box h4 {
+      margin: 0 0 8px; font-size: 0.9rem; color: var(--primary-darker);
+    }
+    .info-box p {
+      margin: 0; font-size: 0.88rem; color: var(--text-gray);
+    }
+
+    /* ── Flow diagram ── */
+    .flow-diagram {
+      background: var(--bg-code); border-radius: var(--radius-lg);
+      padding: 28px 32px; margin-bottom: 24px; overflow-x: auto;
+    }
+    .flow-diagram pre {
+      color: #e2e8f0; font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 0.82rem; line-height: 1.8; margin: 0; white-space: pre;
+    }
+    .flow-diagram .flow-arrow { color: var(--primary); }
+    .flow-diagram .flow-highlight { color: #FF8433; }
+    .flow-diagram .flow-dim { color: #64748b; }
+
+    .config-table-wrap {
+      overflow-x: auto; border-radius: var(--radius); border: 1px solid var(--border);
+      box-shadow: var(--shadow-sm); margin-bottom: 24px;
+    }
+    .config-table {
+      width: 100%; border-collapse: collapse; font-size: 0.88rem;
+    }
+    .config-table thead { background: var(--primary-light); }
+    .config-table th {
+      padding: 12px 16px; text-align: left; font-weight: 700;
+      color: var(--primary-darker); font-size: 0.78rem;
+      text-transform: uppercase; letter-spacing: 0.5px;
+      border-bottom: 2px solid var(--primary-light-2);
+    }
+    .config-table td {
+      padding: 10px 16px; border-bottom: 1px solid var(--border);
+      color: var(--text-gray); vertical-align: top;
+    }
+    .config-table tr:last-child td { border-bottom: none; }
+    .config-table tr:hover td { background: var(--primary-light); }
+
+    .mobile-sidebar-toggle {
+      display: none; position: fixed; bottom: 24px; right: 24px; z-index: 999;
+      width: 48px; height: 48px; border-radius: 50%;
+      background: linear-gradient(135deg, var(--primary-dark), var(--primary));
+      color: var(--white); border: none; font-size: 1.3rem; cursor: pointer;
+      box-shadow: var(--shadow-lg);
+    }
+
+    @media (max-width: 900px) {
+      .sidebar {
+        transform: translateX(-100%); transition: transform 0.3s ease;
+        z-index: 900; width: 280px;
+      }
+      .sidebar.open { transform: translateX(0); }
+      .content { margin-left: 0; padding: 32px 24px 80px; }
+      .mobile-sidebar-toggle { display: flex; align-items: center; justify-content: center; }
+      .content h1 { font-size: 1.7rem; }
+      .content h2 { font-size: 1.3rem; }
+      .info-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+  <header class="header" id="header">
+    <div class="header-inner">
+      <a href="index.html" class="header-logo">
+        <svg width="28" height="28" viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0"><path d="M4 7L14 21L24 7" stroke="#FF6600" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <div class="header-logo-text">v<span>Billing</span> Docs</div>
+      </a>
+      <nav class="header-nav">
+        <a href="index.html">Home</a>
+        <a href="getting-started.html">Guide</a>
+        <a href="https://github.com/vClusterLabs-Experiments/vbilling" class="gh-link" target="_blank">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <div class="docs-layout">
+    <nav class="sidebar" id="sidebar">
+      <a href="index.html" class="sidebar-back">&#8592; Back to main site</a>
+      <div class="sidebar-section">
+        <div class="sidebar-label">Documentation</div>
+        <a href="getting-started.html">Getting Started</a>
+        <a href="configuration.html">Configuration</a>
+        <a href="metrics.html">Metrics Reference</a>
+        <a href="private-nodes.html">Dedicated and Private Nodes</a>
+        <a href="example-gke.html">Example: GKE with GPUs</a>
+        <a href="troubleshooting.html">Troubleshooting</a>
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-label">Billing Adapters</div>
+        <a href="stripe.html">Stripe</a>
+        <a href="metronome.html" class="active">Metronome</a>
+        <a href="lago.html">Lago</a>
+        <a href="custom-adapter.html">Custom Billing Adapter</a>
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-label">Resources</div>
+        <a href="https://github.com/vClusterLabs-Experiments/vbilling" target="_blank">GitHub Repository</a>
+        <a href="https://www.vcluster.com/docs" target="_blank">vCluster Docs</a>
+        <a href="https://docs.stripe.com/billing/subscriptions/usage-based" target="_blank">Stripe Billing Docs</a>
+        <a href="https://docs.metronome.com/" target="_blank">Metronome Docs</a>
+        <a href="https://www.getlago.com/docs" target="_blank">Lago Docs</a>
+      </div>
+    </nav>
+
+    <main class="content">
+      <h1>Metronome</h1>
+      <p class="subtitle">The Metronome billing adapter ships vBilling usage to Metronome for rating and invoicing. vBilling creates the customers, billable metrics and contracts; your rate cards set the prices. With the Stripe link on, Stripe collects payment, invoices and tax.</p>
+
+      <div class="callout callout-warn">
+        <div class="callout-icon">!</div>
+        <div>The adapter's tests validate every request body against Metronome's published OpenAPI schemas and check webhook verification against Metronome's documented test vector. They do not run against a live Metronome account, so run vBilling against a Metronome sandbox before you invoice from it.</div>
+      </div>
+
+      <h2 id="when">When to choose Metronome</h2>
+      <p>Both billing platforms receive the same usage. They differ in where pricing lives.</p>
+      <div class="info-grid">
+        <div class="info-box">
+          <h4>Stripe Billing Meters</h4>
+          <p>One meter per metric, split per SKU, with a metered price on each. A good fit for a pay-as-you-go price list. See <a href="stripe.html">Stripe</a>.</p>
+        </div>
+        <div class="info-box">
+          <h4>Metronome</h4>
+          <p>One billable metric per metric, priced on dimensions such as region, SKU and capacity type. Contracts add commits, credits and rate cards in the currency you invoice in.</p>
+        </div>
+      </div>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead><tr><th>Mode</th><th>Settings</th><th>Who does what</th></tr></thead>
+          <tbody>
+            <tr><td>Metronome</td><td><code>adapters: [metronome]</code></td><td>Metronome rates usage and produces invoices.</td></tr>
+            <tr><td>Metronome + Stripe</td><td><code>adapters: [metronome]</code><br><code>metronome.stripeLink: true</code></td><td>Metronome rates usage. vBilling creates each tenant's Stripe customer and links it, so Stripe collects payment, invoices and tax. The <code>stripe</code> adapter is not needed.</td></tr>
+            <tr><td>Plus a data feed</td><td><code>adapters: [metronome, webhook]</code></td><td>The same events also stream as signed CloudEvents to your data platform. Each destination has its own cursor, so one outage never blocks the other.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h2 id="install">Install</h2>
+      <p>You need a Metronome API token. For Metronome + Stripe, also connect your Stripe account in Metronome and give vBilling a key for the same Stripe account: the customer IDs it links must exist there. Keep both in Secrets; values passed with <code>--set</code> are stored in the Helm release.</p>
+      <div class="code-block"><code><span class="cmd">kubectl</span> create namespace vbilling-system
+<span class="cmd">kubectl</span> <span class="flag">-n</span> vbilling-system create secret generic vbilling-metronome <span class="flag">--from-file</span>=api-token=./metronome-token
+<span class="cmd">helm</span> upgrade <span class="flag">--install</span> vbilling deploy/helm/vbilling <span class="flag">-n</span> vbilling-system \
+  <span class="flag">--set</span> adapters=<span class="string">'{metronome}'</span> \
+  <span class="flag">--set</span> metronome.existingSecret=vbilling-metronome \
+  <span class="flag">--set</span> metronome.rateCard=<span class="string">payg-usd</span> \
+  <span class="flag">--set</span> region=us-east-1</code></div>
+      <p>For Metronome + Stripe, add a Stripe Secret and turn on the link:</p>
+      <div class="code-block"><code><span class="cmd">kubectl</span> <span class="flag">-n</span> vbilling-system create secret generic vbilling-stripe <span class="flag">--from-file</span>=api-key=./stripe-key
+<span class="cmd">helm</span> upgrade vbilling deploy/helm/vbilling <span class="flag">-n</span> vbilling-system <span class="flag">--reuse-values</span> \
+  <span class="flag">--set</span> metronome.stripeLink=true \
+  <span class="flag">--set</span> stripe.existingSecret=vbilling-stripe</code></div>
+
+      <h3 id="settings">Settings</h3>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead><tr><th>Helm value</th><th>Environment variable</th><th>Default</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr><td><code>adapters</code></td><td><code>ADAPTERS</code></td><td><code>[lago]</code></td><td>Include <code>metronome</code>.</td></tr>
+            <tr><td><code>metronome.existingSecret</code></td><td><code>METRONOME_API_TOKEN</code>, <code>METRONOME_WEBHOOK_SECRET</code></td><td>(none)</td><td>Secret with the key <code>api-token</code> and, for webhooks, <code>webhook-secret</code>.</td></tr>
+            <tr><td><code>metronome.rateCard</code></td><td><code>METRONOME_RATE_CARD</code></td><td>(none)</td><td>Rate card alias or ID. Each tenant gets a contract on it; a tenant's <code>vbilling.vcluster.com/plan</code> overrides it.</td></tr>
+            <tr><td><code>metronome.stripeLink</code></td><td><code>METRONOME_STRIPE_LINK</code></td><td><code>false</code></td><td>Create each tenant's Stripe customer and link it in Metronome. Needs <code>stripe.existingSecret</code>.</td></tr>
+            <tr><td><code>metronome.stripeCollectionMethod</code></td><td><code>METRONOME_STRIPE_COLLECTION_METHOD</code></td><td><code>charge_automatically</code></td><td>Or <code>send_invoice</code>.</td></tr>
+            <tr><td><code>stripe.existingSecret</code></td><td><code>STRIPE_API_KEY</code>, <code>STRIPE_WEBHOOK_SECRET</code></td><td>(none)</td><td>Secret with the key <code>api-key</code> and, for Stripe webhooks, <code>webhook-secret</code>.</td></tr>
+            <tr><td><code>metronome.apiBase</code></td><td><code>METRONOME_API_BASE</code></td><td><code>https://api.metronome.com</code></td><td>API base URL.</td></tr>
+            <tr><td><code>metronome.apiToken</code>, <code>metronome.webhookSecret</code></td><td></td><td>(none)</td><td>Inline alternatives to the Secret. Avoid them.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h2 id="objects">What vBilling creates in Metronome</h2>
+      <h3 id="customers">Customers</h3>
+      <p>Each tenant becomes one customer whose ingest alias is the tenant ID: <code>vcluster-&lt;namespace&gt;-&lt;name&gt;</code> by default, or the value of <code>vbilling.vcluster.com/tenant</code>. vBilling looks the customer up by alias before creating it, and a 409 on the alias resolves to the existing customer, so a tenant never gets two.</p>
+      <ul>
+        <li>The customer's name comes from <code>vbilling.vcluster.com/display-name</code> and is set at creation. Rename it in Metronome afterwards.</li>
+        <li>To use a customer that already exists, set <code>vbilling.vcluster.com/metronome-customer-id</code> on the tenant cluster's StatefulSet, its namespace or its <code>VirtualClusterInstance</code>.</li>
+        <li>Offboarded tenants keep their customer and contract, so final usage still invoices.</li>
+      </ul>
+
+      <h3 id="metrics">Billable metrics</h3>
+      <p>At startup vBilling creates one SUM billable metric per billable metric code. It sums the <code>value</code> property, filters on the event type (the metric code) and requires <code>value</code> and every group-key property to be present. Each metric gets one compound group key: the metric's pricing dimensions plus <code>tenant_cluster</code>. Existing metrics are matched by ID or by name and never duplicated; an archived metric is created again at the next start.</p>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead><tr><th>Billable metric</th><th>Group key</th></tr></thead>
+          <tbody>
+            <tr><td><code>GPU Hours [vcluster_gpu_hours]</code></td><td><code>region, sku, capacity_type, billing_mode, tenant_cluster</code></td></tr>
+            <tr><td><code>CPU Core Hours [vcluster_cpu_core_hours]</code></td><td><code>region, capacity_type, billing_mode, tenant_cluster</code></td></tr>
+            <tr><td><code>Memory GiB Hours [vcluster_memory_gb_hours]</code></td><td><code>region, capacity_type, billing_mode, tenant_cluster</code></td></tr>
+            <tr><td><code>Storage GiB Hours [vcluster_storage_gb_hours]</code></td><td><code>region, sku, tenant_cluster</code></td></tr>
+            <tr><td><code>Tenant Cluster Hours [vcluster_instance_hours]</code></td><td><code>region, tenant_class, tenant_cluster</code></td></tr>
+            <tr><td><code>Dedicated Node Hours [vcluster_private_node_hours]</code></td><td><code>region, sku, capacity_type, tenant_cluster</code></td></tr>
+            <tr><td><code>Network Egress GiB [vcluster_network_egress_gb]</code></td><td><code>region, tenant_cluster</code></td></tr>
+            <tr><td><code>Load Balancer Hours [vcluster_lb_hours]</code></td><td><code>region, tenant_cluster</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Custom metrics, from <code>CUSTOM_METRICS</code> or defined in PromQL, get a billable metric too, grouped on the keys you declare. The informational metrics <code>vcluster_gpu_utilization</code> and <code>vcluster_gpu_downtime_hours</code> are never sent to Metronome.</p>
+
+      <h3 id="contracts">Contracts</h3>
+      <p>When a tenant has a rate card, vBilling creates one contract per tenant and rate card. The rate card is the tenant's <code>vbilling.vcluster.com/plan</code>, or <code>metronome.rateCard</code> when the tenant has none. A UUID is used as the rate card ID, anything else as its alias.</p>
+      <ul>
+        <li>The contract starts at UTC midnight on the day vBilling creates it, with monthly usage statements on the first of the month.</li>
+        <li>Its uniqueness key is <code>vbilling-&lt;tenant&gt;-&lt;rate card&gt;</code>, so a retry or a second replica never creates a second contract.</li>
+        <li>Moving a tenant to another rate card creates a contract on the new one. vBilling never ends contracts, so end the old one in Metronome.</li>
+        <li>Without a rate card, vBilling creates the customer only and you manage its contracts in Metronome.</li>
+      </ul>
+
+      <h3 id="stripe-link">Stripe link</h3>
+      <p>With <code>metronome.stripeLink=true</code>, vBilling finds or creates the tenant's Stripe customer the same way the <a href="stripe.html">Stripe adapter</a> does (by the metadata <code>vbilling_tenant_id</code>, or the customer pinned with <code>vbilling.vcluster.com/stripe-customer-id</code>). It then creates the Metronome customer with Stripe as its billing provider, delivery method <code>direct_to_billing_provider</code> and your collection method. Contracts carry the same billing provider. No Stripe meters or prices are created in this mode.</p>
+      <div class="callout callout-info">
+        <div class="callout-icon">i</div>
+        <div>The link is set when vBilling creates the Metronome customer. A customer that already exists in Metronome, found by its alias or pinned by ID, is used as it is: link it to Stripe in Metronome yourself.</div>
+      </div>
+
+      <h2 id="pricing">Pricing on dimensions</h2>
+      <p>Add a usage product per billable metric to your rate card. A product prices on a pricing group key and splits invoice lines with a presentation group key. Metronome requires the two together to form one compound group key of the billable metric, and vBilling defines exactly one, so split its keys between them:</p>
+      <div class="code-block"><code><span class="comment"># Usage product on "GPU Hours [vcluster_gpu_hours]"</span>
+pricing_group_key:      [region, sku, capacity_type, billing_mode]
+presentation_group_key: [tenant_cluster]
+
+<span class="comment"># Usage product on "Dedicated Node Hours [vcluster_private_node_hours]"</span>
+pricing_group_key:      [region, sku, capacity_type]
+presentation_group_key: [tenant_cluster]</code></div>
+      <p>Then give each combination you sell its own rate:</p>
+      <ul>
+        <li><strong>GPU model:</strong> <code>sku</code> carries the node's SKU label or GPU model, so H100 and L40S hours get different rates.</li>
+        <li><strong>Region:</strong> <code>region</code> is the vBilling instance's <code>region</code> (or each node's <code>topology.kubernetes.io/region</code> with <code>REGION_FROM_NODE=true</code>), so two regions can be priced differently.</li>
+        <li><strong>Capacity type:</strong> <code>capacity_type</code> is <code>on-demand</code>, <code>spot</code>, <code>preemptible</code> or <code>reserved</code>. A discount is a lower rate; quantities stay physical.</li>
+        <li><strong>Billing mode:</strong> <code>billing_mode</code> is <code>shared</code>, <code>dedicated_node</code> or <code>private_node</code>, so GPUs on whole nodes can carry their own rate.</li>
+      </ul>
+      <p>Price whole nodes either by node-hours or by their GPU, CPU and memory hours, not both (see <a href="private-nodes.html#billed">what gets billed</a>). Group-key properties an event does not carry are sent as <code>none</code>, so every event still matches its metric. vBilling sends quantities only: the rate card sets prices and currency.</p>
+
+      <h2 id="delivery">Delivery</h2>
+      <p>vBilling posts events to <code>/v1/ingest</code> in batches of 100, one event per tenant, metric, window and set of dimensions. <code>customer_id</code> is the Metronome customer ID once vBilling knows it, and the ingest alias before that:</p>
+      <div class="code-block"><code>{
+  <span class="string">"transaction_id"</span>: "vb1_7c4e9a0d5b...",
+  <span class="string">"customer_id"</span>: "vcluster-team-a-team-a",
+  <span class="string">"event_type"</span>: "vcluster_gpu_hours",
+  <span class="string">"timestamp"</span>: "2026-10-05T10:00:00Z",
+  <span class="string">"properties"</span>: {
+    "value": "0.133333333", "unit": "gpu-hours",
+    "window_start": "2026-10-05T10:00:00Z", "window_end": "2026-10-05T10:01:00Z",
+    "schema_version": "vbilling.usage/v1", "source": "collector",
+    "region": "us-east-1", "sku": "NVIDIA-H100-80GB-HBM3", "resource_id": "gpu-node-1",
+    "capacity_type": "on-demand", "billing_mode": "private_node",
+    "gpu_type": "NVIDIA-H100-80GB-HBM3", "gpu_profile": "full",
+    "tenant_cluster": "vcluster-team-a-team-a"
+  }
+}</code></div>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead><tr><th>Case</th><th>What happens</th></tr></thead>
+          <tbody>
+            <tr><td>Retries and replays</td><td>Metronome ignores a repeated <code>transaction_id</code> for 34 days, so nothing counts twice. vBilling sends no <code>Idempotency-Key</code>, because Metronome would cache an error response under it.</td></tr>
+            <tr><td>Events older than 34 days</td><td>Dead-lettered as <code>older than Metronome's 34-day ingest window</code> (vBilling keeps an hour of margin).</td></tr>
+            <tr><td>HTTP 400, 413, 422</td><td>The batch is split until the rejected events are isolated. Those are dead-lettered; the rest are delivered.</td></tr>
+            <tr><td>HTTP 401, 403, 404, 408, 409, 429, 5xx, network errors</td><td>Retried with backoff, never dead-lettered. Only Metronome waits: other destinations keep delivering from their own cursors.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Check delivery, list dead letters and replay them (add your API token as a bearer token if you set one):</p>
+      <div class="code-block"><code><span class="cmd">kubectl</span> <span class="flag">-n</span> vbilling-system port-forward svc/vbilling 8080
+<span class="cmd">curl</span> <span class="flag">-s</span> localhost:8080/api/v1/destinations | jq <span class="string">'.destinations[] | select(.name == "metronome")'</span>
+<span class="cmd">curl</span> <span class="flag">-s</span> localhost:8080/api/v1/destinations/metronome/dead-letters | jq
+<span class="cmd">curl</span> <span class="flag">-s -X POST</span> localhost:8080/api/v1/destinations/metronome/dead-letters/replay</code></div>
+      <p>Adding Metronome to a running vBilling starts delivery at the next committed window. To send the retained ledger as well (<code>persistence.retention</code>, default <code>168h</code>), rewind its cursor; transaction IDs keep the overlap from counting twice:</p>
+      <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-s -X POST</span> localhost:8080/api/v1/destinations/metronome/cursor <span class="flag">-d</span> <span class="string">'{"seq": 0}'</span></code></div>
+
+      <h2 id="reconcile">Reconciliation</h2>
+      <p><code>GET /api/v1/reconcile?destination=metronome</code> recomputes each tenant's usage from the ledger and compares it with what Metronome's usage API (<code>/v1/usage</code>) recorded. Metronome reports whole UTC days only, so <code>from</code> and <code>to</code> must be UTC midnights (<code>YYYY-MM-DD</code> works). Without them, the previous full UTC day is checked. Narrow it with <code>tenant</code>, <code>metric</code>, <code>project</code>, <code>region</code>, <code>sku</code> or <code>cluster</code>.</p>
+      <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-s</span> <span class="string">'localhost:8080/api/v1/reconcile?destination=metronome&amp;from=2026-10-04&amp;to=2026-10-05'</span> | jq
+<span class="output">{
+  "from": "2026-10-04T00:00:00Z",
+  "to": "2026-10-05T00:00:00Z",
+  "results": [{
+    "destination": "metronome",
+    "ok": true,
+    "rows": [{
+      "tenant": "vcluster-team-a-team-a", "metric": "vcluster_gpu_hours",
+      "ledger": 192, "dead_lettered": 0, "expected": 192,
+      "recorded": 192, "difference": 0, "match": true
+    }]
+  }]
+}</span></code></div>
+      <p><code>expected</code> is the ledger total minus dead letters, and a row matches within 0.1%. Reconcile once a day has closed and <code>lag_records</code> on <code>/api/v1/destinations</code> is back to 0, so no events are still in flight.</p>
+
+      <h2 id="webhooks">Webhooks and billing state</h2>
+      <p>Create a webhook in Metronome pointing at <code>https://&lt;your vBilling host&gt;/webhooks/metronome</code> and add its secret to the Secret as <code>webhook-secret</code>. The Service is <code>ClusterIP</code>; expose only the <code>/webhooks/</code> paths to the internet. Billing-state enforcement turns on when a webhook secret is set.</p>
+      <div class="code-block"><code><span class="cmd">kubectl</span> <span class="flag">-n</span> vbilling-system create secret generic vbilling-metronome \
+  <span class="flag">--from-file</span>=api-token=./metronome-token <span class="flag">--from-file</span>=webhook-secret=./metronome-webhook-secret \
+  <span class="flag">--dry-run=client -o</span> yaml | <span class="cmd">kubectl</span> apply <span class="flag">-f</span> -
+<span class="cmd">kubectl</span> <span class="flag">-n</span> vbilling-system rollout restart statefulset/vbilling</code></div>
+      <p>vBilling verifies <code>Metronome-Webhook-Signature</code>: hex HMAC-SHA256 with the secret over <code>X-Metronome-Date</code> (or <code>Date</code>), a newline and the raw body, within 5 minutes of that date. A bad signature gets a 400. Verified events that carry no billing signal, belong to a customer that is not a vBilling tenant, or repeat an event already applied get a 200 with <code>"applied": false</code>; other failures return a 500 so Metronome retries.</p>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead><tr><th>Metronome event</th><th>Billing state</th></tr></thead>
+          <tbody>
+            <tr><td><code>alerts.*</code>, for example <code>alerts.spend_threshold_reached</code> or <code>alerts.low_remaining_contract_credit_balance_reached</code></td><td><code>warning</code>, with the alert's name as the reason</td></tr>
+            <tr><td><code>payment_gate.payment_status</code> with <code>payment_status: failed</code></td><td><code>delinquent</code></td></tr>
+            <tr><td><code>payment_gate.payment_status</code> with <code>payment_status: paid</code></td><td><code>active</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Map any event type to another state with <code>enforcement.rules</code> (<code>ENFORCEMENT_RULES</code>). A hard spend cap suspends the tenant when its spend alert fires:</p>
+      <div class="code-block"><code><span class="comment"># values.yaml</span>
+enforcement:
+  mode: enforce
+  rules: <span class="string">"alerts.spend_threshold_reached=suspended"</span>
+  admissionPolicy:
+    enabled: true</code></div>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead><tr><th>enforcement.mode</th><th>Effect</th></tr></thead>
+          <tbody>
+            <tr><td><code>observe</code> (default)</td><td>Records the state. It appears in <code>GET /api/v1/billing-states</code>, the metrics and the dashboard.</td></tr>
+            <tr><td><code>annotate</code></td><td>Also annotates the tenant cluster, labels its namespace <code>vbilling.vcluster.com/billing-state</code> and emits a Kubernetes event.</td></tr>
+            <tr><td><code>enforce</code></td><td>Also labels suspended namespaces <code>vbilling.vcluster.com/suspended=true</code>. With <code>enforcement.admissionPolicy.enabled=true</code> (Kubernetes 1.30+), a ValidatingAdmissionPolicy denies new pods in those namespaces of the control plane cluster. Running workloads keep running.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p><strong>Metronome + Stripe:</strong> payment failures on invoices Stripe collects reach vBilling through Stripe's webhooks, not Metronome's, so point Stripe's webhooks at <code>/webhooks/stripe</code> as well and add <code>webhook-secret</code> to the <code>vbilling-stripe</code> Secret. vBilling resolves them through the linked Stripe customers. See <a href="stripe.html#webhooks">Stripe webhooks</a>. To override a state by hand, use <code>PUT /api/v1/billing-states/&lt;tenant&gt;</code> with <code>{"state": "active", "reason": "..."}</code>.</p>
+
+      <h2 id="troubleshooting">Troubleshooting</h2>
+      <h3>The pod exits at startup</h3>
+      <p><code>initialize adapters: METRONOME_API_TOKEN is required when the metronome adapter is enabled</code> means the token did not reach the pod. The chart mounts Secret keys as optional, so a wrong Secret name or key shows up here: the key must be <code>api-token</code> in the Secret named by <code>metronome.existingSecret</code>. <code>METRONOME_STRIPE_LINK needs STRIPE_API_KEY to create Stripe customers</code> is the same problem with the key <code>api-key</code> in <code>stripe.existingSecret</code>.</p>
+      <h3>Delivery to Metronome is paused</h3>
+      <p><code>[pipeline] metronome: bootstrap failed (delivery paused, will retry): list billable metrics: metronome GET /v1/billable-metrics: HTTP 401</code> means Metronome rejected the token. Usage keeps accumulating in the ledger and other destinations keep delivering. Fix the token, then restart vBilling, which reads Secrets at startup.</p>
+      <h3>Tenants get no contract</h3>
+      <p>Contract errors name the tenant and rate card: <code>create contract for &lt;tenant&gt; on &lt;rate card&gt;</code>. Check that the alias or ID exists in Metronome, and check the tenant's <code>vbilling.vcluster.com/plan</code> if it has one. When Metronome answers 400, the log reads <code>[pipeline] metronome: tenant &lt;tenant&gt; rejected</code> and usage keeps flowing to the customer without a contract; other errors pause delivery and retry.</p>
+      <h3>Dead letters older than 34 days</h3>
+      <p><code>older than Metronome's 34-day ingest window</code> comes from a cursor rewind or an outage longer than Metronome accepts backdated events. Metronome cannot take them. They stay in the dead-letter list, and reconciliation reports them as <code>dead_lettered</code>.</p>
+      <h3>Reconciliation fails</h3>
+      <p><code>metronome reconciliation needs whole UTC days (got ... to ...)</code> means <code>from</code> or <code>to</code> is not a UTC midnight. Pass dates as <code>YYYY-MM-DD</code>, or RFC 3339 times at <code>00:00:00Z</code>.</p>
+    </main>
+  </div>
+
+  <button class="mobile-sidebar-toggle" id="mobileSidebarToggle" aria-label="Toggle sidebar">&#9776;</button>
+
+  <script>
+    const header = document.getElementById('header');
+    window.addEventListener('scroll', () => { header.classList.toggle('scrolled', window.scrollY > 10); });
+    const sidebar = document.getElementById('sidebar');
+    const toggle = document.getElementById('mobileSidebarToggle');
+    toggle.addEventListener('click', () => { sidebar.classList.toggle('open'); });
+    document.addEventListener('click', (e) => {
+      if (!sidebar.contains(e.target) && !toggle.contains(e.target)) sidebar.classList.remove('open');
+    });
+  </script>
+</body>
+</html>

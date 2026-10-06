@@ -9,8 +9,8 @@ image:
   pullPolicy: IfNotPresent
 
 # Destinations usage fans out to. Built-in: stripe, metronome, lago, webhook, noop.
-# Each destination has its own cursor into the ledger, so one backend being
-# down never blocks another.
+# Each destination has its own cursor into the ledger, so one billing platform
+# being down never blocks another.
 adapters:
   - lago
 # Deprecated single-adapter form from v0.1; used only when `adapters` is empty.
