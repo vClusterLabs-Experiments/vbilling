@@ -198,11 +198,11 @@ func main() {
 	log.Println("vBilling stopped")
 }
 
-// newEnforcer enables billing-state enforcement when a webhook secret is set.
+// newEnforcer sets up billing states. They are always available: Stripe and
+// Metronome webhooks set them once their secrets are configured, and
+// PUT /api/v1/billing-states/{tenant} sets them from anywhere else, such as
+// Lago or a custom billing platform.
 func newEnforcer(cfg *config.Config, kube kubernetes.Interface, ctrl *controller.Controller, dests []destinations.Destination, tel *telemetry.Registry) *enforcement.Enforcer {
-	if cfg.StripeWebhookSecret == "" && cfg.MetronomeWebhookSecret == "" {
-		return nil
-	}
 	rules, err := enforcement.ParseRules(cfg.EnforcementRules)
 	if err != nil {
 		log.Fatalf("ENFORCEMENT_RULES: %v", err)
@@ -225,7 +225,8 @@ func newEnforcer(cfg *config.Config, kube kubernetes.Interface, ctrl *controller
 	if err != nil {
 		log.Fatalf("open billing state: %v", err)
 	}
-	log.Printf("Billing-state enforcement enabled (mode=%s)", cfg.EnforcementMode)
+	log.Printf("Billing states: mode=%s, Stripe webhooks %s, Metronome webhooks %s", cfg.EnforcementMode,
+		onOff(cfg.StripeWebhookSecret != ""), onOff(cfg.MetronomeWebhookSecret != ""))
 	return enforcement.New(kube, enforcement.Options{
 		Mode:                   cfg.EnforcementMode,
 		StripeWebhookSecret:    cfg.StripeWebhookSecret,
@@ -268,4 +269,11 @@ func getKubeConfig() (*rest.Config, error) {
 	}
 	log.Printf("Using kubeconfig (%s)", os.Getenv("KUBECONFIG"))
 	return cfg, nil
+}
+
+func onOff(b bool) string {
+	if b {
+		return "on"
+	}
+	return "off"
 }
