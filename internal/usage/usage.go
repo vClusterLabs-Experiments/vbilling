@@ -29,7 +29,7 @@ const SchemaVersion = "vbilling.usage/v1"
 const (
 	DimTenantCluster = "tenant_cluster" // tenant cluster external ID
 	DimGPUType       = "gpu_type"       // normalized GPU model, e.g. NVIDIA-H100-80GB-HBM3
-	DimGPUProfile    = "gpu_profile"    // full, mig-1g.10gb, shared-4, ...
+	DimGPUProfile    = "gpu_profile"    // full, mig-1g.10gb, timeslice-4, ...
 	DimCapacityType  = "capacity_type"  // on-demand, spot, preemptible, reserved
 	DimBillingMode   = "billing_mode"   // shared, dedicated_node, private_node
 	DimZone          = "zone"

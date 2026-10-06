@@ -369,8 +369,8 @@
       <p>When a tenant has a rate card, vBilling creates one contract per tenant and rate card. The rate card is the tenant's <code>vbilling.vcluster.com/plan</code>, or <code>metronome.rateCard</code> when the tenant has none. A UUID is used as the rate card ID, anything else as its alias.</p>
       <ul>
         <li>The contract starts at UTC midnight on the day vBilling creates it, with monthly usage statements on the first of the month.</li>
-        <li>Its uniqueness key is <code>vbilling-&lt;tenant&gt;-&lt;rate card&gt;</code>, so a retry or a second replica never creates a second contract.</li>
-        <li>Moving a tenant to another rate card creates a contract on the new one. vBilling never ends contracts, so end the old one in Metronome.</li>
+        <li>Its uniqueness key is <code>vbilling:&lt;rate card&gt;@&lt;start date&gt;:&lt;tenant hash&gt;</code>, so a retry or a second replica never creates a second contract, and a tenant that loses its state adopts its open contract instead of creating one. Contracts from v0.2.0 (<code>vbilling-&lt;tenant&gt;-&lt;rate card&gt;</code>) are recognized and adopted too.</li>
+        <li>Moving a tenant to another rate card creates a contract on the new one from UTC midnight and ends the previous vBilling contract at that moment, so usage is never rated twice. A contract that would not have started by then (the plan changed back the same day) is archived instead. Moving back to an earlier rate card starts a new contract on it. Contracts vBilling did not create are never touched.</li>
         <li>Without a rate card, vBilling creates the customer only and you manage its contracts in Metronome.</li>
       </ul>
 
@@ -378,7 +378,7 @@
       <p>With <code>metronome.stripeLink=true</code>, vBilling finds or creates the tenant's Stripe customer the same way the <a href="stripe.html">Stripe adapter</a> does (by the metadata <code>vbilling_tenant_id</code>, or the customer pinned with <code>vbilling.vcluster.com/stripe-customer-id</code>). It then creates the Metronome customer with Stripe as its billing provider, delivery method <code>direct_to_billing_provider</code> and your collection method. Contracts carry the same billing provider. No Stripe meters or prices are created in this mode.</p>
       <div class="callout callout-info">
         <div class="callout-icon">i</div>
-        <div>The link is set when vBilling creates the Metronome customer. A customer that already exists in Metronome, found by its alias or pinned by ID, is used as it is: link it to Stripe in Metronome yourself.</div>
+        <div>A customer that already exists in Metronome, found by its alias or pinned by ID, gets the same Stripe configuration if it has none, and is left as it is if it already has one.</div>
       </div>
 
       <h2 id="pricing">Pricing on dimensions</h2>
@@ -436,7 +436,7 @@ presentation_group_key: [tenant_cluster]</code></div>
       <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-s -X POST</span> localhost:8080/api/v1/destinations/metronome/cursor <span class="flag">-d</span> <span class="string">'{"seq": 0}'</span></code></div>
 
       <h2 id="reconcile">Reconciliation</h2>
-      <p><code>GET /api/v1/reconcile?destination=metronome</code> recomputes each tenant's usage from the ledger and compares it with what Metronome's usage API (<code>/v1/usage</code>) recorded. Metronome reports whole UTC days only, so <code>from</code> and <code>to</code> must be UTC midnights (<code>YYYY-MM-DD</code> works). Without them, the previous full UTC day is checked. Narrow it with <code>tenant</code>, <code>metric</code>, <code>project</code>, <code>region</code>, <code>sku</code> or <code>cluster</code>.</p>
+      <p><code>GET /api/v1/reconcile?destination=metronome</code> recomputes each tenant's usage from the ledger and compares it with what Metronome's usage API (<code>/v1/usage</code>) recorded. Metronome reports whole UTC days only, so <code>from</code> and <code>to</code> must be UTC midnights (<code>YYYY-MM-DD</code> works). Without them, the previous full UTC day is checked. Narrow it with <code>tenant</code> or <code>metric</code>. <code>project</code>, <code>region</code>, <code>sku</code> and <code>cluster</code> pick the tenants and metrics with such usage, and each row still compares all of that tenant's usage of the metric, because Metronome reports totals per customer.</p>
       <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-s</span> <span class="string">'localhost:8080/api/v1/reconcile?destination=metronome&amp;from=2026-10-04&amp;to=2026-10-05'</span> | jq
 <span class="output">{
   "from": "2026-10-04T00:00:00Z",
@@ -454,7 +454,7 @@ presentation_group_key: [tenant_cluster]</code></div>
       <p><code>expected</code> is the ledger total minus dead letters, and a row matches within 0.1%. Reconcile once a day has closed and <code>lag_records</code> on <code>/api/v1/destinations</code> is back to 0, so no events are still in flight.</p>
 
       <h2 id="webhooks">Webhooks and billing state</h2>
-      <p>Create a webhook in Metronome pointing at <code>https://&lt;your vBilling host&gt;/webhooks/metronome</code> and add its secret to the Secret as <code>webhook-secret</code>. The Service is <code>ClusterIP</code>; expose only the <code>/webhooks/</code> paths to the internet. Billing-state enforcement turns on when a webhook secret is set.</p>
+      <p>Create a webhook in Metronome pointing at <code>https://&lt;your vBilling host&gt;/webhooks/metronome</code> and add its secret to the Secret as <code>webhook-secret</code>. The Service is <code>ClusterIP</code>; expose only the <code>/webhooks/</code> paths to the internet. Billing states are always available: Metronome's webhooks set them once <code>webhook-secret</code> is set.</p>
       <div class="code-block"><code><span class="cmd">kubectl</span> <span class="flag">-n</span> vbilling-system create secret generic vbilling-metronome \
   <span class="flag">--from-file</span>=api-token=./metronome-token <span class="flag">--from-file</span>=webhook-secret=./metronome-webhook-secret \
   <span class="flag">--dry-run=client -o</span> yaml | <span class="cmd">kubectl</span> apply <span class="flag">-f</span> -

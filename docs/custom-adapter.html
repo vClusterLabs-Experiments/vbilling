@@ -378,7 +378,7 @@ def verify(body: bytes, header: str, secret: str, tolerance: int = 300) -&gt; bo
       </div>
       <div class="callout callout-warn">
         <div class="callout-icon">!</div>
-        <div><strong>Deduplicate on <code>id</code>.</strong> A batch can arrive twice: after a timeout, a restart before the cursor was saved, a dead-letter replay or a cursor rewind. A usage event keeps its ID for the same window, so upsert on it. Tenant and catalog IDs carry a timestamp: keep the latest. Return 2xx for types you ignore, because vBilling holds all delivery to the endpoint until it accepts the catalog event.</div>
+        <div><strong>Deduplicate on <code>id</code>.</strong> A batch can arrive twice: after a timeout, a restart before the cursor was saved, a dead-letter replay or a cursor rewind. A usage event keeps its ID for the same window, so upsert on it. Tenant and catalog IDs carry a timestamp: keep the latest. Return 2xx for types you ignore. A catalog event your endpoint rejects with 400, 413 or 422 is logged and skipped; any other failure holds delivery to the endpoint until the catalog event is accepted.</div>
       </div>
       <p>Dead letters stay on the ledger volume until a replay clears them. Add <code>-H "Authorization: Bearer $API_TOKEN"</code> when the API is protected:</p>
       <div class="code-block"><code><span class="cmd">curl</span> -s localhost:8080/api/v1/destinations/webhook/dead-letters \
@@ -436,7 +436,7 @@ type Destination interface {
           <tbody>
             <tr><td><code>EventFilter</code></td><td><code>Accepts(metric string) bool</code></td><td>Skip metrics the platform should not see. <code>destinations.BillableOnly</code> drops the informational ones. Skipped events are counted, never retried.</td></tr>
             <tr><td><code>Reconciler</code></td><td><code>RecordedTotals(ctx context.Context, q TotalsQuery) ([]Total, error)</code></td><td>Report what the platform recorded per tenant and metric, so <code>GET /api/v1/reconcile</code> can compare it with the ledger.</td></tr>
-            <tr><td><code>CustomerResolver</code></td><td><code>TenantForCustomer(ctx context.Context, customerID string) (string, bool)</code></td><td>Map a platform customer ID back to a tenant for inbound billing webhooks. Only the Stripe and Metronome adapters' webhooks (<code>/webhooks/stripe</code>, <code>/webhooks/metronome</code>) consult it today.</td></tr>
+            <tr><td><code>CustomerResolver</code></td><td><code>TenantForCustomer(ctx context.Context, customerID string) (string, bool)</code></td><td>Map a platform customer ID back to a tenant for inbound billing webhooks. Only the Stripe and Metronome adapters' webhooks (<code>/webhooks/stripe</code>, <code>/webhooks/metronome</code>) consult it today; any other billing platform sets billing states with <code>PUT /api/v1/billing-states/{tenant}</code>.</td></tr>
           </tbody>
         </table>
       </div>

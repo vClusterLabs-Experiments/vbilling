@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"time"
@@ -80,8 +81,16 @@ func (a *Adapter) Name() string { return "webhook" }
 
 // Bootstrap publishes the metric catalog so consumers can learn units and
 // group keys without reading vBilling's docs.
+// Bootstrap sends the metric catalog. The catalog is informational: a
+// receiver that rejects it for good (400, 413, 422) is told once in the log,
+// and usage delivery goes ahead without it instead of pausing forever.
 func (a *Adapter) Bootstrap(ctx context.Context, metrics []usage.MetricDef) error {
-	return a.post(ctx, []CloudEvent{a.envelope(TypeCatalog, "catalog-"+strconv.FormatInt(a.now().Unix(), 10), "", a.now(), metrics)})
+	err := a.post(ctx, []CloudEvent{a.envelope(TypeCatalog, "catalog-"+strconv.FormatInt(a.now().Unix(), 10), "", a.now(), metrics)})
+	if destinations.IsPermanent(err) {
+		log.Printf("[webhook] receiver rejected the catalog event (%v); delivering usage without it", err)
+		return nil
+	}
+	return err
 }
 
 func (a *Adapter) EnsureTenant(ctx context.Context, t usage.Tenant) error {

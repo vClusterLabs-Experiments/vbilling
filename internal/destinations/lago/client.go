@@ -293,7 +293,7 @@ func (c *Client) delete(ctx context.Context, path string) error {
 
 	if resp.StatusCode >= 400 {
 		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("lago API error %d: %s", resp.StatusCode, string(respBody))
+		return destinations.StatusError(http.MethodDelete, path, resp.StatusCode, respBody)
 	}
 
 	log.Printf("[lago] DELETE %s -> %d", path, resp.StatusCode)
