@@ -281,6 +281,20 @@ func TestAutoSubscribeUsesPlanTaggedPrices(t *testing.T) {
 	if len(f.subs) != 1 {
 		t.Fatal("plan change created a second subscription")
 	}
+
+	// A plan over Stripe's 20-item limit rejects only this tenant: the error
+	// is permanent, so delivery for everyone else carries on.
+	for i := 0; i < 21; i++ {
+		f.prices = append(f.prices, price(fmt.Sprintf("price_big_%02d", i), meterID(usage.MetricGPUHours), "big", "usd"))
+	}
+	a.pricesTime = time.Time{}
+	err := a.EnsureTenant(ctx, usage.Tenant{ID: "globex", Plan: "big"})
+	if err == nil || !destinations.IsPermanent(err) {
+		t.Fatalf("plan with 21 prices: got %v, want a permanent error", err)
+	}
+	if _, ok := a.state.Get("cus/globex"); !ok {
+		t.Fatal("customer should still exist so usage can be delivered")
+	}
 }
 
 func TestRecordedTotalsSumsSplitMeters(t *testing.T) {
