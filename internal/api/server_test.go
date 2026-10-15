@@ -144,8 +144,12 @@ func (e *env) get(t *testing.T, path string) (int, string) {
 func (e *env) deliver(t *testing.T) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	go e.disp.Run(ctx)
+	done := make(chan struct{})
+	go func() { e.disp.Run(ctx); close(done) }()
+	defer func() {
+		cancel()
+		<-done // Stop all dispatcher writes before returning or cleaning up the spool.
+	}()
 	for e.sp.Cursor("fakebill") < e.sp.Committed() {
 		if ctx.Err() != nil {
 			t.Fatal("delivery timed out")

@@ -117,9 +117,12 @@ func run(t *testing.T, s *spool.Spool, until func() bool, dests ...destinations.
 	t.Helper()
 	d := New(s, dests, Options{BatchSize: 7, MinBackoff: time.Millisecond, MaxBackoff: 5 * time.Millisecond, IdlePoll: 10 * time.Millisecond}, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
 	done := make(chan struct{})
 	go func() { d.Run(ctx); close(done) }()
+	defer func() {
+		cancel()
+		<-done // Finish cursor writes before the spool and its directory are cleaned up.
+	}()
 	for !until() {
 		if ctx.Err() != nil {
 			t.Fatal("timed out waiting for delivery")
@@ -297,8 +300,12 @@ func TestBootstrapGateAndTenantEnsuredBeforeEvents(t *testing.T) {
 		},
 	}, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	go d.Run(ctx)
+	done := make(chan struct{})
+	go func() { d.Run(ctx); close(done) }()
+	defer func() {
+		cancel()
+		<-done // Also wait when a timeout calls t.Fatal.
+	}()
 	for dest.received() < len(all) {
 		if ctx.Err() != nil {
 			t.Fatal("timed out")
@@ -306,6 +313,7 @@ func TestBootstrapGateAndTenantEnsuredBeforeEvents(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	cancel()
+	<-done
 	if bootstrapCalls != 3 {
 		t.Fatalf("bootstrap calls = %d", bootstrapCalls)
 	}
@@ -336,8 +344,12 @@ func TestPermanentlyRejectedTenantDoesNotBlockDelivery(t *testing.T) {
 		Tenants: reg,
 	}, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	go d.Run(ctx)
+	done := make(chan struct{})
+	go func() { d.Run(ctx); close(done) }()
+	defer func() {
+		cancel()
+		<-done // Also wait when a timeout calls t.Fatal.
+	}()
 	for dest.received() < len(all) {
 		if ctx.Err() != nil {
 			t.Fatalf("delivery stalled at %d of %d events", dest.received(), len(all))
@@ -345,6 +357,7 @@ func TestPermanentlyRejectedTenantDoesNotBlockDelivery(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	cancel()
+	<-done
 	if !reg.NeedsEnsure("stripe", usage.Tenant{ID: "t1"}) {
 		t.Fatal("rejected tenant marked ensured")
 	}
