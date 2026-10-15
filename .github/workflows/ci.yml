@@ -26,3 +26,16 @@ jobs:
       - uses: azure/setup-helm@v4
       - run: helm lint deploy/helm/vbilling
       - run: helm template vbilling deploy/helm/vbilling --set adapters='{stripe}' --set stripe.existingSecret=vbilling-stripe > /dev/null
+
+  gke-stripe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check for accidentally committed demo credentials
+        run: python3 scripts/check-demo-secrets.py --tracked
+      - name: Test the secret check with synthetic fixtures
+        run: python3 scripts/check-demo-secrets.py --self-test
+      - name: Test demo helpers without cloud credentials
+        run: python3 -m unittest discover -s examples/gke-stripe/tests -v
+      - name: Check local launcher syntax
+        run: bash -n examples/gke-stripe/scripts/run-local.sh

@@ -19,6 +19,8 @@ vBilling is the **metering pipe**, not the billing engine. It turns what runs in
 
 > vBilling lives in `vClusterLabs-Experiments`: it is an experimental project, not a supported vCluster Labs product.
 
+**[GPU metering with Stripe](examples/gke-stripe/README.md)** provides a step-by-step setup for shared L4 GPUs, optional private A100 nodes, usage delivery to Stripe test mode, and resource cleanup. Credentials and runtime data stay outside the repository.
+
 ## What's new in v0.2
 
 - **Stripe and Metronome adapters.** Use Stripe Billing Meters on their own, or Metronome for rating with Stripe for payment, invoicing and tax. vBilling creates the Stripe customer and links it in Metronome.

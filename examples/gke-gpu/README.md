@@ -8,6 +8,8 @@ A complete setup with both vCluster tenancy models on GPUs, metered by vBilling 
 - **Prometheus** reading DCGM: GKE's exporter on shared nodes, and a Prometheus agent that remote-writes from the private node.
 - **vBilling** sending usage to Stripe: customers, one meter per metric and SKU, subscriptions, invoices.
 
+**For a setup without Prometheus, see [GPU metering with Stripe](../gke-stripe/README.md).** It uses two L4 sharing slots, local vBilling, and paused Stripe test subscriptions. This example uses four slots, Prometheus/DCGM, and automatic subscription creation.
+
 The walkthrough is also on the docs site: [Example: GKE with GPUs](https://vclusterlabs-experiments.github.io/vbilling/example-gke.html).
 
 | File | What it is |
@@ -57,14 +59,14 @@ INGEST_IP=$(kubectl -n monitoring get svc prometheus-ingest -o jsonpath='{.statu
 ## 3. Tenant clusters
 
 ```bash
-vcluster platform login https://<your-platform-host>      # browser login; no key on the command line
+vcluster platform login https://your-platform.example      # browser login; no key on the command line
 vcluster create shared-l4 -n shared-l4 -f 02-tenant-shared.yaml --connect=false
 vcluster create private-a100 -n private-a100 -f 03-tenant-private.yaml --connect=false
 ```
 
 When the CLI is logged in, `vcluster create` registers each tenant cluster with the Platform, which is what licenses Private Nodes. A tenant cluster created before logging in is registered with `vcluster platform add vcluster private-a100 -n private-a100 --project default`.
 
-Tell vBilling who the tenants are. The emails use the reserved `.example` domain:
+Optionally set stable customer IDs and display names. Without these annotations, vBilling derives an identity per tenant cluster. The emails below use the reserved `.example` domain:
 
 ```bash
 kubectl annotate ns shared-l4 vbilling.vcluster.com/tenant=acme-ai "vbilling.vcluster.com/display-name=Acme AI" \
@@ -76,19 +78,28 @@ kubectl annotate ns private-a100 vbilling.vcluster.com/tenant=initech "vbilling.
 ## 4. A private GPU node
 
 ```bash
-vcluster connect private-a100 -n private-a100 -- vcluster token create --expires 2h | grep node/join > join.txt
-awk -v cmd="$(cat join.txt)" '$0 == "JOIN_COMMAND" { print cmd; next } { print }' 04-node-startup.sh > startup.sh
+set -euo pipefail
+set +x  # do not trace commands while handling credentials
+umask 077
+JOIN_DIR=$(mktemp -d "/tmp/vbilling-private-node.XXXXXX")
+chmod 700 "$JOIN_DIR"
+vcluster connect private-a100 -n private-a100 -- vcluster token create --expires 2h | grep node/join > "$JOIN_DIR/join.txt"
+# awk reads the token from the file; the token is never a process argument.
+awk 'FNR == NR { cmd = $0; next } $0 == "JOIN_COMMAND" { print cmd; next } { print }' \
+  "$JOIN_DIR/join.txt" 04-node-startup.sh > "$JOIN_DIR/startup.sh"
 gcloud compute instances create gpu-node-1 --zone $ZONE --machine-type a2-highgpu-1g \
   --provisioning-model SPOT --instance-termination-action STOP --maintenance-policy TERMINATE \
   --image-family ubuntu-2204-lts --image-project ubuntu-os-cloud --boot-disk-size 150GB \
-  --no-service-account --no-scopes --metadata-from-file startup-script=startup.sh
+  --no-service-account --no-scopes --metadata-from-file "startup-script=$JOIN_DIR/startup.sh"
 ```
 
 Once `gpu-node-1` is Ready in the tenant cluster, remove the token from the instance and from disk, and label the node so it gets an SKU:
 
 ```bash
 gcloud compute instances remove-metadata gpu-node-1 --zone $ZONE --keys startup-script
-rm join.txt startup.sh
+rm -f "$JOIN_DIR/join.txt" "$JOIN_DIR/startup.sh"
+rmdir "$JOIN_DIR"
+unset JOIN_DIR
 vcluster connect private-a100 -n private-a100 -- kubectl label node gpu-node-1 \
   node.kubernetes.io/instance-type=a2-highgpu-1g vbilling.vcluster.com/capacity-type=spot
 ```
@@ -115,15 +126,26 @@ vcluster connect shared-l4 -n shared-l4 -- kubectl apply -f workloads/shared-inf
 vcluster connect private-a100 -n private-a100 -- kubectl apply -f workloads/private-training.yaml
 ```
 
-vBilling creates the Stripe customers and meters on the first windows. Give the meters prices tagged with the plan, then restart vBilling so it subscribes the tenants:
+vBilling creates the Stripe customers and meters on the first windows. The operator creates the Product and Price. This example enables automatic subscription creation; prices must be tagged with the plan. The following creates a Product and Price together, so run it once for each intended meter and reuse the existing Price on retries. Then restart vBilling so it subscribes the tenants. For paused test subscriptions and repeatable setup helpers, use [the GPU example](../gke-stripe/README.md).
 
 ```bash
-export STRIPE_API_KEY="$(cat ~/.stripe-test-key)"
-curl -s https://api.stripe.com/v1/billing/meters -u "$STRIPE_API_KEY:" | grep -E '"(id|event_name)"'
-curl -s https://api.stripe.com/v1/prices -u "$STRIPE_API_KEY:" \
+set +x  # keep the key out of shell trace output
+stripe_test() {
+  local key
+  key=$(cat "$HOME/.stripe-test-key") || return 1
+  if [[ ! "$key" =~ ^sk_test_[A-Za-z0-9]+$ ]]; then
+    printf '%s\n' 'Expected a Stripe test secret key.' >&2
+    return 1
+  fi
+  # printf is a shell builtin: only curl's stdin receives the credential.
+  printf 'user = "%s:"\n' "$key" | curl --fail-with-body --silent --show-error --config - "$@"
+}
+stripe_test https://api.stripe.com/v1/billing/meters | grep -E '"(id|event_name)"'
+stripe_test https://api.stripe.com/v1/prices \
   -d currency=usd -d unit_amount_decimal=220 \
   -d "recurring[interval]=month" -d "recurring[usage_type]=metered" -d "recurring[meter]=<meter id>" \
   -d "product_data[name]=A100 40GB GPU-hour" -d "metadata[vbilling_plan]=gpu-cloud"
+unset -f stripe_test
 kubectl -n vbilling rollout restart statefulset/vbilling
 ```
 
