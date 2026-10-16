@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Configuration - vBilling Docs</title>
-  <meta name="description" content="Complete configuration reference for vBilling: environment variables, Helm values, and Lago pricing setup.">
+  <meta name="description" content="Complete configuration reference for vBilling: environment variables, Helm values, and pricing in Stripe, Metronome and Lago.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Roboto+Mono:wght@500&display=swap" rel="stylesheet">
@@ -96,7 +96,7 @@
     .sidebar-back:hover { border-color: var(--primary); color: var(--primary-dark); }
 
     .content {
-      flex: 1; margin-left: var(--sidebar-width);
+      flex: 1; min-width: 0; margin-left: var(--sidebar-width);
       padding: 48px 64px 80px; max-width: 900px;
     }
     .content h1 {
@@ -125,7 +125,7 @@
     .content code {
       background: var(--primary-light-2); padding: 2px 7px; border-radius: 4px;
       font-family: 'Roboto Mono', 'SF Mono', 'Fira Code', monospace;
-      font-size: 0.85rem; color: var(--primary-darker);
+      font-size: 0.85rem; color: var(--primary-darker); overflow-wrap: anywhere;
     }
     .content a { color: var(--primary-dark); text-decoration: none; font-weight: 500; }
     .content a:hover { text-decoration: underline; }
@@ -233,16 +233,25 @@
         <a href="troubleshooting.html">Troubleshooting</a>
       </div>
       <div class="sidebar-section">
+        <div class="sidebar-label">Billing Adapters</div>
+        <a href="stripe.html">Stripe</a>
+        <a href="metronome.html">Metronome</a>
+        <a href="lago.html">Lago</a>
+        <a href="custom-adapter.html">Custom Billing Adapter</a>
+      </div>
+      <div class="sidebar-section">
         <div class="sidebar-label">Resources</div>
         <a href="https://github.com/vClusterLabs-Experiments/vbilling" target="_blank">GitHub Repository</a>
-        <a href="https://www.getlago.com/docs" target="_blank">Lago Docs</a>
         <a href="https://www.vcluster.com/docs" target="_blank">vCluster Docs</a>
+        <a href="https://docs.stripe.com/billing/subscriptions/usage-based" target="_blank">Stripe Billing Docs</a>
+        <a href="https://docs.metronome.com/" target="_blank">Metronome Docs</a>
+        <a href="https://www.getlago.com/docs" target="_blank">Lago Docs</a>
       </div>
     </nav>
 
     <main class="content">
       <h1>Configuration</h1>
-      <p class="subtitle">Every setting for vBilling v0.2: environment variables, Helm chart values, and pricing setup in your billing backend.</p>
+      <p class="subtitle">Every setting for vBilling v0.2: environment variables, Helm chart values, and pricing setup in your billing platform.</p>
 
       <!-- Environment Variables -->
       <h2 id="environment-variables">Environment Variables</h2>
@@ -436,7 +445,7 @@
             </tr>
             <tr>
               <td><code>PROMETHEUS_METRICS_FILE</code></td>
-              <td>Metrics defined by PromQL, evaluated per tenant cluster at every window end (billable ones are created in the billing backends).</td>
+              <td>Metrics defined by PromQL, evaluated per tenant cluster at every window end (billable ones are created in the billing platforms).</td>
               <td class="td-default">(none)</td>
             </tr>
             <tr>
@@ -498,7 +507,8 @@
           </tbody>
         </table>
       </div>
-      <h3>Stripe</h3>
+      <h3 id="stripe">Stripe</h3>
+      <p>Setup, meters, prices and webhooks are in the <a href="stripe.html">Stripe guide</a>.</p>
       <div class="config-table-wrap">
         <table class="config-table">
           <thead>
@@ -548,7 +558,8 @@
           </tbody>
         </table>
       </div>
-      <h3>Metronome</h3>
+      <h3 id="metronome">Metronome</h3>
+      <p>Setup, rate cards, the Stripe link and webhooks are in the <a href="metronome.html">Metronome guide</a>.</p>
       <div class="config-table-wrap">
         <table class="config-table">
           <thead>
@@ -588,7 +599,8 @@
           </tbody>
         </table>
       </div>
-      <h3>Lago</h3>
+      <h3 id="lago">Lago</h3>
+      <p>Running Lago and pricing with charge filters are in the <a href="lago.html">Lago guide</a>.</p>
       <div class="config-table-wrap">
         <table class="config-table">
           <thead>
@@ -618,7 +630,8 @@
           </tbody>
         </table>
       </div>
-      <h3>Webhook</h3>
+      <h3 id="webhook">Webhook</h3>
+      <p>Event types, signature verification and retries are in the <a href="custom-adapter.html#webhook">Custom Billing Adapter guide</a>.</p>
       <div class="config-table-wrap">
         <table class="config-table">
           <thead>
@@ -652,7 +665,7 @@
           <tbody>
             <tr>
               <td><code>SPOT_DISCOUNT_PERCENT</code></td>
-              <td>Ignored since v0.2. Price <code>capacity_type</code> in your billing backend instead, so quantities stay physical and reconcilable.</td>
+              <td>Ignored since v0.2. Price <code>capacity_type</code> in your billing platform instead, so quantities stay physical and reconcilable.</td>
               <td class="td-default">(none)</td>
             </tr>
           </tbody>
@@ -868,7 +881,7 @@
       </div>
 
       <h3>Example: AI Cloud pricing</h3>
-      <p>For a GPU-focused AI Cloud selling compute to AI teams, you might set higher GPU prices and include a premium for dedicated infrastructure:</p>
+      <p>For an AI Cloud selling GPU compute to AI teams, you might set higher GPU prices and include a premium for dedicated infrastructure:</p>
       <div class="code-block"><code><span class="comment"># AI Cloud pricing example</span>
 CPU Core-Hours:        <span class="string">$0.08</span>   <span class="comment"># higher due to bare-metal premium</span>
 Memory GB-Hours:       <span class="string">$0.015</span>  <span class="comment"># ECC memory cost</span>
@@ -901,7 +914,7 @@ Private Node Hours:    <span class="string">$0.50</span>   <span class="comment"
 
       <h2 id="stripe-metronome-pricing">Stripe and Metronome Pricing</h2>
       <p><strong>Stripe:</strong> vBilling creates a Billing Meter per metric and, because Stripe meters cannot price on dimensions, a meter per SKU as new SKUs appear (for example <code>vcluster_gpu_hours__nvidia_h100_80gb_hbm3</code>). Create a metered price on each meter you charge for. To subscribe new tenants automatically, tag the prices <code>metadata[vbilling_plan]=vcluster-standard</code> (or the tenant's <code>plan</code> annotation) and enable <code>stripe.autoSubscribe</code>.</p>
-      <p><strong>Metronome:</strong> vBilling creates SUM billable metrics named <code>&lt;Metric&gt; [&lt;code&gt;]</code>, each with one compound group key: <code>region, sku, capacity_type, billing_mode, tenant_cluster</code> for GPU hours. On your rate card, add a usage product per metric with <code>pricing_group_key</code> set to the dimensions you price on (for example <code>[region, sku, capacity_type]</code>) and <code>presentation_group_key: [tenant_cluster]</code> for invoice lines per tenant cluster. Rate cards carry the currency, so use one rate card per currency (for example AUD and NZD). Point <code>metronome.rateCard</code> or a tenant's <code>plan</code> annotation at it.</p>
+      <p><strong>Metronome:</strong> vBilling creates SUM billable metrics named <code>&lt;Metric&gt; [&lt;code&gt;]</code>, each with one compound group key: <code>region, sku, capacity_type, billing_mode, tenant_cluster</code> for GPU hours. On your rate card, add a usage product per metric with <code>pricing_group_key</code> set to the dimensions you price on and <code>presentation_group_key: [tenant_cluster]</code> for invoice lines per tenant cluster; together the two must form the metric's group key (for GPU hours, <code>pricing_group_key: [region, sku, capacity_type, billing_mode]</code>). Rate cards carry the currency, so use one rate card per currency. Point <code>metronome.rateCard</code> or a tenant's <code>plan</code> annotation at it.</p>
 
 
     </main>

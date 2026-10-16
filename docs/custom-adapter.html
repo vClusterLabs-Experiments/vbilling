@@ -1,0 +1,613 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Custom Billing Adapter - vBilling Docs</title>
+  <meta name="description" content="Connect any billing platform to vBilling: stream signed CloudEvents with the webhook adapter, push usage through the ingest API, or write a billing adapter in Go.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Roboto+Mono:wght@500&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+      --primary: #FF6600; --primary-dark: #CC5100; --primary-darker: #993D00;
+      --primary-light: #FFF5EB; --primary-light-2: #FFE0CC; --accent: #FF8433;
+      --text-dark: #050B24; --text-gray: #505466; --text-light: #828592;
+      --white: #ffffff; --bg-code: #050B24; --border: #E6E7E9;
+      --shadow-sm: 0 1px 2px rgba(0,0,0,0.05);
+      --shadow-md: 0 4px 6px -1px rgba(0,0,0,0.07), 0 2px 4px -2px rgba(0,0,0,0.05);
+      --shadow-lg: 0 10px 15px -3px rgba(0,0,0,0.08), 0 4px 6px -4px rgba(0,0,0,0.04);
+      --radius: 12px; --radius-lg: 16px; --sidebar-width: 260px;
+    }
+
+    html { scroll-behavior: smooth; scroll-padding-top: 80px; }
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      color: var(--text-dark); line-height: 1.6; background: var(--white);
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .header {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 1000;
+      background: rgba(255,255,255,0.92); backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px); border-bottom: 1px solid var(--border);
+    }
+    .header.scrolled { box-shadow: var(--shadow-md); }
+    .header-inner {
+      max-width: 1400px; margin: 0 auto; padding: 0 24px;
+      display: flex; align-items: center; justify-content: space-between; height: 64px;
+    }
+    .header-logo {
+      display: flex; align-items: center; gap: 10px;
+      text-decoration: none; color: var(--text-dark);
+    }
+    .header-logo-icon {
+      width: 32px; height: 32px; border-radius: 8px;
+      background: linear-gradient(135deg, var(--primary-dark), var(--primary));
+      display: flex; align-items: center; justify-content: center;
+      color: var(--white); font-weight: 700; font-size: 0.9rem;
+    }
+    .header-logo-text { font-size: 1.15rem; font-weight: 700; letter-spacing: -0.5px; }
+    .header-logo-text span { color: var(--primary-dark); }
+    .header-nav { display: flex; align-items: center; gap: 20px; }
+    .header-nav a {
+      text-decoration: none; color: var(--text-gray); font-size: 0.88rem;
+      font-weight: 500; transition: color 0.2s;
+    }
+    .header-nav a:hover { color: var(--primary-dark); }
+    .header-nav .gh-link {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: var(--bg-code); color: var(--white); padding: 6px 14px;
+      border-radius: 8px; font-size: 0.82rem; font-weight: 600; transition: opacity 0.2s;
+    }
+    .header-nav .gh-link:hover { opacity: 0.85; color: var(--white); }
+
+    .docs-layout { display: flex; margin-top: 64px; min-height: calc(100vh - 64px); }
+
+    .sidebar {
+      width: var(--sidebar-width); flex-shrink: 0;
+      border-right: 1px solid var(--border); background: var(--primary-light);
+      padding: 32px 0; position: fixed; top: 64px; bottom: 0; overflow-y: auto;
+    }
+    .sidebar-section { margin-bottom: 28px; }
+    .sidebar-label {
+      padding: 0 24px; font-size: 0.72rem; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 1px; color: var(--primary-darker);
+      margin-bottom: 8px;
+    }
+    .sidebar a {
+      display: block; padding: 7px 24px; text-decoration: none;
+      font-size: 0.88rem; color: var(--text-gray); font-weight: 500;
+      transition: all 0.15s; border-left: 3px solid transparent;
+    }
+    .sidebar a:hover { color: var(--primary-dark); background: var(--primary-light-2); }
+    .sidebar a.active {
+      color: var(--primary-dark); background: var(--primary-light-2);
+      border-left-color: var(--primary); font-weight: 600;
+    }
+    .sidebar-back {
+      display: flex; align-items: center; gap: 6px; margin: 0 24px 24px;
+      padding: 8px 12px; border-radius: 8px; text-decoration: none;
+      font-size: 0.85rem; color: var(--text-light); font-weight: 500;
+      border: 1px solid var(--border); transition: all 0.2s;
+    }
+    .sidebar-back:hover { border-color: var(--primary); color: var(--primary-dark); }
+
+    .content {
+      flex: 1; min-width: 0; margin-left: var(--sidebar-width);
+      padding: 48px 64px 80px; max-width: 900px;
+    }
+    .content h1 {
+      font-size: 2.2rem; font-weight: 800; letter-spacing: -1px;
+      margin-bottom: 12px; color: var(--text-dark);
+    }
+    .content .subtitle {
+      font-size: 1.1rem; color: var(--text-gray); line-height: 1.7;
+      margin-bottom: 40px; max-width: 640px;
+    }
+    .content h2 {
+      font-size: 1.5rem; font-weight: 700; letter-spacing: -0.5px;
+      margin: 48px 0 16px; color: var(--text-dark);
+      padding-bottom: 8px; border-bottom: 2px solid var(--primary-light-2);
+    }
+    .content h3 {
+      font-size: 1.15rem; font-weight: 700; margin: 32px 0 12px; color: var(--text-dark);
+    }
+    .content h4 {
+      font-size: 0.95rem; font-weight: 700; margin: 20px 0 8px; color: var(--text-dark);
+    }
+    .content p {
+      font-size: 0.95rem; color: var(--text-gray); line-height: 1.7; margin-bottom: 16px;
+    }
+    .content ul, .content ol {
+      margin: 0 0 16px 24px; color: var(--text-gray); font-size: 0.95rem;
+    }
+    .content li { margin-bottom: 6px; line-height: 1.6; }
+    .content code {
+      background: var(--primary-light-2); padding: 2px 7px; border-radius: 4px;
+      font-family: 'Roboto Mono', 'SF Mono', 'Fira Code', monospace;
+      font-size: 0.85rem; color: var(--primary-darker); overflow-wrap: anywhere;
+    }
+    .content a { color: var(--primary-dark); text-decoration: none; font-weight: 500; }
+    .content a:hover { text-decoration: underline; }
+
+    .code-block {
+      background: var(--bg-code); border-radius: var(--radius);
+      padding: 20px 24px; overflow-x: auto; margin-bottom: 20px; position: relative;
+    }
+    .code-block code {
+      color: #e2e8f0; background: none; padding: 0;
+      font-family: 'Roboto Mono', 'SF Mono', 'Fira Code', monospace;
+      font-size: 0.84rem; line-height: 1.7; white-space: pre;
+    }
+    .code-block .comment { color: #64748b; }
+    .code-block .cmd { color: #FF8433; }
+    .code-block .flag { color: #a5b4fc; }
+    .code-block .string { color: #86efac; }
+    .code-block .output { color: #94a3b8; }
+
+    .callout {
+      padding: 16px 20px; border-radius: var(--radius); margin-bottom: 20px;
+      font-size: 0.9rem; line-height: 1.6; display: flex; gap: 12px;
+    }
+    .callout-icon { flex-shrink: 0; font-size: 1.1rem; margin-top: 1px; }
+    .callout-info { background: #eff6ff; border: 1px solid #bfdbfe; color: #1e40af; }
+    .callout-warn { background: var(--primary-light); border: 1px solid var(--primary-light-2); color: var(--primary-darker); }
+    .callout-success { background: #f0fdf4; border: 1px solid #bbf7d0; color: #166534; }
+
+    /* ── Info boxes ── */
+    .info-grid {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px;
+    }
+    .info-box {
+      background: var(--primary-light); border: 1px solid var(--primary-light-2);
+      border-radius: var(--radius); padding: 20px;
+    }
+    .info-box h4 {
+      margin: 0 0 8px; font-size: 0.9rem; color: var(--primary-darker);
+    }
+    .info-box p {
+      margin: 0; font-size: 0.88rem; color: var(--text-gray);
+    }
+
+    /* ── Flow diagram ── */
+    .flow-diagram {
+      background: var(--bg-code); border-radius: var(--radius-lg);
+      padding: 28px 32px; margin-bottom: 24px; overflow-x: auto;
+    }
+    .flow-diagram pre {
+      color: #e2e8f0; font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 0.82rem; line-height: 1.8; margin: 0; white-space: pre;
+    }
+    .flow-diagram .flow-arrow { color: var(--primary); }
+    .flow-diagram .flow-highlight { color: #FF8433; }
+    .flow-diagram .flow-dim { color: #64748b; }
+
+    .config-table-wrap {
+      overflow-x: auto; border-radius: var(--radius); border: 1px solid var(--border);
+      box-shadow: var(--shadow-sm); margin-bottom: 24px;
+    }
+    .config-table {
+      width: 100%; border-collapse: collapse; font-size: 0.88rem;
+    }
+    .config-table thead { background: var(--primary-light); }
+    .config-table th {
+      padding: 12px 16px; text-align: left; font-weight: 700;
+      color: var(--primary-darker); font-size: 0.78rem;
+      text-transform: uppercase; letter-spacing: 0.5px;
+      border-bottom: 2px solid var(--primary-light-2);
+    }
+    .config-table td {
+      padding: 10px 16px; border-bottom: 1px solid var(--border);
+      color: var(--text-gray); vertical-align: top;
+    }
+    .config-table tr:last-child td { border-bottom: none; }
+    .config-table tr:hover td { background: var(--primary-light); }
+
+    .mobile-sidebar-toggle {
+      display: none; position: fixed; bottom: 24px; right: 24px; z-index: 999;
+      width: 48px; height: 48px; border-radius: 50%;
+      background: linear-gradient(135deg, var(--primary-dark), var(--primary));
+      color: var(--white); border: none; font-size: 1.3rem; cursor: pointer;
+      box-shadow: var(--shadow-lg);
+    }
+
+    @media (max-width: 900px) {
+      .sidebar {
+        transform: translateX(-100%); transition: transform 0.3s ease;
+        z-index: 900; width: 280px;
+      }
+      .sidebar.open { transform: translateX(0); }
+      .content { margin-left: 0; padding: 32px 24px 80px; }
+      .mobile-sidebar-toggle { display: flex; align-items: center; justify-content: center; }
+      .content h1 { font-size: 1.7rem; }
+      .content h2 { font-size: 1.3rem; }
+      .info-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+  <header class="header" id="header">
+    <div class="header-inner">
+      <a href="index.html" class="header-logo">
+        <svg width="28" height="28" viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0"><path d="M4 7L14 21L24 7" stroke="#FF6600" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <div class="header-logo-text">v<span>Billing</span> Docs</div>
+      </a>
+      <nav class="header-nav">
+        <a href="index.html">Home</a>
+        <a href="getting-started.html">Guide</a>
+        <a href="https://github.com/vClusterLabs-Experiments/vbilling" class="gh-link" target="_blank">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <div class="docs-layout">
+    <nav class="sidebar" id="sidebar">
+      <a href="index.html" class="sidebar-back">&#8592; Back to main site</a>
+      <div class="sidebar-section">
+        <div class="sidebar-label">Documentation</div>
+        <a href="getting-started.html">Getting Started</a>
+        <a href="configuration.html">Configuration</a>
+        <a href="metrics.html">Metrics Reference</a>
+        <a href="private-nodes.html">Dedicated and Private Nodes</a>
+        <a href="example-gke.html">Example: GKE with GPUs</a>
+        <a href="troubleshooting.html">Troubleshooting</a>
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-label">Billing Adapters</div>
+        <a href="stripe.html">Stripe</a>
+        <a href="metronome.html">Metronome</a>
+        <a href="lago.html">Lago</a>
+        <a href="custom-adapter.html" class="active">Custom Billing Adapter</a>
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-label">Resources</div>
+        <a href="https://github.com/vClusterLabs-Experiments/vbilling" target="_blank">GitHub Repository</a>
+        <a href="https://www.vcluster.com/docs" target="_blank">vCluster Docs</a>
+        <a href="https://docs.stripe.com/billing/subscriptions/usage-based" target="_blank">Stripe Billing Docs</a>
+        <a href="https://docs.metronome.com/" target="_blank">Metronome Docs</a>
+        <a href="https://www.getlago.com/docs" target="_blank">Lago Docs</a>
+      </div>
+    </nav>
+
+    <main class="content">
+      <h1>Custom Billing Adapter</h1>
+      <p class="subtitle">Connect a billing platform vBilling has no built-in adapter for: stream signed CloudEvents to it with the webhook adapter, push usage vBilling cannot measure through the ingest API, or write a billing adapter in Go.</p>
+      <div class="callout callout-info">
+        <div class="callout-icon">i</div>
+        <div>Stripe, Metronome and Lago have built-in billing adapters: see <a href="stripe.html">Stripe</a>, <a href="metronome.html">Metronome</a> and <a href="lago.html">Lago</a>. Every adapter, built-in or custom, has its own cursor into the ledger, so several can run at once and one billing platform being down never blocks another.</div>
+      </div>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead><tr><th>Approach</th><th>Code to write</th><th>Use it for</th></tr></thead>
+          <tbody>
+            <tr><td><a href="#webhook">Webhook adapter</a></td><td>None in vBilling, an HTTPS receiver on your side</td><td>A data platform, a Kafka bridge or a homegrown rating engine</td></tr>
+            <tr><td><a href="#ingest">Ingest API</a></td><td>An HTTP client in your service</td><td>Usage vBilling cannot see: inference tokens, Slurm accounting, storage</td></tr>
+            <tr><td><a href="#go-adapter">Go adapter</a></td><td>A Go package in your fork of vBilling</td><td>A billing platform with its own API for customers, meters and usage</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h2 id="webhook">Webhook adapter</h2>
+      <p>The <code>webhook</code> adapter POSTs CloudEvents 1.0 batches in structured mode to one endpoint, up to 500 events per request. Keep the signing secret in a Secret under the key <code>secret</code>, and list <code>webhook</code> next to any other adapter (for example <code>'{metronome,webhook}'</code>):</p>
+      <div class="code-block"><code><span class="cmd">kubectl</span> -n vbilling-system create secret generic vbilling-webhook \
+  <span class="flag">--from-file</span>=secret=./webhook-secret
+<span class="cmd">helm</span> upgrade <span class="flag">--install</span> vbilling deploy/helm/vbilling -n vbilling-system \
+  <span class="flag">--set</span> adapters=<span class="string">'{webhook}'</span> \
+  <span class="flag">--set</span> webhook.url=https://billing.example.com/vbilling \
+  <span class="flag">--set</span> webhook.existingSecret=vbilling-webhook \
+  <span class="flag">--set</span> region=us-east-1 <span class="flag">--set</span> clusterName=us-east-1a</code></div>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead><tr><th>Helm value</th><th>Environment variable</th><th>Effect</th></tr></thead>
+          <tbody>
+            <tr><td><code>webhook.url</code></td><td><code>WEBHOOK_URL</code></td><td>Endpoint that receives the batches. Required when <code>webhook</code> is in <code>adapters</code>.</td></tr>
+            <tr><td><code>webhook.existingSecret</code> (key <code>secret</code>)</td><td><code>WEBHOOK_SECRET</code></td><td>Signs every request with HMAC-SHA256. Without it, requests are not signed.</td></tr>
+            <tr><td><code>webhook.headers</code></td><td><code>WEBHOOK_HEADERS</code> (<code>k=v,k=v</code>)</td><td>Extra request headers. The chart sets them as a plain environment value, not from a Secret.</td></tr>
+            <tr><td><code>region</code>, <code>clusterName</code></td><td><code>REGION</code>, <code>CLUSTER_NAME</code></td><td>Form the CloudEvents <code>source</code>: <code>vbilling/&lt;region&gt;/&lt;clusterName&gt;</code>.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Event types</h3>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead><tr><th>type</th><th>Sent</th><th>data</th></tr></thead>
+          <tbody>
+            <tr><td><code>com.vcluster.vbilling.<wbr>usage.v1</code></td><td>For every event committed to the ledger, collector and ingested alike: every metric, including informational (<code>vcluster_gpu_utilization</code>, <code>vcluster_gpu_downtime_hours</code>) and custom ones</td><td>One <a href="https://github.com/vClusterLabs-Experiments/vbilling/blob/main/docs/schema/usage-event.v1.json" target="_blank">usage event</a></td></tr>
+            <tr><td><code>com.vcluster.vbilling.<wbr>tenant.v1</code></td><td>Before the tenant's first usage event, again when its details change, and after a restart</td><td>The tenant: <code>id</code>, <code>display_name</code>, <code>email</code>, <code>currency</code>, <code>region</code>, <code>project</code>, <code>class</code>, <code>plan</code>, <code>clusters</code>, <code>metadata</code>, <code>provider_ids</code>, <code>created_at</code></td></tr>
+            <tr><td><code>com.vcluster.vbilling.<wbr>tenant.<wbr>offboarded.v1</code></td><td>Once the tenant has had no tenant clusters for <code>OFFBOARD_GRACE</code> (default 1h)</td><td>The tenant</td></tr>
+            <tr><td><code>com.vcluster.vbilling.<wbr>catalog.v1</code></td><td>Each time vBilling starts, before any usage</td><td>Every metric definition: <code>code</code>, <code>name</code>, <code>unit</code>, <code>description</code>, <code>billable</code>, <code>group_keys</code>, <code>custom</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>A usage event's CloudEvent <code>id</code> is its usage event ID (<code>vb1_...</code>); the others are <code>tenant-&lt;tenant&gt;-&lt;unix time&gt;</code>, <code>offboard-&lt;tenant&gt;-&lt;unix time&gt;</code> and <code>catalog-&lt;unix time&gt;</code>. Each envelope also carries <code>specversion</code> <code>1.0</code>, <code>source</code>, <code>subject</code> (the tenant ID; the catalog has none), <code>time</code> (a usage event's <code>window_end</code>), <code>datacontenttype</code> <code>application/json</code> and, on usage events, <code>dataschema</code>. A usage batch, formatted and trimmed to one private node's GPU-hours for one minute:</p>
+      <div class="code-block"><code>[{
+  "specversion": "1.0",
+  "id": "vb1_5d0f8e2c9a7b4e1f3c6a8d2b0e9f7a41",
+  "source": "vbilling/us-east-1/us-east-1a",
+  "type": "com.vcluster.vbilling.usage.v1",
+  "subject": "acme-ai",
+  "time": "2026-10-05T10:01:00Z",
+  "datacontenttype": "application/json",
+  "dataschema": "https://github.com/vClusterLabs-Experiments/vbilling/blob/main/docs/schema/usage-event.v1.json",
+  "data": {
+    "schema_version": "vbilling.usage/v1",
+    "id": "vb1_5d0f8e2c9a7b4e1f3c6a8d2b0e9f7a41",
+    "tenant": "acme-ai", "metric": "vcluster_gpu_hours",
+    "quantity": 0.133333333, "unit": "gpu-hours",
+    "window_start": "2026-10-05T10:00:00Z", "window_end": "2026-10-05T10:01:00Z",
+    "region": "us-east-1", "sku": "NVIDIA-H100-80GB-HBM3", "resource_id": "gpu-node-1",
+    "dimensions": {"billing_mode": "private_node", "capacity_type": "reserved",
+      "gpu_profile": "full", "gpu_type": "NVIDIA-H100-80GB-HBM3",
+      "node": "gpu-node-1", "tenant_cluster": "vcluster-acme-ai-train"},
+    "properties": {"gpu_devices": 8, "physical_gpus": 8},
+    "source": "collector", "recorded_at": "2026-10-05T10:01:04Z"
+  }
+}]</code></div>
+
+      <h3 id="signature">Headers and signature</h3>
+      <div class="code-block"><code>POST /vbilling HTTP/1.1
+Content-Type: application/cloudevents-batch+json
+User-Agent: vbilling/0.2
+X-VBilling-Signature: t=1791194464,v1=&lt;hex HMAC-SHA256&gt;</code></div>
+      <p>The signature uses the <code>t=...,v1=...</code> scheme of Stripe's <code>Stripe-Signature</code>: an HMAC-SHA256, keyed with your secret, over the timestamp, a period and the raw request body. Verify it on the raw bytes before parsing JSON and reject stale timestamps. A retry is signed again with a new timestamp.</p>
+      <div class="code-block"><code>import hashlib, hmac, time
+
+def verify(body: bytes, header: str, secret: str, tolerance: int = 300) -&gt; bool:
+    fields = dict(p.split("=", 1) for p in header.split(",") if "=" in p)
+    ts, sig = fields.get("t", ""), fields.get("v1", "")
+    if not ts.isdigit() or abs(time.time() - int(ts)) &gt; tolerance:
+        return False
+    mac = hmac.new(secret.encode(), ts.encode() + b"." + body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(mac, sig)</code></div>
+
+      <h3 id="responses">Responses, retries and dead letters</h3>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead><tr><th>Your endpoint returns</th><th>vBilling</th></tr></thead>
+          <tbody>
+            <tr><td>2xx</td><td>Counts the batch as delivered and moves the cursor on. Return it only once the batch is stored.</td></tr>
+            <tr><td>400, 413 or 422</td><td>Treats the payload as rejected for good: it splits the batch until each rejected event is alone, parks those as dead letters and delivers the rest.</td></tr>
+            <tr><td>Anything else, or no answer within 30s</td><td>Retries the whole batch with exponential backoff (1s, doubling up to 5 min) while later events wait. Auth errors, 404, 409, 429 and 5xx never dead-letter an event.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout callout-warn">
+        <div class="callout-icon">!</div>
+        <div><strong>Deduplicate on <code>id</code>.</strong> A batch can arrive twice: after a timeout, a restart before the cursor was saved, a dead-letter replay or a cursor rewind. A usage event keeps its ID for the same window, so upsert on it. Tenant and catalog IDs carry a timestamp: keep the latest. Return 2xx for types you ignore, because vBilling holds all delivery to the endpoint until it accepts the catalog event.</div>
+      </div>
+      <p>Dead letters stay on the ledger volume until a replay clears them. Add <code>-H "Authorization: Bearer $API_TOKEN"</code> when the API is protected:</p>
+      <div class="code-block"><code><span class="cmd">curl</span> -s localhost:8080/api/v1/destinations/webhook/dead-letters \
+  | jq <span class="string">'.dead_letters[] | {reason, id: .event.id}'</span>
+<span class="cmd">curl</span> -s -X POST localhost:8080/api/v1/destinations/webhook/dead-letters/replay
+<span class="comment"># send the retained ledger (RETENTION, default 7 days) to a new endpoint</span>
+<span class="cmd">curl</span> -s -X POST localhost:8080/api/v1/destinations/webhook/cursor -d <span class="string">'{"seq": 0}'</span></code></div>
+
+      <h2 id="ingest">Ingest API</h2>
+      <p>Usage vBilling cannot measure itself, such as inference tokens from a model gateway or Slurm accounting, goes in through <code>POST /api/v1/events</code>. Accepted events are committed to the same ledger as collector events and fan out to every adapter, the webhook and your own adapter included. Declare the metric, enable ingest with a token, and send closed windows:</p>
+      <div class="code-block"><code><span class="cmd">helm</span> upgrade vbilling deploy/helm/vbilling -n vbilling-system <span class="flag">--reuse-values</span> \
+  <span class="flag">--set</span> metering.customMetrics=<span class="string">'inference_output_tokens:tokens:model'</span> \
+  <span class="flag">--set</span> api.existingSecret=vbilling-api   <span class="comment"># keys: api-token, ingest-token</span>
+
+<span class="cmd">curl</span> -X POST localhost:8080/api/v1/events -H <span class="string">"Authorization: Bearer $INGEST_TOKEN"</span> \
+  -H <span class="string">"X-VBilling-Client: model-gateway"</span> -d <span class="string">'{"events": [{
+    "tenant": "acme-ai", "metric": "inference_output_tokens", "quantity": 1250000,
+    "window_start": "2026-10-05T10:00:00Z", "window_end": "2026-10-05T10:01:00Z",
+    "dimensions": {"model": "llama-3.3-70b"}}]}'</span></code></div>
+      <ul>
+        <li>Ingest is off until <code>INGEST_TOKEN</code> (or <code>API_TOKEN</code>) is set. Up to 5,000 events or 10 MiB per request, as <code>{"events": [...]}</code> or a bare array.</li>
+        <li>The metric must be built in or declared in <code>CUSTOM_METRICS</code> (<code>code:unit[:group_key|group_key]</code>). Custom metrics are billable, so billing adapters create them at bootstrap.</li>
+        <li><code>window_end</code> may be at most 5 minutes in the future and <code>window_start</code> at most 34 days old. <code>region</code> defaults to <code>REGION</code>, and <code>source</code> becomes <code>ingest:&lt;X-VBilling-Client&gt;</code>.</li>
+        <li>Send a stable <code>id</code>, or let vBilling derive one from the event's identity, which excludes the quantity. An ID seen in the last 48 hours is reported as a duplicate and dropped, so send each window once, after it closes.</li>
+        <li>Events are validated one by one: the response lists accepted IDs, duplicates and rejections with their index and reason, and is a 400 only when no event passed.</li>
+      </ul>
+      <p>See <a href="configuration.html#environment-variables">Configuration</a> and <a href="metrics.html#custom-metrics">Custom metrics</a> for the full reference.</p>
+
+      <h2 id="go-adapter">Go adapter</h2>
+      <p>For a billing platform with its own API, implement the <code>Destination</code> interface in a Go package. vBilling's packages are under <code>internal/</code>, so the adapter lives in your fork of the repository, at <code>internal/destinations/&lt;name&gt;</code>, and ships in your own image.</p>
+      <div class="code-block"><code><span class="comment">// internal/destinations/destination.go (package destinations)</span>
+type Destination interface {
+    Name() string
+    Bootstrap(ctx context.Context, metrics []usage.MetricDef) error
+    EnsureTenant(ctx context.Context, t usage.Tenant) error
+    RemoveTenant(ctx context.Context, t usage.Tenant) error
+    SendEvents(ctx context.Context, events []usage.Event) error
+}</code></div>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead><tr><th>Method</th><th>Called</th><th>Contract</th></tr></thead>
+          <tbody>
+            <tr><td><code>Name</code></td><td>Wherever the adapter is named: status, logs, <code>/api/v1/destinations/&lt;name&gt;</code></td><td>Return the name you register, the one operators list in <code>adapters</code> (<code>ADAPTERS</code>). A name may be listed once.</td></tr>
+            <tr><td><code>Bootstrap</code></td><td>When delivery starts, with the whole catalog (built-in, informational and custom metrics)</td><td>Create meters or billable metrics. No event is delivered until it succeeds; failures are retried with backoff.</td></tr>
+            <tr><td><code>EnsureTenant</code></td><td>Before a tenant's first event reaches the adapter, when its details change, and after a restart</td><td>Create or update the customer. A <code>Permanent</code> error is logged and delivery continues; any other error retries the batch.</td></tr>
+            <tr><td><code>RemoveTenant</code></td><td>Once a tenant has had no tenant clusters for <code>OFFBOARD_GRACE</code></td><td>Decide what offboarding means. Never delete a customer with open invoices. An error is retried on the next pass.</td></tr>
+            <tr><td><code>SendEvents</code></td><td>With batches of up to 500 events from the ledger, and with every parked dead letter on a replay</td><td>Deliver them. The error you return decides what happens next (below).</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>vBilling retries every method freely, so each must be idempotent. Three optional interfaces add capabilities:</p>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead><tr><th>Interface</th><th>Method</th><th>Purpose</th></tr></thead>
+          <tbody>
+            <tr><td><code>EventFilter</code></td><td><code>Accepts(metric string) bool</code></td><td>Skip metrics the platform should not see. <code>destinations.BillableOnly</code> drops the informational ones. Skipped events are counted, never retried.</td></tr>
+            <tr><td><code>Reconciler</code></td><td><code>RecordedTotals(ctx context.Context, q TotalsQuery) ([]Total, error)</code></td><td>Report what the platform recorded per tenant and metric, so <code>GET /api/v1/reconcile</code> can compare it with the ledger.</td></tr>
+            <tr><td><code>CustomerResolver</code></td><td><code>TenantForCustomer(ctx context.Context, customerID string) (string, bool)</code></td><td>Map a platform customer ID back to a tenant for inbound billing webhooks. Only the Stripe and Metronome adapters' webhooks (<code>/webhooks/stripe</code>, <code>/webhooks/metronome</code>) consult it today.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3 id="errors">Errors decide what happens to events</h3>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead><tr><th>SendEvents returns</th><th>vBilling</th></tr></thead>
+          <tbody>
+            <tr><td><code>nil</code></td><td>Counts every event as delivered and moves the cursor on.</td></tr>
+            <tr><td><code>&amp;destinations.PartialError{Rejected: rejected}</code>, mapping event IDs to reasons</td><td>Dead-letters the listed events and counts the rest as delivered. Return it only when nothing in the batch needs a retry.</td></tr>
+            <tr><td><code>destinations.Permanent(err)</code></td><td>Splits the batch until each rejected event is alone, then dead-letters it.</td></tr>
+            <tr><td>Any other error</td><td>Retries the whole batch with backoff while later events wait. Use it for auth errors, rate limits and outages: dead-lettering usage because a key expired would lose revenue.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p><code>destinations.StatusError</code> applies the same rule to HTTP responses: 400, 413 and 422 are permanent, everything else is retried.</p>
+      <p><strong>Idempotency.</strong> Event IDs are deterministic: <code>vb1_</code> plus a SHA-256 of the event's identity (tenant, metric, window, region, project, SKU, resource ID and dimensions), never of its quantity. A window keeps its ID through restarts, backfills, replays and a second replica. Send <code>ev.ID</code> as the platform's idempotency key and treat "already exists" as success. A retried batch repeats events you already delivered; <code>destinations.SentCache</code> skips them without a request. Events can also arrive late (backfill up to <code>MAX_BACKFILL</code>, default 6h, tenant API gap fills, replays), so accept backdated timestamps, or reject too-old events one by one with a <code>PartialError</code>, as the Stripe adapter does for Stripe's 35-day limit.</p>
+
+      <h3 id="skeleton">A minimal adapter</h3>
+      <p><code>internal/destinations/acme/adapter.go</code>, for a platform that takes JSON over HTTPS. Its settings come from the environment in the factory:</p>
+      <div class="code-block"><code><span class="comment">// Package acme ships usage to the Acme billing API.</span>
+package acme
+
+import (
+    "bytes"
+    "context"
+    "encoding/json"
+    "errors"
+    "io"
+    "net/http"
+    "os"
+
+    "github.com/vclusterlabs-experiments/vbilling/internal/config"
+    "github.com/vclusterlabs-experiments/vbilling/internal/destinations"
+    "github.com/vclusterlabs-experiments/vbilling/internal/usage"
+)
+
+func init() { destinations.Register("acme", factory) }
+
+func factory(cfg *config.Config) (destinations.Destination, error) {
+    url, key := os.Getenv("ACME_URL"), os.Getenv("ACME_API_KEY")
+    if url == "" || key == "" {
+        return nil, errors.New("ACME_URL and ACME_API_KEY must be set")
+    }
+    return New(url, key), nil
+}
+
+type Adapter struct {
+    url, key string
+    http     *http.Client
+    sent     *destinations.SentCache
+}
+
+func New(url, key string) *Adapter {
+    return &amp;Adapter{url: url, key: key, http: destinations.NewHTTPClient(),
+        sent: destinations.NewSentCache(100_000)}
+}
+
+func (a *Adapter) Name() string { return "acme" }
+
+<span class="comment">// Accepts skips informational metrics (GPU utilization, GPU downtime).</span>
+func (a *Adapter) Accepts(metric string) bool { return destinations.BillableOnly(metric) }
+
+func (a *Adapter) Bootstrap(ctx context.Context, metrics []usage.MetricDef) error {
+    for _, m := range metrics {
+        if !m.Billable {
+            continue
+        }
+        meter := map[string]any{"name": m.Name, "unit": m.Unit, "group_by": m.GroupKeys}
+        if err := a.post(ctx, "/meters/"+m.Code, meter); err != nil {
+            return err
+        }
+    }
+    return nil
+}
+
+func (a *Adapter) EnsureTenant(ctx context.Context, t usage.Tenant) error {
+    return a.post(ctx, "/customers/"+t.ID, map[string]any{
+        "name": t.DisplayName, "email": t.Email, "currency": t.Currency,
+    })
+}
+
+<span class="comment">// RemoveTenant keeps the customer: its final usage still has to be invoiced.</span>
+func (a *Adapter) RemoveTenant(ctx context.Context, t usage.Tenant) error { return nil }
+
+func (a *Adapter) SendEvents(ctx context.Context, events []usage.Event) error {
+    rejected := map[string]string{}
+    for _, ev := range events {
+        if a.sent.Has(ev.ID) {
+            continue <span class="comment">// delivered before this batch was retried</span>
+        }
+        err := a.post(ctx, "/usage", map[string]any{
+            "idempotency_key": ev.ID, "customer": ev.Tenant, "meter": ev.Metric,
+            "quantity": ev.Quantity, "timestamp": ev.WindowStart, "sku": ev.SKU,
+            "region": ev.Region, "dimensions": ev.Dimensions,
+        })
+        switch {
+        case err == nil:
+            a.sent.Add(ev.ID)
+        case destinations.IsPermanent(err):
+            rejected[ev.ID] = err.Error() <span class="comment">// dead-lettered; the rest is delivered</span>
+        default:
+            return err <span class="comment">// the batch is retried with backoff</span>
+        }
+    }
+    if len(rejected) &gt; 0 {
+        return &amp;destinations.PartialError{Rejected: rejected}
+    }
+    return nil
+}
+
+func (a *Adapter) post(ctx context.Context, path string, body any) error {
+    b, err := json.Marshal(body)
+    if err != nil {
+        return err
+    }
+    url := a.url + path
+    req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(b))
+    if err != nil {
+        return err
+    }
+    req.Header.Set("Authorization", "Bearer "+a.key)
+    req.Header.Set("Content-Type", "application/json")
+    resp, err := a.http.Do(req)
+    if err != nil {
+        return err
+    }
+    defer resp.Body.Close()
+    msg, _ := io.ReadAll(io.LimitReader(resp.Body, 64&lt;&lt;10))
+    if resp.StatusCode &gt;= 200 &amp;&amp; resp.StatusCode &lt; 300 {
+        return nil
+    }
+    return destinations.StatusError(http.MethodPost, url, resp.StatusCode, msg)
+}
+
+var (
+    _ destinations.Destination = (*Adapter)(nil)
+    _ destinations.EventFilter = (*Adapter)(nil)
+)</code></div>
+      <p>Register it with a blank import next to the built-in adapters in <code>cmd/vbilling/main.go</code>:</p>
+      <div class="code-block"><code>    <span class="comment">// Register the remaining built-in adapters.</span>
+    _ "github.com/vclusterlabs-experiments/vbilling/internal/destinations/lago"
+    _ "github.com/vclusterlabs-experiments/vbilling/internal/destinations/noop"
+    _ "github.com/vclusterlabs-experiments/vbilling/internal/destinations/webhook"
+    _ "github.com/vclusterlabs-experiments/vbilling/internal/destinations/acme"</code></div>
+      <p>Test it the way <code>internal/destinations/webhook/adapter_test.go</code> does: point the adapter at an <code>httptest</code> server and check that a 422 returns a <code>PartialError</code> and a 503 a retryable error. Then build and deploy your image:</p>
+      <div class="code-block"><code><span class="cmd">go</span> test -race ./internal/destinations/acme/
+<span class="cmd">make</span> test lint
+<span class="cmd">make</span> docker-push IMAGE=registry.example.com/vbilling TAG=acme-1
+<span class="cmd">helm</span> upgrade <span class="flag">--install</span> vbilling deploy/helm/vbilling -n vbilling-system \
+  <span class="flag">--set</span> adapters=<span class="string">'{acme}'</span> \
+  <span class="flag">--set</span> image.repository=registry.example.com/vbilling <span class="flag">--set</span> image.tag=acme-1</code></div>
+      <p>The chart has no generic extra environment value: add <code>ACME_URL</code>, and <code>ACME_API_KEY</code> from a Secret, to the container's <code>env</code> in <code>deploy/helm/vbilling/templates/statefulset.yaml</code> in your fork.</p>
+
+      <h2 id="noop">Dry runs with noop</h2>
+      <p><code>--set adapters='{noop}'</code> delivers nowhere and logs every event, for example <code>[noop] event tenant=acme-ai metric=vcluster_gpu_hours qty=0.133333333 gpu-hours sku=NVIDIA-H100-80GB-HBM3 region=us-east-1 window=10:00:00</code>. Use it to check metering before a billing platform is connected, or list it next to an adapter you are building.</p>
+    </main>
+  </div>
+
+  <button class="mobile-sidebar-toggle" id="mobileSidebarToggle" aria-label="Toggle sidebar">&#9776;</button>
+
+  <script>
+    const header = document.getElementById('header');
+    window.addEventListener('scroll', () => { header.classList.toggle('scrolled', window.scrollY > 10); });
+    const sidebar = document.getElementById('sidebar');
+    const toggle = document.getElementById('mobileSidebarToggle');
+    toggle.addEventListener('click', () => { sidebar.classList.toggle('open'); });
+    document.addEventListener('click', (e) => {
+      if (!sidebar.contains(e.target) && !toggle.contains(e.target)) sidebar.classList.remove('open');
+    });
+  </script>
+</body>
+</html>

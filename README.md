@@ -22,7 +22,7 @@ vBilling is the **metering pipe**, not the billing engine. It turns what runs in
 ## What's new in v0.2
 
 - **Stripe and Metronome adapters.** Use Stripe Billing Meters on their own, or Metronome for rating with Stripe for payment, invoicing and tax. vBilling creates the Stripe customer and links it in Metronome.
-- **Durable, hash-chained ledger.** Every window is committed atomically to disk before any backend sees it. If vBilling restarts or a backend has an outage, no usage is lost, and missed windows are backfilled.
+- **Durable, hash-chained ledger.** Every window is committed atomically to disk before any billing platform sees it. If vBilling restarts or a billing platform has an outage, no usage is lost, and missed windows are backfilled.
 - **Several destinations at once.** Each destination has its own cursor, so a down billing API never blocks your data platform feed.
 - **Deterministic event IDs.** Retries, replays and two replicas all deduplicate downstream.
 - **Second-level allocation metering.** GPU time is metered from container start to finish, including fractional GPUs (MIG mixed and single strategy, GKE GPU partitions, time-slicing including GKE time-sharing) and GPUs allocated through DRA ResourceClaims.
@@ -124,7 +124,7 @@ Every event carries `tenant`, `region`, `project`, `sku`, `resource_id`, `tenant
 | Tenancy model | Where workloads run | How vBilling meters it |
 |---|---|---|
 | Shared nodes | Control plane cluster nodes, pods synced by vCluster | From the control plane cluster: pods, volumes, load balancers (`billing_mode=shared`) |
-| Dedicated nodes | Control plane cluster nodes reserved for one tenant cluster | Whole node: node-hours, whole GPUs, CPU and memory capacity (`billing_mode=dedicated_node`) |
+| Dedicated nodes | Control plane cluster nodes assigned to one tenant cluster | Whole node: node-hours, whole GPUs, CPU and memory capacity (`billing_mode=dedicated_node`) |
 | Private Nodes, Auto Nodes | Machines joined to the tenant cluster itself; nothing is synced to the control plane cluster | Through the tenant cluster's own API: each private node billed whole (`billing_mode=private_node`), plus the tenant cluster's volumes and load balancers. `PRIVATE_NODE_BILLING=usage` bills the pods on them instead |
 | Standalone, or any cluster elsewhere | No control plane cluster | Through a kubeconfig listed in `TENANT_CLUSTERS_FILE`, like private nodes |
 
@@ -165,9 +165,9 @@ vCluster exports kubeconfigs for `localhost`; vBilling connects to the tenant cl
 
 **Outages.** If a tenant cluster's API cannot be read, the rest of the fleet is still metered, and the missed windows are filled as soon as it answers (up to `MAX_BACKFILL`). Fills are late ledger events deduplicated by ID, so a repeated fill never bills twice.
 
-## Billing backends
+## Billing adapters
 
-Select one or more with `ADAPTERS` (Helm: `adapters`).
+Select one or more with `ADAPTERS` (Helm: `adapters`). Each has a full guide on the docs site: [Stripe](https://vclusterlabs-experiments.github.io/vbilling/stripe.html), [Metronome](https://vclusterlabs-experiments.github.io/vbilling/metronome.html), [Lago](https://vclusterlabs-experiments.github.io/vbilling/lago.html) and the [Custom Billing Adapter](https://vclusterlabs-experiments.github.io/vbilling/custom-adapter.html) (webhook, ingest API, or your own Go adapter).
 
 | Adapter | What vBilling does | Pricing lives in |
 |---|---|---|
@@ -175,10 +175,10 @@ Select one or more with `ADAPTERS` (Helm: `adapters`).
 | `metronome` | Creates customers with the tenant ID as ingest alias. Creates SUM billable metrics with one compound group key (`region, sku, capacity_type, billing_mode, tenant_cluster`). Ingests events and optionally creates a contract per tenant from a rate card. Reconciles via `/v1/usage`. | Metronome rate cards (pricing group keys) |
 | `metronome` + `METRONOME_STRIPE_LINK=true` | Also creates the tenant's Stripe customer and links it in Metronome, so **Metronome rates and Stripe collects payment, invoices and tax**. | Metronome |
 | `lago` | Customers, subscriptions and the default plan, plus events whose dimensions are properties for Lago charge filters. | Lago plans and charges |
-| `webhook` | Signed CloudEvents 1.0 batches (`application/cloudevents-batch+json`), including tenant and catalog events. Use it to feed a data platform, Kafka bridge or homegrown rating engine. | wherever you send it |
+| `webhook` | Signed CloudEvents 1.0 batches (`application/cloudevents-batch+json`), including tenant, offboarding and catalog events. Use it to feed a data platform, Kafka bridge or homegrown rating engine. | wherever you send it |
 | `noop` | Logs events (dry run). | n/a |
 
-Stripe now steers new usage-based integrations toward Metronome, which Stripe acquired in January 2026. Both paths are supported here: Billing Meters for straightforward pay-as-you-go, Metronome for dimensional pricing, commits, credits and multi-currency rate cards.
+Stripe acquired Metronome in January 2026. Both paths are supported here: Billing Meters for straightforward pay-as-you-go, Metronome for dimensional pricing, commits, credits and multi-currency rate cards.
 
 ## Quick start
 
@@ -214,11 +214,11 @@ helm upgrade --install vbilling deploy/helm/vbilling -n vbilling-system \
   --set region=ap-southeast-2
 ```
 
-In Metronome, add products on the vBilling billable metrics with `pricing_group_key: ["region","sku","capacity_type"]` to price H100 differently from L40S, Sydney differently from Melbourne, and spot or preemptible at a flat discount. Rate cards carry the currency (AUD and NZD are supported natively).
+In Metronome, add products on the vBilling billable metrics with `pricing_group_key: ["region","sku","capacity_type","billing_mode"]` and `presentation_group_key: ["tenant_cluster"]` (together they must form the metric's group key) to price H100 differently from L40S, one region differently from another, and spot or preemptible at a flat discount. Rate cards carry the currency.
 
 **Shared and private GPU nodes on GKE**: [`examples/gke-gpu`](examples/gke-gpu) is a complete setup, from an empty project to Stripe invoices: a time-sliced L4 tenant cluster, an A100 joined as a vCluster private node, DCGM through Prometheus, and the manifests, values and commands for each step. Also on the [docs site](https://vclusterlabs-experiments.github.io/vbilling/example-gke.html).
 
-**Lago (local demo)**: `deploy/lago/docker-compose.yml` runs Lago locally. See [docs/getting-started.html](docs/getting-started.html).
+**Lago (local demo)**: `deploy/lago/docker-compose.yml` runs Lago locally. See the [Lago guide](https://vclusterlabs-experiments.github.io/vbilling/lago.html), which also runs the whole pipeline on a laptop with vind.
 
 Then:
 
@@ -238,7 +238,7 @@ By default every tenant cluster is its own billing customer, with ID `vcluster-<
 | Key (`vbilling.vcluster.com/...`) | Effect |
 |---|---|
 | `tenant` | Billing customer ID. Several tenant clusters can share one customer. |
-| `display-name`, `email`, `currency` | Customer details sent to the backend |
+| `display-name`, `email`, `currency` | Customer details sent to the billing platform |
 | `project` | Cost attribution (defaults to the vCluster Platform project) |
 | `tenant-class` | e.g. `public`, `enterprise`, `government`, `dev`. Stamped on events for pricing. |
 | `plan` | Lago plan, Stripe plan tag, or Metronome rate card alias/ID |
@@ -253,16 +253,16 @@ On nodes, `vbilling.vcluster.com/capacity-type` (`on-demand`, `spot`, `preemptib
 
 | Guarantee | How |
 |---|---|
-| No usage lost on restart, upgrade or backend outage | Windows are committed to an fsynced, append-only ledger on a PVC before delivery. Each destination has a persisted cursor. On restart, missed windows (up to `MAX_BACKFILL`, default 6h) are backfilled from object lifetimes. |
+| No usage lost on restart, upgrade or billing platform outage | Windows are committed to an fsynced, append-only ledger on a PVC before delivery. Each destination has a persisted cursor. On restart, missed windows (up to `MAX_BACKFILL`, default 6h) are backfilled from object lifetimes. |
 | No duplicates | Event IDs are a hash of the event's identity (tenant, metric, window, dimensions), never of its quantity. Stripe dedupes on `identifier`, Metronome on `transaction_id` (34 days), Lago on `transaction_id`. A window can never be committed twice. |
 | Half-written windows never escape | A window is a single write plus fsync ending in a commit record. A torn or uncommitted tail is truncated on startup and collected again. |
 | Tamper evidence | Every ledger record is SHA-256 chained to the previous one. `GET /api/v1/ledger/verify` re-hashes the whole retained ledger. |
-| Bad events don't block good ones | Payloads a backend rejects are isolated (partial-batch errors, or bisection) and parked as dead letters. Auth errors, rate limits and outages are retried with backoff; they are never dead-lettered. |
+| Bad events don't block good ones | Payloads a billing platform rejects are isolated (partial-batch errors, or bisection) and parked as dead letters. Auth errors, rate limits and outages are retried with backoff; they are never dead-lettered. |
 | Provable totals | `GET /api/v1/reconcile` recomputes each tenant's usage from the ledger and compares it with what Stripe or Metronome recorded. Dead letters are accounted for. |
 | Tenant API outages do not lose usage | A tenant cluster whose own API is unreachable is recorded as a gap (persisted under `DATA_DIR`). Once it answers, exactly the missed windows are metered and appended as late events, deduplicated by ID. |
 | A wrong customer is never billed | Customer search results must carry the tenant's exact metadata. Discovery errors never offboard tenants. A tenant must be gone for `OFFBOARD_GRACE` before `RemoveTenant` runs, and customers are never deleted. |
 
-Running two replicas (each with its own PVC) is safe for delivery: both compute the same deterministic IDs, so backends keep the first copy.
+Running two replicas (each with its own PVC) is safe for delivery: both compute the same deterministic IDs, so billing platforms keep the first copy.
 
 ## Regions and data sovereignty
 
@@ -278,19 +278,19 @@ Point Stripe webhooks at `/webhooks/stripe` (`STRIPE_WEBHOOK_SECRET`) and Metron
 
 | Event | State |
 |---|---|
-| `invoice.payment_failed`, subscription `past_due` | `delinquent` |
+| `invoice.payment_failed`, subscription `past_due`, Metronome `payment_gate.payment_status` failed | `delinquent` |
 | subscription `unpaid` / `canceled` / deleted | `suspended` |
 | `billing.alert.triggered`, Metronome `alerts.*` (spend, usage, low credit or commit balance) | `warning` |
-| `invoice.paid`, subscription `active` | `active` |
+| `invoice.paid`, subscription `active`, Metronome `payment_gate.payment_status` paid | `active` |
 
 Override any mapping with `ENFORCEMENT_RULES`, for example `alerts.spend_threshold_reached=suspended` for a hard spend cap.
 
 `ENFORCEMENT_MODE` controls what happens:
 - **`observe`** (default): record the state only. It appears in the API, metrics and dashboard.
 - **`annotate`**: also annotate the tenant cluster, label its namespace `vbilling.vcluster.com/billing-state`, and emit a Kubernetes event.
-- **`enforce`**: also label suspended namespaces `vbilling.vcluster.com/suspended=true`. With `enforcement.admissionPolicy.enabled=true` (Kubernetes 1.30+), a ValidatingAdmissionPolicy then denies **new** pods in those namespaces. Running workloads keep running, the tenant sees the reason as a sync error inside their tenant cluster, and a paid invoice lifts it automatically.
+- **`enforce`**: also label suspended namespaces `vbilling.vcluster.com/suspended=true`. With `enforcement.admissionPolicy.enabled=true` (Kubernetes 1.30+), a ValidatingAdmissionPolicy then denies **new** pods in those namespaces. Running workloads keep running, the tenant sees the reason as a sync error inside their tenant cluster, and a paid invoice lifts it automatically. The policy acts in the control plane cluster, so it holds tenant clusters on shared or dedicated nodes; tenant clusters with their own nodes (Private Nodes, Auto Nodes, Standalone) run their pods only inside the tenant cluster, so act on their billing state with your own automation.
 
-Metronome does not emit webhooks for Stripe payment failures, so in Metronome + Stripe mode, send Stripe's webhooks to vBilling as well.
+Payment failures on invoices that Stripe collects arrive through Stripe's webhooks, so in Metronome + Stripe mode, send Stripe's webhooks to vBilling as well. Billing states are enabled once `STRIPE_WEBHOOK_SECRET` or `METRONOME_WEBHOOK_SECRET` is set.
 
 ## Custom usage: tokens, Slurm, storage, network
 
@@ -303,7 +303,7 @@ curl -X POST localhost:8080/api/v1/events -H "Authorization: Bearer $INGEST_TOKE
               "dimensions": {"model": "llama-3.3-70b"}}]}'
 ```
 
-Events are validated, stamped with the region, deduplicated (send your own `id`, or let vBilling derive one from the identity), committed to the ledger, and fanned out like collector events. Billing backends create meters and metrics for custom metrics at bootstrap.
+Events are validated, stamped with the region, deduplicated (send your own `id`, or let vBilling derive one from the identity), committed to the ledger, and fanned out like collector events. The billing adapters create meters and metrics for custom metrics at bootstrap.
 
 ### Metrics from Prometheus
 
@@ -349,7 +349,7 @@ vCluster Platform 4.11+ collects metrics from every tenant cluster, private node
 | `GET /api/v1/usage?from&to&group_by=tenant,sku,region,day&format=csv` | Unrated line items (filters: `tenant`, `metric`, `project`, `region`, `sku`, `cluster`) |
 | `GET /api/v1/events?from&to&format=jsonl\|csv` | Raw event export |
 | `POST /api/v1/events` | Ingest custom usage (`INGEST_TOKEN`) |
-| `GET /api/v1/reconcile?from&to&destination` | Ledger vs. backend totals (default: previous UTC day) |
+| `GET /api/v1/reconcile?from&to&destination` | Ledger vs. billing platform totals (default: previous UTC day) |
 | `GET /api/v1/ledger/verify` | Hash-chain verification |
 | `GET /api/v1/destinations`, `GET …/{name}/dead-letters`, `POST …/{name}/dead-letters/replay`, `POST …/{name}/cursor` | Delivery operations |
 | `GET /api/v1/tenants`, `GET /api/v1/billing-states`, `PUT /api/v1/billing-states/{tenant}` | Tenants and billing state |
@@ -403,7 +403,7 @@ Alert on rising lag, dead letters, or a stale last window.
 ## Upgrading from v0.1
 
 - **Workload:** the chart now deploys a **StatefulSet** with a PVC (the ledger). The unused `pricing.*` values were removed.
-- **Discounts:** quantities are no longer discounted for spot nodes (`SPOT_DISCOUNT_PERCENT` is ignored). Price `capacity_type=spot|preemptible` in your backend instead, so metered quantities stay physical and reconcilable.
+- **Discounts:** quantities are no longer discounted for spot nodes (`SPOT_DISCOUNT_PERCENT` is ignored). Price `capacity_type=spot|preemptible` in your billing platform instead, so metered quantities stay physical and reconcilable.
 - **Double counting fixed:** v0.1 billed GPUs and CPU/memory on dedicated nodes twice (pod usage plus node capacity). It also over-counted egress about 5x with 60s windows.
 - **Timestamps:** events use the window start, and identical windows now produce identical IDs.
 - **Dashboard:** it is served by vBilling itself and reads its API (the Lago-only `dashboard/index.html` remains for reference).

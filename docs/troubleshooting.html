@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Troubleshooting - vBilling Docs</title>
-  <meta name="description" content="Common issues and solutions when running vBilling: discovery problems, metrics, GPU detection, Lago connectivity, and more.">
+  <meta name="description" content="Common issues and solutions when running vBilling: discovery, metrics, GPU detection, dedicated and private nodes, DCGM, and the billing adapters.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Roboto+Mono:wght@500&display=swap" rel="stylesheet">
@@ -96,7 +96,7 @@
     .sidebar-back:hover { border-color: var(--primary); color: var(--primary-dark); }
 
     .content {
-      flex: 1; margin-left: var(--sidebar-width);
+      flex: 1; min-width: 0; margin-left: var(--sidebar-width);
       padding: 48px 64px 80px; max-width: 900px;
     }
     .content h1 {
@@ -125,7 +125,7 @@
     .content code {
       background: var(--primary-light-2); padding: 2px 7px; border-radius: 4px;
       font-family: 'Roboto Mono', 'SF Mono', 'Fira Code', monospace;
-      font-size: 0.85rem; color: var(--primary-darker);
+      font-size: 0.85rem; color: var(--primary-darker); overflow-wrap: anywhere;
     }
     .content a { color: var(--primary-dark); text-decoration: none; font-weight: 500; }
     .content a:hover { text-decoration: underline; }
@@ -232,10 +232,19 @@
         <a href="troubleshooting.html" class="active">Troubleshooting</a>
       </div>
       <div class="sidebar-section">
+        <div class="sidebar-label">Billing Adapters</div>
+        <a href="stripe.html">Stripe</a>
+        <a href="metronome.html">Metronome</a>
+        <a href="lago.html">Lago</a>
+        <a href="custom-adapter.html">Custom Billing Adapter</a>
+      </div>
+      <div class="sidebar-section">
         <div class="sidebar-label">Resources</div>
         <a href="https://github.com/vClusterLabs-Experiments/vbilling" target="_blank">GitHub Repository</a>
-        <a href="https://www.getlago.com/docs" target="_blank">Lago Docs</a>
         <a href="https://www.vcluster.com/docs" target="_blank">vCluster Docs</a>
+        <a href="https://docs.stripe.com/billing/subscriptions/usage-based" target="_blank">Stripe Billing Docs</a>
+        <a href="https://docs.metronome.com/" target="_blank">Metronome Docs</a>
+        <a href="https://www.getlago.com/docs" target="_blank">Lago Docs</a>
       </div>
     </nav>
 
@@ -247,11 +256,11 @@
       <h2 id="no-vclusters-discovered">No Tenant Clusters Discovered</h2>
       <div class="issue">
         <div class="issue-header">
-          <h3>"[discovery] found 0 vCluster(s)"</h3>
+          <h3>"[controller] window ...: 0 events for 0 tenant cluster(s)"</h3>
         </div>
         <div class="issue-body">
           <h4>Symptoms</h4>
-          <p>vBilling starts but reports zero tenant clusters. No customers or events appear in Lago. The controller log shows <code>[discovery] found 0 vCluster(s)</code> on every reconcile cycle.</p>
+          <p>vBilling starts but meters no tenant clusters. No customers or events appear in your billing platform, and every window logs <code>[controller] window ...: 0 events for 0 tenant cluster(s)</code>.</p>
 
           <h4>Cause</h4>
           <p>vBilling discovers tenant clusters by scanning for StatefulSets and Deployments with the label <code>app=vcluster</code>. If your tenant clusters use different labels, or if RBAC prevents listing these resources, discovery will find nothing.</p>
@@ -277,10 +286,10 @@
 <span class="comment"># If RBAC is the issue, check the ClusterRole</span>
 <span class="cmd">kubectl</span> get clusterrolebinding | <span class="cmd">grep</span> vbilling</code></div>
 
-          <h4><span class="fix-label">Fix</span> Verify Platform API access (optional)</h4>
-          <p>If using vCluster Platform, vBilling tries the Platform API first (management.loft.sh/v1 VirtualClusterInstance resources). If this CRD does not exist, vBilling falls back to workload scanning. Check the logs for:</p>
-          <div class="code-block"><code><span class="output">[discovery] Platform API not available, falling back to StatefulSet scanning: ...</span></code></div>
-          <p>This is normal if you are not running vCluster Platform -- the fallback to StatefulSet scanning is the expected behavior.</p>
+          <h4><span class="fix-label">Fix</span> Check vCluster Platform enrichment (optional)</h4>
+          <p>Workloads are the source of truth: vBilling finds tenant clusters by their StatefulSets and Deployments. With vCluster Platform, it also reads <code>VirtualClusterInstance</code> resources (<code>management.loft.sh/v1</code>) to add the project and display name, and logs:</p>
+          <div class="code-block"><code><span class="output">[discovery] enriched 3 tenant cluster(s) from vCluster Platform</span></code></div>
+          <p>Without vCluster Platform this line never appears. That is expected: discovery does not depend on it.</p>
 
           <h4><span class="fix-label">Fix</span> Check namespace filter</h4>
           <div class="code-block"><code><span class="comment"># If WATCH_NAMESPACES is set, only those namespaces are scanned</span>
@@ -377,7 +386,7 @@
           <p>The most common cause is a label value mismatch between the node label and the vCluster namespace name. vBilling tries multiple label values, but they must correspond to the namespace.</p>
 
           <h4><span class="fix-label">Fix</span> Understand the label matching logic</h4>
-          <p>For a vCluster in namespace <code>vcluster-team-gpu</code>, vBilling searches for nodes with these selectors:</p>
+          <p>For a tenant cluster in namespace <code>vcluster-team-gpu</code>, vBilling searches for nodes with these selectors:</p>
           <div class="code-block"><code><span class="comment"># Selector 1: full namespace name</span>
 vcluster.loft.sh/managed-by=<span class="string">vcluster-team-gpu</span>
 vcluster.loft.sh/cluster=<span class="string">vcluster-team-gpu</span>
@@ -428,7 +437,7 @@ vcluster.loft.sh/cluster=<span class="string">team-gpu</span>
           <div class="code-block"><code><span class="cmd">kubectl</span> <span class="flag">-n</span> &lt;tenant-namespace&gt; get secret vbilling-kubeconfig</code></div>
 
           <h4><span class="fix-label">Fix</span> The tenant cluster's control plane exits</h4>
-          <p><code>you are trying to use a vCluster pro feature 'Private Nodes' (vcp-distro-private-nodes) that is not available</code> means the tenant cluster has no license: register it with vCluster Platform (<code>vcluster platform add vcluster &lt;name&gt; -n &lt;namespace&gt;</code>). <code>denied by loft access key scope</code> means the CLI's access key is scoped and cannot register tenant clusters; log in with a key that can. vCluster 0.36.2 and later need Platform 4.11.3 or later.</p>
+          <p>An error naming the feature <code>'Private Nodes' (vcp-distro-private-nodes)</code> as not available means the tenant cluster has no license: register it with vCluster Platform (<code>vcluster platform add vcluster &lt;name&gt; -n &lt;namespace&gt;</code>). <code>denied by loft access key scope</code> means the CLI's access key is scoped and cannot register tenant clusters; log in with a key that can. vCluster 0.36.2 and later need Platform 4.11.3 or later.</p>
 
           <h4><span class="fix-label">Fix</span> GPU-hours missing right after a node reboot</h4>
           <p>While a driver container rebuilds (after a reboot, a spot restart or a MIG change), a Ready node advertises no GPUs. vBilling bills the node and records its installed GPUs (GPU Feature Discovery's <code>nvidia.com/gpu.count</code>) as <code>vcluster_gpu_downtime_hours</code> with the reason "GPUs installed but not allocatable" until they are allocatable again.</p>
@@ -503,7 +512,7 @@ vcluster.loft.sh/cluster=<span class="string">team-gpu</span>
           <p>vBilling is successfully sending events (you can see them in the Lago UI under the customer's events tab), but the current usage and invoices all show $0.00.</p>
 
           <h4>Cause</h4>
-          <p>When vBilling bootstraps the <code>vcluster-standard</code> plan, <strong>all charge amounts default to $0.00 per unit</strong>. This is by design -- vBilling creates the plan structure, but you must configure the actual pricing.</p>
+          <p>When vBilling bootstraps the <code>vcluster-standard</code> plan, <strong>all charge amounts default to $0.00 per unit</strong>. This is by design: vBilling creates the plan structure, and the prices are yours to set.</p>
 
           <h4><span class="fix-label">Fix</span> Configure pricing in Lago</h4>
           <ol>
@@ -533,7 +542,7 @@ vcluster.loft.sh/cluster=<span class="string">team-gpu</span>
           <p>After restarting the vBilling controller, you see warnings about subscription creation failing, or duplicate subscriptions appear in Lago.</p>
 
           <h4>Cause</h4>
-          <p>vBilling is designed to be idempotent on restart. When it discovers a vCluster, it first probes for an existing subscription using the <code>GetCurrentUsage</code> API call. If the subscription already exists, Lago returns usage data and vBilling reuses the subscription. If the probe fails (404), vBilling creates a new subscription.</p>
+          <p>vBilling is designed to be idempotent on restart. When it discovers a tenant cluster, it first probes for an existing subscription using the <code>GetCurrentUsage</code> API call. If the subscription already exists, Lago returns usage data and vBilling reuses the subscription. If the probe fails (404), vBilling creates a new subscription.</p>
 
           <h4>How it works</h4>
           <div class="code-block"><code><span class="comment"># vBilling's subscription detection logic:</span>
@@ -599,11 +608,13 @@ LAGO_API_URL=<span class="string">http://localhost:3000</span></code></div>
         <div>
           <strong>Enable verbose logging:</strong> vBilling logs to stdout with the <code>[component]</code> prefix convention. Key prefixes to filter:
           <ul style="margin-top: 8px; margin-bottom: 0;">
-            <li><code>[discovery]</code> -- vCluster discovery events</li>
-            <li><code>[controller]</code> -- Reconciliation and event sending</li>
-            <li><code>[metrics]</code> -- Resource collection (CPU, memory, GPU, etc.)</li>
-            <li><code>[bootstrap]</code> -- Lago metric and plan setup</li>
-            <li><code>[lago]</code> -- Raw API calls to Lago</li>
+            <li><code>[controller]</code>: metering windows, backfills and tenant changes</li>
+            <li><code>[discovery]</code>: vCluster Platform enrichment</li>
+            <li><code>[metrics]</code>: collection (CPU, memory, GPUs, Prometheus)</li>
+            <li><code>[tenantapi]</code>: tenant clusters read through their own API (Private Nodes, Standalone)</li>
+            <li><code>[pipeline]</code>: delivery to each adapter, retries and dead letters</li>
+            <li><code>[stripe]</code>, <code>[metronome]</code>, <code>[lago]</code>, <code>[bootstrap]</code>, <code>[noop]</code>: the billing adapters</li>
+            <li><code>[enforcement]</code>, <code>[api]</code>: billing states, webhooks and the HTTP API</li>
           </ul>
         </div>
       </div>

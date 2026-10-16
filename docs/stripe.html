@@ -1,0 +1,588 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Stripe - vBilling Docs</title>
+  <meta name="description" content="Bill tenant clusters with Stripe Billing Meters: meters per metric and SKU, customers, prices and automatic subscriptions, exactly-once delivery, reconciliation, and billing states from Stripe webhooks.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Roboto+Mono:wght@500&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+      --primary: #FF6600; --primary-dark: #CC5100; --primary-darker: #993D00;
+      --primary-light: #FFF5EB; --primary-light-2: #FFE0CC; --accent: #FF8433;
+      --text-dark: #050B24; --text-gray: #505466; --text-light: #828592;
+      --white: #ffffff; --bg-code: #050B24; --border: #E6E7E9;
+      --shadow-sm: 0 1px 2px rgba(0,0,0,0.05);
+      --shadow-md: 0 4px 6px -1px rgba(0,0,0,0.07), 0 2px 4px -2px rgba(0,0,0,0.05);
+      --shadow-lg: 0 10px 15px -3px rgba(0,0,0,0.08), 0 4px 6px -4px rgba(0,0,0,0.04);
+      --radius: 12px; --radius-lg: 16px; --sidebar-width: 260px;
+    }
+
+    html { scroll-behavior: smooth; scroll-padding-top: 80px; }
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      color: var(--text-dark); line-height: 1.6; background: var(--white);
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .header {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 1000;
+      background: rgba(255,255,255,0.92); backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px); border-bottom: 1px solid var(--border);
+    }
+    .header.scrolled { box-shadow: var(--shadow-md); }
+    .header-inner {
+      max-width: 1400px; margin: 0 auto; padding: 0 24px;
+      display: flex; align-items: center; justify-content: space-between; height: 64px;
+    }
+    .header-logo {
+      display: flex; align-items: center; gap: 10px;
+      text-decoration: none; color: var(--text-dark);
+    }
+    .header-logo-icon {
+      width: 32px; height: 32px; border-radius: 8px;
+      background: linear-gradient(135deg, var(--primary-dark), var(--primary));
+      display: flex; align-items: center; justify-content: center;
+      color: var(--white); font-weight: 700; font-size: 0.9rem;
+    }
+    .header-logo-text { font-size: 1.15rem; font-weight: 700; letter-spacing: -0.5px; }
+    .header-logo-text span { color: var(--primary-dark); }
+    .header-nav { display: flex; align-items: center; gap: 20px; }
+    .header-nav a {
+      text-decoration: none; color: var(--text-gray); font-size: 0.88rem;
+      font-weight: 500; transition: color 0.2s;
+    }
+    .header-nav a:hover { color: var(--primary-dark); }
+    .header-nav .gh-link {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: var(--bg-code); color: var(--white); padding: 6px 14px;
+      border-radius: 8px; font-size: 0.82rem; font-weight: 600; transition: opacity 0.2s;
+    }
+    .header-nav .gh-link:hover { opacity: 0.85; color: var(--white); }
+
+    .docs-layout { display: flex; margin-top: 64px; min-height: calc(100vh - 64px); }
+
+    .sidebar {
+      width: var(--sidebar-width); flex-shrink: 0;
+      border-right: 1px solid var(--border); background: var(--primary-light);
+      padding: 32px 0; position: fixed; top: 64px; bottom: 0; overflow-y: auto;
+    }
+    .sidebar-section { margin-bottom: 28px; }
+    .sidebar-label {
+      padding: 0 24px; font-size: 0.72rem; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 1px; color: var(--primary-darker);
+      margin-bottom: 8px;
+    }
+    .sidebar a {
+      display: block; padding: 7px 24px; text-decoration: none;
+      font-size: 0.88rem; color: var(--text-gray); font-weight: 500;
+      transition: all 0.15s; border-left: 3px solid transparent;
+    }
+    .sidebar a:hover { color: var(--primary-dark); background: var(--primary-light-2); }
+    .sidebar a.active {
+      color: var(--primary-dark); background: var(--primary-light-2);
+      border-left-color: var(--primary); font-weight: 600;
+    }
+    .sidebar-back {
+      display: flex; align-items: center; gap: 6px; margin: 0 24px 24px;
+      padding: 8px 12px; border-radius: 8px; text-decoration: none;
+      font-size: 0.85rem; color: var(--text-light); font-weight: 500;
+      border: 1px solid var(--border); transition: all 0.2s;
+    }
+    .sidebar-back:hover { border-color: var(--primary); color: var(--primary-dark); }
+
+    .content {
+      flex: 1; min-width: 0; margin-left: var(--sidebar-width);
+      padding: 48px 64px 80px; max-width: 900px;
+    }
+    .content h1 {
+      font-size: 2.2rem; font-weight: 800; letter-spacing: -1px;
+      margin-bottom: 12px; color: var(--text-dark);
+    }
+    .content .subtitle {
+      font-size: 1.1rem; color: var(--text-gray); line-height: 1.7;
+      margin-bottom: 40px; max-width: 640px;
+    }
+    .content h2 {
+      font-size: 1.5rem; font-weight: 700; letter-spacing: -0.5px;
+      margin: 48px 0 16px; color: var(--text-dark);
+      padding-bottom: 8px; border-bottom: 2px solid var(--primary-light-2);
+    }
+    .content h3 {
+      font-size: 1.15rem; font-weight: 700; margin: 32px 0 12px; color: var(--text-dark);
+    }
+    .content h4 {
+      font-size: 0.95rem; font-weight: 700; margin: 20px 0 8px; color: var(--text-dark);
+    }
+    .content p {
+      font-size: 0.95rem; color: var(--text-gray); line-height: 1.7; margin-bottom: 16px;
+    }
+    .content ul, .content ol {
+      margin: 0 0 16px 24px; color: var(--text-gray); font-size: 0.95rem;
+    }
+    .content li { margin-bottom: 6px; line-height: 1.6; }
+    .content code {
+      background: var(--primary-light-2); padding: 2px 7px; border-radius: 4px;
+      font-family: 'Roboto Mono', 'SF Mono', 'Fira Code', monospace;
+      font-size: 0.85rem; color: var(--primary-darker); overflow-wrap: anywhere;
+    }
+    .content a { color: var(--primary-dark); text-decoration: none; font-weight: 500; }
+    .content a:hover { text-decoration: underline; }
+
+    .code-block {
+      background: var(--bg-code); border-radius: var(--radius);
+      padding: 20px 24px; overflow-x: auto; margin-bottom: 20px; position: relative;
+    }
+    .code-block code {
+      color: #e2e8f0; background: none; padding: 0;
+      font-family: 'Roboto Mono', 'SF Mono', 'Fira Code', monospace;
+      font-size: 0.84rem; line-height: 1.7; white-space: pre;
+    }
+    .code-block .comment { color: #64748b; }
+    .code-block .cmd { color: #FF8433; }
+    .code-block .flag { color: #a5b4fc; }
+    .code-block .string { color: #86efac; }
+    .code-block .output { color: #94a3b8; }
+
+    .callout {
+      padding: 16px 20px; border-radius: var(--radius); margin-bottom: 20px;
+      font-size: 0.9rem; line-height: 1.6; display: flex; gap: 12px;
+    }
+    .callout-icon { flex-shrink: 0; font-size: 1.1rem; margin-top: 1px; }
+    .callout-info { background: #eff6ff; border: 1px solid #bfdbfe; color: #1e40af; }
+    .callout-warn { background: var(--primary-light); border: 1px solid var(--primary-light-2); color: var(--primary-darker); }
+    .callout-success { background: #f0fdf4; border: 1px solid #bbf7d0; color: #166534; }
+
+    /* ── Info boxes ── */
+    .info-grid {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px;
+    }
+    .info-box {
+      background: var(--primary-light); border: 1px solid var(--primary-light-2);
+      border-radius: var(--radius); padding: 20px;
+    }
+    .info-box h4 {
+      margin: 0 0 8px; font-size: 0.9rem; color: var(--primary-darker);
+    }
+    .info-box p {
+      margin: 0; font-size: 0.88rem; color: var(--text-gray);
+    }
+
+    /* ── Flow diagram ── */
+    .flow-diagram {
+      background: var(--bg-code); border-radius: var(--radius-lg);
+      padding: 28px 32px; margin-bottom: 24px; overflow-x: auto;
+    }
+    .flow-diagram pre {
+      color: #e2e8f0; font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 0.82rem; line-height: 1.8; margin: 0; white-space: pre;
+    }
+    .flow-diagram .flow-arrow { color: var(--primary); }
+    .flow-diagram .flow-highlight { color: #FF8433; }
+    .flow-diagram .flow-dim { color: #64748b; }
+
+    .config-table-wrap {
+      overflow-x: auto; border-radius: var(--radius); border: 1px solid var(--border);
+      box-shadow: var(--shadow-sm); margin-bottom: 24px;
+    }
+    .config-table {
+      width: 100%; border-collapse: collapse; font-size: 0.88rem;
+    }
+    .config-table thead { background: var(--primary-light); }
+    .config-table th {
+      padding: 12px 16px; text-align: left; font-weight: 700;
+      color: var(--primary-darker); font-size: 0.78rem;
+      text-transform: uppercase; letter-spacing: 0.5px;
+      border-bottom: 2px solid var(--primary-light-2);
+    }
+    .config-table td {
+      padding: 10px 16px; border-bottom: 1px solid var(--border);
+      color: var(--text-gray); vertical-align: top;
+    }
+    .config-table tr:last-child td { border-bottom: none; }
+    .config-table tr:hover td { background: var(--primary-light); }
+
+    .mobile-sidebar-toggle {
+      display: none; position: fixed; bottom: 24px; right: 24px; z-index: 999;
+      width: 48px; height: 48px; border-radius: 50%;
+      background: linear-gradient(135deg, var(--primary-dark), var(--primary));
+      color: var(--white); border: none; font-size: 1.3rem; cursor: pointer;
+      box-shadow: var(--shadow-lg);
+    }
+
+    @media (max-width: 900px) {
+      .sidebar {
+        transform: translateX(-100%); transition: transform 0.3s ease;
+        z-index: 900; width: 280px;
+      }
+      .sidebar.open { transform: translateX(0); }
+      .content { margin-left: 0; padding: 32px 24px 80px; }
+      .mobile-sidebar-toggle { display: flex; align-items: center; justify-content: center; }
+      .content h1 { font-size: 1.7rem; }
+      .content h2 { font-size: 1.3rem; }
+      .info-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+  <header class="header" id="header">
+    <div class="header-inner">
+      <a href="index.html" class="header-logo">
+        <svg width="28" height="28" viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0"><path d="M4 7L14 21L24 7" stroke="#FF6600" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <div class="header-logo-text">v<span>Billing</span> Docs</div>
+      </a>
+      <nav class="header-nav">
+        <a href="index.html">Home</a>
+        <a href="getting-started.html">Guide</a>
+        <a href="https://github.com/vClusterLabs-Experiments/vbilling" class="gh-link" target="_blank">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <div class="docs-layout">
+    <nav class="sidebar" id="sidebar">
+      <a href="index.html" class="sidebar-back">&#8592; Back to main site</a>
+      <div class="sidebar-section">
+        <div class="sidebar-label">Documentation</div>
+        <a href="getting-started.html">Getting Started</a>
+        <a href="configuration.html">Configuration</a>
+        <a href="metrics.html">Metrics Reference</a>
+        <a href="private-nodes.html">Dedicated and Private Nodes</a>
+        <a href="example-gke.html">Example: GKE with GPUs</a>
+        <a href="troubleshooting.html">Troubleshooting</a>
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-label">Billing Adapters</div>
+        <a href="stripe.html" class="active">Stripe</a>
+        <a href="metronome.html">Metronome</a>
+        <a href="lago.html">Lago</a>
+        <a href="custom-adapter.html">Custom Billing Adapter</a>
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-label">Resources</div>
+        <a href="https://github.com/vClusterLabs-Experiments/vbilling" target="_blank">GitHub Repository</a>
+        <a href="https://www.vcluster.com/docs" target="_blank">vCluster Docs</a>
+        <a href="https://docs.stripe.com/billing/subscriptions/usage-based" target="_blank">Stripe Billing Docs</a>
+        <a href="https://docs.metronome.com/" target="_blank">Metronome Docs</a>
+        <a href="https://www.getlago.com/docs" target="_blank">Lago Docs</a>
+      </div>
+    </nav>
+
+    <main class="content">
+      <h1>Stripe</h1>
+      <p class="subtitle">Bill tenant clusters with Stripe Billing Meters. vBilling creates the meters and customers, sends every usage window exactly once, keeps subscriptions in step with the prices you tag, and turns Stripe's payment events into billing states for your tenant clusters.</p>
+
+      <h2 id="how-it-works">How it works</h2>
+      <div class="flow-diagram"><pre>tenant clusters <span class="flow-arrow">──►</span> <span class="flow-highlight">vBilling</span> <span class="flow-arrow">──►</span> ledger <span class="flow-dim">(fsynced, hash-chained)</span>
+                                   <span class="flow-arrow">│</span> <span class="flow-dim">stripe cursor</span>
+                                   <span class="flow-arrow">▼</span>
+                          <span class="flow-highlight">Stripe adapter</span>
+                          ├─ Billing Meters   <span class="flow-dim">one per metric, one per SKU</span>
+                          ├─ Customers        <span class="flow-dim">one per tenant, metadata vbilling_tenant_id</span>
+                          ├─ Meter events     <span class="flow-dim">identifier = event ID, timestamp = window start</span>
+                          └─ Subscriptions    <span class="flow-dim">optional: prices tagged vbilling_plan</span>
+
+<span class="flow-highlight">Stripe</span> <span class="flow-arrow">──►</span> /webhooks/stripe <span class="flow-arrow">──►</span> billing state <span class="flow-arrow">──►</span> tenant cluster
+<span class="flow-dim">invoices, subscriptions,          active, warning,</span>
+<span class="flow-dim">usage alerts                      delinquent, suspended</span></pre></div>
+      <div class="info-grid">
+        <div class="info-box">
+          <h4>vBilling does</h4>
+          <p>Meters, customers and meter events; retries and dead letters; optional subscriptions; reconciliation against Stripe; billing states from Stripe webhooks.</p>
+        </div>
+        <div class="info-box">
+          <h4>You do in Stripe</h4>
+          <p>Products and prices, invoice and tax settings, payment methods, Smart Retries and dunning emails, and the customer portal.</p>
+        </div>
+      </div>
+      <div class="callout callout-info">
+        <div class="callout-icon">i</div>
+        <div>A Stripe meter prices one quantity. To price several dimensions at once (region, SKU and capacity type), or to sell commits and credits, rate usage in <a href="metronome.html">Metronome</a> and let Stripe collect payment.</div>
+      </div>
+
+      <h2 id="install">Install in test mode</h2>
+      <p>Start with a sandbox or test-mode key: a secret key (<code>sk_test_...</code>) or a <a href="#keys">restricted key</a> (<code>rk_test_...</code>). Save it to a file and keep it in a Secret, never in <code>--set</code> flags or values files. From a clone of the repository:</p>
+      <div class="code-block"><code><span class="cmd">kubectl</span> create namespace vbilling-system
+<span class="cmd">kubectl</span> <span class="flag">-n</span> vbilling-system create secret generic vbilling-stripe \
+  <span class="flag">--from-file</span>=api-key=./stripe-test-key
+<span class="cmd">helm</span> upgrade <span class="flag">--install</span> vbilling deploy/helm/vbilling <span class="flag">-n</span> vbilling-system \
+  <span class="flag">--set</span> adapters=<span class="string">'{stripe}'</span> \
+  <span class="flag">--set</span> stripe.existingSecret=vbilling-stripe \
+  <span class="flag">--set</span> region=us-east-1</code></div>
+      <p>vBilling creates one meter per billable metric at startup, and a customer for each tenant as its usage arrives. Check the log and the destination's health:</p>
+      <div class="code-block"><code><span class="cmd">kubectl</span> <span class="flag">-n</span> vbilling-system logs statefulset/vbilling | grep <span class="string">'\[stripe\]'</span>
+<span class="output">[stripe] created meter vcluster_gpu_hours (mtr_...)</span>
+<span class="output">[stripe] created customer cus_... for tenant vcluster-team-a-team-a</span>
+<span class="cmd">kubectl</span> <span class="flag">-n</span> vbilling-system port-forward svc/vbilling 8080 &amp;
+<span class="cmd">curl</span> <span class="flag">-s</span> localhost:8080/api/v1/status | jq <span class="string">'.destinations'</span></code></div>
+      <p>For CI, run <a href="https://github.com/stripe/stripe-mock" target="_blank">stripe-mock</a> and set <code>stripe.apiBase</code> to it: every request is validated against Stripe's OpenAPI spec, as in <code>scripts/e2e-kind.sh</code>.</p>
+
+      <h3 id="settings">Settings</h3>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead><tr><th>Helm value</th><th>Environment variable</th><th>Default</th><th>Effect</th></tr></thead>
+          <tbody>
+            <tr><td><code>stripe.existingSecret</code></td><td></td><td></td><td>Secret with the keys <code>api-key</code> and, for webhooks, <code>webhook-secret</code>. Use it instead of the two values below.</td></tr>
+            <tr><td><code>stripe.apiKey</code></td><td><code>STRIPE_API_KEY</code></td><td></td><td>Secret or restricted key. Required when <code>stripe</code> is in <code>adapters</code>.</td></tr>
+            <tr><td><code>stripe.webhookSecret</code></td><td><code>STRIPE_WEBHOOK_SECRET</code></td><td></td><td>Signing secret (<code>whsec_...</code>). Enables <code>/webhooks/stripe</code>.</td></tr>
+            <tr><td><code>stripe.splitMetersBy</code></td><td><code>STRIPE_SPLIT_METERS_BY</code></td><td><code>[sku]</code></td><td>Event fields that get their own meter. See <a href="#meters">Meters</a>.</td></tr>
+            <tr><td><code>stripe.autoSubscribe</code></td><td><code>STRIPE_AUTO_SUBSCRIBE</code></td><td><code>false</code></td><td>Subscribe each tenant to the prices tagged with its plan.</td></tr>
+            <tr><td><code>stripe.cancelOnRemove</code></td><td><code>STRIPE_CANCEL_ON_REMOVE</code></td><td><code>false</code></td><td>Cancel an offboarded tenant's subscription at the end of the period.</td></tr>
+            <tr><td><code>stripe.maxRPS</code></td><td><code>STRIPE_MAX_RPS</code></td><td><code>0</code></td><td>Request rate cap. <code>0</code> picks 20 requests/s for test keys and 200 for live keys.</td></tr>
+            <tr><td><code>stripe.apiVersion</code></td><td><code>STRIPE_API_VERSION</code></td><td><code>2026-09-30.endive</code></td><td>Stripe API version sent on every request.</td></tr>
+            <tr><td><code>stripe.apiBase</code></td><td><code>STRIPE_API_BASE</code></td><td><code>https://api.stripe.com</code></td><td>API base URL, for stripe-mock or a proxy.</td></tr>
+            <tr><td><code>billing.defaultPlanCode</code></td><td><code>DEFAULT_PLAN_CODE</code></td><td><code>vcluster-standard</code></td><td>Plan of tenants without a <code>plan</code> annotation.</td></tr>
+            <tr><td><code>billing.currency</code></td><td><code>BILLING_CURRENCY</code></td><td><code>USD</code></td><td>Currency of tenants without a <code>currency</code> annotation.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p id="keys"><strong>Restricted keys.</strong> A restricted key works if it can write customers and Billing Meters (meters and meter events) and read prices, plus write subscriptions when <code>autoSubscribe</code> or <code>cancelOnRemove</code> is on.</p>
+
+      <h2 id="meters">Meters</h2>
+      <p>At startup vBilling creates, or reactivates, one meter per billable metric: sum aggregation, customers mapped by <code>stripe_customer_id</code>, the quantity in <code>value</code>. Informational metrics (<code>vcluster_gpu_utilization</code>, <code>vcluster_gpu_downtime_hours</code>) are never sent to Stripe.</p>
+      <p>Because a meter cannot price on dimensions, each event goes to a meter named after its metric plus the value of every field in <code>splitMetersBy</code>, created the first time that value appears. Values are lowercased and every other character becomes <code>_</code>; a name longer than Stripe's 100 characters ends in a short hash.</p>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead><tr><th>Metric</th><th>Meters that receive events (split on <code>sku</code>)</th><th>SKU comes from</th></tr></thead>
+          <tbody>
+            <tr><td>GPU hours</td><td><code>vcluster_gpu_hours__nvidia_h100_80gb_hbm3</code><br><code>vcluster_gpu_hours__nvidia_a100_sxm4_40gb_mig_1g_5gb</code><br><code>vcluster_gpu_hours__nvidia_l4_timeslice_4</code></td><td>The GPU model or the node's SKU label, plus the MIG profile or time-slicing replicas for fractional GPUs</td></tr>
+            <tr><td>Dedicated node hours</td><td><code>vcluster_private_node_hours__bm_gpu_h100_8</code></td><td>The SKU label, the instance type, or <code>&lt;n&gt;x&lt;GPU model&gt;</code></td></tr>
+            <tr><td>Storage GiB-hours</td><td><code>vcluster_storage_gb_hours__standard_rwo</code></td><td>The storage class</td></tr>
+            <tr><td>CPU core-hours, memory GiB-hours, tenant cluster hours, LoadBalancer hours, network egress</td><td><code>vcluster_cpu_core_hours</code>, <code>vcluster_memory_gb_hours</code>, and so on</td><td>No SKU: the base meter</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout callout-warn">
+        <div class="callout-icon">!</div>
+        <div>Put prices on the meters that receive events. GPU usage lands on <code>vcluster_gpu_hours__&lt;sku&gt;</code>, so the base <code>vcluster_gpu_hours</code> meter stays empty and a price on it invoices nothing.</div>
+      </div>
+      <div class="code-block"><code>STRIPE_KEY=$(cat ./stripe-test-key)
+<span class="cmd">curl</span> <span class="flag">-s -G</span> https://api.stripe.com/v1/billing/meters <span class="flag">-u</span> <span class="string">"$STRIPE_KEY:"</span> <span class="flag">-d</span> limit=100 | jq <span class="flag">-r</span> <span class="string">'.data[] | "\(.id) \(.event_name)"'</span></code></div>
+
+      <h3 id="split">Pricing on more dimensions</h3>
+      <p>Add fields to the split to give them their own meters and prices. Any event field works: <code>sku</code>, <code>region</code>, <code>project</code>, or a dimension such as <code>capacity_type</code>, <code>billing_mode</code> or <code>tenant_class</code>. Suffixes follow the order of the list:</p>
+      <div class="code-block"><code><span class="flag">--set</span> stripe.splitMetersBy=<span class="string">'{sku,capacity_type}'</span>
+<span class="comment"># vcluster_gpu_hours__nvidia_h100_80gb_hbm3__on_demand</span>
+<span class="comment"># vcluster_gpu_hours__nvidia_h100_80gb_hbm3__spot</span></code></div>
+      <p>Every field multiplies the meters and prices you manage. Settle the split before you go live: a new split sends new usage to new meters, and earlier usage stays on the old ones.</p>
+
+      <h2 id="customers">Customers</h2>
+      <p>Each vBilling tenant gets one Stripe customer. By default a tenant is one tenant cluster, with the ID <code>vcluster-&lt;namespace&gt;-&lt;name&gt;</code>; the <code>vbilling.vcluster.com/tenant</code> key groups several tenant clusters under one customer, and <code>TENANT_SOURCE=project</code> gives each vCluster Platform project one. vBilling finds the customer in this order:</p>
+      <ol>
+        <li>A customer ID pinned with <code>vbilling.vcluster.com/stripe-customer-id</code>.</li>
+        <li>The customer vBilling recorded earlier in <code>state-stripe.json</code> on its volume.</li>
+        <li>A Stripe customer whose <code>metadata[vbilling_tenant_id]</code> is exactly the tenant ID. vBilling uses customer search, and lists customers instead (by email first) for accounts without search.</li>
+        <li>A new customer, created with an idempotency key so that a retry never creates a second one.</li>
+      </ol>
+      <p>Customer details come from labels or annotations on the tenant cluster's StatefulSet, its namespace, or its vCluster Platform <code>VirtualClusterInstance</code>, and are updated when they change:</p>
+      <div class="code-block"><code><span class="cmd">kubectl</span> annotate namespace team-a \
+  vbilling.vcluster.com/tenant=acme-ai \
+  vbilling.vcluster.com/display-name=<span class="string">"Acme AI"</span> \
+  vbilling.vcluster.com/email=billing@acme-ai.example \
+  vbilling.vcluster.com/plan=vcluster-standard
+
+<span class="comment"># reuse a customer that already exists in Stripe</span>
+<span class="cmd">kubectl</span> annotate namespace team-a vbilling.vcluster.com/stripe-customer-id=cus_EXISTING</code></div>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead><tr><th>Customer field</th><th>Value</th></tr></thead>
+          <tbody>
+            <tr><td><code>name</code>, <code>email</code></td><td>The <code>display-name</code> (or the tenant ID) and <code>email</code> keys</td></tr>
+            <tr><td><code>metadata[vbilling_tenant_id]</code></td><td>The tenant ID. vBilling only uses a customer whose value matches exactly.</td></tr>
+            <tr><td><code>metadata[vbilling_plan]</code></td><td>The tenant's plan</td></tr>
+            <tr><td><code>metadata[vbilling_region]</code>, <code>[vbilling_project]</code>, <code>[vbilling_tenant_class]</code></td><td>The region, vCluster Platform project and tenant class</td></tr>
+            <tr><td><code>metadata[vbilling_clusters]</code></td><td>The tenant clusters billed to this customer</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>vBilling never deletes customers. Do not delete them in Stripe either: to move a tenant to another customer, pin it.</p>
+
+      <h2 id="prices">Prices and subscriptions</h2>
+      <p>vBilling never creates prices: what a GPU-hour costs is your decision. Create a recurring, metered price on each meter you charge for. Quantities are hours (GPU-hours, node-hours, GiB-hours), so unit prices are per hour. Fractional GPUs are already counted in GPU-equivalents (a <code>1g.5gb</code> slice of an A100 is 1/7), so one per-GPU-hour price fits every variant of a SKU, or the slices can carry a premium.</p>
+      <div class="code-block"><code>METER=$(<span class="cmd">curl</span> <span class="flag">-s -G</span> https://api.stripe.com/v1/billing/meters <span class="flag">-u</span> <span class="string">"$STRIPE_KEY:"</span> <span class="flag">-d</span> limit=100 \
+  | jq <span class="flag">-r</span> <span class="string">'.data[] | select(.event_name=="vcluster_gpu_hours__nvidia_h100_80gb_hbm3") | .id'</span>)
+<span class="cmd">curl</span> <span class="flag">-s</span> https://api.stripe.com/v1/prices <span class="flag">-u</span> <span class="string">"$STRIPE_KEY:"</span> \
+  <span class="flag">-d</span> currency=usd <span class="flag">-d</span> unit_amount_decimal=250 \
+  <span class="flag">-d</span> <span class="string">"recurring[interval]=month"</span> <span class="flag">-d</span> <span class="string">"recurring[usage_type]=metered"</span> \
+  <span class="flag">-d</span> <span class="string">"recurring[meter]=$METER"</span> \
+  <span class="flag">-d</span> <span class="string">"product_data[name]=H100 GPU-hours"</span> \
+  <span class="flag">-d</span> <span class="string">"metadata[vbilling_plan]=vcluster-standard"</span></code></div>
+      <p><code>unit_amount_decimal</code> is in cents: <code>250</code> is $2.50 per GPU-hour.</p>
+
+      <h3 id="auto-subscribe">Automatic subscriptions</h3>
+      <p>Without <code>autoSubscribe</code>, usage accrues on the meters and is invoiced once you subscribe the customer to prices yourself. With <code>--set stripe.autoSubscribe=true</code>, vBilling subscribes every tenant to the prices of its plan:</p>
+      <ul>
+        <li>The plan is the tenant's <code>vbilling.vcluster.com/plan</code>, or <code>billing.defaultPlanCode</code> (<code>vcluster-standard</code>).</li>
+        <li>A plan's prices are the active metered prices on vBilling's meters tagged <code>metadata[vbilling_plan]=&lt;plan&gt;</code>, in the tenant's currency (<code>vbilling.vcluster.com/currency</code>, or <code>billing.currency</code>).</li>
+        <li>A plan holds up to 20 prices, Stripe's limit per subscription.</li>
+        <li>An existing vBilling subscription gets missing prices added. Prices are never removed from it.</li>
+        <li>New prices reach new tenants within five minutes, and existing tenants when vBilling restarts or their labels and annotations change.</li>
+      </ul>
+      <p>Plans let each tenant pay for what it buys. A tenant that rents whole GPU machines (<a href="private-nodes.html">dedicated or private nodes</a>) can be on a plan with node-hour prices only, and a tenant that pays per GPU-hour on a plan with GPU-hour prices. Stripe only invoices a customer for the meters its subscription has prices on.</p>
+
+      <h3 id="invoices">Invoices</h3>
+      <p>Stripe sums each meter over the billing period and adds a line per price to the subscription's invoice; payment collection, tax, retries and dunning stay in Stripe. To see what a tenant owes so far, open the customer's upcoming invoice in the Dashboard, or preview it:</p>
+      <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-s</span> https://api.stripe.com/v1/invoices/create_preview <span class="flag">-u</span> <span class="string">"$STRIPE_KEY:"</span> <span class="flag">-d</span> customer=cus_... \
+  | jq <span class="string">'.lines.data[] | {description, amount}'</span></code></div>
+      <p>Stripe processes meter events asynchronously, so new usage can take a few minutes to show up.</p>
+
+      <h2 id="delivery">Delivery and idempotency</h2>
+      <p>Every closed window is committed to the ledger first. The Stripe destination sends it from its own cursor, so a Stripe outage never loses usage and never holds up other destinations.</p>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead><tr><th>Concern</th><th>What vBilling does</th></tr></thead>
+          <tbody>
+            <tr><td>Duplicates</td><td>The meter event <code>identifier</code> is the vBilling event ID: a hash of the event's identity (tenant, metric, window, dimensions), never of its quantity. A resend after a crash is rejected by Stripe as a duplicate and counted as delivered.</td></tr>
+            <tr><td>Event time</td><td>The meter event <code>timestamp</code> is the window start, so late deliveries and backfills land in the period they belong to.</td></tr>
+            <tr><td>Precision</td><td>Quantities are plain decimals with at most 15 significant digits and 9 decimals.</td></tr>
+            <tr><td>Rate</td><td>A token bucket at <code>maxRPS</code>, and four workers partitioned by customer and meter, so a customer's meter never gets concurrent calls.</td></tr>
+            <tr><td>Retries</td><td>Authentication errors (401, 403), 404, conflicts (409), rate limits (429), 5xx and network errors are retried with backoff and never dead-lettered. Stripe's <code>Stripe-Should-Retry</code> header wins when present.</td></tr>
+            <tr><td>Dead letters</td><td>Events Stripe rejects as invalid (400, 413, 422) are isolated one by one and parked with the reason; the rest of the batch goes through.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout callout-warn">
+        <div class="callout-icon">!</div>
+        <div>Stripe enforces identifier uniqueness for at least 24 hours and accepts events up to 35 days old. vBilling never resends acknowledged events, and dead-letters events older than 35 days minus an hour of margin. Do not rewind the Stripe destination's cursor by more than 24 hours, or Stripe may count those events again; rewinding is meant for a newly added destination.</div>
+      </div>
+      <p>After fixing what caused a rejection (often by upgrading vBilling), replay the parked events. Events Stripe still rejects stay parked (<code>still_rejected</code>). With <code>API_TOKEN</code> set, add <code>-H "Authorization: Bearer $API_TOKEN"</code>.</p>
+      <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-s</span> localhost:8080/api/v1/destinations/stripe/dead-letters | jq
+<span class="cmd">curl</span> <span class="flag">-s -X POST</span> localhost:8080/api/v1/destinations/stripe/dead-letters/replay
+<span class="output">{"replayed":12}</span></code></div>
+
+      <h2 id="reconcile">Reconciliation</h2>
+      <p><code>GET /api/v1/reconcile</code> recomputes each tenant's usage per metric from the ledger, subtracts what was dead-lettered, and compares it with Stripe's meter event summaries for the tenant's customer, summed over every split meter of the metric. A row matches within 0.1%. The default range is the previous full UTC day; <code>from</code> and <code>to</code> take RFC 3339 times or dates, and <code>tenant</code> and <code>metric</code> narrow it down.</p>
+      <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-s</span> <span class="string">'localhost:8080/api/v1/reconcile?destination=stripe&amp;from=2026-10-05&amp;to=2026-10-06'</span> | jq
+<span class="output">{
+  "from": "2026-10-05T00:00:00Z",
+  "to": "2026-10-06T00:00:00Z",
+  "results": [{
+    "destination": "stripe",
+    "ok": true,
+    "rows": [
+      {"tenant": "acme-ai", "metric": "vcluster_gpu_hours", "ledger": 2.75, "dead_lettered": 0,
+       "expected": 2.75, "recorded": 2.75, "difference": 0, "match": true}
+    ]
+  }]
+}</span></code></div>
+      <p>Stripe's summaries are aligned to minutes and trail ingestion by a few minutes, so reconcile closed periods rather than the current hour. Run it daily and alert when <code>ok</code> is <code>false</code>.</p>
+
+      <h2 id="webhooks">Webhooks and billing states</h2>
+      <p>Stripe's payment events tell vBilling which tenants are paid up. Add a webhook endpoint in Stripe for <code>https://&lt;your-host&gt;/webhooks/stripe</code> with the events below, then add its signing secret to the Secret and restart vBilling:</p>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead><tr><th>Stripe event</th><th>Billing state</th></tr></thead>
+          <tbody>
+            <tr><td><code>invoice.payment_failed</code></td><td><code>delinquent</code></td></tr>
+            <tr><td><code>invoice.paid</code>, <code>invoice.payment_succeeded</code></td><td><code>active</code></td></tr>
+            <tr><td><code>customer.subscription.created</code>, <code>.updated</code>, <code>.resumed</code></td><td>By subscription status: <code>past_due</code> is <code>delinquent</code>; <code>unpaid</code>, <code>canceled</code> and <code>incomplete_expired</code> are <code>suspended</code>; <code>active</code> and <code>trialing</code> are <code>active</code></td></tr>
+            <tr><td><code>customer.subscription.deleted</code></td><td><code>suspended</code></td></tr>
+            <tr><td><code>billing.alert.triggered</code> (a usage alert on a meter)</td><td><code>warning</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="code-block"><code><span class="cmd">kubectl</span> <span class="flag">-n</span> vbilling-system create secret generic vbilling-stripe \
+  <span class="flag">--from-file</span>=api-key=./stripe-test-key <span class="flag">--from-file</span>=webhook-secret=./stripe-webhook-secret \
+  <span class="flag">--dry-run</span>=client <span class="flag">-o</span> yaml | <span class="cmd">kubectl</span> apply <span class="flag">-f</span> -
+<span class="cmd">kubectl</span> <span class="flag">-n</span> vbilling-system rollout restart statefulset/vbilling</code></div>
+      <p>vBilling verifies the <code>Stripe-Signature</code> header (HMAC-SHA256 over the timestamp and the body, with the five-minute tolerance of Stripe's libraries) and applies each event once. It answers <code>400</code> to a bad signature, <code>200</code> with <code>"applied": false</code> for events it ignores, repeats, or customers it does not manage, and <code>500</code> when it could not record the state, so that Stripe retries.</p>
+      <p>Only the webhook path needs to be reachable from Stripe. Keep <code>/api</code> on the internal Service, for example with an Ingress for that one path:</p>
+      <div class="code-block"><code>apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: vbilling-webhooks
+  namespace: vbilling-system
+spec:
+  ingressClassName: nginx
+  tls: [{hosts: [billing-hooks.example.com], secretName: billing-hooks-tls}]
+  rules:
+    - host: billing-hooks.example.com
+      http:
+        paths:
+          - path: /webhooks/stripe
+            pathType: Exact
+            backend:
+              service: {name: vbilling, port: {number: 8080}}</code></div>
+      <p>To try it locally, let the Stripe CLI forward events. It prints a signing secret for the session to use as <code>webhook-secret</code>:</p>
+      <div class="code-block"><code><span class="cmd">stripe</span> listen <span class="flag">--forward-to</span> localhost:8080/webhooks/stripe</code></div>
+      <p>Events fired with <code>stripe trigger</code> belong to new test customers that vBilling does not manage, so they come back with <code>"applied": false</code>. To see a state change, act on one of vBilling's customers, for example by paying its invoice with one of Stripe's declining test cards.</p>
+
+      <h3 id="enforcement">What a billing state does</h3>
+      <p>Billing states are on once <code>webhook-secret</code> is set. They are recorded in every mode and shown by <code>GET /api/v1/billing-states</code>, the metrics and the dashboard. <code>enforcement.mode</code> decides what else happens:</p>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead><tr><th>Mode</th><th>Effect</th></tr></thead>
+          <tbody>
+            <tr><td><code>observe</code> (default)</td><td>Record the state only.</td></tr>
+            <tr><td><code>annotate</code></td><td>Also annotate the tenant cluster, label its namespace <code>vbilling.vcluster.com/billing-state</code>, and emit a Kubernetes event.</td></tr>
+            <tr><td><code>enforce</code></td><td>Also label suspended namespaces <code>vbilling.vcluster.com/suspended=true</code>. With <code>enforcement.admissionPolicy.enabled=true</code> (Kubernetes 1.30+), new pods are denied there while running workloads keep running. A paid invoice lifts it.</td></tr>
+            <tr><td colspan="2">The admission policy acts in the control plane cluster, so it holds tenant clusters on shared or dedicated nodes. Tenant clusters with their own nodes (Private Nodes, Auto Nodes, Standalone) run their pods only inside the tenant cluster: act on their billing state with your own automation.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Override a mapping with <code>enforcement.rules</code> (<code>ENFORCEMENT_RULES</code>), for example <code>invoice.payment_failed=suspended</code> to suspend on the first failed payment, or <code>billing.alert.triggered=suspended</code> to turn a Stripe usage alert into a hard cap. Operators can also set a state by hand:</p>
+      <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-s -X PUT</span> localhost:8080/api/v1/billing-states/acme-ai <span class="flag">-d</span> <span class="string">'{"state": "active", "reason": "paid by bank transfer"}'</span></code></div>
+
+      <h2 id="offboarding">Offboarding</h2>
+      <p>When a tenant has been gone for <code>billing.offboardGrace</code> (default 1h), vBilling offboards it. The Stripe customer and its subscription stay, so final usage is still invoiced. With <code>stripe.cancelOnRemove=true</code>, the subscription is set to cancel at the end of the period.</p>
+
+      <h2 id="limits">Stripe limits</h2>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead><tr><th>Stripe limit</th><th>What vBilling does</th></tr></thead>
+          <tbody>
+            <tr><td>Meter events at most 35 days old</td><td>Older events are dead-lettered as <code>older than Stripe's 35-day meter event window</code>. Normal backfills (<code>billing.maxBackfill</code>, default 6h) stay far inside it.</td></tr>
+            <tr><td>Identifiers unique for at least 24 hours</td><td>Acknowledged events are never resent. Keep cursor rewinds within 24 hours.</td></tr>
+            <tr><td>Event names up to 100 characters</td><td>Longer split meter names end in a hash.</td></tr>
+            <tr><td>20 prices per subscription</td><td>Automatic subscriptions refuse a plan with more than 20 prices: split it into several plans.</td></tr>
+            <tr><td>Request rate (sandboxes share 25 requests/s)</td><td>20 requests/s for test keys and 200 for live keys, adjustable with <code>maxRPS</code>. 429s are retried.</td></tr>
+            <tr><td>No pricing on dimensions within a meter</td><td>Meters are split by <code>splitMetersBy</code>. For pricing on many dimensions, use <a href="metronome.html">Metronome</a>.</td></tr>
+            <tr><td>Customer search is not offered to every account</td><td>vBilling lists customers instead, still requiring an exact <code>metadata[vbilling_tenant_id]</code> match.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h2 id="troubleshooting">Troubleshooting</h2>
+      <h3>The invoice shows no usage</h3>
+      <ul>
+        <li>The price is on a meter that receives nothing, usually the base meter instead of the SKU meter. List the meters and compare with the event names in the log.</li>
+        <li>The tenant is not subscribed. With <code>autoSubscribe</code>, the log says <code>[stripe] no active metered prices tagged vbilling_plan=&lt;plan&gt; in &lt;currency&gt;; tenant &lt;id&gt; not subscribed</code>: check that the price is active and metered, carries the plan in its metadata, and is in the tenant's currency.</li>
+        <li>The usage is still being processed: Stripe aggregates meter events asynchronously.</li>
+      </ul>
+      <h3>Deliveries stop with 401 or 403</h3>
+      <p>The key is wrong or revoked, or a restricted key lacks a permission. Nothing is lost: events wait in the ledger and are retried. Fix the Secret and restart vBilling; <code>/api/v1/status</code> shows each destination's failures and its oldest pending event.</p>
+      <h3>Events dead-lettered as older than 35 days</h3>
+      <p>Stripe no longer accepts them. They stay in the ledger, and reconciliation reports them under <code>dead_lettered</code>. Bill them with a one-off invoice item if needed.</p>
+      <h3>Webhooks fail with 400 or 404</h3>
+      <p><code>400</code>: the signing secret does not match the endpoint (every endpoint, and every <code>stripe listen</code> session, has its own), the clock is more than five minutes off, or a proxy rewrote the body. <code>404</code>: <code>webhook-secret</code> is not set.</p>
+      <h3>"customer search unavailable"</h3>
+      <p><code>[stripe] customer search unavailable (...); finding customers by listing them</code> is expected for accounts without customer search. vBilling switches to listing customers on its own.</p>
+
+      <h2 id="next">See also</h2>
+      <ul>
+        <li><a href="example-gke.html">Example: GKE with GPUs</a>: a complete setup from an empty project to Stripe invoices.</li>
+        <li><a href="metronome.html">Metronome</a>: rating in Metronome with payment, invoices and tax in Stripe.</li>
+        <li><a href="configuration.html#stripe">Configuration reference</a>: every setting, including the API and enforcement.</li>
+      </ul>
+    </main>
+  </div>
+
+  <button class="mobile-sidebar-toggle" id="mobileSidebarToggle" aria-label="Toggle sidebar">&#9776;</button>
+
+  <script>
+    const header = document.getElementById('header');
+    window.addEventListener('scroll', () => { header.classList.toggle('scrolled', window.scrollY > 10); });
+    const sidebar = document.getElementById('sidebar');
+    const toggle = document.getElementById('mobileSidebarToggle');
+    toggle.addEventListener('click', () => { sidebar.classList.toggle('open'); });
+    document.addEventListener('click', (e) => {
+      if (!sidebar.contains(e.target) && !toggle.contains(e.target)) sidebar.classList.remove('open');
+    });
+  </script>
+</body>
+</html>

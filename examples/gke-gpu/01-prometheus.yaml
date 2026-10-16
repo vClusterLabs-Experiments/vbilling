@@ -1,5 +1,5 @@
 # Central Prometheus for the control plane cluster ("bring your own Prometheus").
-# - Scrapes GKE's managed DCGM exporter on the shared GPU nodes. Its target
+# - Scrapes GKE's managed DCGM exporter on the control plane cluster's GPU nodes. Its target
 #   labels win, so DCGM's namespace/pod labels become exported_namespace/exported_pod.
 # - Accepts remote writes from tenant clusters with private nodes, whose DCGM
 #   never reaches this cluster otherwise (see 06-prometheus-agent.yaml).

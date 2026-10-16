@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Metrics Reference - vBilling Docs</title>
-  <meta name="description" content="Detailed reference for all 9 billable metrics tracked by vBilling: CPU, memory, storage, GPU, network, LoadBalancers, instance hours, and private nodes.">
+  <meta name="description" content="Reference for the eight billable metrics vBilling emits (GPU, CPU, memory, storage, dedicated node hours, tenant cluster hours, LoadBalancers, network egress), the two informational ones, and custom metrics.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Roboto+Mono:wght@500&display=swap" rel="stylesheet">
@@ -96,7 +96,7 @@
     .sidebar-back:hover { border-color: var(--primary); color: var(--primary-dark); }
 
     .content {
-      flex: 1; margin-left: var(--sidebar-width);
+      flex: 1; min-width: 0; margin-left: var(--sidebar-width);
       padding: 48px 64px 80px; max-width: 920px;
     }
     .content h1 {
@@ -128,7 +128,7 @@
     .content code {
       background: var(--primary-light-2); padding: 2px 7px; border-radius: 4px;
       font-family: 'Roboto Mono', 'SF Mono', 'Fira Code', monospace;
-      font-size: 0.85rem; color: var(--primary-darker);
+      font-size: 0.85rem; color: var(--primary-darker); overflow-wrap: anywhere;
     }
     .content a { color: var(--primary-dark); text-decoration: none; font-weight: 500; }
     .content a:hover { text-decoration: underline; }
@@ -258,16 +258,25 @@
         <a href="troubleshooting.html">Troubleshooting</a>
       </div>
       <div class="sidebar-section">
+        <div class="sidebar-label">Billing Adapters</div>
+        <a href="stripe.html">Stripe</a>
+        <a href="metronome.html">Metronome</a>
+        <a href="lago.html">Lago</a>
+        <a href="custom-adapter.html">Custom Billing Adapter</a>
+      </div>
+      <div class="sidebar-section">
         <div class="sidebar-label">Resources</div>
         <a href="https://github.com/vClusterLabs-Experiments/vbilling" target="_blank">GitHub Repository</a>
-        <a href="https://www.getlago.com/docs" target="_blank">Lago Docs</a>
         <a href="https://www.vcluster.com/docs" target="_blank">vCluster Docs</a>
+        <a href="https://docs.stripe.com/billing/subscriptions/usage-based" target="_blank">Stripe Billing Docs</a>
+        <a href="https://docs.metronome.com/" target="_blank">Metronome Docs</a>
+        <a href="https://www.getlago.com/docs" target="_blank">Lago Docs</a>
       </div>
     </nav>
 
     <main class="content">
       <h1>Metrics Reference</h1>
-      <p class="subtitle">Every metric vBilling v0.2 emits, how it is measured, and the dimensions billing backends can price on.</p>
+      <p class="subtitle">Every metric vBilling v0.2 emits, how it is measured, and the dimensions billing platforms can price on.</p>
 
       <div class="callout callout-info">
         <div class="callout-icon">i</div>
@@ -293,7 +302,7 @@
           </dl>
           <p>Billing starts at the first container start (image pulls and scheduling are free) and stops when the last container finishes. Pods that started or finished mid-window are billed for exactly the seconds they ran.</p>
           <p><strong>Fractional GPUs:</strong> a MIG slice counts as slices/7 of a GPU (A30: /4), e.g. <code>mig-1g.10gb</code> = 1/7. This works for the MIG mixed strategy (<code>nvidia.com/mig-*</code> resources), the single strategy (slices exposed as <code>nvidia.com/gpu</code>, product label ending in <code>-MIG-&lt;profile&gt;</code>) and GKE GPU partitions (<code>cloud.google.com/gke-gpu-partition-size</code>). On time-sliced nodes (<code>nvidia.com/gpu.replicas</code> &gt; 1, or GKE <code>cloud.google.com/gke-max-shared-clients-per-gpu</code> with time-sharing or MPS) a device counts as 1/replicas. A DRA claim counts the devices allocated to it (a MIG device at its profile's fraction), split across the pods it is reserved for. The SKU becomes <code>&lt;model&gt;-mig-&lt;profile&gt;</code> or <code>&lt;model&gt;-timeslice-&lt;n&gt;</code>, always against the base GPU model (the <code>-SHARED</code> and <code>-MIG-</code> label suffixes are dropped).</p>
-          <p><strong>Dedicated and private nodes:</strong> the node's GPU capacity is billed in whole GPUs with <code>billing_mode=dedicated_node</code> (control plane cluster nodes reserved for the tenant) or <code>billing_mode=private_node</code> (vCluster Private Nodes, Auto Nodes and Standalone, metered through the tenant cluster's own API): MIG slices and time-slicing replicas are converted back, so 8 GPUs shared 4 ways bill as 8, not 32. Pods on those nodes are not billed again. See <a href="private-nodes.html">Dedicated and Private Nodes</a>.</p>
+          <p><strong>Dedicated and private nodes:</strong> the node's GPU capacity is billed in whole GPUs with <code>billing_mode=dedicated_node</code> (control plane cluster nodes assigned to the tenant) or <code>billing_mode=private_node</code> (vCluster Private Nodes, Auto Nodes and Standalone, metered through the tenant cluster's own API): MIG slices and time-slicing replicas are converted back, so 8 GPUs shared 4 ways bill as 8, not 32. Pods on those nodes are not billed again. See <a href="private-nodes.html">Dedicated and Private Nodes</a>.</p>
           <p><strong>Fair metering:</strong> GPU time on a node that is NotReady or carries an <code>UNHEALTHY_NODE_TAINTS</code> taint is emitted as <code>vcluster_gpu_downtime_hours</code> instead. So is a dedicated or private node's GPU time while its GPUs are installed (GPU Feature Discovery's <code>nvidia.com/gpu.count</code>) but not allocatable, for example while the driver rebuilds after a reboot or a MIG change.</p>
           <h4>Dimensions</h4>
           <table class="props-table">
@@ -544,7 +553,7 @@
             <dt>Quantity</dt>
             <dd>as GPU hours</dd>
           </dl>
-          <p>An auditable record of the time tenants were not charged for, never sent to billing backends.</p>
+          <p>An auditable record of the time tenants were not charged for, never sent to billing platforms.</p>
           <h4>Dimensions</h4>
           <table class="props-table">
             <thead><tr><th>Key</th><th>Meaning</th></tr></thead>
@@ -557,7 +566,7 @@
       </div>
 
       <h2 id="custom-metrics">Custom metrics</h2>
-      <p>Declare operator metrics with <code>CUSTOM_METRICS="code:unit[:key|key],..."</code> (for example <code>inference_output_tokens:tokens:model|region</code>) and push closed windows to <code>POST /api/v1/events</code>. Billing backends create meters and billable metrics for them at startup.</p>
+      <p>Declare operator metrics with <code>CUSTOM_METRICS="code:unit[:key|key],..."</code> (for example <code>inference_output_tokens:tokens:model|region</code>) and push closed windows to <code>POST /api/v1/events</code>. The billing adapters create meters and billable metrics for them at startup.</p>
     </main>
   </div>
 

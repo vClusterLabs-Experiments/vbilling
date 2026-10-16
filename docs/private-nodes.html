@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Dedicated and Private Nodes - vBilling Docs</title>
-  <meta name="description" content="How vBilling detects and bills dedicated bare-metal or virtual nodes allocated to individual vCluster tenants.">
+  <meta name="description" content="Node capacity tracking: how vBilling bills dedicated nodes and vCluster Private Nodes, Auto Nodes and Standalone for their full capacity, by SKU, without double billing.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Roboto+Mono:wght@500&display=swap" rel="stylesheet">
@@ -96,7 +96,7 @@
     .sidebar-back:hover { border-color: var(--primary); color: var(--primary-dark); }
 
     .content {
-      flex: 1; margin-left: var(--sidebar-width);
+      flex: 1; min-width: 0; margin-left: var(--sidebar-width);
       padding: 48px 64px 80px; max-width: 900px;
     }
     .content h1 {
@@ -128,7 +128,7 @@
     .content code {
       background: var(--primary-light-2); padding: 2px 7px; border-radius: 4px;
       font-family: 'Roboto Mono', 'SF Mono', 'Fira Code', monospace;
-      font-size: 0.85rem; color: var(--primary-darker);
+      font-size: 0.85rem; color: var(--primary-darker); overflow-wrap: anywhere;
     }
     .content a { color: var(--primary-dark); text-decoration: none; font-weight: 500; }
     .content a:hover { text-decoration: underline; }
@@ -257,10 +257,19 @@
         <a href="troubleshooting.html">Troubleshooting</a>
       </div>
       <div class="sidebar-section">
+        <div class="sidebar-label">Billing Adapters</div>
+        <a href="stripe.html">Stripe</a>
+        <a href="metronome.html">Metronome</a>
+        <a href="lago.html">Lago</a>
+        <a href="custom-adapter.html">Custom Billing Adapter</a>
+      </div>
+      <div class="sidebar-section">
         <div class="sidebar-label">Resources</div>
         <a href="https://github.com/vClusterLabs-Experiments/vbilling" target="_blank">GitHub Repository</a>
-        <a href="https://www.getlago.com/docs" target="_blank">Lago Docs</a>
         <a href="https://www.vcluster.com/docs" target="_blank">vCluster Docs</a>
+        <a href="https://docs.stripe.com/billing/subscriptions/usage-based" target="_blank">Stripe Billing Docs</a>
+        <a href="https://docs.metronome.com/" target="_blank">Metronome Docs</a>
+        <a href="https://www.getlago.com/docs" target="_blank">Lago Docs</a>
       </div>
     </nav>
 
@@ -269,10 +278,10 @@
       <p class="subtitle">How vBilling bills nodes that belong to one tenant cluster for their full capacity, whether they sit in the control plane cluster (dedicated nodes) or join the tenant cluster itself (vCluster Private Nodes, Auto Nodes, Standalone), without ever billing the workloads on them twice.</p>
 
       <h2 id="what">What dedicated nodes are</h2>
-      <p>A dedicated node is a physical server, VM or bare-metal machine reserved for one tenant cluster. AI Clouds typically sell them by SKU (for example <code>bm.gpu.h100.8</code>), billing the whole machine regardless of utilization. Shared nodes, by contrast, are billed by what each pod allocates.</p>
+      <p>A dedicated node is a physical server, VM or bare-metal machine assigned to one tenant cluster. AI Clouds typically sell them by SKU (for example <code>bm.gpu.h100.8</code>), billing the whole machine regardless of utilization. Shared nodes, by contrast, are billed by what each pod allocates.</p>
       <div class="callout callout-info">
         <div class="callout-icon">i</div>
-        <div>Dedicated nodes are control plane cluster nodes reserved through labels. With vCluster <strong>Private Nodes</strong>, nodes join the tenant cluster directly and the control plane cluster never sees them or their pods; see <a href="#private">Private Nodes, Auto Nodes and Standalone</a>.</div>
+        <div>Dedicated nodes are control plane cluster nodes assigned through labels. With vCluster <strong>Private Nodes</strong>, nodes join the tenant cluster directly and the control plane cluster never sees them or their pods; see <a href="#private">Private Nodes, Auto Nodes and Standalone</a>.</div>
       </div>
 
       <h2 id="detection">How vBilling detects them</h2>
