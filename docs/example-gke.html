@@ -277,6 +277,8 @@
       <h1>Example: GKE with shared and private GPU nodes</h1>
       <p class="subtitle">Both vCluster tenancy models on GPUs, metered by vBilling and invoiced by Stripe test mode, from an empty Google Cloud project. The manifests, values files and commands are the ones from a recorded run, with every key, token and account ID left out.</p>
 
+      <p><strong>For a setup without Prometheus, see <a href="https://github.com/vClusterLabs-Experiments/vbilling/tree/main/examples/gke-stripe">GPU metering with Stripe</a>.</strong> It uses two L4 sharing slots, local vBilling, and paused Stripe test subscriptions. This example uses four slots, Prometheus/DCGM, and automatic subscriptions.</p>
+
       <h2 id="what">What you build</h2>
       <ul>
         <li><strong>GKE</strong> as the control plane cluster, with a spot L4 node pool time-shared four ways.</li>
@@ -330,11 +332,11 @@
 <span class="cmd">INGEST_IP=</span>$(kubectl -n monitoring get svc prometheus-ingest -o jsonpath='{.status.loadBalancer.ingress[0].ip}')</code></div>
 
       <h2 id="tenants">3. Tenant clusters</h2>
-      <div class="code-block"><code><span class="cmd">vcluster</span> platform login https://&lt;your-platform-host&gt;   <span class="comment">  # browser login, no key on the command line</span>
+      <div class="code-block"><code><span class="cmd">vcluster</span> platform login https://your-platform.example   <span class="comment">  # browser login, no key on the command line</span>
 <span class="cmd">vcluster</span> create shared-l4 -n shared-l4 -f 02-tenant-shared.yaml --connect=false
 <span class="cmd">vcluster</span> create private-a100 -n private-a100 -f 03-tenant-private.yaml --connect=false</code></div>
       <p>When the CLI is logged in, <code>vcluster create</code> registers each tenant cluster with the Platform, which is what licenses Private Nodes. A tenant cluster created before logging in is registered with <code>vcluster platform add vcluster private-a100 -n private-a100 --project default</code>. The private tenant cluster's <code>exportKubeConfig.additionalSecrets</code> writes the read-only Secret <code>vbilling-kubeconfig</code> that vBilling reads (see <a href="private-nodes.html#private">Private Nodes</a>).</p>
-      <p>Tell vBilling who the tenants are (the emails use the reserved <code>.example</code> domain):</p>
+      <p>Optionally set stable customer IDs and display names. Without these annotations, vBilling derives an identity per tenant cluster. The emails below use the reserved <code>.example</code> domain:</p>
       <div class="code-block"><code><span class="cmd">kubectl</span> annotate ns shared-l4 vbilling.vcluster.com/tenant=acme-ai "vbilling.vcluster.com/display-name=Acme AI" \
   vbilling.vcluster.com/email=billing@acme-ai.example vbilling.vcluster.com/plan=gpu-cloud
 <span class="cmd">kubectl</span> annotate ns private-a100 vbilling.vcluster.com/tenant=initech "vbilling.vcluster.com/display-name=Initech" \
@@ -342,15 +344,24 @@
 
       <h2 id="node">4. A private GPU node</h2>
       <p>Create a join token, put the join command it prints into the startup script, and boot the machine. The VM must reach the tenant cluster's internal load balancer, so keep it in the same VPC and region.</p>
-      <div class="code-block"><code><span class="cmd">vcluster</span> connect private-a100 -n private-a100 -- vcluster token create --expires 2h | grep node/join &gt; join.txt
-<span class="cmd">awk</span> -v cmd="$(cat join.txt)" '$0 == "JOIN_COMMAND" { print cmd; next } { print }' 04-node-startup.sh &gt; startup.sh
-<span class="cmd">gcloud</span> compute instances create gpu-node-1 --zone $ZONE --machine-type a2-highgpu-1g \
+      <div class="code-block"><code>set -euo pipefail
+set +x  # do not trace commands while handling credentials
+umask 077
+JOIN_DIR=$(mktemp -d "/tmp/vbilling-private-node.XXXXXX")
+chmod 700 "$JOIN_DIR"
+vcluster connect private-a100 -n private-a100 -- vcluster token create --expires 2h | grep node/join &gt; "$JOIN_DIR/join.txt"
+# awk reads the token from the file; the token is never a process argument.
+awk 'FNR == NR { cmd = $0; next } $0 == "JOIN_COMMAND" { print cmd; next } { print }' \
+  "$JOIN_DIR/join.txt" 04-node-startup.sh &gt; "$JOIN_DIR/startup.sh"
+gcloud compute instances create gpu-node-1 --zone $ZONE --machine-type a2-highgpu-1g \
   --provisioning-model SPOT --instance-termination-action STOP --maintenance-policy TERMINATE \
   --image-family ubuntu-2204-lts --image-project ubuntu-os-cloud --boot-disk-size 150GB \
-  --no-service-account --no-scopes --metadata-from-file startup-script=startup.sh</code></div>
+  --no-service-account --no-scopes --metadata-from-file "startup-script=$JOIN_DIR/startup.sh"</code></div>
       <p>Once <code>gpu-node-1</code> is Ready in the tenant cluster, remove the token from the instance and from disk, and label the node so it gets an SKU:</p>
       <div class="code-block"><code><span class="cmd">gcloud</span> compute instances remove-metadata gpu-node-1 --zone $ZONE --keys startup-script
-<span class="cmd">rm</span> join.txt startup.sh
+<span class="cmd">rm</span> -f "$JOIN_DIR/join.txt" "$JOIN_DIR/startup.sh"
+<span class="cmd">rmdir</span> "$JOIN_DIR"
+unset JOIN_DIR
 <span class="cmd">vcluster</span> connect private-a100 -n private-a100 -- kubectl label node gpu-node-1 \
   node.kubernetes.io/instance-type=a2-highgpu-1g vbilling.vcluster.com/capacity-type=spot</code></div>
 
@@ -372,14 +383,25 @@
 <span class="cmd">helm</span> install vbilling ../../deploy/helm/vbilling -n vbilling -f 07-vbilling-values.yaml
 <span class="cmd">vcluster</span> connect shared-l4 -n shared-l4 -- kubectl apply -f workloads/shared-inference.yaml
 <span class="cmd">vcluster</span> connect private-a100 -n private-a100 -- kubectl apply -f workloads/private-training.yaml</code></div>
-      <p>vBilling creates the Stripe customers and meters on the first windows. Give the meters prices tagged with the plan, then restart vBilling so it subscribes the tenants:</p>
-      <div class="code-block"><code><span class="cmd">export</span> STRIPE_API_KEY="$(cat ~/.stripe-test-key)"
-<span class="cmd">curl</span> -s https://api.stripe.com/v1/billing/meters -u "$STRIPE_API_KEY:" | grep -E '"(id|event_name)"'
-<span class="cmd">curl</span> -s https://api.stripe.com/v1/prices -u "$STRIPE_API_KEY:" \
+      <p>vBilling creates the Stripe customers and meters on the first windows. The operator creates the Product and Price. This example enables automatic subscription creation; prices must be tagged with the plan. The following creates a Product and Price together, so run it once for each intended meter and reuse the existing Price on retries. Then restart vBilling so it subscribes the tenants. For paused test subscriptions and repeatable setup helpers, use <a href="https://github.com/vClusterLabs-Experiments/vbilling/tree/main/examples/gke-stripe">the GPU example</a>.</p>
+      <div class="code-block"><code>set +x  # keep the key out of shell trace output
+stripe_test() {
+  local key
+  key=$(cat "$HOME/.stripe-test-key") || return 1
+  if [[ ! "$key" =~ ^sk_test_[A-Za-z0-9]+$ ]]; then
+    printf '%s\n' 'Expected a Stripe test secret key.' &gt;&amp;2
+    return 1
+  fi
+  # printf is a shell builtin: only curl's stdin receives the credential.
+  printf 'user = "%s:"\n' "$key" | curl --fail-with-body --silent --show-error --config - "$@"
+}
+stripe_test https://api.stripe.com/v1/billing/meters | grep -E '"(id|event_name)"'
+stripe_test https://api.stripe.com/v1/prices \
   -d currency=usd -d unit_amount_decimal=220 \
   -d "recurring[interval]=month" -d "recurring[usage_type]=metered" -d "recurring[meter]=&lt;meter id&gt;" \
   -d "product_data[name]=A100 40GB GPU-hour" -d "metadata[vbilling_plan]=gpu-cloud"
-<span class="cmd">kubectl</span> -n vbilling rollout restart statefulset/vbilling</code></div>
+unset -f stripe_test
+kubectl -n vbilling rollout restart statefulset/vbilling</code></div>
 
       <h2 id="check">7. Check it</h2>
       <div class="code-block"><code><span class="cmd">kubectl</span> -n vbilling port-forward svc/vbilling 8080:8080 &amp;

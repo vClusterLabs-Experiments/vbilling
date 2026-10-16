@@ -1,0 +1,37 @@
+# vCluster chart 0.36.1. Only synthetic demo workloads belong in this tenant.
+# Shared host scheduling: GPU workload selectors remain separate from the
+# CPU-only control-plane selector below.
+privateNodes:
+  enabled: false
+telemetry:
+  enabled: false
+sync:
+  toHost:
+    pods:
+      enabled: true
+  fromHost:
+    nodes:
+      enabled: false
+      syncBackChanges: false
+controlPlane:
+  distro:
+    k8s:
+      # Public registry HEAD verified this tag exists; matches host/client minor.
+      version: v1.34.1
+  advanced:
+    virtualScheduler:
+      enabled: false
+  statefulSet:
+    scheduling:
+      nodeSelector:
+        cloud.google.com/gke-nodepool: default-pool
+    resources:
+      requests:
+        cpu: 200m
+        memory: 256Mi
+    persistence:
+      volumeClaim:
+        enabled: true
+        size: 5Gi
+        storageClass: standard-rwo
+        retentionPolicy: Delete

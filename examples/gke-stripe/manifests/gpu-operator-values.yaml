@@ -1,0 +1,8 @@
+# Repo example's whole-A100 stage. MIG strategy is prepared, but MIG is not
+# enabled until the node is explicitly labeled after basic GPU proof.
+driver: {enabled: true}
+toolkit: {enabled: true}
+mig: {strategy: single}
+dcgmExporter:
+  enabled: true
+  serviceMonitor: {enabled: false}

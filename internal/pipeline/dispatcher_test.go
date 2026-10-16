@@ -15,8 +15,9 @@ import (
 
 type fakeDest struct {
 	ensured   []string
-	ensureErr int  // fail EnsureTenant this many times
-	partial   bool // report poison events with PartialError instead of failing the batch
+	ensureErr int    // fail EnsureTenant this many times
+	reject    string // tenant EnsureTenant rejects permanently
+	partial   bool   // report poison events with PartialError instead of failing the batch
 	name      string
 	mu        sync.Mutex
 	got       map[string]int // event ID -> times received
@@ -38,6 +39,9 @@ func (f *fakeDest) EnsureTenant(_ context.Context, t usage.Tenant) error {
 	if f.ensureErr > 0 {
 		f.ensureErr--
 		return errors.New("billing API timeout")
+	}
+	if t.ID == f.reject {
+		return destinations.Permanent(fmt.Errorf("plan for %s is misconfigured", t.ID))
 	}
 	f.ensured = append(f.ensured, t.ID)
 	return nil
@@ -113,9 +117,12 @@ func run(t *testing.T, s *spool.Spool, until func() bool, dests ...destinations.
 	t.Helper()
 	d := New(s, dests, Options{BatchSize: 7, MinBackoff: time.Millisecond, MaxBackoff: 5 * time.Millisecond, IdlePoll: 10 * time.Millisecond}, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
 	done := make(chan struct{})
 	go func() { d.Run(ctx); close(done) }()
+	defer func() {
+		cancel()
+		<-done // Finish cursor writes before the spool and its directory are cleaned up.
+	}()
 	for !until() {
 		if ctx.Err() != nil {
 			t.Fatal("timed out waiting for delivery")
@@ -293,8 +300,12 @@ func TestBootstrapGateAndTenantEnsuredBeforeEvents(t *testing.T) {
 		},
 	}, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	go d.Run(ctx)
+	done := make(chan struct{})
+	go func() { d.Run(ctx); close(done) }()
+	defer func() {
+		cancel()
+		<-done // Also wait when a timeout calls t.Fatal.
+	}()
 	for dest.received() < len(all) {
 		if ctx.Err() != nil {
 			t.Fatal("timed out")
@@ -302,6 +313,7 @@ func TestBootstrapGateAndTenantEnsuredBeforeEvents(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	cancel()
+	<-done
 	if bootstrapCalls != 3 {
 		t.Fatalf("bootstrap calls = %d", bootstrapCalls)
 	}
@@ -312,5 +324,44 @@ func TestBootstrapGateAndTenantEnsuredBeforeEvents(t *testing.T) {
 	}
 	if reg.NeedsEnsure("metronome", usage.Tenant{ID: "t0", DisplayName: "Tenant Zero"}) {
 		t.Fatal("tenant not marked ensured")
+	}
+}
+
+func TestPermanentlyRejectedTenantDoesNotBlockDelivery(t *testing.T) {
+	s := openSpool(t, t.TempDir())
+	defer s.Close()
+	dest := newFake("stripe")
+	dest.reject = "t1"
+	s.Cursor("stripe")
+	all := fill(t, s, 3, 3, usage.MetricGPUHours)
+
+	reg := NewTenantRegistry()
+	for _, id := range []string{"t0", "t1", "t2"} {
+		reg.Upsert(usage.Tenant{ID: id})
+	}
+	d := New(s, []destinations.Destination{dest}, Options{
+		BatchSize: 4, MinBackoff: time.Millisecond, MaxBackoff: 2 * time.Millisecond, IdlePoll: 5 * time.Millisecond,
+		Tenants: reg,
+	}, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	done := make(chan struct{})
+	go func() { d.Run(ctx); close(done) }()
+	defer func() {
+		cancel()
+		<-done // Also wait when a timeout calls t.Fatal.
+	}()
+	for dest.received() < len(all) {
+		if ctx.Err() != nil {
+			t.Fatalf("delivery stalled at %d of %d events", dest.received(), len(all))
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	<-done
+	if !reg.NeedsEnsure("stripe", usage.Tenant{ID: "t1"}) {
+		t.Fatal("rejected tenant marked ensured")
+	}
+	if reg.NeedsEnsure("stripe", usage.Tenant{ID: "t0"}) || reg.NeedsEnsure("stripe", usage.Tenant{ID: "t2"}) {
+		t.Fatal("other tenants not ensured")
 	}
 }

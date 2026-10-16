@@ -2,6 +2,8 @@ package metronome
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
@@ -9,6 +11,7 @@ import (
 	"regexp"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -171,6 +174,9 @@ func (a *Adapter) EnsureTenant(ctx context.Context, t usage.Tenant) error {
 	if err != nil {
 		return err
 	}
+	if err := a.ensureStripeLink(ctx, t, cusID); err != nil {
+		return err
+	}
 	rateCard := t.Plan
 	if rateCard == "" {
 		rateCard = a.cfg.MetronomeRateCard
@@ -200,19 +206,14 @@ func (a *Adapter) ensureCustomer(ctx context.Context, t usage.Tenant) (string, e
 	if req.Name == "" {
 		req.Name = t.ID
 	}
+	var stripeID string
 	if a.stripe != nil {
-		stripeID, err := a.stripe.EnsureCustomer(ctx, t)
+		id, err := a.stripe.EnsureCustomer(ctx, t)
 		if err != nil {
 			return "", fmt.Errorf("link stripe customer for %s: %w", t.ID, err)
 		}
-		req.BillingProviderConfigs = []BillingProviderConfig{{
-			BillingProvider: "stripe",
-			DeliveryMethod:  "direct_to_billing_provider",
-			Configuration: map[string]string{
-				"stripe_customer_id":       stripeID,
-				"stripe_collection_method": a.cfg.MetronomeStripeCollect,
-			},
-		}}
+		stripeID = id
+		req.BillingProviderConfigs = []BillingProviderConfig{a.stripeConfig(stripeID)}
 	}
 	cus, err := a.c.CreateCustomer(ctx, req)
 	if IsConflict(err) {
@@ -227,6 +228,9 @@ func (a *Adapter) ensureCustomer(ctx context.Context, t usage.Tenant) (string, e
 	}
 	log.Printf("[metronome] created customer %s for tenant %s", cus.ID, t.ID)
 	a.remember(t.ID, cus.ID)
+	if stripeID != "" {
+		_ = a.state.Set("link/"+cus.ID, stripeID)
+	}
 	return cus.ID, nil
 }
 
@@ -235,34 +239,227 @@ func (a *Adapter) remember(tenant, cus string) {
 	_ = a.state.Set("tenant/"+cus, tenant)
 }
 
-func (a *Adapter) ensureContract(ctx context.Context, t usage.Tenant, cusID, rateCard string) error {
-	if _, ok := a.state.Get("contract/" + t.ID + "/" + rateCard); ok {
+func (a *Adapter) stripeConfig(stripeID string) BillingProviderConfig {
+	return BillingProviderConfig{
+		BillingProvider: "stripe",
+		DeliveryMethod:  "direct_to_billing_provider",
+		Configuration: map[string]string{
+			"stripe_customer_id":       stripeID,
+			"stripe_collection_method": a.cfg.MetronomeStripeCollect,
+		},
+	}
+}
+
+// ensureStripeLink gives a customer vBilling did not create (found by its
+// alias, or pinned by ID) the Stripe configuration it creates customers with,
+// unless the customer already has one.
+func (a *Adapter) ensureStripeLink(ctx context.Context, t usage.Tenant, cusID string) error {
+	if a.stripe == nil {
 		return nil
 	}
-	start := a.now().UTC().Truncate(24 * time.Hour) // UTC midnight
-	req := CreateContractRequest{
-		CustomerID:             cusID,
-		StartingAt:             rfc3339(start),
-		UniquenessKey:          "vbilling-" + t.ID + "-" + rateCard,
-		UsageStatementSchedule: &UsageStatementSchedule{Frequency: "MONTHLY", Day: "FIRST_OF_MONTH"},
+	if _, ok := a.state.Get("link/" + cusID); ok {
+		return nil
 	}
-	if uuidRe.MatchString(rateCard) {
-		req.RateCardID = rateCard
-	} else {
-		req.RateCardAlias = rateCard
-	}
-	if a.stripe != nil {
-		req.BillingProviderConfig = &BillingProviderConfig{BillingProvider: "stripe", DeliveryMethod: "direct_to_billing_provider"}
-	}
-	id, err := a.c.CreateContract(ctx, req)
-	if IsConflict(err) {
-		id, err = "existing", nil // uniqueness_key already used: the contract exists
-	}
+	cfgs, err := a.c.BillingProviderConfigs(ctx, cusID)
 	if err != nil {
-		return fmt.Errorf("create contract for %s on %s: %w", t.ID, rateCard, err)
+		return fmt.Errorf("billing provider configurations of %s: %w", cusID, err)
 	}
-	log.Printf("[metronome] contract %s for tenant %s on rate card %s", id, t.ID, rateCard)
-	return a.state.Set("contract/"+t.ID+"/"+rateCard, id)
+	for _, c := range cfgs {
+		if c.BillingProvider == "stripe" && c.ArchivedAt == "" {
+			return a.state.Set("link/"+cusID, fmt.Sprint(c.Configuration["stripe_customer_id"]))
+		}
+	}
+	stripeID, err := a.stripe.EnsureCustomer(ctx, t)
+	if err != nil {
+		return fmt.Errorf("link stripe customer for %s: %w", t.ID, err)
+	}
+	if err := a.c.SetBillingProviderConfig(ctx, cusID, a.stripeConfig(stripeID)); err != nil {
+		return fmt.Errorf("link customer %s to stripe: %w", cusID, err)
+	}
+	log.Printf("[metronome] linked customer %s of tenant %s to Stripe customer %s", cusID, t.ID, stripeID)
+	return a.state.Set("link/"+cusID, stripeID)
+}
+
+// Contract uniqueness keys. v0.2.0 used "vbilling-<tenant>-<rate card>", which
+// cannot be reused once that contract ended, so newer contracts carry their
+// start date (and a counter for a second contract on the same day):
+// "vbilling:<rate card>@<YYYY-MM-DD>[#n]:<tenant hash>".
+const maxUniquenessKey = 128
+
+func rateCardToken(rateCard string) string {
+	if len(rateCard) <= 64 {
+		return rateCard
+	}
+	return "h" + shortHash(rateCard)
+}
+
+func shortHash(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:8])
+}
+
+// contractRateCard returns the rate card token a vBilling contract key of
+// this tenant was created for, or "" for any other contract.
+func contractRateCard(key, tenant string) string {
+	if body, ok := strings.CutPrefix(key, "vbilling:"); ok {
+		i := strings.LastIndex(body, ":")
+		if i < 0 || body[i+1:] != shortHash(tenant) {
+			return ""
+		}
+		if j := strings.LastIndex(body[:i], "@"); j > 0 {
+			return body[:j]
+		}
+		return ""
+	}
+	if rc, ok := strings.CutPrefix(key, "vbilling-"+tenant+"-"); ok {
+		return rateCardToken(rc)
+	}
+	return ""
+}
+
+func parseTime(s string) time.Time {
+	t, _ := time.Parse(time.RFC3339, s)
+	return t
+}
+
+func laterOf(a, b time.Time) time.Time {
+	if a.After(b) {
+		return a
+	}
+	return b
+}
+
+// openAt reports whether a contract is in force at t (or starts later).
+func openAt(c Contract, t time.Time) bool {
+	return c.ArchivedAt == "" && (c.EndingBefore == "" || parseTime(c.EndingBefore).After(t))
+}
+
+// ensureContract keeps one open vBilling contract per tenant, on the tenant's
+// rate card. When the rate card changes, a new contract starts at UTC
+// midnight and every other open vBilling contract of the tenant ends there,
+// so no usage is rated twice. Contracts vBilling did not create are left alone.
+func (a *Adapter) ensureContract(ctx context.Context, t usage.Tenant, cusID, rateCard string) error {
+	if cur, _ := a.state.Get("contract-current/" + t.ID); cur == rateCard {
+		return nil
+	}
+	all, err := a.c.ListContracts(ctx, cusID)
+	if err != nil {
+		return fmt.Errorf("list contracts of %s: %w", t.ID, err)
+	}
+	today := a.now().UTC().Truncate(24 * time.Hour)
+	token := rateCardToken(rateCard)
+	keys := map[string]bool{}
+	var ours []Contract
+	var keep *Contract
+	for _, c := range all {
+		keys[c.UniquenessKey] = true
+		rc := contractRateCard(c.UniquenessKey, t.ID)
+		if rc == "" {
+			continue
+		}
+		ours = append(ours, c)
+		if rc == token && openAt(c, today) && (keep == nil || parseTime(c.StartingAt).Before(parseTime(keep.StartingAt))) {
+			c := c
+			keep = &c
+		}
+	}
+	if keep == nil {
+		if keep, err = a.createContract(ctx, t, cusID, rateCard, today, keys); err != nil {
+			return err
+		}
+	}
+	if err := a.endOtherContracts(ctx, t, cusID, ours, *keep, today); err != nil {
+		return err
+	}
+	return a.state.Set("contract-current/"+t.ID, rateCard)
+}
+
+func (a *Adapter) createContract(ctx context.Context, t usage.Tenant, cusID, rateCard string, start time.Time, used map[string]bool) (*Contract, error) {
+	base := "vbilling:" + rateCardToken(rateCard) + "@" + start.Format("2006-01-02")
+	for n := 1; n <= 9; n++ {
+		key := base
+		if n > 1 {
+			key += "#" + strconv.Itoa(n)
+		}
+		key += ":" + shortHash(t.ID)
+		if used[key] {
+			continue // ended or archived earlier today: keys cannot be reused
+		}
+		if len(key) > maxUniquenessKey {
+			return nil, destinations.Permanent(fmt.Errorf("contract key for %s on %s exceeds %d characters", t.ID, rateCard, maxUniquenessKey))
+		}
+		req := CreateContractRequest{
+			CustomerID:             cusID,
+			StartingAt:             rfc3339(start),
+			UniquenessKey:          key,
+			UsageStatementSchedule: &UsageStatementSchedule{Frequency: "MONTHLY", Day: "FIRST_OF_MONTH"},
+		}
+		if uuidRe.MatchString(rateCard) {
+			req.RateCardID = rateCard
+		} else {
+			req.RateCardAlias = rateCard
+		}
+		if a.stripe != nil {
+			req.BillingProviderConfig = &BillingProviderConfig{BillingProvider: "stripe", DeliveryMethod: "direct_to_billing_provider"}
+		}
+		id, err := a.c.CreateContract(ctx, req)
+		if IsConflict(err) {
+			// Created meanwhile, by an earlier attempt or another replica.
+			all, lerr := a.c.ListContracts(ctx, cusID)
+			if lerr != nil {
+				return nil, fmt.Errorf("list contracts of %s: %w", t.ID, lerr)
+			}
+			for _, c := range all {
+				if c.UniquenessKey == key && openAt(c, start) {
+					return &c, nil
+				}
+			}
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("create contract for %s on %s: %w", t.ID, rateCard, err)
+		}
+		log.Printf("[metronome] contract %s for tenant %s on rate card %s from %s", id, t.ID, rateCard, start.Format("2006-01-02"))
+		return &Contract{ID: id, UniquenessKey: key, StartingAt: rfc3339(start)}, nil
+	}
+	return nil, destinations.Permanent(fmt.Errorf("no free contract key for %s on %s today", t.ID, rateCard))
+}
+
+// endOtherContracts ends every other open vBilling contract of the tenant
+// where keep takes over: at keep's start, or today if keep started earlier
+// (two contracts that overlapped before this version). One that would not
+// have started by then is archived instead.
+func (a *Adapter) endOtherContracts(ctx context.Context, t usage.Tenant, cusID string, ours []Contract, keep Contract, today time.Time) error {
+	at := parseTime(keep.StartingAt)
+	if at.Before(today) {
+		at = today
+	}
+	for _, c := range ours {
+		if c.ID == keep.ID || !openAt(c, at) {
+			continue
+		}
+		start := parseTime(c.StartingAt)
+		var err error
+		if start.Before(at) {
+			err = a.c.EndContract(ctx, cusID, c.ID, at)
+		} else {
+			err = a.c.ArchiveContract(ctx, cusID, c.ID)
+		}
+		switch {
+		case err == nil:
+			log.Printf("[metronome] contract %s of tenant %s ended at %s, where contract %s takes over", c.ID, t.ID, rfc3339(at), keep.ID)
+			if from := laterOf(start, parseTime(keep.StartingAt)); from.Before(at) {
+				log.Printf("[metronome] WARNING: contracts %s and %s of tenant %s both ran from %s to %s: check their invoices for that period",
+					c.ID, keep.ID, t.ID, rfc3339(from), rfc3339(at))
+			}
+		case destinations.IsPermanent(err):
+			// Retrying cannot help: say so once and move on.
+			log.Printf("[metronome] WARNING: could not end contract %s of tenant %s (%v): end it in Metronome", c.ID, t.ID, err)
+		default:
+			return fmt.Errorf("end contract %s of %s: %w", c.ID, t.ID, err)
+		}
+	}
+	return nil
 }
 
 // RemoveTenant leaves the customer and contract in place: final usage still

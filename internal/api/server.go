@@ -186,6 +186,18 @@ func field(e *usage.Event, key string) string {
 }
 
 // filter applies tenant/metric/project/region/sku/cluster query filters.
+// filterKeys are the query parameters filter understands.
+var filterKeys = []string{"tenant", "metric", "project", "region", "sku", "cluster"}
+
+func hasFilter(r *http.Request) bool {
+	for _, k := range filterKeys {
+		if r.URL.Query().Get(k) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func filter(r *http.Request) func(*usage.Event) bool {
 	q := r.URL.Query()
 	checks := map[string]string{}
@@ -564,21 +576,30 @@ func (s *Server) reconcile(w http.ResponseWriter, r *http.Request) {
 			}
 			continue
 		}
-		results = append(results, s.reconcileOne(r.Context(), d, rec, from, to, keep))
+		results = append(results, s.reconcileOne(r.Context(), d, rec, from, to, keep, hasFilter(r)))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"from": from, "to": to, "results": results})
 }
 
-func (s *Server) reconcileOne(ctx context.Context, d destinations.Destination, rec destinations.Reconciler, from, to time.Time, keep func(*usage.Event) bool) reconcileResult {
+func (s *Server) reconcileOne(ctx context.Context, d destinations.Destination, rec destinations.Reconciler, from, to time.Time, keep func(*usage.Event) bool, filtered bool) reconcileResult {
 	res := reconcileResult{Destination: d.Name()}
 	type key struct{ tenant, metric string }
 	ledger, dead := map[key]float64{}, map[key]float64{}
 	in := func(e *usage.Event) bool {
-		return !e.WindowStart.Before(from) && e.WindowStart.Before(to) && destinations.Accepts(d, e.Metric) && keep(e)
+		return !e.WindowStart.Before(from) && e.WindowStart.Before(to) && destinations.Accepts(d, e.Metric)
 	}
+	// Billing platforms report totals per tenant and metric only, so filters
+	// pick which (tenant, metric) pairs to compare, and each comparison covers
+	// all of that tenant's usage of the metric. Summing only the filtered
+	// events (one SKU, one tenant cluster) would mismatch by construction.
+	selected := map[key]bool{}
 	err := s.spool.Scan(from, to, func(e *usage.Event) error {
 		if in(e) {
-			ledger[key{e.Tenant, e.Metric}] += e.Quantity
+			k := key{e.Tenant, e.Metric}
+			ledger[k] += e.Quantity
+			if keep(e) {
+				selected[k] = true
+			}
 		}
 		return nil
 	})
@@ -588,9 +609,23 @@ func (s *Server) reconcileOne(ctx context.Context, d destinations.Destination, r
 	}
 	if dls, err := s.spool.DeadLetters(d.Name()); err == nil {
 		for i := range dls {
-			if in(&dls[i].Event) {
-				dead[key{dls[i].Event.Tenant, dls[i].Event.Metric}] += dls[i].Event.Quantity
+			if e := &dls[i].Event; in(e) {
+				k := key{e.Tenant, e.Metric}
+				dead[k] += e.Quantity
+				if keep(e) {
+					selected[k] = true
+				}
 			}
+		}
+	}
+	for k := range ledger {
+		if !selected[k] {
+			delete(ledger, k)
+		}
+	}
+	for k := range dead {
+		if !selected[k] {
+			delete(dead, k)
 		}
 	}
 	tenantSet, metricSet := map[string]bool{}, map[string]bool{}
@@ -623,7 +658,9 @@ func (s *Server) reconcileOne(ctx context.Context, d destinations.Destination, r
 		keys[k] = true
 	}
 	for k := range recorded {
-		keys[k] = true
+		if !filtered || selected[k] {
+			keys[k] = true
+		}
 	}
 	res.OK = true
 	for k := range keys {

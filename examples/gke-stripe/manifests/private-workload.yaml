@@ -1,0 +1,51 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gpu-demo
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: private-a100-live
+  namespace: gpu-demo
+  labels:
+    app: private-a100-live
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: private-a100-live
+  template:
+    metadata:
+      labels:
+        app: private-a100-live
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 10
+      containers:
+        - name: cuda
+          image: nvcr.io/nvidia/k8s/cuda-sample:nbody-cuda11.7.1
+          imagePullPolicy: IfNotPresent
+          command: [sh, -c]
+          args:
+            - |
+              set -eu
+              nvidia-smi -L
+              /cuda-samples/sample -benchmark -numbodies=1024
+              echo PRIVATE_GPU_CUDA_SUCCESS
+              touch /tmp/cuda-success
+              while true; do sleep 300; done
+          readinessProbe:
+            exec:
+              command: [test, -f, /tmp/cuda-success]
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              nvidia.com/gpu: 1
+              memory: 2Gi

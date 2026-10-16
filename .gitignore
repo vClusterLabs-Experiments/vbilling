@@ -20,3 +20,24 @@ stripe-webhook-secret
 metronome-token
 lago-api-key
 webhook-secret
+
+# Local demo credentials and generated runtime state (never commit)
+.env.*
+!.env.example
+*.kubeconfig
+*.kubeconfig.*
+kubeconfig
+api-token
+private-tenants.json
+/examples/gke-gpu/join.txt
+/examples/gke-gpu/startup.sh
+/examples/gke-gpu/agent.yaml
+/examples/gke-stripe/.runtime/
+
+# Demo helper bytecode and CLI authentication files
+__pycache__/
+*.py[cod]
+vcluster-cli.json
+platform-cli.json
+private-join.txt
+private-startup.sh

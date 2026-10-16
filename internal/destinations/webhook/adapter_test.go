@@ -79,3 +79,17 @@ func TestErrorClassification(t *testing.T) {
 		}
 	}
 }
+
+func TestRejectedCatalogDoesNotHoldUpDelivery(t *testing.T) {
+	status := http.StatusBadRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(status) }))
+	defer srv.Close()
+	a := New(&config.Config{WebhookURL: srv.URL})
+	if err := a.Bootstrap(context.Background(), usage.Catalog()); err != nil {
+		t.Fatalf("a permanently rejected catalog must not block delivery: %v", err)
+	}
+	status = http.StatusServiceUnavailable // a receiver that is down is retried
+	if err := a.Bootstrap(context.Background(), usage.Catalog()); err == nil || destinations.IsPermanent(err) {
+		t.Fatalf("HTTP 503: got %v, want a retryable error", err)
+	}
+}

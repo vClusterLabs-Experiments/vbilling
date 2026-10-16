@@ -144,8 +144,12 @@ func (e *env) get(t *testing.T, path string) (int, string) {
 func (e *env) deliver(t *testing.T) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	go e.disp.Run(ctx)
+	done := make(chan struct{})
+	go func() { e.disp.Run(ctx); close(done) }()
+	defer func() {
+		cancel()
+		<-done // Stop all dispatcher writes before returning or cleaning up the spool.
+	}()
 	for e.sp.Cursor("fakebill") < e.sp.Committed() {
 		if ctx.Err() != nil {
 			t.Fatal("delivery timed out")
@@ -334,5 +338,36 @@ func TestAPITokenProtectsReadEndpoints(t *testing.T) {
 	}
 	if code, _ := e.get(t, "/healthz"); code != 200 {
 		t.Fatal("healthz must stay open for probes")
+	}
+}
+
+func TestReconcileFiltersSelectTenantMetricPairs(t *testing.T) {
+	e := setup(t)
+	e.sp.Cursor("fakebill")
+	day := now.Truncate(24 * time.Hour).Add(-24 * time.Hour)
+	e.commit(t, 10, day.Add(time.Hour)) // H100 and L40S GPU hours for one tenant cluster
+	e.deliver(t)
+
+	type resp struct {
+		Results []reconcileResult `json:"results"`
+	}
+	for _, q := range []string{"", "sku=NVIDIA-H100", "cluster=vcluster-a-train", "region=ap-southeast-2", "tenant=acme&sku=NVIDIA-L40S"} {
+		_, body := e.get(t, "/api/v1/reconcile?"+q)
+		var r resp
+		json.Unmarshal([]byte(body), &r)
+		if len(r.Results) != 1 || !r.Results[0].OK || len(r.Results[0].Rows) != 1 {
+			t.Fatalf("%q: %s", q, body)
+		}
+		// Platforms report per tenant and metric: a filter must not compare
+		// one SKU's share of the ledger with the platform's whole total.
+		if row := r.Results[0].Rows[0]; row.Ledger == 0 || row.Ledger != row.Recorded {
+			t.Fatalf("%q compared part of the usage: %+v", q, row)
+		}
+	}
+	_, body := e.get(t, "/api/v1/reconcile?sku=AMD-MI300X")
+	var r resp
+	json.Unmarshal([]byte(body), &r)
+	if len(r.Results) != 1 || !r.Results[0].OK || len(r.Results[0].Rows) != 0 {
+		t.Fatalf("a filter that matches nothing should compare nothing: %s", body)
 	}
 }

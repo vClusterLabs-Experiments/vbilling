@@ -353,7 +353,9 @@ func (a *Adapter) ensureSubscription(ctx context.Context, t usage.Tenant, cusID 
 		return nil
 	}
 	if len(prices) > 20 {
-		return fmt.Errorf("plan %s has %d prices; Stripe allows 20 items per subscription", plan, len(prices))
+		// Permanent: retrying cannot help, and a retryable error would hold up
+		// every tenant's usage. The customer exists, so usage keeps flowing.
+		return destinations.Permanent(fmt.Errorf("plan %s has %d prices; Stripe allows 20 items per subscription", plan, len(prices)))
 	}
 	subs, err := a.c.ListSubscriptions(ctx, cusID)
 	if err != nil {
