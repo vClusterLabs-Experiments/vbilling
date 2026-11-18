@@ -221,6 +221,10 @@ spec:
               value: {{ .Values.enforcement.pause.keepBilling | quote }}
             - name: PAUSE_DRAIN_TIMEOUT
               value: {{ .Values.enforcement.pause.drainTimeout | quote }}
+            {{- with .Values.enforcement.pause.keepNamespaces }}
+            - name: PAUSE_KEEP_NAMESPACES
+              value: {{ . | quote }}
+            {{- end }}
             {{- if .Values.prometheus.url }}
             - name: PROMETHEUS_URL
               value: {{ .Values.prometheus.url | quote }}

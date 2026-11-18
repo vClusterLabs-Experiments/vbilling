@@ -189,6 +189,14 @@ func RegisterCustom(d MetricDef) error {
 	return nil
 }
 
+// RemoveCustom drops a custom metric. Tests use it to undo what they
+// registered, so they can run repeatedly in one process (-count).
+func RemoveCustom(code string) {
+	catMu.Lock()
+	delete(custom, code)
+	catMu.Unlock()
+}
+
 // EnsureCustom registers d unless a metric with its code exists, in which
 // case the existing definition wins (an operator's CUSTOM_METRICS entry
 // beats a gateway format's default).

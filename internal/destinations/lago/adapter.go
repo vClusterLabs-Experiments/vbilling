@@ -47,6 +47,9 @@ type Adapter struct {
 	// from a stale read deletes what another update just added.
 	planMu   sync.Mutex
 	skuRetry map[string]retry // metric -> when to retry its SKU filters
+
+	dimsMu     sync.Mutex
+	filterDims map[string][]string // metric -> its billable metric's filter keys besides sku
 }
 
 // New builds the adapter around a client (exported for tests). A nil state

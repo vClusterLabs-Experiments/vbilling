@@ -6,9 +6,11 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"embed"
 	"encoding/csv"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -739,6 +741,15 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 			e.Tenant = bound
 		}
 		noID := e.ID == ""
+		if bound != "" && !noID {
+			// A tenant chooses its own IDs, so two tenants may pick the same
+			// one: scope it to the tenant and client, as record IDs are.
+			if e.Properties == nil {
+				e.Properties = map[string]any{}
+			}
+			e.Properties["client_event_id"] = e.ID
+			e.ID = TenantEventID(bound, client, e.ID)
+		}
 		e.Finalize()
 		if j, dup := firstAt[e.ID]; dup && (noID || derived[e.ID]) {
 			problems = append(problems, fmt.Sprintf("same tenant, metric, window and dimensions as event %d and no id: "+
@@ -793,6 +804,14 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 			"If they are separate requests rather than retries, give each one an id, or send per-request usage to POST /api/v1/records", silent)}
 	}
 	writeJSON(w, status, out)
+}
+
+// TenantEventID is the ledger ID of an event a tenant-bound token sent with
+// its own id: the same tenant, client and id always give the same ID, so
+// retries deduplicate, and no other tenant or collector can produce it.
+func TenantEventID(tenant, client, id string) string {
+	sum := sha256.Sum256([]byte(tenant + "\x00" + client + "\x00" + id))
+	return "te1_" + hex.EncodeToString(sum[:16])
 }
 
 // --- reconciliation ---

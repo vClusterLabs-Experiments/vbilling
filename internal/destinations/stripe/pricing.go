@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -28,14 +29,31 @@ func (c *Client) ListPricesWithTiers(ctx context.Context) ([]Price, error) {
 
 // PricePlan is the vbilling_plan tag a tenant's subscription prices carry
 // when vBilling manages subscriptions (STRIPE_AUTO_SUBSCRIBE), "" otherwise.
+// Subscriptions only take prices in the tenant's currency, so a tenant whose
+// currency is not billing.currency is on its own series: "standard (EUR)".
 func (a *Adapter) PricePlan(t usage.Tenant) string {
 	if !a.cfg.StripeAutoSubscribe {
 		return ""
 	}
-	if t.Plan != "" {
-		return t.Plan
+	plan := t.Plan
+	if plan == "" {
+		plan = a.cfg.DefaultPlanCode
 	}
-	return a.cfg.DefaultPlanCode
+	if t.Currency != "" && !strings.EqualFold(t.Currency, a.cfg.BillingCurrency) {
+		return plan + " (" + strings.ToUpper(t.Currency) + ")"
+	}
+	return plan
+}
+
+var planCurrencyRe = regexp.MustCompile(`^(.*) \(([A-Z]{3})\)$`)
+
+// planCurrency splits a PricePlan value into the vbilling_plan tag and the
+// currency a subscription on it is in.
+func (a *Adapter) planCurrency(s string) (plan, currency string) {
+	if m := planCurrencyRe.FindStringSubmatch(s); m != nil {
+		return m[1], strings.ToLower(m[2])
+	}
+	return s, strings.ToLower(a.cfg.BillingCurrency)
 }
 
 // PriceDims are the meter split keys besides the SKU: each combination of
@@ -162,20 +180,33 @@ func (a *Adapter) pricesCoverage(s destinations.PriceSeries, where string, ps []
 		}
 	}
 	if a.cfg.StripeAutoSubscribe {
-		var tagged []Price
+		// The same rules as planPrices, which builds the subscriptions.
+		plan, cur := a.planCurrency(s.Plan)
+		var tagged, inCur []Price
 		for _, p := range ps {
-			if p.Metadata[metaPlan] == s.Plan {
+			if p.Metadata[metaPlan] == plan {
 				tagged = append(tagged, p)
+				if strings.EqualFold(p.Currency, cur) {
+					inCur = append(inCur, p)
+				}
 			}
 		}
 		if len(tagged) == 0 {
 			return destinations.PriceCoverage{
 				Status: destinations.PriceMissing,
-				Detail: fmt.Sprintf("%s has %d active price(s), none tagged %s=%s, so subscriptions on plan %s do not include it", where, len(ps), metaPlan, s.Plan, s.Plan),
-				Hint:   fmt.Sprintf("add metadata %s=%s to a metered price on %s", metaPlan, s.Plan, where),
+				Detail: fmt.Sprintf("%s has %d active price(s), none tagged %s=%s, so subscriptions on plan %s do not include it", where, len(ps), metaPlan, plan, plan),
+				Hint:   fmt.Sprintf("add metadata %s=%s to a metered price on %s", metaPlan, plan, where),
 			}
 		}
-		ps = tagged
+		if len(inCur) == 0 {
+			return destinations.PriceCoverage{
+				Status: destinations.PriceMissing,
+				Detail: fmt.Sprintf("%s has %d price(s) tagged %s=%s, none in %s, so %s subscriptions on plan %s do not include it",
+					where, len(tagged), metaPlan, plan, strings.ToUpper(cur), strings.ToUpper(cur), plan),
+				Hint: fmt.Sprintf("create a metered price in %s on %s with metadata %s=%s", strings.ToUpper(cur), where, metaPlan, plan),
+			}
+		}
+		ps = inCur
 	}
 	sort.Slice(ps, func(i, j int) bool { return ps[i].ID < ps[j].ID })
 	note := ""
@@ -192,11 +223,12 @@ func (a *Adapter) pricesCoverage(s destinations.PriceSeries, where string, ps []
 		Detail: fmt.Sprintf("every active price on %s is 0 (%s)%s", where, ps[0].ID, note)}
 }
 
-func (a *Adapter) planTagHint(plan string) string {
+func (a *Adapter) planTagHint(s string) string {
 	if !a.cfg.StripeAutoSubscribe {
 		return ""
 	}
-	return fmt.Sprintf(" with metadata %s=%s", metaPlan, plan)
+	plan, cur := a.planCurrency(s)
+	return fmt.Sprintf(" in %s with metadata %s=%s", strings.ToUpper(cur), metaPlan, plan)
 }
 
 func amountIsZero(n *int64, dec *string) bool {

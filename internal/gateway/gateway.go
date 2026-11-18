@@ -85,7 +85,8 @@ func (g *Gate) block(ctx context.Context, b Blocker, tenant string) error {
 	var errs []error
 	for _, id := range unique(g.identities(tenant)) {
 		k := key(b.Name(), id)
-		if _, ours := g.state.Get(k); !ours {
+		_, ours := g.state.Get(k)
+		if !ours {
 			// Blocked already, by someone else: leave it to them, so the
 			// tenant's reactivation never lifts an administrator's block.
 			already, err := b.IsBlocked(ctx, id)
@@ -99,9 +100,18 @@ func (g *Gate) block(ctx context.Context, b Blocker, tenant string) error {
 			if already {
 				continue
 			}
+			// Not blocked: claim it before the call, so a block whose reply
+			// is lost is still ours to retry and to lift on reactivation.
+			if err := g.state.Set(k, tenant); err != nil {
+				errs = append(errs, err)
+				continue
+			}
 		}
 		err := b.Block(ctx, id)
 		if errors.Is(err, ErrUnknown) {
+			if derr := g.state.Delete(k); derr != nil {
+				errs = append(errs, derr)
+			}
 			continue
 		}
 		if err != nil {
@@ -109,11 +119,8 @@ func (g *Gate) block(ctx context.Context, b Blocker, tenant string) error {
 			g.tel.Add("vbilling_gateway_block_errors_total", "Failed gateway block or unblock calls.", map[string]string{"gateway": b.Name()}, 1)
 			continue
 		}
-		if _, had := g.state.Get(k); !had {
+		if !ours {
 			log.Printf("[gateway] %s: blocked %s (tenant %s)", b.Name(), id, tenant)
-		}
-		if err := g.state.Set(k, tenant); err != nil {
-			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)

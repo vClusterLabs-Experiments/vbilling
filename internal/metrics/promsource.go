@@ -317,18 +317,35 @@ func emptyHint(m PromMetric, v queryVars, sourceLabel string) string {
 	return strings.TrimSpace(h)
 }
 
+// maxCounterGap bounds how far back a counter read goes to cover windows
+// committed while a cluster's Prometheus failed. After a longer outage, a
+// series first seen at recovery starts from its first sample instead.
+const maxCounterGap = 24 * time.Hour
+
 // counter bills the exact increase of every matching series per window.
 func (p *PromSource) counter(ctx context.Context, client *prometheusClient, m PromMetric, cluster string, vars queryVars, windows []Window,
 	out []PromWindow, accs map[time.Time]*accumulator, base baseFn) (int, error) {
 	first, last := windows[0], windows[len(windows)-1]
 	selector := expand(m.Counter, vars)
-	rng := last.End.Sub(first.Start) + p.opts.Lookback
-	series, err := client.QueryRaw(ctx, selector, rng, last.End)
+	key := m.Code + "|" + cluster
+	prevObserved, observedBefore := p.store.observed(key)
+	from := first.Start.Add(-p.opts.Lookback)
+	if observedBefore && prevObserved.Before(first.Start) && first.Start.Sub(prevObserved) <= maxCounterGap {
+		// This cluster's Prometheus failed while other sources succeeded,
+		// so windows were committed without it. Read back to its last
+		// successful read: a series that appeared since counts from zero,
+		// and one that existed then does not.
+		if back := prevObserved.Add(-p.opts.Lookback); back.Before(from) {
+			from = back
+		}
+	}
+	// Whether the samples read reach the last successful read, so a series
+	// whose first sample is newer really appeared after it.
+	reachesPrev := observedBefore && !from.After(prevObserved)
+	series, err := client.QueryRaw(ctx, selector, last.End.Sub(from), last.End)
 	if err != nil {
 		return 0, err
 	}
-	key := m.Code + "|" + cluster
-	prevObserved, observedBefore := p.store.observed(key)
 	for _, s := range series {
 		sk := key + "|" + fingerprint(s.Labels)
 		var prev *promSample
@@ -337,10 +354,11 @@ func (p *PromSource) counter(ctx context.Context, client *prometheusClient, m Pr
 		}
 		samples := s.Samples
 		if prev == nil {
-			// No baseline: start from the last sample at or before the first
-			// window. A series without one is new if it appeared after we last
-			// read this metric (it counts from zero); on the very first read
-			// its history is not billed.
+			// No baseline. A series that appeared after we last read this
+			// metric is new: it counts from zero, including samples taken
+			// while this cluster's Prometheus could not be read. Otherwise
+			// start from the last sample at or before the first window; on
+			// the very first read its history is not billed.
 			idx := -1
 			for i, smp := range samples {
 				if !smp.T.After(first.Start) {
@@ -348,11 +366,11 @@ func (p *PromSource) counter(ctx context.Context, client *prometheusClient, m Pr
 				}
 			}
 			switch {
+			case len(samples) > 0 && reachesPrev && samples[0].T.After(prevObserved):
+				prev = &promSample{T: prevObserved, V: 0}
 			case idx >= 0:
 				prev = &samples[idx]
 				samples = samples[idx+1:]
-			case len(samples) > 0 && observedBefore && samples[0].T.After(prevObserved):
-				prev = &promSample{T: first.Start, V: 0}
 			case len(samples) > 0:
 				prev = &samples[0]
 				samples = samples[1:]

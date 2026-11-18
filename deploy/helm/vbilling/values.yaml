@@ -333,6 +333,12 @@ enforcement:
     # How long to wait for workloads on a cluster's own nodes to stop before
     # its control plane is stopped.
     drainTimeout: 2m
+    # Namespaces whose DaemonSets (GPU driver, device plugin, CNI) keep
+    # running on a paused cluster's own nodes; every other pod is stopped.
+    # Empty: kube-system, kube-flannel, calico-system, tigera-operator,
+    # cilium, gpu-operator, nvidia-gpu-operator, network-operator and
+    # nvidia-network-operator. "none" stops every DaemonSet.
+    keepNamespaces: ""
 
 persistence:
   enabled: true # the ledger is the durable outbox: keep it on a volume

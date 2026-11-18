@@ -340,45 +340,75 @@ func syncDir(dir string) error {
 // Peek returns up to max of a series' held events, oldest first, and the
 // file offset after the last one (for Release).
 func (h *HeldStore) Peek(dest, series string, max int) ([]HeldEntry, int64, error) {
+	var out []HeldEntry
+	off, err := h.scan(dest, series, func(e HeldEntry) bool {
+		out = append(out, e)
+		return len(out) < max
+	})
+	if err != nil {
+		return nil, 0, err
+	}
+	return out, off, nil
+}
+
+// ExpiredThrough returns the highest sequence number among a series' held
+// events whose window started before cutoff (0 if none). Held events are in
+// ledger order, not window order: a late adjustment for an old window can
+// sit behind the current minute's usage.
+func (h *HeldStore) ExpiredThrough(dest, series string, cutoff time.Time) (uint64, error) {
+	var seq uint64
+	_, err := h.scan(dest, series, func(e HeldEntry) bool {
+		if e.Event.WindowStart.Before(cutoff) {
+			seq = e.Seq
+		}
+		return true
+	})
+	return seq, err
+}
+
+// scan calls fn with a series' unreleased entries in order until it
+// returns false, and returns the file offset after the last one read.
+func (h *HeldStore) scan(dest, series string, fn func(HeldEntry) bool) (int64, error) {
 	h.mu.Lock()
 	s := h.dests[dest][series]
 	if s == nil {
 		h.mu.Unlock()
-		return nil, 0, nil
+		return 0, nil
 	}
 	path, off, released := s.path, s.offset, s.released
 	h.mu.Unlock()
 
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, 0, err
+		return 0, err
 	}
 	defer f.Close()
 	if _, err := f.Seek(off, io.SeekStart); err != nil {
-		return nil, 0, err
+		return 0, err
 	}
 	r := bufio.NewReaderSize(f, 1<<16)
-	var out []HeldEntry
-	for len(out) < max {
+	for {
 		line, err := r.ReadBytes('\n')
 		if len(line) == 0 || line[len(line)-1] != '\n' {
 			break
 		}
 		var l heldLine
 		if jerr := json.Unmarshal(line, &l); jerr != nil {
-			return nil, 0, fmt.Errorf("held events %s: %w", path, jerr)
+			return 0, fmt.Errorf("held events %s: %w", path, jerr)
 		}
 		off += int64(len(line))
 		if l.ReleasedThrough == 0 && l.Seq > released {
 			e := l.HeldEntry
 			e.end = off
-			out = append(out, e)
+			if !fn(e) {
+				break
+			}
 		}
 		if err != nil {
 			break
 		}
 	}
-	return out, off, nil
+	return off, nil
 }
 
 // Release marks a series' held events up to seq as delivered (n of them,
@@ -407,13 +437,24 @@ func (h *HeldStore) Release(dest, series string, seq uint64, n int, next int64) 
 	}
 	s.released, s.offset = seq, next
 	s.Count -= n
-	// The next entry becomes the oldest; read its window for the summary.
+	// The next entry becomes the first; the oldest window may be any of
+	// the rest (ledger order is not window order).
 	h.mu.Unlock()
-	nextEntries, _, err := h.Peek(dest, series, 1)
+	first := true
+	var oldest time.Time
+	var head HeldEntry
+	_, err := h.scan(dest, series, func(e HeldEntry) bool {
+		if first {
+			head, oldest, first = e, e.Event.WindowStart, false
+		} else if e.Event.WindowStart.Before(oldest) {
+			oldest = e.Event.WindowStart
+		}
+		return true
+	})
 	h.mu.Lock()
-	if err == nil && len(nextEntries) > 0 {
-		s.FirstSeq, s.Sample, s.Since = nextEntries[0].Seq, nextEntries[0].Event, nextEntries[0].At
-		s.Oldest = nextEntries[0].Event.WindowStart
+	if err == nil && !first {
+		s.FirstSeq, s.Sample, s.Since = head.Seq, head.Event, head.At
+		s.Oldest = oldest
 	}
 	return nil
 }

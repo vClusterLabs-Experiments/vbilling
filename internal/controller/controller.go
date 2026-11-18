@@ -73,7 +73,11 @@ type Controller struct {
 
 	prom    PromCollector
 	aliases map[string]string // gateway or external identity -> tenant ID
-	owners  Owners            // optional: past owners of clusters (TENANT_SOURCE=platform)
+	// ambiguous are aliases more than one tenant claims: billing uses the
+	// last claim, but the gateway never blocks them for either tenant.
+	ambiguous   map[string]bool
+	aliasWarned map[string]string
+	owners      Owners // optional: past owners of clusters (TENANT_SOURCE=platform)
 
 	pauses *pause.Store // pause spans; nil = pauses are not tracked
 }
@@ -158,18 +162,49 @@ func (c *Controller) ResolveTenant(v string) (string, bool) {
 }
 
 // GatewayIdentities lists a tenant's gateway identities: its ID and every
-// alias (vbilling.vcluster.com/aliases) that maps to it.
+// alias (vbilling.vcluster.com/aliases) that ResolveTenant maps to it. An
+// alias that is another tenant's ID bills to that tenant, so it is not one
+// of this tenant's identities; neither is an alias two tenants claim.
 func (c *Controller) GatewayIdentities(tenant string) []string {
 	out := []string{tenant}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for alias, t := range c.aliases {
-		if t == tenant {
-			out = append(out, alias)
+		if t != tenant || c.ambiguous[alias] {
+			continue
 		}
+		if _, other := c.tenants.Get(alias); other {
+			continue
+		}
+		out = append(out, alias)
 	}
 	sort.Strings(out[1:])
 	return out
+}
+
+// warnAliasConflicts logs, once per change, aliases that are another
+// tenant's ID or that two tenants claim.
+func (c *Controller) warnAliasConflicts(aliases map[string]string, ambiguous map[string]bool) {
+	warn := map[string]string{}
+	for a, t := range aliases {
+		switch {
+		case ambiguous[a]:
+			warn[a] = "is claimed by more than one tenant; usage bills to " + t + " and the gateway never blocks it"
+		default:
+			if _, ok := c.tenants.Get(a); ok {
+				warn[a] = "is tenant " + a + "'s own ID; usage sent as " + a + " bills to " + a + ", not to " + t
+			}
+		}
+	}
+	c.mu.Lock()
+	prev := c.aliasWarned
+	c.aliasWarned = warn
+	c.mu.Unlock()
+	for a, msg := range warn {
+		if prev[a] != msg {
+			log.Printf("[controller] WARNING: alias %q %s. Fix the %saliases setting", a, msg, discovery.AnnotationPrefix)
+		}
+	}
 }
 
 func New(cfg *config.Config, disc Discoverer, coll Collector, sp *spool.Spool, tenants *pipeline.TenantRegistry,
@@ -290,17 +325,25 @@ func (c *Controller) Reconcile(ctx context.Context) {
 	}
 
 	aliases := map[string]string{}
+	ambiguous := map[string]bool{}
 	src := discovery.TenantSource(c.cfg.TenantSource)
 	for i := range clusters {
+		owner := clusters[i].TenantID(src)
 		for _, a := range strings.Split(clusters[i].Meta("aliases"), ",") {
-			if a = strings.TrimSpace(a); a != "" {
-				aliases[a] = clusters[i].TenantID(src)
+			if a = strings.TrimSpace(a); a == "" || a == owner {
+				continue
 			}
+			if prev, ok := aliases[a]; ok && prev != owner {
+				ambiguous[a] = true
+			}
+			aliases[a] = owner
 		}
 	}
+	c.warnAliasConflicts(aliases, ambiguous)
 	c.observePauses(clusters, now)
 	c.mu.Lock()
 	c.aliases = aliases
+	c.ambiguous = ambiguous
 	c.clusters = clusters
 	c.discovered = true
 	for _, t := range tenants {
@@ -628,21 +671,28 @@ func (c *Controller) CollectPrometheusDue(ctx context.Context) {
 	for end := firstEnd; !end.After(latestEnd); end = end.Add(size) {
 		windows = append(windows, metrics.Window{Start: end.Add(-size), End: end, Latest: end.Equal(latestEnd)})
 	}
-	results, err := c.prom.Collect(ctx, c.targets(), windows)
-	if err != nil {
-		log.Printf("[controller] Prometheus: %v; %d window(s) wait until it answers", err, len(windows))
-		c.tel.Add("vbilling_prometheus_unavailable_total", "Runs where every Prometheus read failed (windows wait).", nil, 1)
-		return
-	}
+	// Windows read after the fact bill each cluster's owner during them,
+	// as Kubernetes backfill does. Each run of windows with the same owners
+	// is read and committed before the next one is read: counters bill
+	// from the baselines the previous run committed.
 	total := 0
-	err = c.prom.Commit(results, func(w metrics.Window, evs []usage.Event) error {
-		stampPlatform(evs, platformProps(c.targets()))
-		total += len(evs)
-		return c.spool.AppendWindow(metrics.SourcePrometheus, w.End, evs, "")
-	})
-	if err != nil {
-		log.Printf("[controller] commit Prometheus windows: %v (will retry)", err)
-		return
+	for _, r := range c.ownerRuns(c.targets(), windows) {
+		results, err := c.prom.Collect(ctx, r.targets, r.windows)
+		if err != nil {
+			log.Printf("[controller] Prometheus: %v; %d window(s) wait until it answers", err, len(r.windows))
+			c.tel.Add("vbilling_prometheus_unavailable_total", "Runs where every Prometheus read failed (windows wait).", nil, 1)
+			return
+		}
+		props := platformProps(r.targets)
+		err = c.prom.Commit(results, func(w metrics.Window, evs []usage.Event) error {
+			stampPlatform(evs, props)
+			total += len(evs)
+			return c.spool.AppendWindow(metrics.SourcePrometheus, w.End, evs, "")
+		})
+		if err != nil {
+			log.Printf("[controller] commit Prometheus windows: %v (will retry)", err)
+			return
+		}
 	}
 	if total > 0 || len(windows) > 1 {
 		log.Printf("[controller] Prometheus: %d event(s) over %d window(s)", total, len(windows))

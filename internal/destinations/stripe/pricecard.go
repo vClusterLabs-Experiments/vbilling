@@ -274,7 +274,7 @@ func (a *Adapter) applyCardPrice(ctx context.Context, existing []Price, pc *Pric
 	if err != nil {
 		return false, fmt.Errorf("price card %s: create price on %s: %w", plan, name, err)
 	}
-	log.Printf("[stripe] price card: plan %s, %s: %s %s per unit (%s)", plan, name, want, pc.Currency, p.ID)
+	log.Printf("[stripe] price card: plan %s, %s: %s minor units of %s per unit (%s)", plan, name, want, strings.ToUpper(pc.Currency), p.ID)
 	return true, nil
 }
 

@@ -90,13 +90,14 @@ func TestLivePriceCard(t *testing.T) {
 // with product_data is its product's default price, which Stripe refuses to
 // archive until the product's default is unset.
 func archiveTestPrices(t *testing.T, c *Client, prices []Price) {
+	t.Helper()
 	ctx := context.Background()
 	for _, p := range prices {
 		var full struct {
 			Product string `json:"product"`
 		}
 		if err := c.do(ctx, http.MethodGet, "/v1/prices/"+p.ID, nil, "", &full); err != nil {
-			t.Logf("read %s: %v", p.ID, err)
+			t.Errorf("cleanup: read %s: %v", p.ID, err)
 			continue
 		}
 		unset := url.Values{}
@@ -108,8 +109,22 @@ func archiveTestPrices(t *testing.T, c *Client, prices []Price) {
 			form url.Values
 		}{{"/v1/products/" + full.Product, unset}, {"/v1/prices/" + p.ID, archive}, {"/v1/products/" + full.Product, archive}} {
 			if err := c.do(ctx, http.MethodPost, step.path, step.form, "", nil); err != nil {
-				t.Logf("cleanup %s: %v", step.path, err)
+				t.Errorf("cleanup %s: %v", step.path, err)
 			}
+		}
+		// Read back: PASS must mean the sandbox is clean.
+		var price struct {
+			Active bool `json:"active"`
+		}
+		var product struct {
+			Active       bool    `json:"active"`
+			DefaultPrice *string `json:"default_price"`
+		}
+		if err := c.do(ctx, http.MethodGet, "/v1/prices/"+p.ID, nil, "", &price); err != nil || price.Active {
+			t.Errorf("cleanup: price %s still active (read error %v)", p.ID, err)
+		}
+		if err := c.do(ctx, http.MethodGet, "/v1/products/"+full.Product, nil, "", &product); err != nil || product.Active || product.DefaultPrice != nil {
+			t.Errorf("cleanup: product %s active=%v default_price=%v (read error %v)", full.Product, product.Active, product.DefaultPrice, err)
 		}
 	}
 }

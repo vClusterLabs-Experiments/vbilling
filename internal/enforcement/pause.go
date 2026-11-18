@@ -88,9 +88,25 @@ func (e *Enforcer) pauseCluster(ctx context.Context, cl discovery.TenantCluster,
 			if err := e.policyInside(ctx, kube, ts); err != nil {
 				log.Printf("[enforcement] %s: admission policy before pause: %v", id, err)
 			}
-			if left, err := e.drain(ctx, kube, false); err != nil {
+			left, err := e.drain(ctx, kube, false)
+			var slow *stillStopping
+			switch {
+			case errors.As(err, &slow):
+				// Every pod was told to stop; some take their grace period.
 				log.Printf("[enforcement] %s: drain before pause: %v", id, err)
-			} else if left > 0 {
+			case err != nil:
+				// The control plane must stay up until the drain succeeds:
+				// stopped, it can no longer stop the pods on the cluster's
+				// own nodes, and a later resync would skip the drain. Until
+				// then the cluster runs, so it bills: lift the mark (the
+				// next resync marks it again and retries), so a tenant that
+				// makes the drain fail never runs for free.
+				if uerr := e.unmarkPaused(ctx, cl); uerr != nil {
+					log.Printf("[enforcement] %s: lift pause mark after failed drain: %v", id, uerr)
+				}
+				return fmt.Errorf("drain its own nodes (retried at the next resync; the cluster keeps running and billing until then): %w", err)
+			}
+			if left > 0 {
 				log.Printf("[enforcement] %s: %d pod(s) on its own nodes tolerate the pause taint and keep running", id, left)
 			}
 		}
@@ -108,6 +124,18 @@ func (e *Enforcer) pauseCluster(ctx context.Context, cl discovery.TenantCluster,
 	}
 	log.Printf("[enforcement] %s: paused (%s)", id, ts.Reason)
 	e.opts.Telemetry.Add("vbilling_clusters_paused_total", "Clusters vBilling paused.", nil, 1)
+	return nil
+}
+
+// unmarkPaused lifts vBilling's pause mark from a cluster that is still
+// running, and ends its pause span: it bills again from now.
+func (e *Enforcer) unmarkPaused(ctx context.Context, cl discovery.TenantCluster) error {
+	if err := e.patchWorkload(ctx, cl, map[string]any{"metadata": map[string]any{"annotations": map[string]any{
+		discovery.AnnotationPausedBy: nil, discovery.AnnotationPausedAt: nil, discovery.AnnotationPausedReplicas: nil,
+	}}}); err != nil {
+		return err
+	}
+	e.ended(cl.ExternalID(), e.opts.Now().UTC())
 	return nil
 }
 
@@ -459,7 +487,7 @@ func (e *Enforcer) drain(ctx context.Context, kube kubernetes.Interface, externa
 			if !own[p.Spec.NodeName] || p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
 				continue
 			}
-			if !stopsOnPause(p) {
+			if !e.stopsOnPause(p) {
 				continue // node infrastructure, or a static pod the kubelet runs
 			}
 			if tolerates(p, &pausedTaint) {
@@ -477,7 +505,7 @@ func (e *Enforcer) drain(ctx context.Context, kube kubernetes.Interface, externa
 			return tolerating, nil
 		}
 		if time.Now().After(deadline) {
-			return tolerating, fmt.Errorf("%d pod(s) still stopping after %s", running, timeout)
+			return tolerating, &stillStopping{n: running, after: timeout}
 		}
 		select {
 		case <-ctx.Done():
@@ -531,21 +559,51 @@ func (e *Enforcer) updateNode(ctx context.Context, kube kubernetes.Interface, na
 	}
 }
 
-// stopsOnPause reports whether a pause stops a pod: every workload, and a
-// DaemonSet pod only when it requests an accelerator or another extended
-// resource. Other DaemonSet pods (GPU driver, toolkit, device plugin, CNI,
-// monitoring agents) and static pods keep running, so nothing has to be
-// reinstalled when the cluster resumes.
-func stopsOnPause(p *corev1.Pod) bool {
+// stillStopping is a drain that told every pod to stop, some of which were
+// still in their termination grace period at the drain timeout.
+type stillStopping struct {
+	n     int
+	after time.Duration
+}
+
+func (s *stillStopping) Error() string {
+	return fmt.Sprintf("%d pod(s) still stopping after %s", s.n, s.after)
+}
+
+// DefaultKeepNamespaces are the namespaces whose DaemonSets a pause leaves
+// running: node infrastructure (GPU driver, device plugin, CNI, kube-proxy).
+var DefaultKeepNamespaces = []string{"kube-system", "kube-flannel", "calico-system", "tigera-operator", "cilium",
+	"gpu-operator", "nvidia-gpu-operator", "network-operator", "nvidia-network-operator"}
+
+// stopsOnPause reports whether a pause stops a pod: every pod, except static
+// pods and the DaemonSet pods of node infrastructure, so the GPU driver and
+// the CNI need not be reinstalled when the cluster resumes. A DaemonSet pod
+// is infrastructure only in a PAUSE_KEEP_NAMESPACES namespace and only if
+// it requests no accelerator or other extended resource: any other
+// DaemonSet is a workload, and is stopped like one.
+func (e *Enforcer) stopsOnPause(p *corev1.Pod) bool {
 	for _, ref := range p.OwnerReferences {
 		switch ref.Kind {
 		case "Node":
 			return false // a static pod: the kubelet would recreate it
 		case "DaemonSet":
-			return requestsExtendedResources(p)
+			return !e.keepNamespace(p.Namespace) || requestsExtendedResources(p)
 		}
 	}
 	return true
+}
+
+func (e *Enforcer) keepNamespace(ns string) bool {
+	keep := e.opts.KeepNamespaces
+	if keep == nil {
+		keep = DefaultKeepNamespaces
+	}
+	for _, k := range keep {
+		if k == ns {
+			return true
+		}
+	}
+	return false
 }
 
 func requestsExtendedResources(p *corev1.Pod) bool {

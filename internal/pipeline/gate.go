@@ -202,22 +202,28 @@ func (d *Dispatcher) release(ctx context.Context, dest destinations.Destination)
 	return nil
 }
 
-// releaseExpired delivers, unpriced, the held events of a series from the
-// oldest on while their window started more than MaxHold ago. Usage held
-// longer could no longer be backdated into Metronome (34 days) or Stripe
-// (35 days); shipped now, the billing platform can re-rate it once Finance
-// adds the price. Younger events of the series stay held, behind them.
+// releaseExpired delivers, unpriced, the held events of a series up to and
+// including the last one whose window started more than MaxHold ago. Usage
+// held longer could no longer be backdated into Metronome (34 days) or
+// Stripe (35 days); shipped now, the billing platform can re-rate it once
+// Finance adds the price. Held events are in ledger order, not window
+// order, so a late adjustment for an old window can sit behind younger
+// usage: those younger events ship with it, also unpriced, rather than
+// strand it past the deadline. Events after it stay held.
 func (d *Dispatcher) releaseExpired(ctx context.Context, dest destinations.Destination, h HeldSummary) error {
 	name := dest.Name()
 	total := 0
-	for ctx.Err() == nil {
-		cutoff := time.Now().Add(-d.opts.MaxHold)
+	through, err := d.opts.Held.ExpiredThrough(name, h.Series, time.Now().Add(-d.opts.MaxHold))
+	if err != nil {
+		return err
+	}
+	for ctx.Err() == nil && through > 0 {
 		entries, _, err := d.opts.Held.Peek(name, h.Series, d.opts.BatchSize)
 		if err != nil {
 			return err
 		}
 		n := 0
-		for n < len(entries) && entries[n].Event.WindowStart.Before(cutoff) {
+		for n < len(entries) && entries[n].Seq <= through {
 			n++
 		}
 		if n == 0 {

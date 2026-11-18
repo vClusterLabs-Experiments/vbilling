@@ -628,6 +628,11 @@
               <td>How long a pause waits for workloads on a cluster's own nodes to stop before it stops the control plane. Helm: <code>enforcement.pause.drainTimeout</code>.</td>
               <td class="td-default">2m</td>
             </tr>
+            <tr>
+              <td><code>PAUSE_KEEP_NAMESPACES</code></td>
+              <td>Namespaces whose DaemonSets keep running on a paused cluster's own nodes: node infrastructure such as the GPU driver, device plugin and CNI, so nothing is reinstalled on resume. Every other pod is stopped, including DaemonSets elsewhere and any DaemonSet pod that requests a GPU or another extended resource. <code>none</code> stops every DaemonSet. Helm: <code>enforcement.pause.keepNamespaces</code>.</td>
+              <td class="td-default">kube-system, kube-flannel, calico-system, tigera-operator, cilium, gpu-operator, nvidia-gpu-operator, network-operator, nvidia-network-operator</td>
+            </tr>
           </tbody>
         </table>
       </div>
@@ -971,8 +976,8 @@
               <td class="td-default">observe / &quot;&quot; / false</td>
             </tr>
             <tr>
-              <td><code>enforcement.pause.keepBilling / drainTimeout</code></td>
-              <td>PAUSE_KEEP_BILLING / PAUSE_DRAIN_TIMEOUT</td>
+              <td><code>enforcement.pause.keepBilling / drainTimeout / keepNamespaces</code></td>
+              <td>PAUSE_KEEP_BILLING / PAUSE_DRAIN_TIMEOUT / PAUSE_KEEP_NAMESPACES</td>
               <td class="td-default">storage,load_balancers / 2m</td>
             </tr>
             <tr>

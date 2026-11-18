@@ -109,6 +109,7 @@ func (a *Adapter) addSKUs(ctx context.Context, metric string, skus, plans []stri
 	if err != nil {
 		return fmt.Errorf("get billable metric: %w", err)
 	}
+	a.noteFilterDims(bm)
 	if filters, added := withFilterValues(bm.Filters, "sku", skus); len(added) > 0 {
 		if _, err := a.client.UpdateBillableMetricFilters(ctx, metric, filters); err != nil {
 			return err

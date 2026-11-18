@@ -145,6 +145,27 @@ type tenantInventory struct {
 	Services []corev1.Service               `json:"services"`
 	// Leases: last renewal of each node whose kubelet went silent.
 	Leases map[string]time.Time `json:"leases,omitempty"`
+	// Pods and the time each deleted one was deleted (by UID), saved by
+	// Freeze with PRIVATE_NODE_BILLING=usage: the window a pause cuts in
+	// two still bills its workloads up to the pause.
+	Pods        []corev1.Pod         `json:"pods,omitempty"`
+	PodsDeleted map[string]time.Time `json:"podsDeleted,omitempty"`
+}
+
+// podEntries returns a stored inventory's pods with their deletion times.
+// A pod that was terminating when it was saved ends at its deletion
+// deadline at the latest.
+func (inv *tenantInventory) podEntries() []podEntry {
+	out := make([]podEntry, 0, len(inv.Pods))
+	for i := range inv.Pods {
+		p := &inv.Pods[i]
+		e := podEntry{pod: p, deletedAt: inv.PodsDeleted[string(p.UID)]}
+		if e.deletedAt.IsZero() && p.DeletionTimestamp != nil {
+			e.deletedAt = p.DeletionTimestamp.Time
+		}
+		out = append(out, e)
+	}
+	return out
 }
 
 func readTenantInventory(ctx context.Context, kube kubernetes.Interface, at time.Time) (*tenantInventory, error) {
@@ -174,6 +195,9 @@ func (inv *tenantInventory) compact() {
 	}
 	for i := range inv.PVCs {
 		inv.PVCs[i].ManagedFields = nil
+	}
+	for i := range inv.Pods {
+		inv.Pods[i].ManagedFields = nil
 	}
 	kept := inv.Services[:0]
 	for _, svc := range inv.Services {
@@ -237,8 +261,17 @@ func (c *Collector) meterTenant(ctx context.Context, t Target, conn *TenantConn,
 	}
 
 	if c.opts.PrivateNodeBilling == "usage" {
-		// A paused cluster runs no pods: its workloads were stopped.
-		if conn.Kube != nil {
+		if conn.Kube == nil {
+			// A paused cluster: its pods as saved right before the pause.
+			// Their usage ends at the pause (workloadPauses), so the window
+			// the pause cuts in two still bills the part before it.
+			include := func(p *corev1.Pod) bool {
+				_, onPrivate := private[p.Spec.NodeName]
+				return onPrivate && !c.excludedTenantNS[p.Namespace]
+			}
+			c.meterPods(inv.podEntries(), include, func(p *corev1.Pod) string { return p.Namespace },
+				private, nil, dra, windows, accs, st, base, nil, "private_node", c.workloadPauses(t))
+		} else {
 			podList, err := conn.Kube.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
 			if err != nil {
 				return fmt.Errorf("list pods: %w", err)
@@ -291,6 +324,23 @@ func (c *Collector) Freeze(ctx context.Context, cl discovery.TenantCluster) erro
 	inv, err := readTenantInventory(ctx, conn.Kube, c.opts.Now())
 	if err != nil {
 		return err
+	}
+	if c.opts.PrivateNodeBilling == "usage" {
+		pods, err := conn.Kube.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
+		if err != nil {
+			return fmt.Errorf("list pods: %w", err)
+		}
+		conn.Graveyard.SeenPods(pods.Items, c.opts.Now())
+		inv.Pods = pods.Items
+		for _, e := range withDeleted(pods.Items, conn.Graveyard.Pods("")) {
+			if !e.deletedAt.IsZero() {
+				if inv.PodsDeleted == nil {
+					inv.PodsDeleted = map[string]time.Time{}
+				}
+				inv.Pods = append(inv.Pods, *e.pod)
+				inv.PodsDeleted[string(e.pod.UID)] = e.deletedAt
+			}
+		}
 	}
 	return c.storeInventory(cl.ExternalID(), inv)
 }

@@ -148,6 +148,7 @@ func (a *Adapter) ensureMetrics(ctx context.Context, metrics []BillableMetric) (
 		existing, err := a.client.GetBillableMetric(ctx, m.Code)
 		if err == nil && existing.LagoID != "" {
 			ids[m.Code] = existing.LagoID
+			a.noteFilterDims(existing)
 			log.Printf("[bootstrap] metric %q already exists (id=%s)", m.Code, existing.LagoID)
 			continue
 		}
