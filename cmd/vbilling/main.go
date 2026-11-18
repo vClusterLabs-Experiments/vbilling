@@ -21,14 +21,17 @@ import (
 	"github.com/vclusterlabs-experiments/vbilling/internal/api"
 	"github.com/vclusterlabs-experiments/vbilling/internal/config"
 	"github.com/vclusterlabs-experiments/vbilling/internal/controller"
+	"github.com/vclusterlabs-experiments/vbilling/internal/crosscheck"
 	"github.com/vclusterlabs-experiments/vbilling/internal/destinations"
 	"github.com/vclusterlabs-experiments/vbilling/internal/destinations/metronome"
 	"github.com/vclusterlabs-experiments/vbilling/internal/destinations/stripe"
 	"github.com/vclusterlabs-experiments/vbilling/internal/discovery"
 	"github.com/vclusterlabs-experiments/vbilling/internal/enforcement"
+	"github.com/vclusterlabs-experiments/vbilling/internal/health"
 	"github.com/vclusterlabs-experiments/vbilling/internal/kv"
 	"github.com/vclusterlabs-experiments/vbilling/internal/metrics"
 	"github.com/vclusterlabs-experiments/vbilling/internal/pipeline"
+	"github.com/vclusterlabs-experiments/vbilling/internal/records"
 	"github.com/vclusterlabs-experiments/vbilling/internal/spool"
 	"github.com/vclusterlabs-experiments/vbilling/internal/telemetry"
 	"github.com/vclusterlabs-experiments/vbilling/internal/tenantapi"
@@ -40,9 +43,12 @@ import (
 	_ "github.com/vclusterlabs-experiments/vbilling/internal/destinations/webhook"
 )
 
-var version = "0.2.0"
+var version = "0.3.0"
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "ledger" {
+		os.Exit(runLedgerCmd(os.Args[2:]))
+	}
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	log.Printf("vBilling %s: usage metering for tenant clusters", version)
 
@@ -58,10 +64,32 @@ func main() {
 	if err != nil {
 		log.Fatalf("CUSTOM_METRICS: %v", err)
 	}
+	if cfg.CustomMetricsFile != "" {
+		b, err := os.ReadFile(cfg.CustomMetricsFile)
+		if err != nil {
+			log.Fatalf("CUSTOM_METRICS_FILE: %v", err)
+		}
+		more, err := usage.ParseCustomMetricsYAML(b)
+		if err != nil {
+			log.Fatalf("CUSTOM_METRICS_FILE %s: %v", cfg.CustomMetricsFile, err)
+		}
+		customs = append(customs, more...)
+	}
 	for _, d := range customs {
 		if err := usage.RegisterCustom(d); err != nil {
 			log.Fatalf("CUSTOM_METRICS: %v", err)
 		}
+	}
+	formats, err := records.LoadFormats(cfg.RecordsMappingsFile, cfg.RecordsLiteLLM)
+	if err != nil {
+		log.Fatalf("RECORDS_MAPPINGS_FILE: %v", err)
+	}
+	if err := formats.Declare(); err != nil {
+		log.Fatalf("records formats: %v", err)
+	}
+	// Egress is a counter (exact) unless EGRESS_QUERY replaces it.
+	if cfg.EgressQuery != "" && cfg.EgressQuery != "none" {
+		usage.SetAccuracy(usage.MetricNetworkEgressGB, usage.AccuracyEstimate)
 	}
 	promMetrics, err := metrics.LoadPromMetrics(cfg.PrometheusMetrics)
 	if err != nil {
@@ -70,9 +98,20 @@ func main() {
 	log.Printf("Adapters: %v | Region: %s | Window: %s | CPU/memory basis: %s | Data: %s",
 		cfg.Adapters, cfg.Region, cfg.CollectionInterval, cfg.CPUMemoryBasis, cfg.DataDir)
 
-	sp, err := spool.Open(filepath.Join(cfg.DataDir, "ledger"), spool.Options{Retention: cfg.Retention})
+	sp, err := spool.Open(filepath.Join(cfg.DataDir, "ledger"), spool.Options{Retention: cfg.Retention, ArchiveDir: cfg.ArchiveDir})
 	if err != nil {
 		log.Fatalf("open ledger: %v", err)
+	}
+	// Per-request usage records have their own ledger: they are evidence for
+	// disputes and input to aggregation, never shipped to a destination.
+	recLedgerOpts := spool.Options{Retention: cfg.RecordsRetention}
+	if cfg.RecordsArchive {
+		// A separate directory: each ledger has its own hash chain.
+		recLedgerOpts.ArchiveDir = filepath.Join(cfg.ArchiveDir, "records")
+	}
+	recSpool, err := spool.Open(filepath.Join(cfg.DataDir, "records"), recLedgerOpts)
+	if err != nil {
+		log.Fatalf("open records ledger: %v", err)
 	}
 	dests, err := destinations.NewAll(cfg.Adapters, cfg)
 	if err != nil {
@@ -97,6 +136,7 @@ func main() {
 	}
 
 	tel := telemetry.Default
+	sources := health.New(tel)
 	tenants := pipeline.NewTenantRegistry()
 	disp := pipeline.New(sp, dests, pipeline.Options{
 		Tenants:   tenants,
@@ -131,6 +171,17 @@ func main() {
 		DRAGPUDrivers:           cfg.DRAGPUDrivers,
 	})
 	coll.UseDynamic(dynamicClient)
+	coll.UseHealth(sources)
+	prom, err := coll.NewPromSource(metrics.PromOptions{
+		SourceLabel: cfg.PromSourceLabel,
+		Lookback:    cfg.PromLookback,
+		StatePath:   filepath.Join(cfg.DataDir, "prom-counters.json"),
+		Watermark:   func() (time.Time, bool) { return sp.Watermark(metrics.SourcePrometheus) },
+		Health:      sources,
+	})
+	if err != nil {
+		log.Fatalf("Prometheus counters: %v", err)
+	}
 	// Deleted pods and nodes stay billable until their windows are committed.
 	retention := cfg.MaxBackfill + 2*cfg.CollectionInterval
 	if cfg.WatchDeletions {
@@ -138,6 +189,7 @@ func main() {
 		go g.Watch(ctx, kube, metrics.LabelManagedBy, true, true)
 		coll.UseGraveyard(g)
 	}
+	var tenantMgr *tenantapi.Manager
 	if cfg.TenantAPI {
 		ext, err := tenantapi.LoadExternal(cfg.TenantClustersFile)
 		if err != nil {
@@ -151,16 +203,35 @@ func main() {
 			Retention:     retention,
 		})
 		coll.UseTenantAPI(mgr)
+		tenantMgr = mgr
 		disc.WithExternal(mgr.Clusters())
 		log.Printf("Tenant APIs: Secret %q per tenant cluster (admin fallback %t), %d external tenant cluster(s), private nodes billed by %s",
 			cfg.TenantKubeconfigSecret, cfg.TenantAdminFallback, len(ext), cfg.PrivateNodeBilling)
 	}
+	checks, err := crosscheck.Parse(cfg.CrossChecks)
+	if err != nil {
+		log.Fatalf("CROSS_CHECKS: %v", err)
+	}
 	ctrl := controller.New(cfg, disc, coll, sp, tenants, dests, tel)
-	enf := newEnforcer(cfg, kube, ctrl, dests, tel)
+	ctrl.UsePrometheus(prom)
+	enf := newEnforcer(cfg, kube, ctrl, dests, tel, tenantMgr)
+
+	recOpts := records.Options{
+		Window:               cfg.CollectionInterval,
+		Settle:               cfg.RecordsSettle,
+		MaxAge:               min(34*24*time.Hour, cfg.RecordsRetention-time.Hour),
+		AllowUnkeyed:         cfg.RecordsAllowUnkeyed,
+		RejectUnknownTenants: cfg.RecordsRejectUnknown,
+		Region:               cfg.Region,
+	}
+	// The aggregator must exist before the API accepts records: it raises the
+	// records ledger's clock past every window already committed.
+	agg := records.NewAggregator(recSpool, sp, recOpts, sources, tel)
+	ingester := records.NewIngester(recSpool, formats, recOpts, ctrl.ResolveTenant, sources, tel)
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           api.New(cfg, sp, disp, tenants, ctrl, enf, tel, version).Handler(),
+		Handler:           api.New(cfg, sp, disp, tenants, ctrl, enf, tel, version).WithHealth(sources).WithRecords(ingester).WithCrossChecks(checks).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	if cfg.APIToken == "" {
@@ -168,7 +239,46 @@ func main() {
 	}
 
 	var wg sync.WaitGroup
-	wg.Add(3)
+	wg.Add(6)
+	go func() {
+		defer wg.Done()
+		agg.Run(ctx)
+	}()
+	go func() {
+		defer wg.Done()
+		(&crosscheck.Runner{Spool: sp, Checks: checks, Health: sources, Tel: tel}).Run(ctx)
+	}()
+	go func() {
+		// Forget sources nothing has reported for six hours (deleted
+		// clusters, metrics removed from the configuration).
+		t := time.NewTicker(time.Hour)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				sources.Prune(time.Now().Add(-6 * time.Hour))
+			}
+		}
+	}()
+	go func() {
+		// Converge clusters created or unreachable during a state change.
+		t := time.NewTicker(2 * time.Minute)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				enf.Resync(ctx)
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		compactLoop(ctx, recSpool, nil)
+	}()
 	go func() {
 		defer wg.Done()
 		log.Printf("API listening on %s", cfg.ListenAddr)
@@ -195,6 +305,9 @@ func main() {
 	if err := sp.Close(); err != nil {
 		log.Printf("close ledger: %v", err)
 	}
+	if err := recSpool.Close(); err != nil {
+		log.Printf("close records ledger: %v", err)
+	}
 	log.Println("vBilling stopped")
 }
 
@@ -202,7 +315,7 @@ func main() {
 // Metronome webhooks set them once their secrets are configured, and
 // PUT /api/v1/billing-states/{tenant} sets them from anywhere else, such as
 // Lago or a custom billing platform.
-func newEnforcer(cfg *config.Config, kube kubernetes.Interface, ctrl *controller.Controller, dests []destinations.Destination, tel *telemetry.Registry) *enforcement.Enforcer {
+func newEnforcer(cfg *config.Config, kube kubernetes.Interface, ctrl *controller.Controller, dests []destinations.Destination, tel *telemetry.Registry, tenantMgr *tenantapi.Manager) *enforcement.Enforcer {
 	rules, err := enforcement.ParseRules(cfg.EnforcementRules)
 	if err != nil {
 		log.Fatalf("ENFORCEMENT_RULES: %v", err)
@@ -227,7 +340,25 @@ func newEnforcer(cfg *config.Config, kube kubernetes.Interface, ctrl *controller
 	}
 	log.Printf("Billing states: mode=%s, Stripe webhooks %s, Metronome webhooks %s", cfg.EnforcementMode,
 		onOff(cfg.StripeWebhookSecret != ""), onOff(cfg.MetronomeWebhookSecret != ""))
+	var tenantClient func(ctx context.Context, cl discovery.TenantCluster) (kubernetes.Interface, error)
+	if cfg.EnforcementInCluster {
+		if tenantMgr == nil {
+			log.Fatalf("ENFORCEMENT_IN_CLUSTER needs TENANT_API=true")
+		}
+		tenantClient = func(ctx context.Context, cl discovery.TenantCluster) (kubernetes.Interface, error) {
+			conn, err := tenantMgr.Conn(ctx, cl)
+			if errors.Is(err, metrics.ErrNoTenantAPI) {
+				return nil, nil // no credentials for this cluster: the control plane policy is all there is
+			}
+			if err != nil {
+				return nil, err
+			}
+			return conn.Kube, nil
+		}
+		log.Printf("Enforcement inside clusters: on (needs write access to admission policies in each cluster)")
+	}
 	return enforcement.New(kube, enforcement.Options{
+		TenantClient:           tenantClient,
 		Mode:                   cfg.EnforcementMode,
 		StripeWebhookSecret:    cfg.StripeWebhookSecret,
 		MetronomeWebhookSecret: cfg.MetronomeWebhookSecret,

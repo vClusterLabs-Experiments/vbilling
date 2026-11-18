@@ -126,6 +126,14 @@ func DeriveID(e *Event) string {
 	return "vb1_" + hex.EncodeToString(sum[:16])
 }
 
+// DeriveIDWith derives a deterministic ID for a second event with the same
+// identity as e, distinguished by salt (for example a late adjustment to a
+// window that was already committed).
+func DeriveIDWith(e *Event, salt string) string {
+	sum := sha256.Sum256([]byte(DeriveID(e) + "\x00" + salt))
+	return "vb1_" + hex.EncodeToString(sum[:16])
+}
+
 // Finalize fills schema version, unit, rounding and the derived ID. It is
 // what the collector calls on every event it builds.
 func (e *Event) Finalize() {

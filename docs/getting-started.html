@@ -283,6 +283,7 @@
         <a href="getting-started.html" class="active">Getting Started</a>
         <a href="configuration.html">Configuration</a>
         <a href="metrics.html">Metrics Reference</a>
+        <a href="usage-sources.html">Usage Sources</a>
         <a href="private-nodes.html">Dedicated and Private Nodes</a>
         <a href="example-gke.html">Example: GKE with GPUs</a>
         <a href="troubleshooting.html">Troubleshooting</a>
@@ -340,7 +341,7 @@
 
       <!-- Step 2 -->
       <h2 id="step-2"><span class="step-marker">2</span>Install vBilling</h2>
-      <p>The chart defaults to the published image <code>ghcr.io/vclusterlabs-experiments/vbilling:v0.2.0</code> (<code>linux/amd64</code> and <code>linux/arm64</code>). Keep billing keys in Secrets, never in <code>--set</code> flags or values files. From a clone of the repository, with Stripe as the example:</p>
+      <p>The chart defaults to the published image <code>ghcr.io/vclusterlabs-experiments/vbilling:v0.3.0</code> (<code>linux/amd64</code> and <code>linux/arm64</code>). Keep billing keys in Secrets, never in <code>--set</code> flags or values files. From a clone of the repository, with Stripe as the example:</p>
       <div class="code-block"><code><span class="cmd">git</span> clone https://github.com/vClusterLabs-Experiments/vbilling.git &amp;&amp; <span class="cmd">cd</span> vbilling
 <span class="cmd">kubectl</span> create namespace vbilling-system
 <span class="cmd">kubectl</span> <span class="flag">-n</span> vbilling-system create secret generic vbilling-stripe <span class="flag">--from-file</span>=api-key=./stripe-test-key
@@ -401,6 +402,7 @@ API listening on :8080
       <ul>
         <li><a href="configuration.html">Configuration</a>: intervals, tenants and projects, regions, the API and enforcement</li>
         <li><a href="metrics.html">Metrics Reference</a>: the eight billable metrics and the two informational ones</li>
+        <li><a href="usage-sources.html">Usage Sources</a>: per-request usage from AI gateways, exact Prometheus counters, cross-checks and source health</li>
         <li><a href="private-nodes.html">Dedicated and Private Nodes</a>: whole GPU nodes, including vCluster Private Nodes, Auto Nodes and Standalone</li>
         <li><a href="example-gke.html">Example: GKE with GPUs</a>: an end-to-end setup with real GPUs and Stripe</li>
         <li><a href="troubleshooting.html">Troubleshooting</a>: common issues and fixes</li>

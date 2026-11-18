@@ -4,8 +4,10 @@
 // control plane hours, requests-based CPU/memory) are computed from object
 // lifetimes overlapping each window, to the second. That is what makes
 // backfill after a restart possible and keeps short jobs accurate.
-// Consumption metrics (metrics-server CPU/memory, Prometheus egress and
-// DCGM utilization) are sampled for the latest window only.
+// metrics-server CPU/memory is sampled for the latest window only.
+// Prometheus-read usage (egress, DCGM utilization, operator metrics) is
+// collected by PromSource under its own ledger source, so a Prometheus
+// outage delays those windows instead of dropping them.
 package metrics
 
 import (
@@ -22,6 +24,7 @@ import (
 	metricsclient "k8s.io/metrics/pkg/client/clientset/versioned"
 
 	"github.com/vclusterlabs-experiments/vbilling/internal/discovery"
+	"github.com/vclusterlabs-experiments/vbilling/internal/health"
 	"github.com/vclusterlabs-experiments/vbilling/internal/usage"
 )
 
@@ -57,15 +60,17 @@ type Options struct {
 
 // Collector gathers billable state from the Kubernetes API.
 type Collector struct {
-	kube      kubernetes.Interface
-	metrics   metricsclient.Interface // nil disables usage-based CPU/memory
-	prom      *prometheusClient
-	graveyard *Graveyard        // deletions seen between collections; nil = none
-	tenants   TenantAPI         // tenant clusters' own APIs; nil = control plane cluster only
-	dyn       dynamic.Interface // DRA ResourceClaims and ResourceSlices; nil = none
-	opts      Options
+	kube        kubernetes.Interface
+	metrics     metricsclient.Interface // nil disables usage-based CPU/memory
+	prom        *PromSource             // nil until NewPromSource
+	promDefault *prometheusClient       // PROMETHEUS_URL; nil when unset
+	graveyard   *Graveyard              // deletions seen between collections; nil = none
+	tenants     TenantAPI               // tenant clusters' own APIs; nil = control plane cluster only
+	dyn         dynamic.Interface       // DRA ResourceClaims and ResourceSlices; nil = none
+	opts        Options
 
 	excludedTenantNS map[string]bool
+	health           *health.Registry // nil: not reported
 }
 
 // UseGraveyard makes the collector bill pods and nodes deleted between
@@ -74,6 +79,10 @@ func (c *Collector) UseGraveyard(g *Graveyard) { c.graveyard = g }
 
 // UseDynamic enables DRA (ResourceClaim) GPU metering on the control plane cluster.
 func (c *Collector) UseDynamic(d dynamic.Interface) { c.dyn = d }
+
+// UseHealth makes the collector report tenant API and metrics-server
+// health.
+func (c *Collector) UseHealth(h *health.Registry) { c.health = h }
 
 // baseFn builds an event template for a tenant cluster and node.
 type baseFn func(metric string, n *nodeInfo) usage.Event
@@ -115,21 +124,6 @@ func NewCollector(kube kubernetes.Interface, mc metricsclient.Interface, opts Op
 	if opts.Basis == "" {
 		opts.Basis = "usage"
 	}
-	egress, util, count := defaultEgressQuery, defaultGPUUtilQuery, defaultGPUCountQuery
-	if opts.PrometheusPreset == PresetVClusterPlatform {
-		egress, util, count = platformQueries.egress, platformQueries.util, platformQueries.count
-	}
-	if opts.EgressQuery == "" {
-		opts.EgressQuery = egress
-	}
-	// A custom utilization query usually means a different exporter, so the
-	// DCGM device count only rides along with the default query.
-	if opts.GPUUtilQuery == "" {
-		opts.GPUUtilQuery = util
-		if opts.GPUCountQuery == "" {
-			opts.GPUCountQuery = count
-		}
-	}
 	if opts.PrivateNodeBilling == "" {
 		opts.PrivateNodeBilling = "node"
 	}
@@ -144,7 +138,7 @@ func NewCollector(kube kubernetes.Interface, mc metricsclient.Interface, opts Op
 		c.excludedTenantNS[ns] = true
 	}
 	if opts.PrometheusURL != "" {
-		c.prom = newPrometheusClient(opts.PrometheusURL, opts.PromHeaders, opts.PromTokenFile)
+		c.promDefault = newPrometheusClient(opts.PrometheusURL, opts.PromHeaders, opts.PromTokenFile)
 	}
 	return c
 }
@@ -382,87 +376,7 @@ func (c *Collector) collectTarget(ctx context.Context, t Target, nodes map[strin
 		}
 	}
 
-	if c.prom != nil && latest.Latest {
-		c.collectPrometheus(ctx, t, latest, accs[latest.End], base, st)
-	}
 	return nil
-}
-
-func (c *Collector) collectPrometheus(ctx context.Context, t Target, w Window, acc *accumulator, base baseFn, st *Stats) {
-	size := w.End.Sub(w.Start)
-	vars := varsFor(t, size)
-	id := t.Cluster.ExternalID()
-	res, err := c.prom.Query(ctx, expand(c.opts.EgressQuery, vars), w.End)
-	if err != nil {
-		st.PromFailures++
-		log.Printf("[metrics] %s: egress query failed: %v", id, err)
-	} else {
-		var bytes float64
-		for _, r := range res {
-			bytes += r.Value
-		}
-		acc.add(base(usage.MetricNetworkEgressGB, nil), bytes/gib, nil)
-	}
-
-	if c.opts.GPUUtilQuery != "none" {
-		c.collectGPUUtilization(ctx, vars, id, w, acc, base, st)
-	}
-
-	for _, m := range c.opts.PromMetrics {
-		res, err := c.prom.Query(ctx, expand(m.Query, vars), w.End)
-		if err != nil {
-			st.PromFailures++
-			log.Printf("[metrics] %s: %s query failed: %v", id, m.Code, err)
-			continue
-		}
-		for _, r := range res {
-			ev := base(m.Code, nil)
-			for _, l := range m.Dimensions {
-				if v := r.Labels[l]; v != "" {
-					ev.Dimensions[dimKey(l)] = v
-				}
-			}
-			if m.SKU != "" {
-				ev.SKU = r.Labels[m.SKU]
-			}
-			acc.add(ev, r.Value, nil)
-		}
-	}
-}
-
-func (c *Collector) collectGPUUtilization(ctx context.Context, vars queryVars, id string, w Window, acc *accumulator, base baseFn, st *Stats) {
-	util, err := c.prom.Query(ctx, expand(c.opts.GPUUtilQuery, vars), w.End)
-	if err != nil {
-		st.PromFailures++
-		log.Printf("[metrics] %s: GPU utilization query failed: %v", id, err)
-		return
-	}
-	countBy := map[string]float64{}
-	if c.opts.GPUCountQuery != "" && len(util) > 0 {
-		counts, _ := c.prom.Query(ctx, expand(c.opts.GPUCountQuery, vars), w.End)
-		for _, r := range counts {
-			countBy[promGPUModel(r.Labels)] = r.Value
-		}
-	}
-	for _, r := range util {
-		model := promGPUModel(r.Labels)
-		ev := base(usage.MetricGPUUtilization, nil)
-		ev.Dimensions[usage.DimGPUType] = model
-		props := map[string]any{"avg_utilization_pct": r.Value}
-		if n, ok := countBy[model]; ok {
-			props["gpu_devices"] = n
-		}
-		acc.add(ev, r.Value*w.End.Sub(w.Start).Hours(), props)
-	}
-}
-
-// promGPUModel reads the GPU model from a utilization result: DCGM's
-// modelName, or gpu_type/model from a custom GPU_UTIL_QUERY.
-func promGPUModel(labels map[string]string) string {
-	if v := firstLabel(labels, "modelName", "gpu_type", "model"); v != "" {
-		return normalizeGPUType(v)
-	}
-	return "unknown"
 }
 
 // podUsage returns current CPU cores and memory bytes per pod name.

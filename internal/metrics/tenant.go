@@ -14,6 +14,7 @@ import (
 	metricsclient "k8s.io/metrics/pkg/client/clientset/versioned"
 
 	"github.com/vclusterlabs-experiments/vbilling/internal/discovery"
+	"github.com/vclusterlabs-experiments/vbilling/internal/health"
 	"github.com/vclusterlabs-experiments/vbilling/internal/usage"
 )
 
@@ -74,10 +75,18 @@ func (c *Collector) collectTenant(ctx context.Context, t Target, hostNodes map[s
 	if err == nil {
 		err = c.collectTenantAPI(ctx, t, conn, hostNodes, windows, tmp, st)
 	}
+	id := t.Cluster.ExternalID()
 	if err != nil {
-		log.Printf("[metrics] %s: tenant API unavailable, its windows will be filled later: %v", t.Cluster.ExternalID(), err)
-		st.TenantAPIFailed = append(st.TenantAPIFailed, t.Cluster.ExternalID())
+		log.Printf("[metrics] %s: tenant API unavailable, its windows will be filled later: %v", id, err)
+		st.TenantAPIFailed = append(st.TenantAPIFailed, id)
+		if c.health != nil {
+			c.health.Fail(health.Name("tenant-api", id), "tenant-api", id, err,
+				"the cluster's own nodes, volumes and load balancers are not metered until its API answers; missed windows are filled then")
+		}
 		return
+	}
+	if c.health != nil {
+		c.health.OK(health.Name("tenant-api", id), "tenant-api", id, 1)
 	}
 	for end, a := range tmp {
 		for _, k := range a.order {
@@ -118,6 +127,7 @@ func (c *Collector) collectTenantAPI(ctx context.Context, t Target, conn *Tenant
 			consider(d.obj, d.at)
 		}
 	}
+	c.prom.noteOwnNodes(t.Cluster.ExternalID(), len(private) > 0)
 	if len(private) == 0 {
 		return nil // a shared tenant cluster: everything is metered from the control plane cluster
 	}

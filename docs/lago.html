@@ -252,6 +252,7 @@
         <a href="getting-started.html">Getting Started</a>
         <a href="configuration.html">Configuration</a>
         <a href="metrics.html">Metrics Reference</a>
+        <a href="usage-sources.html">Usage Sources</a>
         <a href="private-nodes.html">Dedicated and Private Nodes</a>
         <a href="example-gke.html">Example: GKE with GPUs</a>
         <a href="troubleshooting.html">Troubleshooting</a>
@@ -282,8 +283,9 @@
         <table class="config-table">
           <thead><tr><th>In Lago</th><th>Created by vBilling</th></tr></thead>
           <tbody>
-            <tr><td>Billable metrics</td><td>One per vBilling metric (<code>vcluster_gpu_hours</code>, <code>vcluster_cpu_core_hours</code>, ...), summing a field named after it (<code>gpu_hours</code>, <code>cpu_core_hours</code>, ...)</td></tr>
-            <tr><td>Plan</td><td><code>vcluster-standard</code> (<code>billing.defaultPlanCode</code>) with one charge per metric at $0, for you to price</td></tr>
+            <tr><td>Billable metrics</td><td>One per vBilling metric (<code>vcluster_gpu_hours</code>, <code>vcluster_cpu_core_hours</code>, ...), summing a field named after it (<code>gpu_hours</code>, <code>cpu_core_hours</code>, ...). Every SKU vBilling sends is added to the metric's <code>sku</code> filter.</td></tr>
+            <tr><td>Plan</td><td><code>vcluster-standard</code> (<code>billing.defaultPlanCode</code>) with one standard charge per metric, at $0 or at its <a href="#price-card">price card</a> amount. A metric declared later, such as a custom metric, gets its charge on the next start.</td></tr>
+            <tr><td>Charge filters</td><td>One per SKU on the metric's charge, for example <code>vCluster GPU Hours - NVIDIA-H100-80GB-HBM3</code>, added the first time vBilling sends the SKU. See <a href="#sku-filters">One line per SKU</a>.</td></tr>
             <tr><td>Customers</td><td>One per tenant: <code>external_id</code> is the tenant ID, with its name, email, currency and metadata</td></tr>
             <tr><td>Subscriptions</td><td><code>sub-&lt;tenant ID&gt;</code> on the tenant's plan (<code>vbilling.vcluster.com/plan</code>, or the default plan)</td></tr>
             <tr><td>Events</td><td>Batches of up to 100. <code>transaction_id</code> is the vBilling event ID, so a resent event is never counted twice.</td></tr>
@@ -298,6 +300,7 @@
 <span class="cmd">openssl</span> genrsa 2048 &gt; deploy/lago/lago_rsa.key
 <span class="cmd">echo</span> <span class="string">"LAGO_RSA_PRIVATE_KEY=$(base64 -i deploy/lago/lago_rsa.key | tr -d '\n')"</span> &gt; deploy/lago/.env
 <span class="cmd">docker</span> compose <span class="flag">-f</span> deploy/lago/docker-compose.yml <span class="flag">--env-file</span> deploy/lago/.env up <span class="flag">-d</span></code></div>
+      <p>The Compose file gives Lago's API and worker a shared Redis cache (<code>LAGO_REDIS_CACHE_URL</code>). Without one, current usage stops moving: see <a href="#usage-does-not-move">Current usage in Lago does not move</a>.</p>
       <p>Open <code>http://localhost:8081</code> and sign up to create the organization. Then copy the API key from <strong>Developers</strong>, <strong>API keys</strong> into a file (paste it, press Enter, then Ctrl-D):</p>
       <div class="code-block"><code><span class="cmd">cat</span> &gt; ./lago-api-key</code></div>
       <p>For a shared or production setup, run Lago in Kubernetes with its Helm chart (see the <a href="https://www.getlago.com/docs" target="_blank">Lago docs</a>) and point <code>lago.apiURL</code> at its API Service.</p>
@@ -316,6 +319,9 @@
             <tr><td><code>lago.apiURL</code></td><td><code>LAGO_API_URL</code></td><td><code>http://lago-api.lago-system.svc.cluster.local:3000</code></td><td>Lago API, reachable from the vBilling pod. Use <code>http://host.docker.internal:3000</code> for Lago in Docker on the same machine as a vind control plane cluster.</td></tr>
             <tr><td><code>lago.existingSecret</code></td><td></td><td></td><td>Secret with the key <code>api-key</code>. Use it instead of <code>lago.apiKey</code>.</td></tr>
             <tr><td><code>lago.apiKey</code></td><td><code>LAGO_API_KEY</code></td><td></td><td>Lago API key.</td></tr>
+            <tr><td><code>lago.priceCard</code></td><td><code>LAGO_PRICE_CARD</code></td><td></td><td>Amounts for the charges and charge filters vBilling creates (see <a href="#price-card">Prices as code</a>). The chart renders it to a ConfigMap and mounts it; the variable is the path of the YAML file.</td></tr>
+            <tr><td><code>lago.priceCardConfigMap</code></td><td></td><td></td><td>Existing ConfigMap with the key <code>price-card.yaml</code>. Use it instead of <code>lago.priceCard</code>.</td></tr>
+            <tr><td><code>lago.managedPlans</code></td><td><code>LAGO_MANAGED_PLANS</code></td><td></td><td>Plans besides the default plan whose charges and SKU filters vBilling keeps up to date. Comma-separated as a variable. vBilling never changes other plans.</td></tr>
             <tr><td><code>billing.defaultPlanCode</code></td><td><code>DEFAULT_PLAN_CODE</code></td><td><code>vcluster-standard</code></td><td>Plan that vBilling creates, and that tenants without a <code>plan</code> annotation subscribe to.</td></tr>
             <tr><td><code>billing.currency</code></td><td><code>BILLING_CURRENCY</code></td><td><code>USD</code></td><td>Currency of the plan and of tenants without a <code>currency</code> annotation.</td></tr>
           </tbody>
@@ -329,13 +335,37 @@
 <span class="cmd">curl</span> <span class="flag">-s</span> http://localhost:3000/api/v1/customers <span class="flag">-H</span> <span class="string">"Authorization: Bearer $(cat ./lago-api-key)"</span> | jq <span class="string">'.customers[].external_id'</span></code></div>
 
       <h2 id="pricing">Configure pricing</h2>
-      <p>Every charge on <code>vcluster-standard</code> starts at $0, so invoices stay at $0.00 until you price them. In the Lago UI, open <strong>Plans</strong>, <strong>vCluster Standard</strong>, and set a price per unit on each charge. vBilling sends every dimension as an event property, so <strong>charge filters</strong> can price one metric several ways:</p>
+      <p>Without a <a href="#price-card">price card</a>, every charge on <code>vcluster-standard</code> starts at $0, so invoices stay at $0.00 until you price them. In the Lago UI, open <strong>Plans</strong>, <strong>vCluster Standard</strong>, and set a price per unit on each charge. vBilling sends every dimension as an event property, so <strong>charge filters</strong> can price one metric several ways:</p>
       <ul>
-        <li><code>sku</code> (or <code>gpu_type</code>): H100 hours differently from L40S hours</li>
+        <li><code>sku</code> (or <code>gpu_type</code>): H100 hours differently from L40S hours. vBilling creates the <code>sku</code> filters for you.</li>
         <li><code>capacity_type</code>: a discount for <code>spot</code> and <code>preemptible</code>, or a <code>reserved</code> rate</li>
         <li><code>region</code>, <code>billing_mode</code>, <code>tenant_class</code> and <code>tenant_cluster</code></li>
       </ul>
       <p>To price tenants differently, create more plans and set <code>vbilling.vcluster.com/plan</code> on their tenant clusters. <a href="configuration.html#lago-pricing">Lago pricing</a> lists the charges to configure, with example price lists.</p>
+
+      <h3 id="sku-filters">One line per SKU</h3>
+      <p>Lago prices an event property only through filters. The first time vBilling sends usage with a new <code>sku</code> for a metric, it adds the value to the billable metric's <code>sku</code> filter, then adds a charge filter for it to the metric's charge on each managed plan. Current usage and invoices then show one line per SKU. Lago applies filters when it computes usage, so usage sent before the filter existed counts under it too.</p>
+      <ul>
+        <li>A new filter costs what its metric's charge costs, unless the price card has an amount for the SKU. Splitting a SKU out never changes what its usage is billed.</li>
+        <li>vBilling never adds a filter for a SKU that a filter in Lago already prices, and leaves charges that are not <code>standard</code> (graduated, package, volume, percentage) to you.</li>
+        <li>Every update sends back all charges and filters of the plan unchanged, so prices you edit in Lago stay as they are. A charge you delete in Lago is not added back.</li>
+        <li>vBilling records what it has set up in <code>state-lago.json</code> in its data directory, so each SKU is handled once. If Lago rejects a change, vBilling logs it and tries again on a later batch. Usage is delivered either way.</li>
+      </ul>
+      <div class="code-block"><code><span class="output">[lago] billable metric vcluster_gpu_hours: added sku filter values NVIDIA-L4
+[lago] plan vcluster-standard: added vcluster_gpu_hours charge filters for sku NVIDIA-L4</span></code></div>
+
+      <h2 id="price-card">Prices as code</h2>
+      <p>A price card sets the amounts vBilling uses when it creates a charge or a charge filter. vBilling never changes an amount that already exists in Lago, so Finance can keep editing prices in the Lago UI. Quote amounts to keep every digit.</p>
+      <div class="code-block"><code>lago:
+  priceCard:
+    vcluster_gpu_hours:
+      amount: <span class="string">"0"</span>            <span class="comment"># the metric's charge</span>
+      sku:
+        NVIDIA-H100-80GB-HBM3: <span class="string">"2.49"</span>
+        NVIDIA-L40S: <span class="string">"1.10"</span>
+    inference_output_tokens:
+      amount: <span class="string">"0.000002"</span></code></div>
+      <p>SKUs listed under <code>sku</code> get their charge filters when vBilling starts, before any usage arrives. vBilling manages charges and filters on the default plan and on the plans in <code>lago.managedPlans</code>, and never changes other plans. To keep the price card in your own ConfigMap, set <code>lago.priceCardConfigMap</code>. Outside Helm, point <code>LAGO_PRICE_CARD</code> at the YAML file and list extra plans in <code>LAGO_MANAGED_PLANS</code>.</p>
 
       <h2 id="events">Events in Lago</h2>
       <p>Each event carries the quantity under the metric's field name, which the billable metric sums, and every dimension as a property (trimmed here):</p>
@@ -400,6 +430,12 @@ API listening on :8080
 <span class="cmd">docker</span> compose <span class="flag">-f</span> deploy/lago/docker-compose.yml down <span class="flag">-v</span></code></div>
 
       <h2 id="troubleshooting">Troubleshooting</h2>
+      <h3 id="usage-does-not-move">Current usage in Lago does not move</h3>
+      <p>Events keep arriving in Lago, but a subscription's current usage stays at the first value you saw until the Lago API restarts. Lago caches current usage, and its worker clears that cache when new events arrive. Without a shared cache, the API keeps the cache in its own process, where the worker cannot clear it.</p>
+      <p>Give the <code>api</code> and <code>worker</code> services the same Redis cache, as <code>deploy/lago/docker-compose.yml</code> does, and restart both:</p>
+      <div class="code-block"><code>    environment:
+      LAGO_REDIS_CACHE_URL: redis://redis:6379</code></div>
+      <p>However you run Lago, set <code>LAGO_REDIS_CACHE_URL</code> (or <code>LAGO_MEMCACHE_SERVERS</code>) on both the API and the worker. The usage itself is not lost: Lago stores every event, and vBilling's ledger (<code>GET /api/v1/usage</code>) has the totals to compare against.</p>
       <ul>
         <li><a href="troubleshooting.html#lago-connection-failed">Lago connection failed</a></li>
         <li><a href="troubleshooting.html#zero-dollar-invoices">Events sent but $0.00 in Lago</a></li>

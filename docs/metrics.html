@@ -253,6 +253,7 @@
         <a href="getting-started.html">Getting Started</a>
         <a href="configuration.html">Configuration</a>
         <a href="metrics.html" class="active">Metrics Reference</a>
+        <a href="usage-sources.html">Usage Sources</a>
         <a href="private-nodes.html">Dedicated and Private Nodes</a>
         <a href="example-gke.html">Example: GKE with GPUs</a>
         <a href="troubleshooting.html">Troubleshooting</a>
@@ -276,12 +277,32 @@
 
     <main class="content">
       <h1>Metrics Reference</h1>
-      <p class="subtitle">Every metric vBilling v0.2 emits, how it is measured, and the dimensions billing platforms can price on.</p>
+      <p class="subtitle">Every metric vBilling v0.3 emits, how it is measured, and the dimensions billing platforms can price on.</p>
 
       <div class="callout callout-info">
         <div class="callout-icon">i</div>
         <div>vBilling meters closed windows (60s by default) aligned to the wall clock. Allocation metrics come from object lifetimes, to the second, so missed windows can be backfilled exactly after a restart. Every event also carries <code>tenant</code>, <code>region</code>, <code>project</code>, <code>resource_id</code>, <code>tenant_cluster</code>, <code>tenant_class</code> and a deterministic <code>id</code>. Schema: <a href="schema/usage-event.v1.json">usage-event.v1.json</a>.</div>
       </div>
+
+      <h2 id="accuracy">Exact and estimated metrics</h2>
+      <p>Each metric in <code>GET /api/v1/catalog</code> has an <code>accuracy</code> and a <code>source</code>. Exact quantities come from object lifetimes, Prometheus counter samples, per-request records or window totals you send, and they add up across windows. Estimates come from PromQL functions that extrapolate between samples (<code>increase()</code>, <code>rate()</code>, <code>avg_over_time()</code>); their events carry <code>estimate: true</code>, and the dashboard marks them with &#8776;. Do not let an estimate be the only evidence for usage a customer may dispute. See <a href="usage-sources.html">Usage Sources</a>.</p>
+      <table class="props-table">
+        <thead><tr><th>Metric</th><th>Quantities are</th><th>Measured from</th></tr></thead>
+        <tbody>
+          <tr><td><code>vcluster_gpu_hours</code></td><td>Exact</td><td>Pod and node lifetimes</td></tr>
+          <tr><td><code>vcluster_cpu_core_hours</code>, <code>vcluster_memory_gb_hours</code></td><td>Exact</td><td>Pod lifetimes and requests, or node capacity. With <code>CPU_MEMORY_BASIS=usage</code>, the usage part is a metrics-server sample of the live window.</td></tr>
+          <tr><td><code>vcluster_private_node_hours</code></td><td>Exact</td><td>Node lifetimes and health</td></tr>
+          <tr><td><code>vcluster_storage_gb_hours</code></td><td>Exact</td><td>Bound PVC lifetimes</td></tr>
+          <tr><td><code>vcluster_instance_hours</code></td><td>Exact</td><td>Control plane readiness</td></tr>
+          <tr><td><code>vcluster_lb_hours</code></td><td>Exact</td><td>LoadBalancer Service lifetimes</td></tr>
+          <tr><td><code>vcluster_network_egress_gb</code></td><td>Exact by default; an estimate with <code>EGRESS_QUERY</code></td><td>A Prometheus counter, read sample by sample</td></tr>
+          <tr><td><code>vcluster_gpu_utilization</code> (informational)</td><td>Estimate</td><td>DCGM averages over the window, from Prometheus</td></tr>
+          <tr><td><code>vcluster_gpu_downtime_hours</code> (informational)</td><td>Exact</td><td>Node conditions and taints</td></tr>
+          <tr><td>Metrics in <code>prometheus.metrics</code></td><td>Exact with <code>counter:</code>, an estimate with <code>query:</code></td><td>Prometheus</td></tr>
+          <tr><td>Metrics from per-request records, such as <code>inference_output_tokens</code></td><td>Exact</td><td>Records, summed per window</td></tr>
+          <tr><td>Custom metrics sent as window totals</td><td>Exact as sent</td><td><code>POST /api/v1/events</code></td></tr>
+        </tbody>
+      </table>
 
       <h2 id="gpu-hours">1. GPU Hours</h2>
       <div class="metric-card">
@@ -492,19 +513,20 @@
         <div class="metric-card-header">
           <h3><code>vcluster_network_egress_gb</code></h3>
           <div class="metric-card-badges">
-            <span class="metric-badge optional">Prometheus / informational</span>
+            <span class="metric-badge optional">Prometheus</span>
           </div>
         </div>
         <div class="metric-card-body">
           <dl class="metric-detail">
             <dt>Source</dt>
-            <dd>Prometheus: <code>increase(container_network_transmit_bytes_total{namespace})</code> over the window, evaluated at the window end, or your <code>EGRESS_QUERY</code></dd>
+            <dd>Prometheus counter <code>container_network_transmit_bytes_total{{selector}}</code>: vBilling reads its raw samples and bills the exact byte increase per window. Or your <code>EGRESS_QUERY</code>, an estimate.</dd>
             <dt>Unit</dt>
             <dd>gib</dd>
             <dt>Quantity</dt>
             <dd>bytes / 1024<sup>3</sup></dd>
           </dl>
-          <p>The default counts all transmitted bytes. To bill only internet egress, point <code>EGRESS_QUERY</code> at flow metrics from your CNI or fabric.</p>
+          <p>Since v0.3 egress is a counter, exact at sample granularity, and windows Prometheus could not answer are caught up. v0.2 used <code>increase()</code> at the window end, an estimate. <code>{{selector}}</code> scopes the series to the cluster: by namespace on shared and dedicated nodes, by <code>PROMETHEUS_SOURCE_LABEL</code> on clusters with their own nodes (see <a href="usage-sources.html#scoping">Scope series to a cluster</a>).</p>
+          <p>The default counts all transmitted bytes. To bill only internet egress, point <code>EGRESS_QUERY</code> at flow metrics from your CNI or fabric; its events are marked as estimates. <code>EGRESS_QUERY=none</code> turns egress off.</p>
         </div>
       </div>
 
@@ -519,13 +541,13 @@
         <div class="metric-card-body">
           <dl class="metric-detail">
             <dt>Source</dt>
-            <dd>DCGM exporter via Prometheus (<code>DCGM_FI_DEV_GPU_UTIL</code>; for GPUs in MIG mode, which DCGM reports per instance, <code>DCGM_FI_PROF_GR_ENGINE_ACTIVE</code>), matched on the workload's <code>namespace</code> or, where Prometheus renames it (kube-prometheus-stack), <code>exported_namespace</code>. <code>GPU_UTIL_QUERY</code> replaces the query for other exporters; <code>none</code> turns it off.</dd>
+            <dd>DCGM exporter via Prometheus (<code>DCGM_FI_DEV_GPU_UTIL</code>; for GPUs in MIG mode, which DCGM reports per instance, <code>DCGM_FI_PROF_GR_ENGINE_ACTIVE</code>), matched on the workload's <code>namespace</code> or, where Prometheus renames it (kube-prometheus-stack), <code>exported_namespace</code>. For clusters with their own nodes, a Prometheus of their own, or <code>PROMETHEUS_PRESET=vcluster-platform</code>, the default query selects DCGM series with the cluster's <code>{{matchers}}</code> instead. <code>GPU_UTIL_QUERY</code> replaces the query for other exporters; <code>none</code> turns it off.</dd>
             <dt>Unit</dt>
             <dd>util-hours</dd>
             <dt>Quantity</dt>
             <dd>average utilization % &times; hours, per GPU model</dd>
           </dl>
-          <p>Informational: delivered to the ledger, webhooks and exports, never to Stripe or Metronome (Lago keeps it for v0.1 plans).</p>
+          <p>Informational: delivered to the ledger, webhooks and exports, never to Stripe or Metronome (Lago keeps it for v0.1 plans). An estimate: it averages samples over the window.</p>
           <h4>Dimensions</h4>
           <table class="props-table">
             <thead><tr><th>Key</th><th>Meaning</th></tr></thead>
@@ -541,7 +563,7 @@
         <div class="metric-card-header">
           <h3><code>vcluster_gpu_downtime_hours</code></h3>
           <div class="metric-card-badges">
-            <span class="metric-badge optional">Prometheus / informational</span>
+            <span class="metric-badge optional">Informational</span>
           </div>
         </div>
         <div class="metric-card-body">
@@ -566,7 +588,18 @@
       </div>
 
       <h2 id="custom-metrics">Custom metrics</h2>
-      <p>Declare operator metrics with <code>CUSTOM_METRICS="code:unit[:key|key],..."</code> (for example <code>inference_output_tokens:tokens:model|region</code>) and push closed windows to <code>POST /api/v1/events</code>. The billing adapters create meters and billable metrics for them at startup.</p>
+      <p>Declare operator metrics as a list in <code>metering.customMetrics</code>. The chart passes it as <code>CUSTOM_METRICS_FILE</code>:</p>
+      <div class="code-block"><code>metering:
+  customMetrics:
+    - code: slurm_gpu_hours
+      name: Slurm GPU hours
+      unit: gpu-hours
+      groupKeys: [sku, region]
+    - code: vllm_output_tokens
+      unit: tokens
+      billable: false     <span class="comment"># informational: a second source to cross-check</span></code></div>
+      <p>Each entry takes <code>code</code>, <code>name</code>, <code>unit</code>, <code>description</code>, <code>groupKeys</code> (the dimensions billing platforms price on) and <code>billable</code>. <code>billable</code> defaults to <code>true</code>; <code>false</code> keeps a metric informational: it stays in the ledger, the exports and the webhook feed, and never reaches Stripe, Metronome or Lago. The v0.2 string form, <code>CUSTOM_METRICS="code:unit[:key|key],..."</code> (for example <code>inference_output_tokens:tokens:model|region</code>), still works and declares billable metrics. The billing adapters create meters and billable metrics for billable metrics at startup.</p>
+      <p>Usage for custom metrics arrives as per-request records (<code>POST /api/v1/records</code>), as window totals (<code>POST /api/v1/events</code>), or from Prometheus (<code>prometheus.metrics</code>, which declares its own metrics). The built-in <code>litellm</code> records format declares <code>inference_input_tokens</code> and <code>inference_output_tokens</code> on every install. See <a href="usage-sources.html">Usage Sources</a>.</p>
     </main>
   </div>
 

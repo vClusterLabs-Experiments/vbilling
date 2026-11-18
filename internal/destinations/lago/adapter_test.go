@@ -52,7 +52,7 @@ func TestDuplicateTransactionIDCountsAsDelivered(t *testing.T) {
 		w.WriteHeader(200)
 	}))
 	defer srv.Close()
-	a := &Adapter{client: NewClient(srv.URL, "key"), cfg: &config.Config{}}
+	a := New(NewClient(srv.URL, "key"), &config.Config{}, nil, nil)
 	ev := usage.Event{ID: "vb1_dup", Tenant: "acme", Metric: usage.MetricCPUCoreHours, Quantity: 1, WindowStart: time.Now().Add(-time.Minute), WindowEnd: time.Now()}
 	if err := a.SendEvents(context.Background(), []usage.Event{ev}); err != nil {
 		t.Fatalf("duplicate must be treated as delivered: %v", err)
@@ -63,7 +63,7 @@ func TestDuplicateTransactionIDCountsAsDelivered(t *testing.T) {
 		io.WriteString(w, `{"code":"validation_errors","error_details":{"code":["metric_not_found"]}}`)
 	}))
 	defer srv2.Close()
-	b := &Adapter{client: NewClient(srv2.URL, "key"), cfg: &config.Config{}}
+	b := New(NewClient(srv2.URL, "key"), &config.Config{}, nil, nil)
 	if err := b.SendEvents(context.Background(), []usage.Event{ev}); !destinations.IsPermanent(err) {
 		t.Fatalf("expected permanent error, got %v", err)
 	}
@@ -81,7 +81,7 @@ func TestRemoveTenantTreatsMissingSubscriptionAsDone(t *testing.T) {
 		w.WriteHeader(status)
 	}))
 	defer srv.Close()
-	a := &Adapter{client: NewClient(srv.URL, "key"), cfg: &config.Config{}}
+	a := New(NewClient(srv.URL, "key"), &config.Config{}, nil, nil)
 	if err := a.RemoveTenant(context.Background(), usage.Tenant{ID: "acme"}); err != nil {
 		t.Fatalf("an already terminated subscription is nothing to end: %v", err)
 	}

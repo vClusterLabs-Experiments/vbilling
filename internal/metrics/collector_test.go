@@ -3,6 +3,7 @@ package metrics
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -128,6 +129,19 @@ func collect(t *testing.T, opts Options, objs []runtime.Object, windows []Window
 	out, _, err := c.Collect(context.Background(), targets, windows)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if opts.PrometheusURL != "" {
+		ps, err := c.NewPromSource(PromOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		pws, err := ps.Collect(context.Background(), targets, windows)
+		if err != nil && !errors.Is(err, ErrPrometheusUnavailable) {
+			t.Fatal(err)
+		}
+		for _, pw := range pws {
+			out[pw.Window.End] = append(out[pw.Window.End], pw.Events...)
+		}
 	}
 	return out
 }
@@ -396,27 +410,17 @@ func TestBackfillAndDeterminism(t *testing.T) {
 }
 
 func TestPrometheusEgressAndUtilizationAtWindowEnd(t *testing.T) {
-	var queries []string
-	prom := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		q := r.URL.Query().Get("query")
-		queries = append(queries, q)
-		if r.URL.Query().Get("time") != strconv.FormatInt(we.Unix(), 10) {
-			t.Errorf("query not evaluated at window end: %s", r.URL.RawQuery)
-		}
-		val := "0"
-		labels := map[string]string{}
+	prom, queries := promServer(t, nil, func(q string) (string, map[string]string) {
 		switch {
 		case strings.Contains(q, "container_network_transmit_bytes_total"):
-			val = strconv.Itoa(3 * gib)
+			return strconv.Itoa(3 * gib), map[string]string{"pod": "web"}
 		case strings.Contains(q, "avg_over_time(DCGM_FI_DEV_GPU_UTIL"):
-			val, labels = "75", map[string]string{"modelName": "NVIDIA H100 80GB HBM3"}
+			return "75", map[string]string{"modelName": "NVIDIA H100 80GB HBM3"}
 		case strings.Contains(q, "count by"):
-			val, labels = "2", map[string]string{"modelName": "NVIDIA H100 80GB HBM3"}
+			return "2", map[string]string{"modelName": "NVIDIA H100 80GB HBM3"}
 		}
-		json.NewEncoder(w).Encode(map[string]any{"status": "success", "data": map[string]any{"resultType": "vector",
-			"result": []map[string]any{{"metric": labels, "value": []any{float64(we.Unix()), val}}}}})
-	}))
-	defer prom.Close()
+		return "", nil
+	})
 	evs := collect(t, Options{PrometheusURL: prom.URL}, nil, latest())[we]
 	if got, _ := find(evs, usage.MetricNetworkEgressGB); !near(got, 3) {
 		t.Errorf("egress GiB = %v", got)
@@ -424,8 +428,9 @@ func TestPrometheusEgressAndUtilizationAtWindowEnd(t *testing.T) {
 	if got, _ := find(evs, usage.MetricGPUUtilization, usage.DimGPUType, "NVIDIA-H100-80GB-HBM3"); !near(got, usage.Round(75.0/60)) {
 		t.Errorf("utilization hours = %v", got)
 	}
-	if !strings.Contains(queries[0], `increase(container_network_transmit_bytes_total{namespace="team-a"}[60s])`) {
-		t.Errorf("egress query = %s", queries[0])
+	// Egress is a counter read: raw samples over the window plus lookback.
+	if !strings.Contains(strings.Join(*queries, "\n"), `container_network_transmit_bytes_total{namespace="team-a"}[660s]`) {
+		t.Errorf("egress query = %q", *queries)
 	}
 }
 
@@ -507,6 +512,18 @@ func promServer(t *testing.T, check func(*http.Request) bool, respond func(q str
 		queries = append(queries, q)
 		val, labels := respond(q)
 		result := []map[string]any{}
+		// A plain selector with a range is a counter read: answer with raw
+		// samples whose increase over the window is val.
+		if strings.HasSuffix(q, "s]") && !strings.Contains(q, "(") {
+			if val != "" {
+				inc, _ := strconv.ParseFloat(val, 64)
+				result = append(result, map[string]any{"metric": labels, "values": [][]any{
+					{float64(ws.Add(-30 * time.Second).Unix()), "1000"},
+					{float64(we.Unix()), strconv.FormatFloat(1000+inc, 'f', -1, 64)}}})
+			}
+			json.NewEncoder(w).Encode(map[string]any{"status": "success", "data": map[string]any{"resultType": "matrix", "result": result}})
+			return
+		}
 		if val != "" {
 			result = append(result, map[string]any{"metric": labels, "value": []any{float64(we.Unix()), val}})
 		}

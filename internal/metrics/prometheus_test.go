@@ -57,7 +57,7 @@ func TestPrometheusDefinedBillableMetrics(t *testing.T) {
 		t.Fatal(err)
 	}
 	def, ok := usage.Lookup("test_output_tokens")
-	if !ok || !def.Billable || strings.Join(def.GroupKeys, ",") != "model_name,model_tier" {
+	if !ok || !def.Billable || strings.Join(def.GroupKeys, ",") != "model_name,model_tier,sku" {
 		t.Fatalf("registered metric = %+v", def)
 	}
 	prom, queries := promServer(t, nil, func(q string) (string, map[string]string) {

@@ -1,0 +1,12 @@
+{{- if and (has "lago" (include "vbilling.adapters" . | splitList ",")) .Values.lago.priceCard (not .Values.lago.priceCardConfigMap) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "vbilling.fullname" . }}-lago-price-card
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "vbilling.labels" . | nindent 4 }}
+data:
+  price-card.yaml: |
+    {{- toYaml .Values.lago.priceCard | nindent 4 }}
+{{- end }}

@@ -74,110 +74,14 @@ echo ""
 echo ">>> Step 3: Starting Lago (billing engine)..."
 mkdir -p "$LAGO_DIR"
 
-# Lago signs its tokens with an RSA key: generate one for this demo, never commit one.
-RSA_KEY="$(openssl genrsa -traditional 2048 2>/dev/null || openssl genrsa 2048 2>/dev/null)"
-cat > "$LAGO_DIR/docker-compose.yml" <<'COMPOSE'
-version: "3.8"
-
-services:
-  db:
-    image: postgres:14-alpine
-    environment:
-      POSTGRES_USER: lago
-      POSTGRES_PASSWORD: lago
-      POSTGRES_DB: lago
-    volumes:
-      - lago_pg_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U lago"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-  redis:
-    image: redis:7-alpine
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-  api:
-    image: getlago/api:v1.17.1
-    depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    environment:
-      RAILS_ENV: production
-      DATABASE_URL: postgresql://lago:lago@db:5432/lago
-      REDIS_URL: redis://redis:6379
-      SECRET_KEY_BASE: your-secret-key-base-for-demo-only-change-in-production
-      LAGO_API_URL: http://localhost:3000
-      LAGO_FRONT_URL: http://localhost:8081
-      RSA_PRIVATE_KEY: |
-        __RSA_PRIVATE_KEY__
-      LAGO_ENCRYPTION_PRIMARY_KEY: demo-encryption-primary-key
-      LAGO_ENCRYPTION_DETERMINISTIC_KEY: demo-encryption-deterministic-key
-      LAGO_ENCRYPTION_KEY_DERIVATION_SALT: demo-encryption-derivation-salt
-    ports:
-      - "3000:3000"
-    command: >
-      sh -c "bundle exec rails db:migrate && bundle exec rails s -b 0.0.0.0 -p 3000"
-
-  worker:
-    image: getlago/api:v1.17.1
-    depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    environment:
-      RAILS_ENV: production
-      DATABASE_URL: postgresql://lago:lago@db:5432/lago
-      REDIS_URL: redis://redis:6379
-      SECRET_KEY_BASE: your-secret-key-base-for-demo-only-change-in-production
-      LAGO_ENCRYPTION_PRIMARY_KEY: demo-encryption-primary-key
-      LAGO_ENCRYPTION_DETERMINISTIC_KEY: demo-encryption-deterministic-key
-      LAGO_ENCRYPTION_KEY_DERIVATION_SALT: demo-encryption-derivation-salt
-    command: bundle exec sidekiq
-
-  clock:
-    image: getlago/api:v1.17.1
-    depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    environment:
-      RAILS_ENV: production
-      DATABASE_URL: postgresql://lago:lago@db:5432/lago
-      REDIS_URL: redis://redis:6379
-      SECRET_KEY_BASE: your-secret-key-base-for-demo-only-change-in-production
-      LAGO_ENCRYPTION_PRIMARY_KEY: demo-encryption-primary-key
-      LAGO_ENCRYPTION_DETERMINISTIC_KEY: demo-encryption-deterministic-key
-      LAGO_ENCRYPTION_KEY_DERIVATION_SALT: demo-encryption-derivation-salt
-    command: bundle exec clockwork lib/clock.rb
-
-  front:
-    image: getlago/front:v1.17.1
-    depends_on:
-      - api
-    environment:
-      API_URL: http://api:3000
-      APP_ENV: production
-    ports:
-      - "8081:80"
-
-volumes:
-  lago_pg_data:
-COMPOSE
-RSA_KEY="$RSA_KEY" awk '/__RSA_PRIVATE_KEY__/ { n = split(ENVIRON["RSA_KEY"], k, "\n"); for (i = 1; i <= n; i++) print "        " k[i]; next } { print }' \
-  "$LAGO_DIR/docker-compose.yml" > "$LAGO_DIR/docker-compose.yml.tmp" && mv "$LAGO_DIR/docker-compose.yml.tmp" "$LAGO_DIR/docker-compose.yml"
-
-cd "$LAGO_DIR"
-docker compose up -d
+# Lago signs its tokens with an RSA key: generate one for this demo, never
+# commit one. It goes into a temporary env file next to the key, base64
+# encoded, which is the form Lago reads (LAGO_RSA_PRIVATE_KEY). The tracked
+# Compose file is used as it is, the same way the Lago guide runs it.
+LAGO_SECRETS="$(mktemp -d)"
+openssl genrsa 2048 2>/dev/null > "$LAGO_SECRETS/lago_rsa.key"
+echo "LAGO_RSA_PRIVATE_KEY=$(base64 < "$LAGO_SECRETS/lago_rsa.key" | tr -d '\n')" > "$LAGO_SECRETS/lago.env"
+docker compose -f "$LAGO_DIR/docker-compose.yml" --env-file "$LAGO_SECRETS/lago.env" up -d
 echo "    Waiting for Lago API to be ready..."
 for i in $(seq 1 60); do
     if curl -s http://localhost:3000/health > /dev/null 2>&1; then

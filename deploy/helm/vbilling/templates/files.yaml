@@ -1,0 +1,19 @@
+{{- $custom := and .Values.metering.customMetrics (not (kindIs "string" .Values.metering.customMetrics)) -}}
+{{- if or .Values.records.formats $custom }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "vbilling.fullname" . }}-files
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "vbilling.labels" . | nindent 4 }}
+data:
+  {{- if $custom }}
+  custom-metrics.yaml: |
+    {{- toYaml .Values.metering.customMetrics | nindent 4 }}
+  {{- end }}
+  {{- if .Values.records.formats }}
+  records-formats.yaml: |
+    {{- toYaml .Values.records.formats | nindent 4 }}
+  {{- end }}
+{{- end }}

@@ -40,6 +40,12 @@ type tenantFiller interface {
 // SourceTenantFill is the ledger source of windows filled after a tenant API outage.
 const SourceTenantFill = "tenant-api-fill"
 
+// PromCollector reads Prometheus usage under its own ledger source.
+type PromCollector interface {
+	Collect(ctx context.Context, targets []metrics.Target, windows []metrics.Window) ([]metrics.PromWindow, error)
+	Commit(results []metrics.PromWindow, commit func(w metrics.Window, evs []usage.Event) error) error
+}
+
 // Controller owns tenant reconciliation and metering.
 type Controller struct {
 	cfg     *config.Config
@@ -61,6 +67,27 @@ type Controller struct {
 	// gaps: tenant cluster external ID -> end of the first window its own
 	// API could not be read for. Persisted, so a restart still fills them.
 	gaps *kv.Store
+
+	prom    PromCollector
+	aliases map[string]string // gateway or external identity -> tenant ID
+}
+
+// UsePrometheus enables Prometheus-read usage.
+func (c *Controller) UsePrometheus(p PromCollector) { c.prom = p }
+
+// ResolveTenant maps a value an emitter sends (a tenant ID, or an alias
+// from the vbilling.vcluster.com/aliases setting of a cluster) to a known
+// tenant. Unknown values are returned as they are, with known=false.
+func (c *Controller) ResolveTenant(v string) (string, bool) {
+	if _, ok := c.tenants.Get(v); ok {
+		return v, true
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if t, ok := c.aliases[v]; ok {
+		return t, true
+	}
+	return v, false
 }
 
 func New(cfg *config.Config, disc Discoverer, coll Collector, sp *spool.Spool, tenants *pipeline.TenantRegistry,
@@ -87,6 +114,7 @@ func (c *Controller) Run(ctx context.Context) error {
 		c.cfg.Adapters, c.cfg.CollectionInterval, c.cfg.ReconcileInterval, c.cfg.Region)
 	c.Reconcile(ctx)
 	c.CollectDue(ctx)
+	c.CollectPrometheusDue(ctx)
 
 	reconcile := time.NewTicker(c.cfg.ReconcileInterval)
 	defer reconcile.Stop()
@@ -100,6 +128,7 @@ func (c *Controller) Run(ctx context.Context) error {
 			c.Reconcile(ctx)
 		case <-collect.C:
 			c.CollectDue(ctx)
+			c.CollectPrometheusDue(ctx)
 			collect.Reset(c.untilNextWindow())
 		}
 	}
@@ -162,7 +191,17 @@ func (c *Controller) Reconcile(ctx context.Context) {
 		c.tenants.Upsert(t)
 	}
 
+	aliases := map[string]string{}
+	src := discovery.TenantSource(c.cfg.TenantSource)
+	for i := range clusters {
+		for _, a := range strings.Split(clusters[i].Meta("aliases"), ",") {
+			if a = strings.TrimSpace(a); a != "" {
+				aliases[a] = clusters[i].TenantID(src)
+			}
+		}
+	}
 	c.mu.Lock()
+	c.aliases = aliases
 	c.clusters = clusters
 	c.discovered = true
 	for _, t := range tenants {
@@ -251,7 +290,7 @@ func (c *Controller) tenantsFrom(clusters []discovery.TenantCluster) []usage.Ten
 		first(&t.Currency, cl.Meta("currency"))
 		first(&t.Project, cl.Project)
 		first(&t.Class, cl.Meta("tenant-class"), c.cfg.TenantClass)
-		first(&t.Plan, cl.Meta("plan"))
+		first(&t.Plan, cl.Meta("plan"), c.cfg.PlanByClass[t.Class])
 		if v := cl.Meta("stripe-customer-id"); v != "" {
 			t.ProviderIDs["stripe"] = v
 		}
@@ -315,12 +354,7 @@ func (c *Controller) CollectDue(ctx context.Context) {
 		windows = append(windows, metrics.Window{Start: end.Add(-size), End: end, Latest: end.Equal(latestEnd)})
 	}
 
-	src := discovery.TenantSource(c.cfg.TenantSource)
-	var targets []metrics.Target
-	for _, cl := range c.Clusters() {
-		t, _ := c.tenants.Get(cl.TenantID(src))
-		targets = append(targets, metrics.Target{Cluster: cl, Tenant: t.ID, Project: cl.Project, TenantClass: t.Class})
-	}
+	targets := c.targets()
 
 	started := time.Now()
 	byWindow, st, err := c.coll.Collect(ctx, targets, windows)
@@ -433,4 +467,79 @@ func parseGap(store *kv.Store, id string) ([2]time.Time, bool) {
 		return [2]time.Time{}, false
 	}
 	return [2]time.Time{from, to}, true
+}
+
+// targets resolves every known cluster to its billing identity.
+func (c *Controller) targets() []metrics.Target {
+	src := discovery.TenantSource(c.cfg.TenantSource)
+	var targets []metrics.Target
+	for _, cl := range c.Clusters() {
+		t, _ := c.tenants.Get(cl.TenantID(src))
+		targets = append(targets, metrics.Target{Cluster: cl, Tenant: t.ID, Project: cl.Project, TenantClass: t.Class})
+	}
+	return targets
+}
+
+// CollectPrometheusDue reads Prometheus usage for every window since the
+// Prometheus watermark, bounded by MAX_BACKFILL. It runs after the
+// Kubernetes windows are committed and never holds them up. When every read
+// fails (Prometheus is down), nothing is committed: the windows are read
+// again, one by one, once it answers. When only some reads fail, the
+// windows are committed without them, and those counters bill their whole
+// increase in the first window that reads them again.
+func (c *Controller) CollectPrometheusDue(ctx context.Context) {
+	if c.prom == nil || !c.Ready() || !c.prometheusConfigured() {
+		return
+	}
+	size := c.cfg.CollectionInterval
+	latestEnd := c.now().UTC().Truncate(size)
+	firstEnd := latestEnd
+	if wm, ok := c.spool.Watermark(metrics.SourcePrometheus); ok {
+		if !latestEnd.After(wm) {
+			return
+		}
+		firstEnd = wm.Add(size)
+		if earliest := latestEnd.Add(-c.cfg.MaxBackfill).Truncate(size).Add(size); firstEnd.Before(earliest) {
+			log.Printf("[controller] Prometheus windows before %s are older than MAX_BACKFILL=%s; counters bill that usage in the first window read",
+				earliest.Add(-size).Format(time.RFC3339), c.cfg.MaxBackfill)
+			firstEnd = earliest
+		}
+	}
+	var windows []metrics.Window
+	for end := firstEnd; !end.After(latestEnd); end = end.Add(size) {
+		windows = append(windows, metrics.Window{Start: end.Add(-size), End: end, Latest: end.Equal(latestEnd)})
+	}
+	results, err := c.prom.Collect(ctx, c.targets(), windows)
+	if err != nil {
+		log.Printf("[controller] Prometheus: %v; %d window(s) wait until it answers", err, len(windows))
+		c.tel.Add("vbilling_prometheus_unavailable_total", "Runs where every Prometheus read failed (windows wait).", nil, 1)
+		return
+	}
+	total := 0
+	err = c.prom.Commit(results, func(w metrics.Window, evs []usage.Event) error {
+		total += len(evs)
+		return c.spool.AppendWindow(metrics.SourcePrometheus, w.End, evs, "")
+	})
+	if err != nil {
+		log.Printf("[controller] commit Prometheus windows: %v (will retry)", err)
+		return
+	}
+	if total > 0 || len(windows) > 1 {
+		log.Printf("[controller] Prometheus: %d event(s) over %d window(s)", total, len(windows))
+	}
+	c.tel.Add("vbilling_prometheus_events_total", "Usage events read from Prometheus.", nil, float64(total))
+}
+
+// prometheusConfigured is true when PROMETHEUS_URL is set or a cluster
+// names its own Prometheus.
+func (c *Controller) prometheusConfigured() bool {
+	if c.cfg.PrometheusURL != "" {
+		return true
+	}
+	for _, cl := range c.Clusters() {
+		if cl.Meta("prometheus-url") != "" {
+			return true
+		}
+	}
+	return false
 }

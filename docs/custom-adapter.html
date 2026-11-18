@@ -252,6 +252,7 @@
         <a href="getting-started.html">Getting Started</a>
         <a href="configuration.html">Configuration</a>
         <a href="metrics.html">Metrics Reference</a>
+        <a href="usage-sources.html">Usage Sources</a>
         <a href="private-nodes.html">Dedicated and Private Nodes</a>
         <a href="example-gke.html">Example: GKE with GPUs</a>
         <a href="troubleshooting.html">Troubleshooting</a>
@@ -400,9 +401,10 @@ def verify(body: bytes, header: str, secret: str, tolerance: int = 300) -&gt; bo
     "dimensions": {"model": "llama-3.3-70b"}}]}'</span></code></div>
       <ul>
         <li>Ingest is off until <code>INGEST_TOKEN</code> (or <code>API_TOKEN</code>) is set. Up to 5,000 events or 10 MiB per request, as <code>{"events": [...]}</code> or a bare array.</li>
-        <li>The metric must be built in or declared in <code>CUSTOM_METRICS</code> (<code>code:unit[:group_key|group_key]</code>). Custom metrics are billable, so billing adapters create them at bootstrap.</li>
+        <li>The metric must be built in or declared in <code>metering.customMetrics</code> (or <code>CUSTOM_METRICS</code>, <code>code:unit[:group_key|group_key]</code>). Custom metrics are billable unless declared with <code>billable: false</code>, so billing adapters create them at bootstrap. See <a href="metrics.html#custom-metrics">Custom metrics</a>.</li>
         <li><code>window_end</code> may be at most 5 minutes in the future and <code>window_start</code> at most 34 days old. <code>region</code> defaults to <code>REGION</code>, and <code>source</code> becomes <code>ingest:&lt;X-VBilling-Client&gt;</code>.</li>
         <li>Send a stable <code>id</code>, or let vBilling derive one from the event's identity, which excludes the quantity. An ID seen in the last 48 hours is reported as a duplicate and dropped, so send each window once, after it closes.</li>
+        <li>Events without an <code>id</code> that share tenant, metric, window and dimensions would count once, so vBilling rejects the second of them in one request, and warns when one matches usage already in the ledger. For usage per request, such as tokens from an AI gateway, use <a href="usage-sources.html#records"><code>POST /api/v1/records</code></a>, which sums records per window and deduplicates them by request ID.</li>
         <li>Events are validated one by one: the response lists accepted IDs, duplicates and rejections with their index and reason, and is a 400 only when no event passed.</li>
       </ul>
       <p>See <a href="configuration.html#environment-variables">Configuration</a> and <a href="metrics.html#custom-metrics">Custom metrics</a> for the full reference.</p>

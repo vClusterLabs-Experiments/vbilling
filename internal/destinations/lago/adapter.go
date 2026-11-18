@@ -6,10 +6,14 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/vclusterlabs-experiments/vbilling/internal/config"
 	"github.com/vclusterlabs-experiments/vbilling/internal/destinations"
+	"github.com/vclusterlabs-experiments/vbilling/internal/kv"
 	"github.com/vclusterlabs-experiments/vbilling/internal/usage"
 )
 
@@ -18,29 +22,63 @@ func init() {
 		if cfg.LagoAPIKey == "" {
 			return nil, fmt.Errorf("LAGO_API_KEY is required when the lago adapter is enabled")
 		}
-		return &Adapter{
-			client: NewClient(cfg.LagoAPIURL, cfg.LagoAPIKey),
-			cfg:    cfg,
-		}, nil
+		card, err := LoadPriceCard(cfg.LagoPriceCard)
+		if err != nil {
+			return nil, fmt.Errorf("LAGO_PRICE_CARD: %w", err)
+		}
+		state, err := kv.Open(filepath.Join(cfg.DataDir, "state-lago.json"))
+		if err != nil {
+			return nil, fmt.Errorf("open lago state: %w", err)
+		}
+		return New(NewClient(cfg.LagoAPIURL, cfg.LagoAPIKey), cfg, state, card), nil
 	})
 }
 
 // Adapter ships usage events to Lago.
 type Adapter struct {
-	client *Client
-	cfg    *config.Config
+	client    *Client
+	cfg       *config.Config
+	state     *kv.Store // charges and SKU filters already set up in Lago
+	priceCard PriceCard
+	now       func() time.Time
+
+	// planMu serializes read-modify-write updates of plans and billable
+	// metrics: Lago has no conditional update, and a plan update built
+	// from a stale read deletes what another update just added.
+	planMu   sync.Mutex
+	skuRetry map[string]retry // metric -> when to retry its SKU filters
+}
+
+// New builds the adapter around a client (exported for tests). A nil state
+// keeps adapter state in memory only.
+func New(c *Client, cfg *config.Config, state *kv.Store, card PriceCard) *Adapter {
+	if state == nil {
+		state = kv.Memory()
+	}
+	return &Adapter{client: c, cfg: cfg, state: state, priceCard: card, now: time.Now, skuRetry: map[string]retry{}}
 }
 
 func (a *Adapter) Name() string { return "lago" }
+
+// managedPlans lists the plans whose charges and SKU filters vBilling keeps
+// up to date: the default plan, then LAGO_MANAGED_PLANS. Other plans are
+// never changed.
+func (a *Adapter) managedPlans() []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, code := range append([]string{a.cfg.DefaultPlanCode}, a.cfg.LagoManagedPlans...) {
+		if code != "" && !seen[code] {
+			seen[code] = true
+			out = append(out, code)
+		}
+	}
+	return out
+}
 
 // Accepts billable metrics plus GPU utilization, which v0.1 created as a
 // Lago billable metric and existing plans may still reference.
 func (a *Adapter) Accepts(metric string) bool {
 	return destinations.BillableOnly(metric) || metric == MetricGPUUtilization
-}
-
-func (a *Adapter) Bootstrap(ctx context.Context, catalog []usage.MetricDef) error {
-	return Bootstrap(ctx, a.client, a.cfg, catalog)
 }
 
 func (a *Adapter) EnsureTenant(ctx context.Context, t usage.Tenant) error {
@@ -134,9 +172,15 @@ func ToEvent(ev *usage.Event) Event {
 
 func (a *Adapter) SendEvents(ctx context.Context, events []usage.Event) error {
 	lagoEvents := make([]Event, 0, len(events))
+	skus := map[string][]string{} // metric -> distinct SKUs in this batch
+	seen := map[[2]string]bool{}
 	for i := range events {
 		if a.Accepts(events[i].Metric) {
 			lagoEvents = append(lagoEvents, ToEvent(&events[i]))
+			if key := [2]string{events[i].Metric, events[i].SKU}; key[1] != "" && !seen[key] {
+				seen[key] = true
+				skus[key[0]] = append(skus[key[0]], key[1])
+			}
 		}
 	}
 	// Lago's batch endpoint caps at 100 events per call. Transaction IDs are
@@ -154,6 +198,10 @@ func (a *Adapter) SendEvents(ctx context.Context, events []usage.Event) error {
 			return fmt.Errorf("send %d events: %w", len(batch), err)
 		}
 	}
+	// After delivery, never before: SKU filters are best effort. Lago
+	// matches filters when it aggregates, so the events just sent are
+	// priced by the filters added here.
+	a.syncSKUs(ctx, skus)
 	return nil
 }
 

@@ -1,4 +1,6 @@
 {{- $adapters := include "vbilling.adapters" . | splitList "," -}}
+{{- $files := or .Values.records.formats (and .Values.metering.customMetrics (not (kindIs "string" .Values.metering.customMetrics))) -}}
+{{- $lagoPriceCard := and (has "lago" $adapters) (or .Values.lago.priceCard .Values.lago.priceCardConfigMap) -}}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -19,6 +21,8 @@ spec:
       annotations:
         checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
         checksum/prometheus-metrics: {{ toYaml .Values.prometheus.metrics | sha256sum }}
+        checksum/files: {{ include (print $.Template.BasePath "/files.yaml") . | sha256sum }}
+        checksum/lago-price-card: {{ toYaml .Values.lago.priceCard | sha256sum }}
     spec:
       serviceAccountName: {{ include "vbilling.serviceAccountName" . }}
       {{- with .Values.podSecurityContext }}
@@ -58,6 +62,14 @@ spec:
               value: /var/lib/vbilling
             - name: RETENTION
               value: {{ .Values.persistence.retention | quote }}
+            {{- if .Values.persistence.archive.enabled }}
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: ARCHIVE_DIR
+              value: {{ printf "%s/$(POD_NAME)" (trimSuffix "/" .Values.persistence.archive.mountPath) | quote }}
+            {{- end }}
             - name: LISTEN_ADDR
               value: ":{{ .Values.api.port }}"
             - name: DEFAULT_PLAN_CODE
@@ -90,8 +102,37 @@ spec:
               value: {{ .Values.metering.dedicatedNodeLabel | quote }}
             - name: REGION_FROM_NODE
               value: {{ .Values.metering.regionFromNode | quote }}
+            {{- if kindIs "string" .Values.metering.customMetrics }}
             - name: CUSTOM_METRICS
               value: {{ .Values.metering.customMetrics | quote }}
+            {{- else if .Values.metering.customMetrics }}
+            - name: CUSTOM_METRICS_FILE
+              value: /etc/vbilling/files/custom-metrics.yaml
+            {{- end }}
+            {{- if .Values.billing.planByClass }}
+            - name: PLAN_BY_CLASS
+              value: {{ $p := list }}{{ range $k, $v := .Values.billing.planByClass }}{{ $p = append $p (printf "%s=%s" $k $v) }}{{ end }}{{ join "," $p | quote }}
+            {{- end }}
+            {{- if .Values.crossChecks }}
+            - name: CROSS_CHECKS
+              value: {{ $c := list }}{{ range .Values.crossChecks }}{{ $c = append $c (printf "%s=%s:%v%%" .primary .secondary (.tolerancePercent | default 1)) }}{{ end }}{{ join "," $c | quote }}
+            {{- end }}
+            - name: RECORDS_SETTLE
+              value: {{ .Values.records.settle | quote }}
+            - name: RECORDS_RETENTION
+              value: {{ .Values.records.retention | quote }}
+            - name: RECORDS_ALLOW_UNKEYED
+              value: {{ .Values.records.allowUnkeyed | quote }}
+            - name: RECORDS_UNKNOWN_TENANTS
+              value: {{ .Values.records.unknownTenants | quote }}
+            - name: RECORDS_LITELLM
+              value: {{ .Values.records.litellm | quote }}
+            - name: RECORDS_ARCHIVE
+              value: {{ and .Values.records.archive .Values.persistence.archive.enabled | quote }}
+            {{- if .Values.records.formats }}
+            - name: RECORDS_MAPPINGS_FILE
+              value: /etc/vbilling/files/records-formats.yaml
+            {{- end }}
             - name: WATCH_DELETIONS
               value: {{ .Values.metering.watchDeletions | quote }}
             - name: DRA_GPU_DRIVERS
@@ -118,6 +159,8 @@ spec:
               value: {{ .Values.enforcement.mode | quote }}
             - name: ENFORCEMENT_RULES
               value: {{ .Values.enforcement.rules | quote }}
+            - name: ENFORCEMENT_IN_CLUSTER
+              value: {{ .Values.enforcement.inCluster | quote }}
             {{- if .Values.prometheus.url }}
             - name: PROMETHEUS_URL
               value: {{ .Values.prometheus.url | quote }}
@@ -129,21 +172,34 @@ spec:
               value: {{ .Values.prometheus.gpuCountQuery | quote }}
             - name: PROMETHEUS_PRESET
               value: {{ .Values.prometheus.preset | quote }}
-            {{- if .Values.prometheus.metrics }}
-            - name: PROMETHEUS_METRICS_FILE
-              value: /etc/vbilling/prometheus/metrics.yaml
-            {{- end }}
             {{- if .Values.prometheus.bearerTokenFile }}
             - name: PROMETHEUS_BEARER_TOKEN_FILE
               value: {{ .Values.prometheus.bearerTokenFile | quote }}
             {{- end }}
             {{- include "vbilling.secretEnv" (dict "env" "PROMETHEUS_HEADERS" "existing" .Values.prometheus.existingSecret "key" "headers" "inline" .Values.prometheus.headers "chartKey" "prometheus-headers" "root" .) | nindent 12 }}
             {{- end }}
+            {{- if .Values.prometheus.metrics }}
+            - name: PROMETHEUS_METRICS_FILE
+              value: /etc/vbilling/prometheus/metrics.yaml
+            {{- end }}
+            - name: PROMETHEUS_SOURCE_LABEL
+              value: {{ .Values.prometheus.sourceLabel | quote }}
+            - name: PROMETHEUS_LOOKBACK
+              value: {{ .Values.prometheus.lookback | quote }}
             {{- include "vbilling.secretEnv" (dict "env" "API_TOKEN" "existing" .Values.api.existingSecret "key" "api-token" "inline" .Values.api.token "chartKey" "api-token" "root" .) | nindent 12 }}
             {{- include "vbilling.secretEnv" (dict "env" "INGEST_TOKEN" "existing" .Values.api.existingSecret "key" "ingest-token" "inline" .Values.api.ingestToken "chartKey" "ingest-token" "root" .) | nindent 12 }}
+            {{- include "vbilling.secretEnv" (dict "env" "INGEST_TOKENS" "existing" .Values.api.existingSecret "key" "ingest-tokens" "inline" .Values.api.tenantIngestTokens "chartKey" "ingest-tokens" "root" .) | nindent 12 }}
             {{- if has "lago" $adapters }}
             - name: LAGO_API_URL
               value: {{ .Values.lago.apiURL | quote }}
+            {{- if $lagoPriceCard }}
+            - name: LAGO_PRICE_CARD
+              value: /etc/vbilling/lago/price-card.yaml
+            {{- end }}
+            {{- with .Values.lago.managedPlans }}
+            - name: LAGO_MANAGED_PLANS
+              value: {{ join "," . | quote }}
+            {{- end }}
             {{- include "vbilling.secretEnv" (dict "env" "LAGO_API_KEY" "existing" .Values.lago.existingSecret "key" "api-key" "inline" .Values.lago.apiKey "chartKey" "lago-api-key" "root" .) | nindent 12 }}
             {{- end }}
             {{- if or (has "stripe" $adapters) .Values.metronome.stripeLink }}
@@ -186,6 +242,10 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/vbilling
+            {{- if .Values.persistence.archive.enabled }}
+            - name: archive
+              mountPath: {{ .Values.persistence.archive.mountPath }}
+            {{- end }}
             {{- if .Values.tenantAPI.externalClustersSecret }}
             - name: tenant-clusters
               mountPath: /etc/vbilling/tenants
@@ -196,13 +256,29 @@ spec:
               mountPath: /etc/vbilling/prometheus
               readOnly: true
             {{- end }}
+            {{- if $files }}
+            - name: files
+              mountPath: /etc/vbilling/files
+              readOnly: true
+            {{- end }}
+            {{- if $lagoPriceCard }}
+            - name: lago-price-card
+              mountPath: /etc/vbilling/lago
+              readOnly: true
+            {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
-      {{- if or (not .Values.persistence.enabled) .Values.tenantAPI.externalClustersSecret .Values.prometheus.metrics }}
+      {{- $archiveClaim := and .Values.persistence.archive.enabled .Values.persistence.archive.existingClaim }}
+      {{- if or (not .Values.persistence.enabled) .Values.tenantAPI.externalClustersSecret .Values.prometheus.metrics $files $lagoPriceCard $archiveClaim }}
       volumes:
         {{- if not .Values.persistence.enabled }}
         - name: data
           emptyDir: {}
+        {{- end }}
+        {{- if $archiveClaim }}
+        - name: archive
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.archive.existingClaim }}
         {{- end }}
         {{- if .Values.tenantAPI.externalClustersSecret }}
         - name: tenant-clusters
@@ -213,6 +289,16 @@ spec:
         - name: prometheus-metrics
           configMap:
             name: {{ include "vbilling.fullname" . }}-prometheus-metrics
+        {{- end }}
+        {{- if $files }}
+        - name: files
+          configMap:
+            name: {{ include "vbilling.fullname" . }}-files
+        {{- end }}
+        {{- if $lagoPriceCard }}
+        - name: lago-price-card
+          configMap:
+            name: {{ .Values.lago.priceCardConfigMap | default (printf "%s-lago-price-card" (include "vbilling.fullname" .)) }}
         {{- end }}
       {{- end }}
       {{- with .Values.nodeSelector }}
@@ -227,8 +313,10 @@ spec:
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-  {{- if .Values.persistence.enabled }}
+  {{- $archiveTemplate := and .Values.persistence.archive.enabled (not .Values.persistence.archive.existingClaim) }}
+  {{- if or .Values.persistence.enabled $archiveTemplate }}
   volumeClaimTemplates:
+    {{- if .Values.persistence.enabled }}
     - metadata:
         name: data
       spec:
@@ -239,4 +327,17 @@ spec:
         resources:
           requests:
             storage: {{ .Values.persistence.size }}
+    {{- end }}
+    {{- if $archiveTemplate }}
+    - metadata:
+        name: archive
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- with .Values.persistence.archive.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.archive.size }}
+    {{- end }}
   {{- end }}
