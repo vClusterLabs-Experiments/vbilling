@@ -228,6 +228,7 @@
         <a href="getting-started.html">Getting Started</a>
         <a href="configuration.html" class="active">Configuration</a>
         <a href="metrics.html">Metrics Reference</a>
+        <a href="usage-sources.html">Usage Sources</a>
         <a href="private-nodes.html">Dedicated and Private Nodes</a>
         <a href="example-gke.html">Example: GKE with GPUs</a>
         <a href="troubleshooting.html">Troubleshooting</a>
@@ -251,7 +252,7 @@
 
     <main class="content">
       <h1>Configuration</h1>
-      <p class="subtitle">Every setting for vBilling v0.2: environment variables, Helm chart values, and pricing setup in your billing platform.</p>
+      <p class="subtitle">Every setting for vBilling v0.3: environment variables, Helm chart values, and pricing setup in your billing platform.</p>
 
       <!-- Environment Variables -->
       <h2 id="environment-variables">Environment Variables</h2>
@@ -340,8 +341,13 @@
             </tr>
             <tr>
               <td><code>RETENTION</code></td>
-              <td>How long closed ledger segments are kept once every destination has consumed them.</td>
+              <td>How long closed ledger segments stay on the ledger volume once every destination has consumed them. <code>0</code> keeps them forever.</td>
               <td class="td-default">168h</td>
+            </tr>
+            <tr>
+              <td><code>ARCHIVE_DIR</code></td>
+              <td>Long-term archive. Before compaction deletes a segment, vBilling gzips it into this directory and records it in <code>archive.jsonl</code>. See <a href="#retention-and-disputes">Retention and disputes</a>.</td>
+              <td class="td-default">(none)</td>
             </tr>
           </tbody>
         </table>
@@ -415,7 +421,12 @@
             </tr>
             <tr>
               <td><code>CUSTOM_METRICS</code></td>
-              <td>Operator metrics accepted by the ingest API, <code>code:unit[:key|key],...</code></td>
+              <td>Operator metrics in the v0.2 string form, <code>code:unit[:key|key],...</code>. All of them are billable.</td>
+              <td class="td-default">(none)</td>
+            </tr>
+            <tr>
+              <td><code>CUSTOM_METRICS_FILE</code></td>
+              <td>Path of a YAML list of operator metrics: <code>code</code>, <code>name</code>, <code>unit</code>, <code>description</code>, <code>groupKeys</code> and <code>billable</code> (default <code>true</code>; <code>false</code> keeps a metric informational). Helm renders <code>metering.customMetrics</code> into it. See <a href="metrics.html#custom-metrics">Custom metrics</a>.</td>
               <td class="td-default">(none)</td>
             </tr>
             <tr>
@@ -425,12 +436,12 @@
             </tr>
             <tr>
               <td><code>EGRESS_QUERY</code></td>
-              <td>PromQL template for egress bytes. Placeholders: <code>{{namespace}}</code>, <code>{{vcluster}}</code>, <code>{{instance}}</code>, <code>{{project}}</code>, <code>{{tenant}}</code>, <code>{{tenant_cluster}}</code>, <code>{{window}}</code> (e.g. <code>60s</code>), <code>{{window_seconds}}</code> (e.g. <code>60</code>).</td>
-              <td class="td-default">container_network_transmit_bytes_total increase</td>
+              <td>PromQL query for egress bytes. Without it, egress is read as a counter, <code>container_network_transmit_bytes_total{{selector}}</code>, and billed exactly; a query makes it an estimate. <code>none</code> turns egress off. Placeholders: <code>{{selector}}</code>, <code>{{matchers}}</code>, <code>{{namespace}}</code>, <code>{{vcluster}}</code>, <code>{{instance}}</code>, <code>{{project}}</code>, <code>{{tenant}}</code>, <code>{{tenant_cluster}}</code>, <code>{{window}}</code> (e.g. <code>60s</code>), <code>{{window_seconds}}</code> (e.g. <code>60</code>).</td>
+              <td class="td-default">(none: a counter)</td>
             </tr>
             <tr>
               <td><code>GPU_UTIL_QUERY</code>, <code>GPU_COUNT_QUERY</code></td>
-              <td>Replace the GPU utilization queries (same placeholders, results grouped by <code>modelName</code> or <code>gpu_type</code>). <code>none</code> disables utilization.</td>
+              <td>Replace the GPU utilization queries (same placeholders, results grouped by <code>modelName</code> or <code>gpu_type</code>). <code>none</code> disables utilization. For clusters with their own nodes, a Prometheus of their own or <code>PROMETHEUS_PRESET</code>, the defaults select DCGM series with <code>{{matchers}}</code>.</td>
               <td class="td-default">DCGM, <code>namespace</code> or <code>exported_namespace</code></td>
             </tr>
             <tr>
@@ -440,13 +451,23 @@
             </tr>
             <tr>
               <td><code>PROMETHEUS_PRESET</code></td>
-              <td><code>vcluster-platform</code> reads vCluster Platform fleet observability: egress and GPU utilization selected by the <code>vcluster_platform_instance</code> and <code>vcluster_platform_project</code> labels.</td>
+              <td><code>vcluster-platform</code> reads vCluster Platform fleet observability: <code>{{matchers}}</code> becomes the <code>vcluster_platform_instance</code> and <code>vcluster_platform_project</code> labels for every Prometheus metric, egress and GPU utilization included.</td>
               <td class="td-default">(none)</td>
             </tr>
             <tr>
               <td><code>PROMETHEUS_METRICS_FILE</code></td>
-              <td>Metrics defined by PromQL, evaluated per tenant cluster at every window end (billable ones are created in the billing platforms).</td>
+              <td>Metrics read from Prometheus for every cluster and window: <code>counter:</code> (raw samples, exact) or <code>query:</code> (PromQL, an estimate). Billable ones are created in the billing platforms. See <a href="usage-sources.html#prometheus">Usage Sources</a>.</td>
               <td class="td-default">(none)</td>
+            </tr>
+            <tr>
+              <td><code>PROMETHEUS_SOURCE_LABEL</code></td>
+              <td>Label that names the source cluster on series from clusters with their own nodes, an external label their Prometheus agent adds when it remote writes. For those clusters <code>{{matchers}}</code> becomes <code>&lt;label&gt;="&lt;cluster name&gt;"</code>. See <a href="usage-sources.html#scoping">Scope series to a cluster</a>.</td>
+              <td class="td-default">vcluster</td>
+            </tr>
+            <tr>
+              <td><code>PROMETHEUS_LOOKBACK</code></td>
+              <td>How far before a window vBilling looks for the sample a counter's increase starts from. Keep it longer than the scrape interval plus any remote-write delay.</td>
+              <td class="td-default">10m</td>
             </tr>
             <tr>
               <td><code>PROMETHEUS_BEARER_TOKEN_FILE</code></td>
@@ -472,6 +493,27 @@
           </tbody>
         </table>
       </div>
+      <h3 id="records">Per-request records and cross-checks</h3>
+      <p>Records from AI gateways and inference servers (<code>POST /api/v1/records</code>), and comparisons of two sources of the same usage. See <a href="usage-sources.html">Usage Sources</a>.</p>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead><tr><th>Variable</th><th>Description</th><th>Default</th></tr></thead>
+          <tbody>
+            <tr><td><code>RECORDS_SETTLE</code></td><td>How long after a window ends its records still count as on time. Records that arrive later become a separate late adjustment to the same window. Must be shorter than <code>COLLECTION_INTERVAL</code>; when the variable is unset, windows of 30s or less use half the window.</td><td class="td-default">30s</td></tr>
+            <tr><td><code>RECORDS_RETENTION</code></td><td>How long raw request records stay under <code>DATA_DIR/records</code>. Records older than this minus one hour (34 days at most) are refused. At least <code>2h</code>.</td><td class="td-default">168h</td></tr>
+            <tr><td><code>RECORDS_MAPPINGS_FILE</code></td><td>Path of a YAML map of payload formats besides <code>vbilling</code> and <code>litellm</code>: field paths for the request ID, time, tenant and quantities of each gateway.</td><td class="td-default">(none)</td></tr>
+            <tr><td><code>RECORDS_LITELLM</code></td><td>Enable the built-in <code>litellm</code> format for LiteLLM's generic API logger. It declares <code>inference_input_tokens</code> and <code>inference_output_tokens</code>, which every billing adapter then creates.</td><td class="td-default">false</td></tr>
+            <tr><td><code>RECORDS_ALLOW_UNKEYED</code></td><td>Derive a request ID from a record's content when the emitter sends none. Identical records then count once.</td><td class="td-default">false</td></tr>
+            <tr><td><code>RECORDS_UNKNOWN_TENANTS</code></td><td><code>accept</code>: bill records for a tenant vBilling does not know to that tenant ID, and report it in the response and in source health. <code>reject</code>: refuse them.</td><td class="td-default">accept</td></tr>
+            <tr><td><code>RECORDS_ARCHIVE</code></td><td>Also archive raw request records to <code>ARCHIVE_DIR/records</code> before retention deletes them: request-level evidence, at a high volume. Needs <code>ARCHIVE_DIR</code>.</td><td class="td-default">false</td></tr>
+            <tr><td><code>CROSS_CHECKS</code></td><td>Compare two sources of the same usage per tenant and hour, <code>primary=secondary[:tolerance%],...</code>, for example <code>inference_output_tokens=vllm_output_tokens:2%</code>. Both metrics must be declared. Divergence above the tolerance shows in source health and <code>/metrics</code>.</td><td class="td-default">(none), tolerance 1%</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout callout-warn">
+        <div class="callout-icon">!</div>
+        <div><code>RECORDS_SETTLE</code> must be shorter than the window. With <code>billing.collectionInterval</code> of 30s or less, vBilling uses half the window instead of the 30s default.</div>
+      </div>
       <h3>API and enforcement</h3>
       <div class="config-table-wrap">
         <table class="config-table">
@@ -491,7 +533,12 @@
             </tr>
             <tr>
               <td><code>INGEST_TOKEN</code></td>
-              <td>Bearer token for <code>POST /api/v1/events</code>; defaults to <code>API_TOKEN</code>. Ingest is disabled without a token.</td>
+              <td>Bearer token for <code>POST /api/v1/events</code> and <code>POST /api/v1/records</code>; defaults to <code>API_TOKEN</code>. Ingest is disabled without a token.</td>
+              <td class="td-default">(none)</td>
+            </tr>
+            <tr>
+              <td><code>INGEST_TOKENS</code></td>
+              <td>Ingest tokens bound to one tenant, <code>token=tenant,...</code>. Usage sent with such a token is billed to that tenant whatever the payload says, so a gateway inside a tenant's cluster can never bill another tenant. Helm: <code>api.tenantIngestTokens</code> (<code>{tenant: token}</code>) or the <code>ingest-tokens</code> key of <code>api.existingSecret</code>.</td>
               <td class="td-default">(none)</td>
             </tr>
             <tr>
@@ -503,6 +550,11 @@
               <td><code>ENFORCEMENT_RULES</code></td>
               <td>Overrides, <code>event.type=state,...</code> (for example <code>alerts.spend_threshold_reached=suspended</code>).</td>
               <td class="td-default">(none)</td>
+            </tr>
+            <tr>
+              <td><code>ENFORCEMENT_IN_CLUSTER</code></td>
+              <td>In <code>enforce</code> mode, also install the <code>vbilling-suspended</code> admission policy inside each of a suspended tenant's clusters, through their own API. The only enforcement that reaches clusters with their own nodes. Needs <code>TENANT_API=true</code> and write access to admission policies in each cluster. See <a href="private-nodes.html#enforcement">Billing-state enforcement inside the cluster</a>.</td>
+              <td class="td-default">false</td>
             </tr>
           </tbody>
         </table>
@@ -623,9 +675,24 @@
               <td class="td-default">vcluster-standard</td>
             </tr>
             <tr>
+              <td><code>PLAN_BY_CLASS</code></td>
+              <td>Plan per tenant class, <code>class=plan,...</code> (for example <code>enterprise=vcluster-enterprise,dev=vcluster-dev</code>), for tenants whose clusters set no <code>vbilling.vcluster.com/plan</code>. A Lago plan code, Stripe plan tag or Metronome rate card, like <code>DEFAULT_PLAN_CODE</code>.</td>
+              <td class="td-default">(none)</td>
+            </tr>
+            <tr>
               <td><code>BILLING_CURRENCY</code></td>
               <td>ISO 4217 currency for customers and plans.</td>
               <td class="td-default">USD</td>
+            </tr>
+            <tr>
+              <td><code>LAGO_PRICE_CARD</code></td>
+              <td>Path of a YAML price card: the amounts vBilling uses when it creates a charge, or a charge filter for a new SKU. Amounts that already exist in Lago are never changed. See <a href="lago.html#price-card">Prices as code</a>.</td>
+              <td class="td-default">(none)</td>
+            </tr>
+            <tr>
+              <td><code>LAGO_MANAGED_PLANS</code></td>
+              <td>Comma-separated plans besides the default plan whose charges and SKU filters vBilling keeps up to date. Other plans are never changed.</td>
+              <td class="td-default">(none)</td>
             </tr>
           </tbody>
         </table>
@@ -707,14 +774,44 @@
               <td class="td-default">vcluster-standard / USD</td>
             </tr>
             <tr>
+              <td><code>billing.planByClass</code></td>
+              <td>PLAN_BY_CLASS, from a map <code>{class: plan}</code></td>
+              <td class="td-default">{}</td>
+            </tr>
+            <tr>
               <td><code>metering.*</code></td>
-              <td>CPU_MEMORY_BASIS, METER_*, GPU_RESOURCES, SKU_LABEL, CAPACITY_TYPE_LABEL, UNHEALTHY_NODE_TAINTS, VCLUSTER_NODE_LABEL, REGION_FROM_NODE, CUSTOM_METRICS</td>
+              <td>CPU_MEMORY_BASIS, METER_*, GPU_RESOURCES, SKU_LABEL, CAPACITY_TYPE_LABEL, UNHEALTHY_NODE_TAINTS, VCLUSTER_NODE_LABEL, REGION_FROM_NODE</td>
               <td class="td-default">see above</td>
+            </tr>
+            <tr>
+              <td><code>metering.customMetrics</code></td>
+              <td>A list: CUSTOM_METRICS_FILE (ConfigMap). The v0.2 string form still sets CUSTOM_METRICS.</td>
+              <td class="td-default">[]</td>
             </tr>
             <tr>
               <td><code>prometheus.url / egressQuery / gpuUtilQuery / gpuCountQuery / headers / existingSecret / bearerTokenFile / preset / metrics</code></td>
               <td>PROMETHEUS_URL / EGRESS_QUERY / GPU_UTIL_QUERY / GPU_COUNT_QUERY / PROMETHEUS_HEADERS (chart Secret) / PROMETHEUS_BEARER_TOKEN_FILE / PROMETHEUS_PRESET / PROMETHEUS_METRICS_FILE (ConfigMap)</td>
               <td class="td-default">(none)</td>
+            </tr>
+            <tr>
+              <td><code>prometheus.sourceLabel / lookback</code></td>
+              <td>PROMETHEUS_SOURCE_LABEL / PROMETHEUS_LOOKBACK</td>
+              <td class="td-default">vcluster / 10m</td>
+            </tr>
+            <tr>
+              <td><code>records.settle / retention / allowUnkeyed / unknownTenants / archive</code></td>
+              <td>RECORDS_SETTLE / RECORDS_RETENTION / RECORDS_LITELLM / RECORDS_ALLOW_UNKEYED / RECORDS_UNKNOWN_TENANTS / RECORDS_ARCHIVE (only with <code>persistence.archive.enabled</code>)</td>
+              <td class="td-default">30s / 168h / false / accept / false</td>
+            </tr>
+            <tr>
+              <td><code>records.formats</code></td>
+              <td>RECORDS_MAPPINGS_FILE (ConfigMap): payload formats by name</td>
+              <td class="td-default">{}</td>
+            </tr>
+            <tr>
+              <td><code>crossChecks</code></td>
+              <td>CROSS_CHECKS, from a list of <code>{primary, secondary, tolerancePercent}</code> (tolerance default 1)</td>
+              <td class="td-default">[]</td>
             </tr>
             <tr>
               <td><code>tenantAPI.enabled / secretName / adminFallback / privateNodeBilling / excludeNamespaces / externalClustersSecret</code></td>
@@ -735,6 +832,11 @@
               <td><code>lago.apiURL / apiKey / existingSecret (key api-key)</code></td>
               <td>LAGO_API_URL / LAGO_API_KEY</td>
               <td class="td-default">(none)</td>
+            </tr>
+            <tr>
+              <td><code>lago.priceCard / priceCardConfigMap / managedPlans</code></td>
+              <td>LAGO_PRICE_CARD (a ConfigMap, or your own with key <code>price-card.yaml</code>) / LAGO_MANAGED_PLANS</td>
+              <td class="td-default">{} / &quot;&quot; / []</td>
             </tr>
             <tr>
               <td><code>stripe.apiKey / webhookSecret / existingSecret (keys api-key, webhook-secret)</code></td>
@@ -762,8 +864,8 @@
               <td class="td-default">(none)</td>
             </tr>
             <tr>
-              <td><code>api.port / token / ingestToken / existingSecret (keys api-token, ingest-token)</code></td>
-              <td>LISTEN_ADDR / API_TOKEN / INGEST_TOKEN</td>
+              <td><code>api.port / token / ingestToken / tenantIngestTokens / existingSecret (keys api-token, ingest-token, ingest-tokens)</code></td>
+              <td>LISTEN_ADDR / API_TOKEN / INGEST_TOKEN / INGEST_TOKENS (<code>tenantIngestTokens</code> is a map <code>{tenant: token}</code>; the <code>ingest-tokens</code> key holds <code>token=tenant,...</code>)</td>
               <td class="td-default">8080</td>
             </tr>
             <tr>
@@ -772,9 +874,9 @@
               <td class="td-default">ClusterIP / 8080</td>
             </tr>
             <tr>
-              <td><code>enforcement.mode / rules</code></td>
-              <td>ENFORCEMENT_MODE / ENFORCEMENT_RULES</td>
-              <td class="td-default">observe</td>
+              <td><code>enforcement.mode / rules / inCluster</code></td>
+              <td>ENFORCEMENT_MODE / ENFORCEMENT_RULES / ENFORCEMENT_IN_CLUSTER</td>
+              <td class="td-default">observe / &quot;&quot; / false</td>
             </tr>
             <tr>
               <td><code>enforcement.admissionPolicy.enabled</code></td>
@@ -787,6 +889,11 @@
               <td class="td-default">true / 5Gi / &quot;&quot; / 168h</td>
             </tr>
             <tr>
+              <td><code>persistence.archive.enabled / existingClaim / size / storageClass / mountPath</code></td>
+              <td>Archive volume (an existing PVC, or a volumeClaimTemplate) / ARCHIVE_DIR set to <code>&lt;mountPath&gt;/&lt;pod name&gt;</code></td>
+              <td class="td-default">false / &quot;&quot; / 20Gi / &quot;&quot; / /var/lib/vbilling-archive</td>
+            </tr>
+            <tr>
               <td><code>serviceMonitor.enabled / interval</code></td>
               <td>Prometheus Operator ServiceMonitor</td>
               <td class="td-default">false / 30s</td>
@@ -794,7 +901,7 @@
             <tr>
               <td><code>image.repository / tag / pullPolicy</code></td>
               <td>Container image</td>
-              <td class="td-default">ghcr.io/vclusterlabs-experiments/vbilling / v0.2.0</td>
+              <td class="td-default">ghcr.io/vclusterlabs-experiments/vbilling / v0.3.0</td>
             </tr>
           </tbody>
         </table>
@@ -810,8 +917,43 @@
   <span class="flag">--set</span> webhook.url=https://data.example.com/usage \
   <span class="flag">--set</span> region=ap-southeast-2 <span class="flag">--set</span> api.existingSecret=vbilling-api</code></div>
 
+      <h2 id="retention-and-disputes">Retention and disputes</h2>
+      <p>Customers dispute invoices months after the usage happened, so the evidence behind a bill has to outlive the bill. vBilling keeps its hash-chained ledger in two tiers.</p>
+      <p><strong><code>RETENTION</code></strong> (default <code>168h</code>) is how long raw ledger segments stay on the ledger volume after every destination has consumed them. Hourly compaction deletes older ones; a segment a destination has not consumed yet is never deleted. Size <code>persistence.size</code> for this window (see Sizing below).</p>
+      <p><strong><code>ARCHIVE_DIR</code></strong> keeps the evidence after that. Before compaction deletes a segment, it writes a gzip of the segment's exact bytes to <code>seg-&lt;first seq&gt;.log.gz</code> (temporary file, fsync, rename), appends a line to <code>archive.jsonl</code> with the segment's sequence range, times, the hash it links to, its last hash and the gzip file's sha256 and size, and only then deletes the segment. If archiving fails, the segment stays and the next compaction retries. vBilling never deletes from the archive. The files are plain gzip and JSON lines: each ledger line is the sha256 of its record, a tab, and the record, which names the hash of the record before it, so <code>sha256sum</code> and <code>zcat</code> are enough to inspect them.</p>
+      <p>With Helm, <code>persistence.archive.enabled=true</code> mounts a volume and sets <code>ARCHIVE_DIR</code> to <code>&lt;mountPath&gt;/&lt;pod name&gt;</code>, so replicas never share files. For object storage, bind a PersistentVolumeClaim to a bucket through a CSI driver (Cloud Storage FUSE, Mountpoint for Amazon S3) and set <code>persistence.archive.existingClaim</code>. The mount must let the pod user (65532) create, rename and append to files.</p>
+      <div class="callout callout-warn">
+        <div class="callout-icon">!</div>
+        <div>Without <code>existingClaim</code>, the chart adds a volumeClaimTemplate, which Kubernetes cannot add to an existing StatefulSet. On an existing install, run <code>kubectl -n vbilling-system delete statefulset vbilling --cascade=orphan</code> first: pods, volumes and the ledger stay, and the upgrade recreates the StatefulSet.</div>
+      </div>
+
+      <h3>Verify</h3>
+      <p><code>vbilling ledger verify</code> checks every archived segment (the gzip file's sha256, every record's hash, the links across segments) and then the live ledger, which must continue exactly where the archive ends. It only reads files, prints a JSON report and exits 1 on any failure. Inside the pod, <code>--dir</code> and <code>--archive</code> default to the controller's <code>DATA_DIR</code> and <code>ARCHIVE_DIR</code>:</p>
+      <div class="code-block"><code><span class="cmd">kubectl</span> <span class="flag">-n</span> vbilling-system exec vbilling-0 -- /vbilling ledger verify
+<span class="output">{
+  "ok": true,
+  "records": 18,
+  "archived_segments": 3,
+  "live_segments": 3,
+  "first_seq": 1,
+  "last_seq": 18,
+  "first_at": "2026-10-05T10:01:00Z",
+  "last_at": "2026-10-05T10:06:00Z",
+  "anchor": "",
+  "head": "823ba93bdcec1b82d732117c6d363dde578df4dde161fdfd26e89c6d378a3b72"
+}</span></code></div>
+      <p>An empty <code>anchor</code> means the chain is intact back to the ledger's first record; otherwise it starts where retention had already deleted segments before <code>ARCHIVE_DIR</code> was set. The chain shows that no record was changed, removed or inserted unless every record after it was rewritten as well, so keep each report's <code>head</code> somewhere outside vBilling, for example with the invoice. To check a copy elsewhere, run the binary with <code>--archive</code> on the copied bucket, with or without <code>--dir</code>. The running API does the same check with <code>GET /api/v1/ledger/verify?archive=true</code>.</p>
+
+      <h3>Export the usage behind an invoice</h3>
+      <div class="code-block"><code><span class="cmd">kubectl</span> <span class="flag">-n</span> vbilling-system exec vbilling-0 -- /vbilling ledger export \
+  <span class="flag">--from</span> 2026-01-01 <span class="flag">--to</span> 2026-02-01 <span class="flag">--tenant</span> acme-ai &gt; acme-ai-2026-01.ndjson</code></div>
+      <p>Each line is a usage event exactly as it was recorded, for every window that overlaps <code>[--from, --to)</code>, from the archive and then the ledger in ledger order. <code>--metric</code> narrows it further. Export checks each event against its hash, and a missing archived segment fails the export rather than returning less usage; run <code>verify</code> first for the whole chain.</p>
+
+      <h3>Sizing</h3>
+      <p>Measured on one full segment (20,025 records) of GPU cluster usage, eight metrics per cluster per minute with the dimensions and properties the collector sets: <strong>821 bytes per event in the ledger, 86 bytes in the archive</strong>, 9.5 times smaller. For 100 clusters (48,000 events an hour) that is about 0.95 GB a day on the ledger volume, so 6.6 GB for the default 7 days, and about 3 GB a month in the archive, 39 GB for 13 months. Verification reads about 165 MB of ledger a second on one core (Apple M1 Max), so those 13 months verify in about 40 minutes. Reproduce with <code>go test -run X -bench ArchiveSegment ./internal/spool/</code>.</p>
+
       <h2 id="lago-pricing">Lago Pricing Configuration</h2>
-      <p>vBilling bootstraps 9 billable metrics and a <code>vcluster-standard</code> plan on startup. All charges default to <strong>$0.00</strong> per unit. You must configure pricing in the Lago UI or API to actually generate non-zero invoices.</p>
+      <p>vBilling bootstraps a billable metric for each of its 9 built-in metrics and for every custom metric, among them <code>inference_input_tokens</code> and <code>inference_output_tokens</code>, which v0.3 always declares, and a <code>vcluster-standard</code> plan on startup. All charges default to <strong>$0.00</strong> per unit unless a <a href="lago.html#price-card">price card</a> sets them. You must configure pricing in the Lago UI or API to actually generate non-zero invoices.</p>
 
       <h3>Charges to configure</h3>
       <p>In the Lago UI, go to <strong>Plans &gt; vCluster Standard &gt; Edit</strong> and set the per-unit price for each charge:</p>

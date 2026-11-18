@@ -32,6 +32,10 @@ services:
       RAILS_ENV: production
       DATABASE_URL: postgresql://lago:lago@db:5432/lago
       REDIS_URL: redis://redis:6379
+      # Shared cache for api and worker. Without it the api caches current
+      # usage in its own memory, the worker cannot expire it when events
+      # arrive, and current usage never moves until the api restarts.
+      LAGO_REDIS_CACHE_URL: redis://redis:6379
       SECRET_KEY_BASE: your-secret-key-base-for-demo-only-change-in-production-1234567890
       LAGO_API_URL: http://localhost:3000
       LAGO_FRONT_URL: http://localhost:8081
@@ -55,6 +59,7 @@ services:
       RAILS_ENV: production
       DATABASE_URL: postgresql://lago:lago@db:5432/lago
       REDIS_URL: redis://redis:6379
+      LAGO_REDIS_CACHE_URL: redis://redis:6379 # same cache as the api (see above)
       SECRET_KEY_BASE: your-secret-key-base-for-demo-only-change-in-production-1234567890
       LAGO_RSA_PRIVATE_KEY: ${LAGO_RSA_PRIVATE_KEY}
       LAGO_ENCRYPTION_PRIMARY_KEY: demo-encryption-primary-key-at-least-32-chars-long-for-safety

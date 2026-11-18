@@ -23,10 +23,13 @@ import (
 	"time"
 
 	"github.com/vclusterlabs-experiments/vbilling/internal/config"
+	"github.com/vclusterlabs-experiments/vbilling/internal/crosscheck"
 	"github.com/vclusterlabs-experiments/vbilling/internal/destinations"
 	"github.com/vclusterlabs-experiments/vbilling/internal/discovery"
 	"github.com/vclusterlabs-experiments/vbilling/internal/enforcement"
+	"github.com/vclusterlabs-experiments/vbilling/internal/health"
 	"github.com/vclusterlabs-experiments/vbilling/internal/pipeline"
+	"github.com/vclusterlabs-experiments/vbilling/internal/records"
 	"github.com/vclusterlabs-experiments/vbilling/internal/spool"
 	"github.com/vclusterlabs-experiments/vbilling/internal/telemetry"
 	"github.com/vclusterlabs-experiments/vbilling/internal/usage"
@@ -53,7 +56,20 @@ type Server struct {
 	tel     *telemetry.Registry
 	version string
 	now     func() time.Time
+
+	health  *health.Registry  // nil: no source health
+	records *records.Ingester // nil: POST /api/v1/records disabled
+	checks  []crosscheck.Check
 }
+
+// WithCrossChecks enables GET /api/v1/crosscheck.
+func (s *Server) WithCrossChecks(c []crosscheck.Check) *Server { s.checks = c; return s }
+
+// WithHealth exposes source health in the status API and /api/v1/sources.
+func (s *Server) WithHealth(h *health.Registry) *Server { s.health = h; return s }
+
+// WithRecords enables POST /api/v1/records.
+func (s *Server) WithRecords(in *records.Ingester) *Server { s.records = in; return s }
 
 func New(cfg *config.Config, sp *spool.Spool, disp *pipeline.Dispatcher, tenants *pipeline.TenantRegistry,
 	ctrl Controller, enf *enforcement.Enforcer, tel *telemetry.Registry, version string) *Server {
@@ -73,6 +89,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/usage", s.auth(s.usage))
 	mux.HandleFunc("GET /api/v1/events", s.auth(s.exportEvents))
 	mux.HandleFunc("POST /api/v1/events", s.ingest)
+	mux.HandleFunc("POST /api/v1/records", s.ingestRecords)
+	mux.HandleFunc("GET /api/v1/sources", s.auth(s.sources))
+	mux.HandleFunc("GET /api/v1/crosscheck", s.auth(s.crossCheck))
 	mux.HandleFunc("GET /api/v1/reconcile", s.auth(s.reconcile))
 	mux.HandleFunc("GET /api/v1/ledger/verify", s.auth(s.verify))
 	mux.HandleFunc("GET /api/v1/destinations", s.auth(s.listDestinations))
@@ -270,7 +289,152 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	if s.disp != nil {
 		out["destinations"] = s.disp.Statuses()
 	}
+	if s.health != nil {
+		problems := s.health.Problems()
+		out["sources"] = s.health.Summary()
+		out["healthy"] = len(problems) == 0
+		var warnings []string
+		for _, p := range problems {
+			if len(warnings) == 25 {
+				warnings = append(warnings, fmt.Sprintf("... and %d more, see GET /api/v1/sources", len(problems)-25))
+				break
+			}
+			msg := p.Name + ": " + string(p.Status)
+			if p.Message != "" {
+				msg += ": " + p.Message
+			}
+			if p.Hint != "" {
+				msg += " (hint: " + p.Hint + ")"
+			}
+			warnings = append(warnings, msg)
+		}
+		out["warnings"] = warnings
+	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// sources lists every usage source with its last success and last error.
+func (s *Server) sources(w http.ResponseWriter, r *http.Request) {
+	if s.health == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"sources": []any{}})
+		return
+	}
+	list := s.health.List()
+	if kind := r.URL.Query().Get("kind"); kind != "" {
+		kept := list[:0]
+		for _, src := range list {
+			if src.Kind == kind {
+				kept = append(kept, src)
+			}
+		}
+		list = kept
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"summary": s.health.Summary(), "sources": list})
+}
+
+// crossCheck compares two sources of the same usage (CROSS_CHECKS) per
+// tenant over [from, to), by hour (default) or day. Default range: the last
+// 24 complete hours.
+func (s *Server) crossCheck(w http.ResponseWriter, r *http.Request) {
+	end := s.now().UTC().Truncate(time.Hour)
+	from, to, err := s.parseRange(r, end.Add(-24*time.Hour), end)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "%v", err)
+		return
+	}
+	bucket := time.Hour
+	if r.URL.Query().Get("bucket") == "day" {
+		bucket = 24 * time.Hour
+	}
+	rows, err := crosscheck.Evaluate(s.spool, s.checks, from, to, bucket)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "%v", err)
+		return
+	}
+	if t := r.URL.Query().Get("tenant"); t != "" {
+		kept := rows[:0]
+		for _, row := range rows {
+			if row.Tenant == t {
+				kept = append(kept, row)
+			}
+		}
+		rows = kept
+	}
+	ok := true
+	for _, row := range rows {
+		ok = ok && row.OK
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"checks": s.checks, "ok": ok, "rows": rows})
+}
+
+// ingestAuth checks an ingest token. A token from INGEST_TOKENS is bound to
+// a tenant: everything sent with it is billed to that tenant.
+func (s *Server) ingestAuth(w http.ResponseWriter, r *http.Request) (boundTenant string, ok bool) {
+	if s.cfg.IngestToken == "" && len(s.cfg.IngestTokens) == 0 {
+		writeErr(w, http.StatusForbidden, "ingest is disabled: set INGEST_TOKEN (or API_TOKEN), or INGEST_TOKENS for tokens bound to a tenant")
+		return "", false
+	}
+	got := bearer(r)
+	if s.cfg.IngestToken != "" && tokenOK(got, s.cfg.IngestToken) {
+		return "", true
+	}
+	for tok, tenant := range s.cfg.IngestTokens {
+		if tokenOK(got, tok) {
+			return tenant, true
+		}
+	}
+	writeErr(w, http.StatusUnauthorized, "missing or invalid bearer token")
+	return "", false
+}
+
+// ingestRecords accepts per-request usage (one record per request) from
+// gateways and inference servers. Records are acknowledged only once they
+// are on disk; any non-2xx answer means nothing was stored and the emitter
+// should retry. ?format= (or X-VBilling-Format) picks the payload format:
+// vbilling (default), litellm, or a name from RECORDS_MAPPINGS_FILE.
+func (s *Server) ingestRecords(w http.ResponseWriter, r *http.Request) {
+	if s.records == nil {
+		writeErr(w, http.StatusNotFound, "records ingest is not enabled")
+		return
+	}
+	bound, ok := s.ingestAuth(w, r)
+	if !ok {
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxRecordsBody+1))
+	if err != nil || len(body) > maxRecordsBody {
+		writeErr(w, http.StatusRequestEntityTooLarge, "body must be at most %d bytes", maxRecordsBody)
+		return
+	}
+	format := r.URL.Query().Get("format")
+	if format == "" {
+		format = r.Header.Get("X-VBilling-Format")
+	}
+	if format == "" {
+		format = records.Native
+	}
+	client := r.Header.Get("X-VBilling-Client")
+	if client == "" {
+		client = format
+	}
+	res, err := s.records.Ingest(format, client, bound, body)
+	var unknown records.ErrUnknownFormat
+	switch {
+	case errors.As(err, &unknown):
+		writeErr(w, http.StatusBadRequest, "%v", err)
+		return
+	case err != nil && res.Received == 0:
+		writeErr(w, http.StatusBadRequest, "%v", err)
+		return
+	case err != nil:
+		writeErr(w, http.StatusServiceUnavailable, "%v", err)
+		return
+	}
+	status := http.StatusOK
+	if res.Received > 0 && res.Accepted == 0 && res.Skipped == 0 && res.DuplicatesInBatch == 0 {
+		status = http.StatusBadRequest
+	}
+	writeJSON(w, status, res)
 }
 
 func (s *Server) catalog(w http.ResponseWriter, r *http.Request) {
@@ -438,6 +602,7 @@ const (
 	maxIngestEvents = 5000
 	ingestMaxAge    = 34 * 24 * time.Hour // the strictest backend window (Metronome)
 	ingestMaxSkew   = 5 * time.Minute
+	maxRecordsBody  = 16 << 20
 )
 
 // ingest accepts usage from custom emitters: inference gateways (tokens),
@@ -445,12 +610,8 @@ const (
 // metric (builtin or CUSTOM_METRICS) and a closed window; an omitted ID is
 // derived from the event identity, so resends deduplicate.
 func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
-	if s.cfg.IngestToken == "" {
-		writeErr(w, http.StatusForbidden, "ingest is disabled: set INGEST_TOKEN (or API_TOKEN) to enable it")
-		return
-	}
-	if !tokenOK(bearer(r), s.cfg.IngestToken) {
-		writeErr(w, http.StatusUnauthorized, "missing or invalid bearer token")
+	bound, ok := s.ingestAuth(w, r)
+	if !ok {
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxIngestBody+1))
@@ -490,6 +651,8 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 	}
 	var valid []usage.Event
 	var rejected []rejection
+	derived := map[string]bool{} // IDs vBilling derived because the event had none
+	firstAt := map[string]int{}
 	for i := range events {
 		e := events[i]
 		e.Source = source
@@ -497,8 +660,26 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 		if e.Region == "" {
 			e.Region = s.cfg.Region
 		}
-		e.Finalize()
 		var problems []string
+		if bound != "" {
+			if e.Tenant != "" && e.Tenant != bound {
+				problems = append(problems, fmt.Sprintf("tenant %q does not match the tenant this token is bound to", e.Tenant))
+			}
+			e.Tenant = bound
+		}
+		noID := e.ID == ""
+		e.Finalize()
+		if j, dup := firstAt[e.ID]; dup && (noID || derived[e.ID]) {
+			problems = append(problems, fmt.Sprintf("same tenant, metric, window and dimensions as event %d and no id: "+
+				"events without an id are deduplicated by those fields, so separate requests would be counted once. "+
+				"Give every event a unique id, or send per-request usage to POST /api/v1/records, which sums it", j))
+		}
+		if _, seen := firstAt[e.ID]; !seen {
+			firstAt[e.ID] = i
+		}
+		if noID {
+			derived[e.ID] = true
+		}
 		if _, ok := usage.Lookup(e.Metric); !ok {
 			problems = append(problems, fmt.Sprintf("unknown metric %q (declare it in CUSTOM_METRICS)", e.Metric))
 		}
@@ -529,7 +710,18 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 		status = http.StatusBadRequest
 	}
 	s.tel.Add("vbilling_ingested_events_total", "Events accepted through the ingest API.", map[string]string{"client": client}, float64(len(accepted)))
-	writeJSON(w, status, map[string]any{"accepted": len(accepted), "duplicates": len(dups), "rejected": rejected, "ids": accepted})
+	out := map[string]any{"accepted": len(accepted), "duplicates": len(dups), "rejected": rejected, "ids": accepted}
+	silent := 0
+	for _, id := range dups {
+		if derived[id] {
+			silent++
+		}
+	}
+	if silent > 0 {
+		out["warnings"] = []string{fmt.Sprintf("%d event(s) without an id matched usage already in the ledger and were not counted again. "+
+			"If they are separate requests rather than retries, give each one an id, or send per-request usage to POST /api/v1/records", silent)}
+	}
+	writeJSON(w, status, out)
 }
 
 // --- reconciliation ---
@@ -682,7 +874,30 @@ func (s *Server) reconcileOne(ctx context.Context, d destinations.Destination, r
 
 // --- ledger, destinations, dead letters ---
 
+// verify checks the retained ledger's hash chain. With ?archive=true it starts
+// from the oldest archived segment (ARCHIVE_DIR) and continues into the
+// retained ledger as one chain.
 func (s *Server) verify(w http.ResponseWriter, r *http.Request) {
+	if v := r.URL.Query().Get("archive"); v != "" {
+		withArchive, err := strconv.ParseBool(v)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "archive must be true or false")
+			return
+		}
+		if withArchive {
+			rep, err := s.spool.VerifyWithArchive()
+			if err != nil {
+				writeErr(w, http.StatusBadRequest, "%v", err)
+				return
+			}
+			status := http.StatusOK
+			if !rep.OK {
+				status = http.StatusConflict
+			}
+			writeJSON(w, status, rep)
+			return
+		}
+	}
 	rep := s.spool.Verify()
 	status := http.StatusOK
 	if !rep.OK {
@@ -810,6 +1025,10 @@ func (s *Server) setBillingState(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		State  enforcement.State `json:"state"`
 		Reason string            `json:"reason"`
+		// Hold names the reason class: "billing" (default, the hold billing
+		// webhooks set and clear) or any other, e.g. "support" or "abuse",
+		// which only an operator can clear.
+		Hold string `json:"hold"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON: %v", err)
@@ -819,7 +1038,7 @@ func (s *Server) setBillingState(w http.ResponseWriter, r *http.Request) {
 		req.Reason = "set by operator"
 	}
 	tenant := r.PathValue("tenant")
-	if err := s.enf.Set(r.Context(), tenant, req.State, req.Reason, "api", "manual"); err != nil {
+	if err := s.enf.SetHold(r.Context(), tenant, req.Hold, req.State, req.Reason, "api", "manual"); err != nil {
 		writeErr(w, http.StatusBadRequest, "%v", err)
 		return
 	}

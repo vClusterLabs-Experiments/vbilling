@@ -1,0 +1,729 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Usage Sources - vBilling Docs</title>
+  <meta name="description" content="Where vBilling's usage comes from and what each source guarantees: per-request records from AI gateways such as LiteLLM, exact Prometheus counters, estimates from PromQL queries, cross-checks and source health.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Roboto+Mono:wght@500&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    :root {
+      --primary: #FF6600;
+      --primary-dark: #CC5100;
+      --primary-darker: #993D00;
+      --primary-light: #FFF5EB;
+      --primary-light-2: #FFE0CC;
+      --accent: #FF8433;
+      --text-dark: #050B24;
+      --text-gray: #505466;
+      --text-light: #828592;
+      --white: #ffffff;
+      --bg-code: #050B24;
+      --border: #E6E7E9;
+      --shadow-sm: 0 1px 2px rgba(0,0,0,0.05);
+      --shadow-md: 0 4px 6px -1px rgba(0,0,0,0.07), 0 2px 4px -2px rgba(0,0,0,0.05);
+      --shadow-lg: 0 10px 15px -3px rgba(0,0,0,0.08), 0 4px 6px -4px rgba(0,0,0,0.04);
+      --radius: 12px;
+      --radius-lg: 16px;
+      --sidebar-width: 260px;
+    }
+
+    html { scroll-behavior: smooth; scroll-padding-top: 80px; }
+
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      color: var(--text-dark);
+      line-height: 1.6;
+      background: var(--white);
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ── Header ── */
+    .header {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 1000;
+      background: rgba(255,255,255,0.92);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+    }
+    .header.scrolled { box-shadow: var(--shadow-md); }
+    .header-inner {
+      max-width: 1400px; margin: 0 auto; padding: 0 24px;
+      display: flex; align-items: center; justify-content: space-between; height: 64px;
+    }
+    .header-logo {
+      display: flex; align-items: center; gap: 10px;
+      text-decoration: none; color: var(--text-dark);
+    }
+    .header-logo-icon {
+      width: 32px; height: 32px; border-radius: 8px;
+      background: linear-gradient(135deg, var(--primary-dark), var(--primary));
+      display: flex; align-items: center; justify-content: center;
+      color: var(--white); font-weight: 700; font-size: 0.9rem;
+    }
+    .header-logo-text { font-size: 1.15rem; font-weight: 700; letter-spacing: -0.5px; }
+    .header-logo-text span { color: var(--primary-dark); }
+    .header-nav { display: flex; align-items: center; gap: 20px; }
+    .header-nav a {
+      text-decoration: none; color: var(--text-gray); font-size: 0.88rem;
+      font-weight: 500; transition: color 0.2s;
+    }
+    .header-nav a:hover { color: var(--primary-dark); }
+    .header-nav .gh-link {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: var(--bg-code); color: var(--white); padding: 6px 14px;
+      border-radius: 8px; font-size: 0.82rem; font-weight: 600; transition: opacity 0.2s;
+    }
+    .header-nav .gh-link:hover { opacity: 0.85; color: var(--white); }
+
+    /* ── Layout ── */
+    .docs-layout {
+      display: flex; margin-top: 64px; min-height: calc(100vh - 64px);
+    }
+
+    /* ── Sidebar ── */
+    .sidebar {
+      width: var(--sidebar-width); flex-shrink: 0;
+      border-right: 1px solid var(--border); background: var(--primary-light);
+      padding: 32px 0; position: fixed; top: 64px; bottom: 0;
+      overflow-y: auto;
+    }
+    .sidebar-section { margin-bottom: 28px; }
+    .sidebar-label {
+      padding: 0 24px; font-size: 0.72rem; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 1px; color: var(--primary-darker);
+      margin-bottom: 8px;
+    }
+    .sidebar a {
+      display: block; padding: 7px 24px; text-decoration: none;
+      font-size: 0.88rem; color: var(--text-gray); font-weight: 500;
+      transition: all 0.15s; border-left: 3px solid transparent;
+    }
+    .sidebar a:hover { color: var(--primary-dark); background: var(--primary-light-2); }
+    .sidebar a.active {
+      color: var(--primary-dark); background: var(--primary-light-2);
+      border-left-color: var(--primary); font-weight: 600;
+    }
+    .sidebar-back {
+      display: flex; align-items: center; gap: 6px; margin: 0 24px 24px;
+      padding: 8px 12px; border-radius: 8px; text-decoration: none;
+      font-size: 0.85rem; color: var(--text-light); font-weight: 500;
+      border: 1px solid var(--border); transition: all 0.2s;
+    }
+    .sidebar-back:hover { border-color: var(--primary); color: var(--primary-dark); }
+
+    /* ── Content ── */
+    .content {
+      flex: 1; min-width: 0; margin-left: var(--sidebar-width);
+      padding: 48px 64px 80px; max-width: 900px;
+    }
+    .content h1 {
+      font-size: 2.2rem; font-weight: 800; letter-spacing: -1px;
+      margin-bottom: 12px; color: var(--text-dark);
+    }
+    .content .subtitle {
+      font-size: 1.1rem; color: var(--text-gray); line-height: 1.7;
+      margin-bottom: 40px; max-width: 640px;
+    }
+    .content h2 {
+      font-size: 1.5rem; font-weight: 700; letter-spacing: -0.5px;
+      margin: 48px 0 16px; color: var(--text-dark);
+      padding-bottom: 8px; border-bottom: 2px solid var(--primary-light-2);
+    }
+    .content h3 {
+      font-size: 1.15rem; font-weight: 700; margin: 32px 0 12px;
+      color: var(--text-dark);
+    }
+    .content h4 {
+      font-size: 0.95rem; font-weight: 700; margin: 20px 0 8px; color: var(--text-dark);
+    }
+    .content p {
+      font-size: 0.95rem; color: var(--text-gray); line-height: 1.7;
+      margin-bottom: 16px;
+    }
+    .content ul, .content ol {
+      margin: 0 0 16px 24px; color: var(--text-gray); font-size: 0.95rem;
+    }
+    .content li { margin-bottom: 6px; line-height: 1.6; }
+    .content code {
+      background: var(--primary-light-2); padding: 2px 7px; border-radius: 4px;
+      font-family: 'Roboto Mono', 'SF Mono', 'Fira Code', monospace;
+      font-size: 0.85rem; color: var(--primary-darker); overflow-wrap: anywhere;
+    }
+    .content a { color: var(--primary-dark); text-decoration: none; font-weight: 500; }
+    .content a:hover { text-decoration: underline; }
+
+    /* ── Code Blocks ── */
+    .code-block {
+      background: var(--bg-code); border-radius: var(--radius);
+      padding: 20px 24px; overflow-x: auto; margin-bottom: 20px;
+      position: relative;
+    }
+    .code-block code {
+      color: #e2e8f0; background: none; padding: 0;
+      font-family: 'Roboto Mono', 'SF Mono', 'Fira Code', monospace;
+      font-size: 0.84rem; line-height: 1.7; white-space: pre;
+    }
+    .code-block .comment { color: #64748b; }
+    .code-block .cmd { color: #FF8433; }
+    .code-block .flag { color: #a5b4fc; }
+    .code-block .string { color: #86efac; }
+    .code-block .output { color: #94a3b8; }
+    .code-label {
+      display: inline-block; background: rgba(255,255,255,0.08);
+      color: #94a3b8; font-size: 0.75rem; font-weight: 600;
+      padding: 2px 10px; border-radius: 4px; margin-bottom: 12px;
+      text-transform: uppercase; letter-spacing: 0.5px;
+    }
+    .code-copy {
+      position: absolute; top: 12px; right: 12px;
+      background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 6px; padding: 5px 10px; color: #94a3b8;
+      font-size: 0.72rem; cursor: pointer; transition: all 0.2s;
+    }
+    .code-copy:hover { background: rgba(255,255,255,0.15); color: #e2e8f0; }
+
+    /* ── Callouts ── */
+    .callout {
+      padding: 16px 20px; border-radius: var(--radius); margin-bottom: 20px;
+      font-size: 0.9rem; line-height: 1.6; display: flex; gap: 12px;
+    }
+    .callout-icon { flex-shrink: 0; font-size: 1.1rem; margin-top: 1px; }
+    .callout-info {
+      background: #eff6ff; border: 1px solid #bfdbfe; color: #1e40af;
+    }
+    .callout-warn {
+      background: var(--primary-light); border: 1px solid var(--primary-light-2); color: var(--primary-darker);
+    }
+    .callout-success {
+      background: #f0fdf4; border: 1px solid #bbf7d0; color: #166534;
+    }
+
+    /* ── Step markers ── */
+    .step-marker {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 32px; height: 32px; border-radius: 50%;
+      background: linear-gradient(135deg, var(--primary-dark), var(--primary));
+      color: var(--white); font-weight: 700; font-size: 0.85rem;
+      margin-right: 10px; flex-shrink: 0; vertical-align: middle;
+    }
+
+    /* ── Mobile sidebar toggle ── */
+    .mobile-sidebar-toggle {
+      display: none; position: fixed; bottom: 24px; right: 24px; z-index: 999;
+      width: 48px; height: 48px; border-radius: 50%;
+      background: linear-gradient(135deg, var(--primary-dark), var(--primary));
+      color: var(--white); border: none; font-size: 1.3rem; cursor: pointer;
+      box-shadow: var(--shadow-lg);
+    }
+
+    .config-table-wrap {
+      overflow-x: auto; border-radius: var(--radius); border: 1px solid var(--border);
+      box-shadow: var(--shadow-sm); margin-bottom: 24px;
+    }
+    .config-table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+    .config-table thead { background: var(--primary-light); }
+    .config-table th {
+      padding: 12px 16px; text-align: left; font-weight: 700;
+      color: var(--primary-darker); font-size: 0.78rem;
+      text-transform: uppercase; letter-spacing: 0.5px;
+      border-bottom: 2px solid var(--primary-light-2);
+    }
+    .config-table td {
+      padding: 10px 16px; border-bottom: 1px solid var(--border);
+      color: var(--text-gray); vertical-align: top;
+    }
+    .config-table tr:last-child td { border-bottom: none; }
+    .config-table tr:hover td { background: var(--primary-light); }
+
+    /* ── Responsive ── */
+    @media (max-width: 900px) {
+      .sidebar {
+        transform: translateX(-100%); transition: transform 0.3s ease;
+        z-index: 900; width: 280px;
+      }
+      .sidebar.open { transform: translateX(0); }
+      .content { margin-left: 0; padding: 32px 24px 80px; }
+      .mobile-sidebar-toggle { display: flex; align-items: center; justify-content: center; }
+      .content h1 { font-size: 1.7rem; }
+      .content h2 { font-size: 1.3rem; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <header class="header" id="header">
+    <div class="header-inner">
+      <a href="index.html" class="header-logo">
+        <svg width="28" height="28" viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0"><path d="M4 7L14 21L24 7" stroke="#FF6600" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <div class="header-logo-text">v<span>Billing</span> Docs</div>
+      </a>
+      <nav class="header-nav">
+        <a href="index.html">Home</a>
+        <a href="getting-started.html">Guide</a>
+        <a href="https://github.com/vClusterLabs-Experiments/vbilling" class="gh-link" target="_blank">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <!-- Layout -->
+  <div class="docs-layout">
+
+    <!-- Sidebar -->
+    <nav class="sidebar" id="sidebar">
+      <a href="index.html" class="sidebar-back">&#8592; Back to main site</a>
+      <div class="sidebar-section">
+        <div class="sidebar-label">Documentation</div>
+        <a href="getting-started.html">Getting Started</a>
+        <a href="configuration.html">Configuration</a>
+        <a href="metrics.html">Metrics Reference</a>
+        <a href="usage-sources.html" class="active">Usage Sources</a>
+        <a href="private-nodes.html">Dedicated and Private Nodes</a>
+        <a href="example-gke.html">Example: GKE with GPUs</a>
+        <a href="troubleshooting.html">Troubleshooting</a>
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-label">Billing Adapters</div>
+        <a href="stripe.html">Stripe</a>
+        <a href="metronome.html">Metronome</a>
+        <a href="lago.html">Lago</a>
+        <a href="custom-adapter.html">Custom Billing Adapter</a>
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-label">Resources</div>
+        <a href="https://github.com/vClusterLabs-Experiments/vbilling" target="_blank">GitHub Repository</a>
+        <a href="https://www.vcluster.com/docs" target="_blank">vCluster Docs</a>
+        <a href="https://docs.stripe.com/billing/subscriptions/usage-based" target="_blank">Stripe Billing Docs</a>
+        <a href="https://docs.metronome.com/" target="_blank">Metronome Docs</a>
+        <a href="https://www.getlago.com/docs" target="_blank">Lago Docs</a>
+      </div>
+    </nav>
+
+    <!-- Content -->
+    <main class="content">
+      <h1>Usage Sources</h1>
+      <p class="subtitle">Where vBilling's usage comes from, what each source guarantees, and how to bill AI gateways and Prometheus counters without losing a request or counting one twice.</p>
+
+      <h2 id="billing-is-not-telemetry">Billing data is not telemetry</h2>
+      <p>Runtime telemetry is built to watch systems. It may drop a sample under load, extrapolate between samples, and keep a few days of history. For a dashboard or an alert, that is fine.</p>
+      <p>A bill is different. Every unit must be counted exactly once: a lost minute is lost revenue, a doubled one is an overcharge. And the evidence must outlive the invoice, because customers dispute bills months later. So billing data needs its own pipeline.</p>
+      <p>In vBilling, every source lands in the same hash-chained ledger, one closed window at a time, with deterministic event IDs, before any billing platform sees it. What a source can guarantee depends on how vBilling reads it.</p>
+
+      <h2 id="guarantees">What each source guarantees</h2>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead><tr><th>Source</th><th>Guarantee</th><th>Keep in mind</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><strong>Kubernetes objects</strong><br>Pods, nodes, volumes and load balancers, read from the control plane cluster and from each cluster's own API</td>
+              <td><strong>Exact.</strong> Quantities come from object lifetimes, to the second. Windows missed while vBilling was down are backfilled from those lifetimes, up to <code>MAX_BACKFILL</code>.</td>
+              <td>CPU and memory usage from metrics-server (<code>CPU_MEMORY_BASIS=usage</code>) is a sample of the live window and is never backfilled.</td>
+            </tr>
+            <tr>
+              <td><strong>Per-request records</strong><br><code>POST /api/v1/records</code> from AI gateways, inference servers or any emitter</td>
+              <td><strong>Durable, deduplicated, late-safe.</strong> A record is on disk before vBilling answers 2xx. Retries are dropped by request ID. A record that arrives late becomes a separate adjustment to its own window.</td>
+              <td>vBilling sees only what the emitter sends. A batch the gateway loses before posting never arrives: <a href="#cross-checks">cross-check</a> it.</td>
+            </tr>
+            <tr>
+              <td><strong>Prometheus counters</strong><br><code>counter:</code> in <code>prometheus.metrics</code></td>
+              <td><strong>Exact at sample granularity.</strong> Each window bills the increase between raw samples, counter resets included, so the windows add up to the counter's true total across restarts and Prometheus outages.</td>
+              <td>Usage after a pod's last scrape never reaches Prometheus, so it is never billed. The first read does not bill the counter's history.</td>
+            </tr>
+            <tr>
+              <td><strong>Prometheus queries</strong><br><code>query:</code> in <code>prometheus.metrics</code></td>
+              <td><strong>Estimates.</strong> <code>increase()</code> and <code>rate()</code> extrapolate to the window edges. Every event carries <code>estimate: true</code>, and <code>GET /api/v1/catalog</code> reports <code>accuracy: estimate</code>.</td>
+              <td>A window Prometheus could not answer is not recovered later.</td>
+            </tr>
+            <tr>
+              <td><strong>Window totals</strong><br><code>POST /api/v1/events</code> from your own pipeline</td>
+              <td><strong>Exact as sent,</strong> deduplicated by event ID.</td>
+              <td>You sum per window. Events without an ID are deduplicated by tenant, metric, window and dimensions, so per-request usage belongs in records. See <a href="#window-totals">Window totals</a>.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout callout-success">
+        <div class="callout-icon">&#10003;</div>
+        <div><strong>Bill anything a customer may dispute, such as tokens, from per-request records or Prometheus counters.</strong> Use PromQL queries for signals: utilization, dashboards, alerts. When a query is the only way to measure something, its events say that they are estimates.</div>
+      </div>
+
+      <h3 id="evidence">In a live run</h3>
+      <p>On a kind control plane cluster with one cluster, Prometheus v2.55.1 scraping a test engine pod that exposes vLLM's output token counter, and vBilling installed from the chart, 17 one-minute windows included a rolling upgrade of vBilling, a 7-minute vBilling outage and a restart of the engine pod:</p>
+      <ul>
+        <li>The <code>counter:</code> metric billed 20,500 tokens. Prometheus's raw samples for the same period sum to 20,500.0.</li>
+        <li>An <code>increase()</code> query on the same counter came to 20,700.13. Its windows held fractional quantities such as 1199.976 tokens, and a partial window read 921.8 tokens where the counter grew by 800.</li>
+        <li>A simulated LiteLLM gateway sent 60 requests (5,400 output tokens) and retried 10 of its batches. The ledger shows exactly 5,400. A record sent 4 minutes late became a separate 77-token adjustment to its own window.</li>
+      </ul>
+      <p><code>scripts/e2e-usage-sources.sh</code> in the repository runs these checks on a laptop.</p>
+
+      <!-- Records -->
+      <h2 id="records">Per-request records</h2>
+      <p>AI usage happens per request. A gateway knows the tokens of each request, but summing them into windows, retrying failed sends and placing late arrivals is exactly where usage gets lost or doubled. <code>POST /api/v1/records</code> takes the records as they are and does that work inside vBilling.</p>
+      <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-X</span> POST localhost:8080/api/v1/records \
+  <span class="flag">-H</span> <span class="string">"Authorization: Bearer $INGEST_TOKEN"</span> <span class="flag">-H</span> <span class="string">"X-VBilling-Client: edge-gateway"</span> \
+  <span class="flag">-d</span> <span class="string">'{"id": "req-7f3a", "tenant": "acme-ai", "time": "2026-11-18T10:00:01.123Z",
+       "usage": {"inference_input_tokens": 512, "inference_output_tokens": 128},
+       "sku": "llama-3.1-70b", "dimensions": {"endpoint": "chat"}}'</span>
+<span class="output">{
+  "format": "vbilling",
+  "received": 1,
+  "accepted": 1,
+  "usage_rows": 2
+}</span></code></div>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead><tr><th>Field</th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr><td><code>id</code></td><td>Request ID, unique per request and the same on every retry. Required, unless <code>RECORDS_ALLOW_UNKEYED=true</code> derives one from the record's content (identical records then count once).</td></tr>
+            <tr><td><code>tenant</code></td><td>The tenant to bill: a tenant ID or an alias (see <a href="#tenants">Which tenant pays</a>). Ignored with a tenant-bound token.</td></tr>
+            <tr><td><code>time</code> (or <code>timestamp</code>)</td><td>When the request happened: RFC 3339 (UTC when no zone is given) or a Unix timestamp in seconds, milliseconds, microseconds or nanoseconds. It picks the window. Without it, vBilling uses the arrival time and warns.</td></tr>
+            <tr><td><code>usage</code></td><td>Quantities by metric code. Every metric must be declared (see <a href="metrics.html#custom-metrics">Custom metrics</a>).</td></tr>
+            <tr><td><code>metric</code>, <code>quantity</code></td><td>Shorthand for one metric.</td></tr>
+            <tr><td><code>sku</code>, <code>region</code>, <code>project</code></td><td>Event fields. <code>region</code> defaults to <code>REGION</code>.</td></tr>
+            <tr><td><code>tenant_cluster</code></td><td>Sets the <code>tenant_cluster</code> dimension.</td></tr>
+            <tr><td><code>dimensions</code></td><td>More dimensions, as strings.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <ul>
+        <li>The body is one record, a JSON array, <code>{"records": [...]}</code> or NDJSON, up to 16 MiB.</li>
+        <li><code>?format=</code> (or the <code>X-VBilling-Format</code> header) picks the payload format: <code>vbilling</code> (the default), <code>litellm</code>, or a <a href="#custom-mapping">mapping</a> of your own.</li>
+        <li><code>X-VBilling-Client</code> names the emitter and defaults to the format name. It is part of each record's identity, so two emitters never deduplicate each other's request IDs. Keep it stable for one emitter, or its retries are not recognized as retries.</li>
+        <li>Ingest needs a token: <code>INGEST_TOKEN</code> (or <code>API_TOKEN</code>), or a tenant-bound token from <code>INGEST_TOKENS</code>.</li>
+      </ul>
+
+      <h3 id="responses">Responses and retries</h3>
+      <p>vBilling answers only after the records are fsynced to their own ledger, under <code>DATA_DIR/records</code>. On any answer other than 2xx, nothing was stored: retry.</p>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead><tr><th>Status</th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr><td>200</td><td>Stored. <code>rejected</code> lists the records refused one by one, with their index and reason: sending them again does not help. <code>skipped</code> counts records the format filters out, <code>duplicates_in_batch</code> repeated request IDs, and <code>unknown_tenants</code> and <code>warnings</code> report the rest.</td></tr>
+            <tr><td>400</td><td>Nothing stored: an unknown format, a body that is not JSON, or every record rejected.</td></tr>
+            <tr><td>401, 403</td><td>A wrong token, or ingest disabled because no ingest token is set.</td></tr>
+            <tr><td>413</td><td>The body is over 16 MiB. Send smaller batches.</td></tr>
+            <tr><td>503</td><td>The records ledger could not be written. Retry.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>A record is refused when it has no request ID, no tenant, a metric that is not declared, a negative or non-numeric quantity, a time more than 5 minutes ahead of vBilling's clock, or a time older than <code>RECORDS_RETENTION</code> minus one hour (34 days at most). The <code>vbilling_records_rejected_total{client}</code> counter on <code>/metrics</code> counts them.</p>
+
+      <h3 id="windows">Windows, retries and late records</h3>
+      <ul>
+        <li>A record belongs to the window its time falls in, not to the window it arrives in.</li>
+        <li><code>RECORDS_SETTLE</code> (default 30s) after a window ends, vBilling commits one usage event per tenant, metric, SKU and dimensions for that window. <code>properties.records</code> counts the requests in it. A request ID already counted for the window, from a retry or a resent batch, is dropped.</li>
+        <li>A record that arrives later becomes a separate <strong>late adjustment</strong> for the same window: same <code>window_start</code> and <code>window_end</code>, with <code>properties.late: true</code> and <code>properties.arrived_by</code>. Its ID is deterministic. Nothing is ever merged into a window that was already committed.</li>
+        <li>The split between on time and late depends only on when each record was stored, never on when vBilling ran. After a crash or an upgrade, vBilling rebuilds the same events with the same IDs: nothing is lost and nothing is counted twice.</li>
+      </ul>
+      <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-s</span> <span class="string">'localhost:8080/api/v1/events?tenant=acme-ai&amp;metric=inference_output_tokens'</span> \
+  | <span class="cmd">jq</span> <span class="flag">-c</span> <span class="string">'select(.properties.late) | {window_start, quantity, properties}'</span>
+<span class="output">{"window_start":"2026-11-18T10:03:00Z","quantity":77,"properties":{"arrived_by":"2026-11-18T10:08:00Z","late":true,"records":1}}</span></code></div>
+
+      <h3 id="records-retention">Retention and evidence</h3>
+      <p>Raw records stay under <code>DATA_DIR/records</code> for <code>RECORDS_RETENTION</code> (default <code>168h</code>, at least <code>2h</code>). They are the evidence behind each window's event and the input to aggregation; billing adapters receive only the window events. With <code>RECORDS_ARCHIVE=true</code> (Helm <code>records.archive</code>, which needs <code>persistence.archive.enabled</code>), vBilling also archives them to <code>ARCHIVE_DIR/records</code> before retention deletes them: request-level evidence for disputes, at a high volume. See <a href="configuration.html#retention-and-disputes">Retention and disputes</a>.</p>
+      <p>vBilling stores only the fields a format maps: request ID, time, tenant, quantities, SKU and dimensions. Prompts and responses in a payload are never stored.</p>
+
+      <!-- Tenants -->
+      <h2 id="tenants">Which tenant pays</h2>
+      <h3>Tenant-bound tokens</h3>
+      <p>A token in <code>INGEST_TOKENS</code> is bound to one tenant. Everything sent with it is billed to that tenant, whatever the payload says, so a gateway inside a tenant's cluster can never bill another tenant. Give each such gateway its own token. In the Secret the format is <code>token=tenant,...</code>:</p>
+      <div class="code-block"><code><span class="cmd">kubectl</span> <span class="flag">-n</span> vbilling-system create secret generic vbilling-api \
+  <span class="flag">--from-literal</span>=api-token=<span class="string">"$(openssl rand -hex 32)"</span> \
+  <span class="flag">--from-literal</span>=ingest-token=<span class="string">"$(openssl rand -hex 32)"</span> \
+  <span class="flag">--from-literal</span>=ingest-tokens=<span class="string">"$ACME_GATEWAY_TOKEN=acme-ai,$GLOBEX_GATEWAY_TOKEN=globex"</span>
+<span class="cmd">helm</span> upgrade vbilling deploy/helm/vbilling <span class="flag">-n</span> vbilling-system <span class="flag">--reuse-values</span> <span class="flag">--set</span> api.existingSecret=vbilling-api</code></div>
+      <p>The Helm value <code>api.tenantIngestTokens</code> takes the same tokens the other way round, as <code>{tenant: token}</code>, and renders them into the chart's Secret.</p>
+
+      <h3>The tenant in the payload</h3>
+      <p>Without a bound token, vBilling resolves the record's tenant value against:</p>
+      <ul>
+        <li>the tenant IDs it knows, such as <code>vcluster-&lt;namespace&gt;-&lt;name&gt;</code> or a cluster's <code>vbilling.vcluster.com/tenant</code> value;</li>
+        <li>the aliases in <code>vbilling.vcluster.com/aliases</code>, a comma-separated list on a cluster's StatefulSet or Deployment, its namespace, or its vCluster Platform VirtualClusterInstance;</li>
+        <li>for a custom format, its <code>tenantMap</code>, applied first.</li>
+      </ul>
+      <div class="code-block"><code><span class="comment"># Records from LiteLLM team e2f1c0de-... are billed to the tenant of this cluster</span>
+<span class="cmd">kubectl</span> annotate namespace globex vbilling.vcluster.com/aliases=e2f1c0de-7b1a-4c55-9a7e-2d4f8b3c6a10,globex-prod</code></div>
+      <p>A record for a tenant that matches nothing is accepted and reported: the response lists it under <code>unknown_tenants</code> with a warning, and the source <code>records/&lt;client&gt;/unknown-tenants</code> turns <code>empty</code> in <a href="#source-health">source health</a>. Its usage is billed to a tenant with that raw ID, so your billing platform gets a customer with that ID. <code>RECORDS_UNKNOWN_TENANTS=reject</code> refuses such records instead. See <a href="troubleshooting.html#unknown-tenant-records">Records billed to an unknown tenant</a>.</p>
+
+      <!-- Gateways -->
+      <h2 id="gateways">AI gateways</h2>
+      <h3 id="litellm">LiteLLM</h3>
+      <p>LiteLLM's generic API logger posts a <code>StandardLoggingPayload</code> for every request. The built-in <code>litellm</code> format reads it as posted. Enable it with <code>RECORDS_LITELLM=true</code> (Helm <code>records.litellm: true</code>); it is off by default because it declares <code>inference_input_tokens</code> and <code>inference_output_tokens</code>, which every billing adapter then creates.</p>
+      <div class="code-block"><code><span class="comment"># LiteLLM proxy config.yaml</span>
+litellm_settings:
+  callbacks: [<span class="string">"generic_api"</span>]</code></div>
+      <div class="code-block"><code><span class="comment"># LiteLLM proxy environment</span>
+GENERIC_LOGGER_ENDPOINT=<span class="string">http://vbilling.vbilling-system.svc:8080/api/v1/records?format=litellm</span>
+GENERIC_LOGGER_HEADERS=<span class="string">"Authorization=Bearer &lt;ingest token&gt;"</span></code></div>
+      <p>The endpoint assumes LiteLLM runs in the control plane cluster and vBilling in <code>vbilling-system</code>. A gateway elsewhere needs a route to vBilling's Service. LiteLLM can also take the endpoint and headers from <code>callback_settings</code> with <code>callback_type: generic_api</code>; see LiteLLM's <a href="https://docs.litellm.ai/docs/observability/generic_api" target="_blank">Generic API Callback</a> docs.</p>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead><tr><th>vBilling</th><th>LiteLLM field</th></tr></thead>
+          <tbody>
+            <tr><td>Request ID</td><td><code>id</code></td></tr>
+            <tr><td>Time</td><td><code>endTime</code>, else <code>startTime</code></td></tr>
+            <tr><td>Tenant</td><td><code>metadata.user_api_key_team_id</code>, else <code>metadata.user_api_key_org_id</code>, <code>metadata.user_api_key_user_id</code>, <code>end_user</code></td></tr>
+            <tr><td><code>inference_input_tokens</code></td><td><code>prompt_tokens</code></td></tr>
+            <tr><td><code>inference_output_tokens</code></td><td><code>completion_tokens</code></td></tr>
+            <tr><td>SKU</td><td><code>model_group</code>, else <code>model</code></td></tr>
+            <tr><td>Billed</td><td>Only records with <code>status: success</code>. Failed calls are counted as <code>skipped</code>.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Records are billed to the team of the virtual key. LiteLLM generates team IDs unless you pass <code>team_id</code> when you create a team, so either create teams with the tenant ID as their <code>team_id</code>, or list each team ID in the <code>vbilling.vcluster.com/aliases</code> of the tenant's cluster. A LiteLLM that serves one tenant can use a tenant-bound token instead.</p>
+      <div class="callout callout-warn">
+        <div class="callout-icon">!</div>
+        <div>LiteLLM queues records in memory and posts them in batches: by default every 512 records or 5 seconds (<code>DEFAULT_BATCH_SIZE</code>, <code>DEFAULT_FLUSH_INTERVAL_SECONDS</code>). A batch still in the queue when the proxy stops is lost, and LiteLLM's documentation does not say that a failed post is retried. <a href="#cross-checks">Cross-check</a> the gateway against the engine's own counters. Each record also carries the messages and the response, so lower <code>DEFAULT_BATCH_SIZE</code> when prompts are long: vBilling accepts up to 16 MiB per request.</div>
+      </div>
+
+      <h3 id="custom-mapping">Any other gateway</h3>
+      <p>A gateway that can post JSON for each request, such as Kong, an Envoy AI Gateway access log or your own proxy, needs a mapping, not a shim: field paths for the request ID, the time, the tenant and the quantities. With Helm, add it under <code>records.formats</code>. Without Helm, put the same YAML, a map of format names, in a file and point <code>RECORDS_MAPPINGS_FILE</code> at it. Then post to <code>/api/v1/records?format=kong</code>.</p>
+      <div class="code-block"><code>records:
+  formats:
+    kong:
+      id: request.id
+      time: started_at
+      tenant: consumer.username
+      tenantMap: {acme-prod: acme-ai}       <span class="comment"># gateway value: tenant ID</span>
+      usage:
+        inference_input_tokens: ai.proxy.usage.prompt_tokens
+        inference_output_tokens: ai.proxy.usage.completion_tokens
+      sku: ai.proxy.meta.response_model</code></div>
+      <p>Kong's AI fields differ between Kong versions and plugins. Check one real log entry from your Kong and adjust the paths before you bill from it.</p>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead><tr><th>Key</th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr><td><code>id</code>, <code>time</code>, <code>usage</code></td><td>Required. <code>usage</code> maps metric codes to quantity paths; numbers and numeric strings both work. <code>time</code> takes RFC 3339 or a Unix timestamp.</td></tr>
+            <tr><td><code>tenant</code>, <code>tenantMap</code></td><td>The tenant path, and gateway values mapped to tenant IDs before aliases apply.</td></tr>
+            <tr><td><code>sku</code>, <code>region</code>, <code>project</code>, <code>tenantCluster</code></td><td>Paths for those event fields.</td></tr>
+            <tr><td><code>dimensions</code></td><td>Dimension keys mapped to paths.</td></tr>
+            <tr><td><code>where</code></td><td>Paths with the value they must have, for example <code>{status: success}</code>. Other records are skipped.</td></tr>
+            <tr><td><code>metrics</code></td><td>Metrics to declare (<code>code</code>, <code>name</code>, <code>unit</code>, <code>description</code>, <code>groupKeys</code>, <code>billable</code>), unless a metric with the same code exists.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>A path is dotted, or a list of paths of which the first non-empty one wins. The built-in <code>litellm</code> format declares <code>inference_input_tokens</code> and <code>inference_output_tokens</code> (unit tokens, priced by <code>sku</code>) on every install, so any format can use them, and billing adapters create them at startup. Declare other metrics in a format's <code>metrics</code> or in <a href="metrics.html#custom-metrics"><code>metering.customMetrics</code></a>, which wins. A format named <code>litellm</code> replaces the built-in one; <code>vbilling</code> cannot be redefined.</p>
+
+      <!-- Prometheus -->
+      <h2 id="prometheus">Prometheus counters and queries</h2>
+      <p>Metrics in <code>prometheus.metrics</code> (Helm) or <code>PROMETHEUS_METRICS_FILE</code> are read from Prometheus for every cluster and window. Give each one a <code>counter:</code> or a <code>query:</code>.</p>
+      <div class="code-block"><code>prometheus:
+  url: http://prometheus.monitoring.svc:9090
+  metrics:
+    - code: inference_output_tokens
+      name: Inference output tokens
+      unit: tokens
+      dimensions: [model_name]
+      skuLabel: model_name
+      counter: vllm:generation_tokens_total{{selector}}   <span class="comment"># exact: raw samples</span></code></div>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead><tr><th>Key</th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr><td><code>code</code>, <code>name</code>, <code>unit</code>, <code>description</code></td><td>The metric, as billing platforms see it.</td></tr>
+            <tr><td><code>counter</code></td><td>A plain series selector of a monotonic counter, such as <code>vllm:generation_tokens_total{{selector}}</code>: no functions, no range. Exact. vBilling sums the matching series per dimension itself.</td></tr>
+            <tr><td><code>query</code></td><td>Any PromQL returning one value per series at the window end. An estimate.</td></tr>
+            <tr><td><code>billable</code></td><td>Default <code>true</code>. <code>false</code> keeps the metric informational: it stays in the ledger, the exports and the webhook feed, and never reaches Stripe, Metronome or Lago. Use it for a second source to cross-check.</td></tr>
+            <tr><td><code>scale</code></td><td>Multiplies every quantity, for example <code>0.001</code> to turn milliseconds into seconds.</td></tr>
+            <tr><td><code>dimensions</code></td><td>Series labels kept as event dimensions and pricing group keys. <code>modelName</code> becomes <code>model_name</code>.</td></tr>
+            <tr><td><code>skuLabel</code></td><td>The label whose value becomes the event's SKU. <code>sku</code>, its v0.2 name, still works and logs a warning.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Templates: <code>{{selector}}</code> and <code>{{matchers}}</code> scope series to the cluster (see <a href="#scoping">below</a>), <code>{{namespace}}</code>, <code>{{vcluster}}</code> (the cluster's name), <code>{{instance}}</code>, <code>{{project}}</code>, <code>{{tenant}}</code>, <code>{{tenant_cluster}}</code>, <code>{{window}}</code> (for example <code>60s</code>) and <code>{{window_seconds}}</code> (for example <code>60</code>).</p>
+      <p>Bill each kind of usage from one source. If a gateway already sends <code>inference_output_tokens</code> as records, give the engine's counter its own code and <code>billable: false</code>, and compare the two with a <a href="#cross-checks">cross-check</a>.</p>
+
+      <h3 id="counters">How counters are billed</h3>
+      <ul>
+        <li>vBilling asks Prometheus for the raw samples of every matching series (a range selector, which Prometheus returns as stored, without extrapolation) and bills each sample's increase in the window the sample falls in. A drop in value is a counter reset: the new value counts in full.</li>
+        <li>A window's quantity runs up to its last sample, so usage between that sample and the window's end lands in the next window. Nothing falls between windows.</li>
+        <li>The last sample of each series is the next window's starting point. These baselines are saved in <code>DATA_DIR/prom-counters.json</code> in two generations, and the ledger decides which one is in force after a restart, so a crash between saving them and committing a window cannot count that window twice.</li>
+        <li>On the first read of a counter, its history is not billed: billing starts with the first window vBilling reads. A series that appears later, such as a new pod or a new model, counts from zero. A series not seen for 7 days is forgotten.</li>
+        <li><code>PROMETHEUS_LOOKBACK</code> (default <code>10m</code>) is how far before a window vBilling looks for a counter's starting sample. Keep it longer than the scrape interval plus any remote-write delay.</li>
+        <li>Usage after a pod's last scrape never reaches Prometheus, so no counter can bill it. Scrape inference engines often, so little is left between the last scrape and a pod's end.</li>
+      </ul>
+
+      <h3 id="prometheus-outages">Outages</h3>
+      <p>Prometheus usage is committed under its own ledger source, with its own watermark, after the Kubernetes windows. Kubernetes metering never waits for Prometheus.</p>
+      <ul>
+        <li><strong>vBilling was down:</strong> on restart it reads every window it missed, up to <code>MAX_BACKFILL</code>, and each counter sample lands in its own window. A counter's usage from before that is billed in the first window read.</li>
+        <li><strong>Prometheus is down</strong> (every read fails): nothing is committed and the sources turn <code>failing</code>. The windows wait, and once Prometheus answers they are read one by one, counters and queries alike, so each window gets its own usage.</li>
+        <li><strong>Only some reads fail</strong> (one cluster's own Prometheus, one metric): the window is committed without them. Those counters keep their last sample, so the first window that reads them again bills the whole increase since then. The total stays exact; that usage lands in the recovery window. A query that failed has no usage for that window.</li>
+      </ul>
+
+      <!-- Scoping -->
+      <h2 id="scoping">Scope series to a cluster</h2>
+      <p>Write <code>{{selector}}</code> (the matchers in braces) after a metric name, or <code>{{matchers}}</code> (the same matchers without braces) to combine them with your own, as in <code>vllm:generation_tokens_total{model_name="llama-3.1-70b",{{matchers}}}</code>. vBilling fills them for every cluster, whatever its tenancy model. The first row that applies wins:</p>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead><tr><th>Cluster</th><th>Where its series are</th><th><code>{{matchers}}</code> becomes</th></tr></thead>
+          <tbody>
+            <tr><td>Any, with <code>vbilling.vcluster.com/prometheus-url</code></td><td>A Prometheus that sees only this cluster: a URL such as <code>https://prometheus.globex.example.com</code>, or <code>tenant-service://NAMESPACE/NAME:PORT[/prefix]</code> for a Service inside the cluster, reached through the cluster's API server</td><td><code>__name__!=""</code>, which matches everything: the source is the scope</td></tr>
+            <tr><td>With <code>PROMETHEUS_PRESET=vcluster-platform</code></td><td>vCluster Platform fleet observability</td><td><code>vcluster_platform_instance="&lt;instance&gt;",vcluster_platform_project="&lt;project&gt;"</code></td></tr>
+            <tr><td>Own nodes: Private Nodes, Auto Nodes, Standalone</td><td>Remote written by a Prometheus agent (or an OpenTelemetry collector) in the cluster, with an external label naming the cluster</td><td><code>vcluster="&lt;cluster name&gt;"</code>: the label is <code>PROMETHEUS_SOURCE_LABEL</code>, and <code>vbilling.vcluster.com/prometheus-source</code> overrides the name</td></tr>
+            <tr><td>Shared or dedicated nodes</td><td>Pods synced to the control plane cluster and scraped there</td><td><code>namespace="&lt;namespace on the control plane cluster&gt;"</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <ul>
+        <li><code>vbilling.vcluster.com/prometheus-matchers</code> on a cluster replaces its matchers in every row, for example <code>team="globex"</code>.</li>
+        <li>vBilling knows that a cluster runs on its own nodes from the cluster's own API, read with the <code>vbilling-kubeconfig</code> Secret (see <a href="private-nodes.html#prometheus">Private Nodes</a>). Clusters in <code>TENANT_CLUSTERS_FILE</code> always do. A cluster vBilling cannot read is scoped by namespace; give it <code>prometheus-matchers</code> instead.</li>
+        <li><code>{{namespace}}</code> still works, but it is the cluster's namespace on the control plane cluster: it matches only series scraped there, from clusters on shared or dedicated nodes. Prefer <code>{{selector}}</code>.</li>
+        <li>The built-in egress counter and the DCGM utilization queries use the same scoping.</li>
+        <li>A <code>tenant-service://</code> URL needs <code>TENANT_API=true</code>, and the cluster's API credentials need <code>get</code> on <code>services/proxy</code> for that Service. A URL is sent the same <code>PROMETHEUS_HEADERS</code> and bearer token as <code>PROMETHEUS_URL</code>.</li>
+      </ul>
+      <div class="callout callout-warn">
+        <div class="callout-icon">!</div>
+        <div>The <code>vbilling.vcluster.com/*</code> settings decide who pays and where vBilling reads usage. Let only operators set them on clusters, namespaces and VirtualClusterInstances.</div>
+      </div>
+
+      <!-- Cross-checks -->
+      <h2 id="cross-checks">Cross-checks</h2>
+      <p>A gateway counts the tokens that pass through it; an inference engine counts the tokens it generated. Both see the same requests, so they should agree. When they do not, a gateway batch was lost, requests bypassed the gateway, or scrapes went missing. A cross-check finds out within the hour, before an invoice goes out, instead of in a dispute afterwards.</p>
+      <div class="code-block"><code>prometheus:
+  metrics:
+    - code: vllm_output_tokens                <span class="comment"># the second source, never billed</span>
+      name: vLLM output tokens
+      unit: tokens
+      billable: false
+      counter: vllm:generation_tokens_total{{selector}}
+crossChecks:
+  - primary: inference_output_tokens          <span class="comment"># billed, from LiteLLM records</span>
+    secondary: vllm_output_tokens
+    tolerancePercent: 2</code></div>
+      <p>Without Helm: <code>CROSS_CHECKS="inference_output_tokens=vllm_output_tokens:2%"</code>. Both metrics must be declared. The default tolerance is 1%.</p>
+      <ul>
+        <li>Every 5 minutes, vBilling compares each tenant's totals for the last complete hour, 10 minutes after it ends, so late records and Prometheus catch-up are in.</li>
+        <li>The divergence is the difference between the two totals divided by the larger one. Above the tolerance, the source <code>crosscheck/&lt;primary&gt;~&lt;secondary&gt;/&lt;tenant&gt;</code> turns <code>diverged</code> with both totals, and <code>vbilling_crosscheck_divergence_ratio{check,tenant}</code> on <code>/metrics</code> shows the ratio.</li>
+        <li>Billing continues from the primary. A cross-check tells you which tenant, which hour and by how much; it never changes a bill.</li>
+        <li>The engine's counter is attributed to the cluster the engine runs in, so the check works per tenant when each tenant's traffic is served by engines in its own clusters. Gateway cache hits and traffic that skips the gateway also show up as divergence: set the tolerance for them.</li>
+      </ul>
+      <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-s</span> <span class="string">'localhost:8080/api/v1/crosscheck?tenant=acme-ai'</span> | <span class="cmd">jq</span> <span class="string">'.rows[] | select(.ok | not)'</span>
+<span class="output">{
+  "check": "inference_output_tokens~vllm_output_tokens",
+  "tenant": "acme-ai",
+  "from": "2026-11-18T09:00:00Z",
+  "to": "2026-11-18T10:00:00Z",
+  "primary": 1843200,
+  "secondary": 1920000,
+  "divergence": 0.04,
+  "ok": false
+}</span></code></div>
+      <p><code>GET /api/v1/crosscheck</code> takes <code>from</code>, <code>to</code>, <code>tenant</code> and <code>bucket=hour</code> (default) or <code>day</code>. Without a range it covers the last 24 complete hours.</p>
+
+      <!-- Source health -->
+      <h2 id="source-health">Source health</h2>
+      <p>A billing pipeline that fails quietly is worse than one that stops. A selector that matches nothing and a cluster API that refuses its credentials both look like zero usage. vBilling records the outcome of every attempt, for every source:</p>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead><tr><th>Source</th><th>Name</th></tr></thead>
+          <tbody>
+            <tr><td>A Prometheus metric, per cluster</td><td><code>prometheus/&lt;metric&gt;/&lt;cluster&gt;</code></td></tr>
+            <tr><td>A cluster's own API</td><td><code>tenant-api/&lt;cluster&gt;</code></td></tr>
+            <tr><td>A records client</td><td><code>records/&lt;client&gt;</code>, and <code>records/&lt;client&gt;/unknown-tenants</code></td></tr>
+            <tr><td>The records aggregator</td><td><code>records/aggregator</code></td></tr>
+            <tr><td>A cross-check, per tenant</td><td><code>crosscheck/&lt;primary&gt;~&lt;secondary&gt;/&lt;tenant&gt;</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p><code>&lt;cluster&gt;</code> is the cluster's ID, <code>vcluster-&lt;namespace&gt;-&lt;name&gt;</code>. Each source has a status:</p>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead><tr><th>Status</th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr><td><code>ok</code></td><td>The last attempt returned data.</td></tr>
+            <tr><td><code>empty</code></td><td>The source answered with nothing. For a billed metric this is usually a selector that matches no series; <code>message</code> says how the cluster was scoped and <code>hint</code> what to change.</td></tr>
+            <tr><td><code>failing</code></td><td>The last attempt failed; <code>last_error_message</code> has the error.</td></tr>
+            <tr><td><code>diverged</code></td><td>A cross-check's two sources disagree beyond the tolerance.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <ul>
+        <li><code>GET /api/v1/sources</code> lists every source, problems first, with <code>status</code>, <code>message</code>, <code>hint</code>, <code>since</code>, <code>last_success</code>, <code>last_error</code>, <code>last_error_message</code>, <code>series</code> and how many attempts in a row failed or were empty. <code>?kind=</code> narrows it to <code>prometheus</code>, <code>tenant-api</code>, <code>records</code> or <code>crosscheck</code>.</li>
+        <li><code>GET /api/v1/status</code> adds <code>healthy</code> (no source needs attention), <code>sources</code> (counts by status) and <code>warnings</code> (one line per problem, with its hint).</li>
+        <li><code>/metrics</code> has <code>vbilling_sources{kind,status}</code>. Alert on <code>vbilling_sources{status!="ok"} &gt; 0</code>.</li>
+        <li>The log, prefixed <code>[health]</code>, records every change of state, and repeats a problem after 1, 10, 100 and more attempts in a row.</li>
+        <li>The dashboard has a Usage sources tile and panel.</li>
+        <li>A source that stops reporting, such as a gateway that stopped posting, keeps its last status, and vBilling forgets it after 6 hours. Watch <code>last_success</code> of <code>records/&lt;client&gt;</code>, or let a <a href="#cross-checks">cross-check</a> against the engine catch a silent gateway.</li>
+      </ul>
+      <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-s</span> localhost:8080/api/v1/status | <span class="cmd">jq</span> <span class="string">'{healthy, sources, warnings}'</span>
+<span class="output">{
+  "healthy": false,
+  "sources": {
+    "empty": 1,
+    "ok": 14
+  },
+  "warnings": [
+    "prometheus/inference_output_tokens/vcluster-globex-private-a100: empty: no series for vcluster-globex-private-a100 (own nodes, selected by vcluster label) (hint: the selector matched nothing with {{matchers}} = vcluster=\"private-a100\". This cluster runs on its own nodes: its series must carry vcluster=&lt;cluster name&gt; ...)"
+  ]
+}</span></code></div>
+      <p>What to do about an <code>empty</code> Prometheus source: <a href="troubleshooting.html#prometheus-metric-empty">A Prometheus metric returns nothing</a>.</p>
+
+      <!-- Window totals -->
+      <h2 id="window-totals">Window totals</h2>
+      <p><code>POST /api/v1/events</code> takes closed windows that your own pipeline already summed, such as Slurm accounting or a storage exporter (see the <a href="custom-adapter.html#ingest">Ingest API</a>). An event without an <code>id</code> gets one derived from its tenant, metric, window and dimensions, so two requests in the same window would look like one event sent twice. Since v0.3, vBilling rejects the second of two such events in one request, and warns when an event without an <code>id</code> matches usage already in the ledger. Per-request usage belongs in <a href="#records">records</a>, which sum it.</p>
+
+      <!-- Settings -->
+      <h2 id="settings">Settings</h2>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead><tr><th>Variable</th><th>Helm value</th><th>Default</th></tr></thead>
+          <tbody>
+            <tr><td><code>RECORDS_SETTLE</code></td><td><code>records.settle</code></td><td>30s</td></tr>
+            <tr><td><code>RECORDS_RETENTION</code></td><td><code>records.retention</code></td><td>168h</td></tr>
+            <tr><td><code>RECORDS_MAPPINGS_FILE</code></td><td><code>records.formats</code></td><td>(none)</td></tr>
+            <tr><td><code>RECORDS_ALLOW_UNKEYED</code></td><td><code>records.allowUnkeyed</code></td><td>false</td></tr>
+            <tr><td><code>RECORDS_UNKNOWN_TENANTS</code></td><td><code>records.unknownTenants</code></td><td>accept</td></tr>
+            <tr><td><code>RECORDS_ARCHIVE</code></td><td><code>records.archive</code></td><td>false</td></tr>
+            <tr><td><code>INGEST_TOKEN</code>, <code>INGEST_TOKENS</code></td><td><code>api.ingestToken</code>, <code>api.tenantIngestTokens</code></td><td>(none)</td></tr>
+            <tr><td><code>PROMETHEUS_METRICS_FILE</code></td><td><code>prometheus.metrics</code></td><td>(none)</td></tr>
+            <tr><td><code>PROMETHEUS_SOURCE_LABEL</code></td><td><code>prometheus.sourceLabel</code></td><td>vcluster</td></tr>
+            <tr><td><code>PROMETHEUS_LOOKBACK</code></td><td><code>prometheus.lookback</code></td><td>10m</td></tr>
+            <tr><td><code>EGRESS_QUERY</code></td><td><code>prometheus.egressQuery</code></td><td>(none: a counter)</td></tr>
+            <tr><td><code>CROSS_CHECKS</code></td><td><code>crossChecks</code></td><td>(none)</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout callout-warn">
+        <div class="callout-icon">!</div>
+        <div><code>RECORDS_SETTLE</code> must be shorter than <code>COLLECTION_INTERVAL</code>. With a window of 30s or less, vBilling uses half the window instead of the 30s default.</div>
+      </div>
+      <p>Every setting is described in <a href="configuration.html#records">Configuration</a>.</p>
+
+    </main>
+  </div>
+
+  <button class="mobile-sidebar-toggle" id="mobileSidebarToggle" aria-label="Toggle sidebar">&#9776;</button>
+
+  <script>
+    // Header scroll shadow
+    const header = document.getElementById('header');
+    window.addEventListener('scroll', () => {
+      header.classList.toggle('scrolled', window.scrollY > 10);
+    });
+
+    // Mobile sidebar toggle
+    const sidebar = document.getElementById('sidebar');
+    const toggle = document.getElementById('mobileSidebarToggle');
+    toggle.addEventListener('click', () => {
+      sidebar.classList.toggle('open');
+    });
+    document.addEventListener('click', (e) => {
+      if (!sidebar.contains(e.target) && !toggle.contains(e.target)) {
+        sidebar.classList.remove('open');
+      }
+    });
+  </script>
+</body>
+</html>

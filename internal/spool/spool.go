@@ -75,6 +75,9 @@ type Options struct {
 	// Retention is how long closed segments are kept once every destination
 	// has consumed them. Zero keeps data forever.
 	Retention time.Duration
+	// ArchiveDir, when set, receives a gzipped copy of each segment before
+	// compaction deletes it, recorded in archive.jsonl (see archive.go).
+	ArchiveDir string
 	// DedupeWindow bounds how long ingested event IDs are remembered.
 	DedupeWindow time.Duration
 	// NoSync skips fsync (tests only).
@@ -139,6 +142,12 @@ type Spool struct {
 	recentIDs  map[string]time.Time
 	changed    chan struct{}
 	closed     bool
+
+	// lastAt is the time of the newest record; floorAt is a floor set by
+	// AdvanceClock. Record times never go below either, so they increase
+	// with sequence numbers even if the wall clock steps back.
+	lastAt  time.Time
+	floorAt time.Time
 }
 
 // Open opens or creates a spool in dir and recovers its state.
@@ -244,6 +253,12 @@ func (s *Spool) recover() error {
 		s.head = s.anchor
 	}
 	s.committed = s.seq
+	for i := len(s.segs) - 1; i >= 0; i-- {
+		if s.segs[i].Last != 0 {
+			s.lastAt = s.segs[i].LastAt
+			break
+		}
+	}
 	return nil
 }
 
@@ -446,11 +461,122 @@ func (s *Spool) AppendIngest(source string, events []usage.Event) (accepted, dup
 	return accepted, duplicates, nil
 }
 
+// AppendBatch atomically appends events with no window and no ID memory.
+// Per-request usage records use it: their IDs are deduplicated when
+// windows are aggregated, which keeps memory bounded at any request rate.
+func (s *Spool) AppendBatch(source string, events []usage.Event) (at time.Time, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return time.Time{}, errors.New("spool closed")
+	}
+	if err := s.appendLocked(source, time.Time{}, events, ""); err != nil {
+		return time.Time{}, err
+	}
+	return s.lastAt, nil
+}
+
+// AdvanceClock guarantees every record appended from now on is stamped
+// after t. An aggregator calls it before reading a time range, so nothing
+// can later arrive inside a range it has already closed.
+func (s *Spool) AdvanceClock(t time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t = t.UTC().Add(time.Nanosecond)
+	if t.After(s.floorAt) {
+		s.floorAt = t
+	}
+}
+
+// Clock returns the time the next record would at least be stamped with.
+func (s *Spool) Clock() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.opts.Now().UTC()
+	for _, t := range []time.Time{s.lastAt, s.floorAt} {
+		if now.Before(t) {
+			now = t
+		}
+	}
+	return now
+}
+
+// ScanRecords visits committed event records whose window overlaps
+// [from, to), with the time each was appended.
+func (s *Spool) ScanRecords(from, to time.Time, fn func(ev *usage.Event, at time.Time) error) error {
+	committed, segs := s.snapshot()
+	for i := range segs {
+		sg := &segs[i]
+		if sg.Last == 0 || sg.LastAt.Before(from.Add(-scanSkew)) {
+			continue
+		}
+		var cbErr error
+		inRange := func(line []byte) bool {
+			ws, we, ok := peekWindow(line)
+			return ok && we.After(from) && ws.Before(to)
+		}
+		err := s.readSegmentOpts(sg, sg.First, committed, false, inRange, func(r *Record) bool {
+			if r.Type != TypeEvent || r.Event == nil {
+				return true
+			}
+			e := r.Event
+			if e.WindowEnd.After(from) && e.WindowStart.Before(to) {
+				if cbErr = fn(e, r.At); cbErr != nil {
+					return false
+				}
+			}
+			return true
+		})
+		if err != nil {
+			return err
+		}
+		if cbErr != nil {
+			return cbErr
+		}
+	}
+	return nil
+}
+
+// ScanAppended visits committed event records appended in [from, to),
+// whatever their window. Late-arriving usage is found this way.
+func (s *Spool) ScanAppended(from, to time.Time, fn func(ev *usage.Event, at time.Time) error) error {
+	committed, segs := s.snapshot()
+	for i := range segs {
+		sg := &segs[i]
+		if sg.Last == 0 || sg.LastAt.Before(from) || !sg.FirstAt.Before(to) {
+			continue
+		}
+		var cbErr error
+		err := s.readSegmentOpts(sg, sg.First, committed, false, nil, func(r *Record) bool {
+			if r.Type != TypeEvent || r.Event == nil || r.At.Before(from) || !r.At.Before(to) {
+				return true
+			}
+			if cbErr = fn(r.Event, r.At); cbErr != nil {
+				return false
+			}
+			return true
+		})
+		if err != nil {
+			return err
+		}
+		if cbErr != nil {
+			return cbErr
+		}
+	}
+	return nil
+}
+
 func (s *Spool) appendLocked(source string, windowEnd time.Time, events []usage.Event, note string) error {
 	if err := s.maybeRotateLocked(); err != nil {
 		return err
 	}
 	now := s.opts.Now().UTC()
+	if now.Before(s.lastAt) {
+		now = s.lastAt
+	}
+	if now.Before(s.floorAt) {
+		now = s.floorAt
+	}
 	sg := s.segs[len(s.segs)-1]
 	startSize := sg.Size
 	seq, head := s.seq, s.head
@@ -507,6 +633,7 @@ func (s *Spool) appendLocked(source string, windowEnd time.Time, events []usage.
 	sg.Size = startSize + int64(buf.Len())
 	sg.index = append(sg.index, newIndex...)
 	s.seq, s.head, s.committed = seq, head, seq
+	s.lastAt = now
 	if !windowEnd.IsZero() {
 		s.watermarks[source] = windowEnd
 	}
@@ -870,46 +997,20 @@ func (s *Spool) loadDedupe() error {
 // --- retention ---
 
 // Compact deletes closed segments older than the retention period that
-// every listed destination has already consumed.
+// every listed destination has already consumed. With ArchiveDir set, each
+// one is archived first and deleted only once its archived copy is durable;
+// a segment that fails to archive is kept and retried next time.
 func (s *Spool) Compact(consumers []string) (removed int, err error) {
+	if s.opts.ArchiveDir != "" {
+		return s.compactArchived(consumers)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.opts.Retention <= 0 || len(s.segs) < 2 {
-		return 0, s.compactDedupeLocked()
+	removed, err = s.removeLocked(s.compactableLocked(consumers), nil)
+	if derr := s.compactDedupeLocked(); err == nil {
+		err = derr
 	}
-	minCursor := s.committed
-	for _, c := range consumers {
-		cur, ok := s.cursors[c]
-		if !ok {
-			cur = s.committed
-		}
-		if cur < minCursor {
-			minCursor = cur
-		}
-	}
-	cutoff := s.opts.Now().Add(-s.opts.Retention)
-	keepFrom := 0
-	for i, sg := range s.segs[:len(s.segs)-1] {
-		if sg.Last != 0 && (sg.LastAt.After(cutoff) || sg.Last > minCursor) {
-			break
-		}
-		if err := os.Remove(filepath.Join(s.dir, sg.Name)); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return removed, err
-		}
-		if sg.LastHash != "" {
-			s.anchor = sg.LastHash
-		}
-		removed++
-		keepFrom = i + 1
-	}
-	if err := s.compactDedupeLocked(); err != nil {
-		return removed, err
-	}
-	if removed > 0 {
-		s.segs = append([]*segment(nil), s.segs[keepFrom:]...)
-		return removed, s.writeManifestLocked()
-	}
-	return 0, nil
+	return removed, err
 }
 
 func (s *Spool) compactDedupeLocked() error {

@@ -2,8 +2,8 @@ apiVersion: v2
 name: vbilling
 description: vBilling meters tenant clusters and ships durable, reconcilable usage events to Stripe, Metronome, Lago or your own pipeline
 type: application
-version: 0.2.0
-appVersion: "0.2.0"
+version: 0.3.0
+appVersion: "0.3.0"
 home: https://github.com/vclusterlabs-experiments/vbilling
 keywords:
   - vcluster

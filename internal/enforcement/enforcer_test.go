@@ -12,6 +12,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/vclusterlabs-experiments/vbilling/internal/destinations"
@@ -179,5 +180,136 @@ func TestMetronomeAlertsAndRules(t *testing.T) {
 	}
 	if _, err := ParseRules("x=bogus"); err == nil {
 		t.Fatal("invalid rule accepted")
+	}
+}
+
+// A payment clears the billing hold only: a suspension an operator set for
+// another reason stays until the operator lifts it.
+func TestHoldsAreIndependent(t *testing.T) {
+	e := New(nil, Options{Mode: "observe", Now: func() time.Time { return time.Date(2026, 11, 18, 10, 0, 0, 0, time.UTC) }})
+	ctx := context.Background()
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(e.Set(ctx, "acme", Delinquent, "invoice payment failed", "stripe", "invoice.payment_failed"))
+	must(e.SetHold(ctx, "acme", "abuse", Suspended, "crypto mining", "api", "manual"))
+	if s := e.StateOf("acme"); s.State != Suspended || !strings.Contains(s.Reason, "abuse") || len(s.Holds) != 2 {
+		t.Fatalf("state = %+v", s)
+	}
+	must(e.Set(ctx, "acme", Active, "invoice paid", "stripe", "invoice.paid"))
+	if s := e.StateOf("acme"); s.State != Suspended || len(s.Holds) != 1 {
+		t.Fatalf("payment must not lift the abuse hold: %+v", s)
+	}
+	must(e.SetHold(ctx, "acme", "abuse", Active, "cleared", "api", "manual"))
+	if s := e.StateOf("acme"); s.State != Active || len(s.Holds) != 0 {
+		t.Fatalf("state after both cleared = %+v", s)
+	}
+}
+
+// In enforce mode a suspended tenant's clusters get an admission policy
+// through their own API, which is what reaches clusters with their own
+// nodes; lifting the suspension removes it.
+func TestSuspensionInstallsPolicyInsideTenantClusters(t *testing.T) {
+	host := fake.NewSimpleClientset(
+		&appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "private-a", Namespace: "vc-private-a"}},
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "vc-private-a"}},
+	)
+	inside := fake.NewSimpleClientset()
+	cl := discovery.TenantCluster{Name: "private-a", Namespace: "vc-private-a", Source: "statefulset"}
+	e := New(host, Options{Mode: "enforce", Now: time.Now,
+		Clusters:     func(string) []discovery.TenantCluster { return []discovery.TenantCluster{cl} },
+		TenantClient: func(context.Context, discovery.TenantCluster) (kubernetes.Interface, error) { return inside, nil },
+	})
+	ctx := context.Background()
+	if err := e.Set(ctx, "acme", Suspended, "subscription canceled", "stripe", "customer.subscription.deleted"); err != nil {
+		t.Fatal(err)
+	}
+	p, err := inside.AdmissionregistrationV1().ValidatingAdmissionPolicies().Get(ctx, PolicyName, metav1.GetOptions{})
+	if err != nil || !strings.Contains(p.Spec.Validations[0].Message, "subscription canceled") {
+		t.Fatalf("policy = %+v, %v", p, err)
+	}
+	if _, err := inside.AdmissionregistrationV1().ValidatingAdmissionPolicyBindings().Get(ctx, PolicyName, metav1.GetOptions{}); err != nil {
+		t.Fatalf("binding: %v", err)
+	}
+	// An operator hold explains itself as such, not as billing.
+	if err := e.SetHold(ctx, "acme", "abuse", Suspended, "port scanning", "api", "manual"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Set(ctx, "acme", Active, "invoice paid", "stripe", "invoice.paid"); err != nil {
+		t.Fatal(err)
+	}
+	p, _ = inside.AdmissionregistrationV1().ValidatingAdmissionPolicies().Get(ctx, PolicyName, metav1.GetOptions{})
+	if msg := p.Spec.Validations[0].Message; !strings.Contains(msg, "suspended (abuse: port scanning)") || strings.Contains(msg, "for billing") {
+		t.Fatalf("operator hold message = %q", msg)
+	}
+	if err := e.SetHold(ctx, "acme", "abuse", Active, "reviewed", "api", "manual"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Set(ctx, "acme", Suspended, "subscription canceled", "stripe", "customer.subscription.deleted"); err != nil {
+		t.Fatal(err)
+	}
+	// Suspending again (another webhook) updates the policy idempotently.
+	if err := e.Set(ctx, "acme", Suspended, "still unpaid", "stripe", "invoice.payment_failed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Set(ctx, "acme", Active, "invoice paid", "stripe", "invoice.paid"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inside.AdmissionregistrationV1().ValidatingAdmissionPolicies().Get(ctx, PolicyName, metav1.GetOptions{}); err == nil {
+		t.Fatal("the policy must be removed when the tenant is active again")
+	}
+}
+
+// A cluster created while its tenant is suspended gets the policy at the
+// next resync, and one that missed the payment loses it.
+func TestResyncConvergesNewAndMissedClusters(t *testing.T) {
+	host := fake.NewSimpleClientset(
+		&appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: "vc-a"}},
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "vc-a"}},
+		&appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "b", Namespace: "vc-b"}},
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "vc-b"}},
+	)
+	insideA, insideB := fake.NewSimpleClientset(), fake.NewSimpleClientset()
+	clusters := []discovery.TenantCluster{{Name: "a", Namespace: "vc-a", Source: "statefulset"}}
+	reachable := map[string]bool{"a": true, "b": true}
+	e := New(host, Options{Mode: "enforce", Now: time.Now,
+		Clusters: func(string) []discovery.TenantCluster { return clusters },
+		TenantClient: func(_ context.Context, cl discovery.TenantCluster) (kubernetes.Interface, error) {
+			if !reachable[cl.Name] {
+				return nil, errors.New("unreachable")
+			}
+			if cl.Name == "a" {
+				return insideA, nil
+			}
+			return insideB, nil
+		},
+	})
+	ctx := context.Background()
+	if err := e.Set(ctx, "acme", Suspended, "unpaid", "stripe", "invoice.payment_failed"); err != nil {
+		t.Fatal(err)
+	}
+	has := func(c kubernetes.Interface) bool {
+		_, err := c.AdmissionregistrationV1().ValidatingAdmissionPolicies().Get(ctx, PolicyName, metav1.GetOptions{})
+		return err == nil
+	}
+	// Cluster b is created while acme is suspended.
+	clusters = append(clusters, discovery.TenantCluster{Name: "b", Namespace: "vc-b", Source: "statefulset"})
+	e.Resync(ctx)
+	if !has(insideB) {
+		t.Fatal("a cluster created during the suspension must get the policy at resync")
+	}
+	// The payment arrives while cluster b is unreachable.
+	reachable["b"] = false
+	_ = e.Set(ctx, "acme", Active, "invoice paid", "stripe", "invoice.paid")
+	if has(insideA) || !has(insideB) {
+		t.Fatalf("after payment: a=%v b=%v", has(insideA), has(insideB))
+	}
+	reachable["b"] = true
+	e.Resync(ctx)
+	if has(insideB) {
+		t.Fatal("a cluster that missed the payment must be unblocked at resync")
 	}
 }

@@ -995,7 +995,7 @@
           <a href="getting-started.html" class="btn-secondary">Read the docs</a>
           <a href="https://github.com/vClusterLabs-Experiments/vbilling" class="btn-secondary">View on GitHub</a>
         </div>
-        <p class="hero-new"><strong>New in v0.2:</strong> Stripe and Metronome, a verifiable ledger, vCluster Private Nodes, and DCGM through your own Prometheus. <a href="example-gke.html">See it end to end on GKE with real GPUs &#8594;</a></p>
+        <p class="hero-new"><strong>New in v0.3:</strong> per-request usage from AI gateways, exact Prometheus counters, source health, and enforcement inside clusters with their own nodes. <a href="usage-sources.html">How vBilling keeps usage exact &#8594;</a></p>
       </div>
 
       <div class="hero-visual">
@@ -1234,13 +1234,25 @@
         <div class="feature-card">
           <span class="feature-icon">block</span>
           <h3>Billing-state enforcement</h3>
-          <p>Stripe dunning and Metronome spend alerts label, annotate, or soft-suspend tenant clusters through an admission policy.</p>
+          <p>Stripe dunning and Metronome spend alerts label, annotate, or soft-suspend clusters through admission policies, inside clusters with their own nodes too.</p>
         </div>
 
         <div class="feature-card">
           <span class="feature-icon">input</span>
           <h3>Ingest API</h3>
           <p>Push inference tokens, Slurm accounting, or storage usage into the same durable pipeline as collector events.</p>
+        </div>
+
+        <div class="feature-card">
+          <span class="feature-icon">verified</span>
+          <h3>Exact usage from gateways and Prometheus</h3>
+          <p>Per-request records from LiteLLM or any AI gateway are stored before they are acknowledged, deduplicated by request ID and safe when late. Prometheus counters bill the exact increase per window; PromQL estimates are marked as such.</p>
+        </div>
+
+        <div class="feature-card">
+          <span class="feature-icon">monitor_heart</span>
+          <h3>Source health</h3>
+          <p>Every usage source reports ok, empty, failing or diverged, with its last success and a hint, so a selector that matches nothing never looks like zero usage. Cross-checks compare gateway tokens with the engine's own counters.</p>
         </div>
 
         <div class="feature-card">

@@ -24,8 +24,9 @@ type Config struct {
 	TenantClass string // default tenant class, e.g. public, enterprise, government, dev
 
 	// Durable ledger.
-	DataDir   string
-	Retention time.Duration
+	DataDir    string
+	Retention  time.Duration
+	ArchiveDir string // ARCHIVE_DIR: gzipped copies of compacted segments, kept for disputes
 
 	// Collection. CollectionInterval is the metering window size.
 	CollectionInterval time.Duration
@@ -48,6 +49,11 @@ type Config struct {
 	PrometheusMetrics  string // PROMETHEUS_METRICS_FILE: operator-defined metrics from PromQL
 	DRAGPUDrivers      []string
 	WatchDeletions     bool // bill pods and nodes deleted between windows
+	// PromSourceLabel names the source cluster on series from clusters with
+	// their own nodes (an external label of their Prometheus agent).
+	PromSourceLabel string
+	// PromLookback is how far before a window a counter's starting sample may be.
+	PromLookback time.Duration
 
 	// Tenant clusters with their own nodes (Private Nodes, Auto Nodes, Standalone).
 	TenantAPI               bool
@@ -63,6 +69,26 @@ type Config struct {
 	PlatformCluster         string
 	OffboardGrace           time.Duration
 	CustomMetrics           string
+	CustomMetricsFile       string // YAML list form of CUSTOM_METRICS (Helm metering.customMetrics)
+	// PlanByClass picks a plan (Lago plan code, Stripe plan tag, Metronome
+	// rate card) for tenants without a vbilling.vcluster.com/plan setting.
+	PlanByClass map[string]string
+
+	// Per-request usage records (POST /api/v1/records).
+	RecordsSettle        time.Duration
+	RecordsRetention     time.Duration
+	RecordsMappingsFile  string
+	RecordsAllowUnkeyed  bool
+	RecordsRejectUnknown bool
+	// RecordsArchive also archives per-request records (to ARCHIVE_DIR/records)
+	// before retention removes them: request-level evidence for disputes.
+	RecordsArchive bool
+	// RecordsLiteLLM enables the built-in litellm payload format.
+	RecordsLiteLLM bool
+	IngestTokens   map[string]string // token -> tenant the token is bound to
+	// CrossChecks compares two sources of the same usage per tenant and hour:
+	// "primary=secondary[:tolerance%],...".
+	CrossChecks string
 
 	// Billing defaults.
 	DefaultPlanCode string
@@ -76,10 +102,17 @@ type Config struct {
 	// Enforcement of billing state on tenant clusters: observe | annotate | enforce.
 	EnforcementMode  string
 	EnforcementRules string // "event.type=state,..." overrides
+	// EnforcementInCluster also installs an admission policy inside each
+	// suspended tenant's clusters through their own API (enforce mode). It
+	// is the only enforcement that reaches clusters with their own nodes,
+	// and needs write access to admission policies inside them.
+	EnforcementInCluster bool
 
 	// Lago.
-	LagoAPIURL string
-	LagoAPIKey string
+	LagoAPIURL       string
+	LagoAPIKey       string
+	LagoPriceCard    string   // YAML amounts for the charges and SKU charge filters vBilling creates
+	LagoManagedPlans []string // plans besides DefaultPlanCode whose charges and SKU filters vBilling manages
 
 	// Stripe (Billing Meters).
 	StripeAPIKey         string
@@ -117,8 +150,9 @@ func Load() *Config {
 		ClusterName: envOr("CLUSTER_NAME", "control-plane"),
 		TenantClass: os.Getenv("DEFAULT_TENANT_CLASS"),
 
-		DataDir:   envOr("DATA_DIR", "/var/lib/vbilling"),
-		Retention: envDuration("RETENTION", 7*24*time.Hour),
+		DataDir:    envOr("DATA_DIR", "/var/lib/vbilling"),
+		Retention:  envDuration("RETENTION", 7*24*time.Hour),
+		ArchiveDir: os.Getenv("ARCHIVE_DIR"),
 
 		CollectionInterval: envDuration("COLLECTION_INTERVAL", 60*time.Second),
 		ReconcileInterval:  envDuration("RECONCILE_INTERVAL", 30*time.Second),
@@ -140,6 +174,8 @@ func Load() *Config {
 		PrometheusMetrics:  os.Getenv("PROMETHEUS_METRICS_FILE"),
 		DRAGPUDrivers:      envList("DRA_GPU_DRIVERS", []string{"gpu.nvidia.com", "gpu.amd.com"}),
 		WatchDeletions:     envBool("WATCH_DELETIONS", true),
+		PromSourceLabel:    envOr("PROMETHEUS_SOURCE_LABEL", "vcluster"),
+		PromLookback:       envDuration("PROMETHEUS_LOOKBACK", 10*time.Minute),
 
 		TenantAPI:               envBool("TENANT_API", true),
 		TenantKubeconfigSecret:  envOr("TENANT_KUBECONFIG_SECRET", "vbilling-kubeconfig"),
@@ -154,6 +190,17 @@ func Load() *Config {
 		PlatformCluster:         os.Getenv("PLATFORM_CLUSTER"),
 		OffboardGrace:           envDuration("OFFBOARD_GRACE", time.Hour),
 		CustomMetrics:           os.Getenv("CUSTOM_METRICS"),
+		CustomMetricsFile:       os.Getenv("CUSTOM_METRICS_FILE"),
+		PlanByClass:             envMap("PLAN_BY_CLASS"),
+		RecordsSettle:           envDuration("RECORDS_SETTLE", 30*time.Second),
+		RecordsRetention:        envDuration("RECORDS_RETENTION", 7*24*time.Hour),
+		RecordsMappingsFile:     os.Getenv("RECORDS_MAPPINGS_FILE"),
+		RecordsAllowUnkeyed:     envBool("RECORDS_ALLOW_UNKEYED", false),
+		RecordsRejectUnknown:    os.Getenv("RECORDS_UNKNOWN_TENANTS") == "reject",
+		RecordsArchive:          envBool("RECORDS_ARCHIVE", false),
+		RecordsLiteLLM:          envBool("RECORDS_LITELLM", false),
+		IngestTokens:            secretMap("INGEST_TOKENS"),
+		CrossChecks:             os.Getenv("CROSS_CHECKS"),
 
 		DefaultPlanCode: envOr("DEFAULT_PLAN_CODE", "vcluster-standard"),
 		BillingCurrency: envOr("BILLING_CURRENCY", "USD"),
@@ -162,11 +209,14 @@ func Load() *Config {
 		APIToken:    secretEnv("API_TOKEN"),
 		IngestToken: secretEnv("INGEST_TOKEN"),
 
-		EnforcementMode:  envOr("ENFORCEMENT_MODE", "observe"),
-		EnforcementRules: os.Getenv("ENFORCEMENT_RULES"),
+		EnforcementMode:      envOr("ENFORCEMENT_MODE", "observe"),
+		EnforcementRules:     os.Getenv("ENFORCEMENT_RULES"),
+		EnforcementInCluster: envBool("ENFORCEMENT_IN_CLUSTER", false),
 
-		LagoAPIURL: envOr("LAGO_API_URL", "http://localhost:3000"),
-		LagoAPIKey: secretEnv("LAGO_API_KEY"),
+		LagoAPIURL:       envOr("LAGO_API_URL", "http://localhost:3000"),
+		LagoAPIKey:       secretEnv("LAGO_API_KEY"),
+		LagoPriceCard:    os.Getenv("LAGO_PRICE_CARD"),
+		LagoManagedPlans: envList("LAGO_MANAGED_PLANS", nil),
 
 		StripeAPIKey:         secretEnv("STRIPE_API_KEY"),
 		StripeAPIBase:        envOr("STRIPE_API_BASE", "https://api.stripe.com"),
@@ -195,6 +245,11 @@ func Load() *Config {
 	}
 	if c.IngestToken == "" {
 		c.IngestToken = c.APIToken
+	}
+	// Records are on time until Settle after their window; it must be
+	// shorter than the window, so short windows get half the window.
+	if c.RecordsSettle >= c.CollectionInterval {
+		c.RecordsSettle = c.CollectionInterval / 2
 	}
 	return c
 }
@@ -226,6 +281,25 @@ func (c *Config) Validate() error {
 	case "node", "usage":
 	default:
 		return fmt.Errorf("PRIVATE_NODE_BILLING %q must be node or usage", c.PrivateNodeBilling)
+	}
+	if c.RecordsSettle <= 0 {
+		return fmt.Errorf("RECORDS_SETTLE %s must be positive", c.RecordsSettle)
+	}
+	if c.RecordsArchive && c.ArchiveDir == "" {
+		return fmt.Errorf("RECORDS_ARCHIVE needs ARCHIVE_DIR")
+	}
+	if c.RecordsRetention < 2*time.Hour {
+		return fmt.Errorf("RECORDS_RETENTION %s must be at least 2h", c.RecordsRetention)
+	}
+	switch v := os.Getenv("RECORDS_UNKNOWN_TENANTS"); v {
+	case "", "accept", "reject":
+	default:
+		return fmt.Errorf("RECORDS_UNKNOWN_TENANTS %q must be accept or reject", v)
+	}
+	for tok, tenant := range c.IngestTokens {
+		if tok == "" || tenant == "" {
+			return fmt.Errorf("INGEST_TOKENS entries must be token=tenant")
+		}
 	}
 	switch c.PrometheusPreset {
 	case "", "default", "vcluster-platform":
@@ -288,6 +362,15 @@ func envList(key string, fallback []string) []string {
 		if p = strings.TrimSpace(p); p != "" {
 			out = append(out, p)
 		}
+	}
+	return out
+}
+
+// secretMap parses "k1=v1,k2=v2" from a secret, trimming each part.
+func secretMap(key string) map[string]string {
+	out := map[string]string{}
+	for k, v := range envMap(key) {
+		out[strings.TrimSpace(k)] = strings.TrimSpace(v)
 	}
 	return out
 }

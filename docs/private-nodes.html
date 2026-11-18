@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Dedicated and Private Nodes - vBilling Docs</title>
-  <meta name="description" content="Node capacity tracking: how vBilling bills dedicated nodes and vCluster Private Nodes, Auto Nodes and Standalone for their full capacity, by SKU, without double billing.">
+  <meta name="description" content="Node capacity tracking: how vBilling bills dedicated nodes and vCluster Private Nodes, Auto Nodes and Standalone for their full capacity, by SKU, without double billing, reads their Prometheus series, and enforces billing states inside them.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Roboto+Mono:wght@500&display=swap" rel="stylesheet">
@@ -252,6 +252,7 @@
         <a href="getting-started.html">Getting Started</a>
         <a href="configuration.html">Configuration</a>
         <a href="metrics.html">Metrics Reference</a>
+        <a href="usage-sources.html">Usage Sources</a>
         <a href="private-nodes.html" class="active">Dedicated and Private Nodes</a>
         <a href="example-gke.html">Example: GKE with GPUs</a>
         <a href="troubleshooting.html">Troubleshooting</a>
@@ -365,6 +366,119 @@ experimental:
       </div>
       <p><strong>Outages.</strong> If a tenant cluster's API cannot be read, everything else is still metered and the gap is recorded under <code>DATA_DIR</code>. As soon as the API answers, exactly the missed windows are metered and appended as late events, deduplicated by ID, up to <code>MAX_BACKFILL</code>.</p>
       <p><strong>Scale-down.</strong> Nodes deleted between two windows (Auto Nodes scaling down, a machine removed) are billed until the second they were deleted. A deletion noticed only after a watch reconnects is dated to the last time vBilling saw the node, never later.</p>
+
+      <h2 id="prometheus">Prometheus for clusters with their own nodes</h2>
+      <p>Pods on private nodes never appear in the control plane cluster. A Prometheus there never scrapes them, and their series carry no control plane cluster namespace. Ship them to your Prometheus with a Prometheus agent, or an OpenTelemetry collector, inside the cluster that remote writes with an external label naming the cluster:</p>
+      <div class="code-block"><code><span class="comment"># prometheus.yml of the agent inside the cluster</span>
+global:
+  external_labels: {vcluster: private-a100}   <span class="comment"># the cluster's name</span>
+remote_write:
+  - url: http://prometheus.monitoring.example.com:9090/api/v1/write</code></div>
+      <p>vBilling then selects that cluster's series with <code>vcluster="private-a100"</code> wherever a metric uses <code>{{selector}}</code> or <code>{{matchers}}</code>, and so do the built-in egress counter and the DCGM utilization queries. The label is <code>PROMETHEUS_SOURCE_LABEL</code> (Helm <code>prometheus.sourceLabel</code>, default <code>vcluster</code>). If the agent's value is not the cluster's name, set <code>vbilling.vcluster.com/prometheus-source</code> on the cluster. <code>examples/gke-gpu/06-prometheus-agent.yaml</code> in the repository is a complete agent that ships DCGM this way.</p>
+      <p>vBilling knows a cluster runs on its own nodes because it reads the cluster's API with the exported kubeconfig above. A cluster it cannot read is scoped by namespace, like a cluster on shared nodes; give it <code>vbilling.vcluster.com/prometheus-matchers</code> instead. All scoping rules are in <a href="usage-sources.html#scoping">Usage Sources</a>.</p>
+      <h3>A Prometheus inside the cluster</h3>
+      <p>A cluster can instead name a Prometheus that sees only it, with <code>vbilling.vcluster.com/prometheus-url</code>. vBilling queries it without extra matchers, because the source itself is the scope:</p>
+      <ul>
+        <li>A URL vBilling can reach, such as <code>https://prometheus.globex.example.com</code>. It gets <code>PROMETHEUS_HEADERS</code> and the bearer token only when it is on the same host as <code>PROMETHEUS_URL</code>, so an annotation can never send them elsewhere. Put credentials for any other host in its URL (<code>https://user:password@host</code>).</li>
+        <li><code>tenant-service://NAMESPACE/NAME:PORT</code>, with an optional path prefix after the port, for a Service inside the cluster. vBilling reaches it through the cluster's API server, so nothing is exposed. The cluster's API credentials need <code>get</code> on <code>services/proxy</code> in that namespace:</li>
+      </ul>
+      <div class="code-block"><code><span class="comment"># inside the cluster, for tenant-service://monitoring/prometheus:9090</span>
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: vbilling-prometheus
+  namespace: monitoring
+rules:
+  - apiGroups: [<span class="string">""</span>]
+    resources: [services/proxy]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: vbilling-prometheus
+  namespace: monitoring
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: vbilling-prometheus
+subjects:
+  - kind: ServiceAccount
+    name: vbilling-reader
+    namespace: kube-system</code></div>
+
+      <h2 id="enforcement">Billing-state enforcement inside the cluster</h2>
+      <p>In <code>enforce</code> mode, vBilling labels a suspended tenant's namespaces in the control plane cluster, and the chart's admission policy denies new pods there. That holds clusters on shared and dedicated nodes, whose pods are synced into those namespaces. A cluster with its own nodes schedules its pods inside itself, so the control plane cluster never sees them.</p>
+      <p>With <code>ENFORCEMENT_IN_CLUSTER=true</code> (Helm <code>enforcement.inCluster=true</code>), vBilling also acts inside each of a suspended tenant's clusters, through the cluster's own API:</p>
+      <ul>
+        <li>It installs a ValidatingAdmissionPolicy and a binding, both named <code>vbilling-suspended</code>, that deny new pods in every namespace except <code>kube-system</code> and namespaces labeled <code>vbilling.vcluster.com/enforcement-exempt</code>. The cluster needs Kubernetes 1.30 or later.</li>
+        <li>The denial carries the reason: <code>This tenant is suspended for billing (...). New workloads are blocked until the account is current; running workloads are not affected.</code></li>
+        <li>Running workloads are never stopped. When the tenant is active again, vBilling deletes the policy and the binding.</li>
+        <li>vBilling applies it when the tenant's state changes, and again every two minutes for every tenant. A cluster created while its tenant is suspended gets the policy within two minutes, and a cluster that could not be reached when the state changed (including when the tenant paid) converges once it answers. If a cluster cannot be reached at the change itself, the API call or webhook that changed the state also fails and names the cluster, so billing platforms retry it.</li>
+        <li>It needs <code>ENFORCEMENT_MODE=enforce</code> and <code>TENANT_API=true</code>. Clusters without API credentials are skipped.</li>
+      </ul>
+      <p>This is the only enforcement that reaches clusters with their own nodes. The read-only service account vCluster exports for vBilling cannot write admission policies, so grant it that in <code>vcluster.yaml</code>, next to <code>vbilling-reader</code>:</p>
+      <div class="code-block"><code>experimental:
+  deploy:
+    vcluster:
+      manifests: |-
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: ClusterRole
+        metadata:
+          name: vbilling-reader
+        rules:
+          - apiGroups: [<span class="string">""</span>]
+            resources: [nodes, pods, persistentvolumeclaims, services]
+            verbs: [get, list, watch]
+          - apiGroups: [resource.k8s.io]
+            resources: [resourceclaims, resourceslices]
+            verbs: [get, list]
+          - apiGroups: [metrics.k8s.io]
+            resources: [pods]
+            verbs: [get, list]
+        ---
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: ClusterRole
+        metadata:
+          name: vbilling-enforcer
+        rules:
+          - apiGroups: [admissionregistration.k8s.io]
+            resources: [validatingadmissionpolicies, validatingadmissionpolicybindings]
+            verbs: [create]
+          - apiGroups: [admissionregistration.k8s.io]
+            resources: [validatingadmissionpolicies, validatingadmissionpolicybindings]
+            resourceNames: [vbilling-suspended]
+            verbs: [get, update, delete]
+        ---
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: ClusterRoleBinding
+        metadata:
+          name: vbilling-enforcer
+        roleRef:
+          apiGroup: rbac.authorization.k8s.io
+          kind: ClusterRole
+          name: vbilling-enforcer
+        subjects:
+          - kind: ServiceAccount
+            name: vbilling-reader
+            namespace: kube-system</code></div>
+      <p>Kubernetes RBAC cannot limit <code>create</code> to a name; the other verbs only reach <code>vbilling-suspended</code>. Then turn it on:</p>
+      <div class="code-block"><code><span class="cmd">helm</span> upgrade vbilling deploy/helm/vbilling <span class="flag">-n</span> vbilling-system <span class="flag">--reuse-values</span> \
+  <span class="flag">--set</span> enforcement.mode=enforce <span class="flag">--set</span> enforcement.inCluster=true \
+  <span class="flag">--set</span> enforcement.admissionPolicy.enabled=true   <span class="comment"># the control plane cluster's policy, for shared and dedicated nodes</span></code></div>
+
+      <h3 id="holds">Holds</h3>
+      <p>A tenant can be held for more than one reason. Billing webhooks own the <code>billing</code> hold. Operators set others through the API, such as <code>abuse</code> or <code>support</code>, and only an operator clears them. The tenant's state is the most severe of its holds, so a payment that clears the billing hold never lifts an operator's hold.</p>
+      <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-X</span> PUT localhost:8080/api/v1/billing-states/globex <span class="flag">-H</span> <span class="string">"Authorization: Bearer $API_TOKEN"</span> \
+  <span class="flag">-d</span> <span class="string">'{"state": "suspended", "hold": "abuse", "reason": "outbound spam reported"}'</span>
+<span class="comment"># later, after the review</span>
+<span class="cmd">curl</span> <span class="flag">-X</span> PUT localhost:8080/api/v1/billing-states/globex <span class="flag">-H</span> <span class="string">"Authorization: Bearer $API_TOKEN"</span> \
+  <span class="flag">-d</span> <span class="string">'{"state": "active", "hold": "abuse"}'</span></code></div>
+      <p>Without <code>hold</code>, a PUT sets the <code>billing</code> hold. Setting a hold to <code>active</code> removes it. <code>GET /api/v1/billing-states</code> lists each tenant's state with its <code>holds</code>; for a hold other than <code>billing</code>, the reason starts with the hold's name, and the in-cluster denial reads <code>This tenant is suspended (abuse: outbound spam reported). New workloads are blocked until the hold is lifted; ...</code></p>
+      <div class="callout callout-success">
+        <div class="callout-icon">&#10003;</div>
+        <div>In a live run with <code>ENFORCEMENT_IN_CLUSTER</code> on, <code>kubectl run</code> inside a suspended tenant's cluster was denied by <code>vbilling-suspended</code> with the reason. A payment cleared the billing hold, and an <code>abuse</code> hold kept the tenant blocked until the operator lifted it.</div>
+      </div>
 
       <h2 id="whole-gpus">Whole GPUs, however they are carved</h2>
       <p>Dedicated and private nodes are billed for physical GPUs. MIG slices (mixed or single strategy, GKE GPU partitions) and time-slicing replicas (NVIDIA or GKE time-sharing) are converted back: a node exposing 56 MIG slices of 1g.10gb, or 32 time-sliced devices with 4 replicas, bills 8 GPUs. GPUs offered only through DRA ResourceSlices count too.</p>

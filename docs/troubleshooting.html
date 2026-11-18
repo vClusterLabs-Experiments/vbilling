@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Troubleshooting - vBilling Docs</title>
-  <meta name="description" content="Common issues and solutions when running vBilling: discovery, metrics, GPU detection, dedicated and private nodes, DCGM, and the billing adapters.">
+  <meta name="description" content="Common issues and solutions when running vBilling: discovery, metrics, GPU detection, dedicated and private nodes, DCGM, Prometheus metrics, gateway records, enforcement and the billing adapters.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Roboto+Mono:wght@500&display=swap" rel="stylesheet">
@@ -227,6 +227,7 @@
         <a href="getting-started.html">Getting Started</a>
         <a href="configuration.html">Configuration</a>
         <a href="metrics.html">Metrics Reference</a>
+        <a href="usage-sources.html">Usage Sources</a>
         <a href="private-nodes.html">Dedicated and Private Nodes</a>
         <a href="example-gke.html">Example: GKE with GPUs</a>
         <a href="troubleshooting.html" class="active">Troubleshooting</a>
@@ -444,6 +445,38 @@ vcluster.loft.sh/cluster=<span class="string">team-gpu</span>
         </div>
       </div>
 
+      <h2 id="suspended-private-nodes">Suspended Tenants on Private Nodes Can Still Start Pods</h2>
+      <div class="issue">
+        <div class="issue-header">
+          <h3>A suspended tenant's cluster with its own nodes still accepts new pods</h3>
+        </div>
+        <div class="issue-body">
+          <h4>Symptoms</h4>
+          <p><code>GET /api/v1/billing-states</code> shows the tenant as <code>suspended</code>, and its namespace in the control plane cluster carries <code>vbilling.vcluster.com/suspended=true</code>. Yet <code>kubectl run</code> inside one of its clusters with Private Nodes, Auto Nodes or Standalone still starts a pod.</p>
+
+          <h4>Cause</h4>
+          <p>The chart's admission policy runs in the control plane cluster, so it only sees pods synced there: clusters on shared or dedicated nodes. A cluster with its own nodes schedules its pods inside itself.</p>
+
+          <h4><span class="fix-label">Fix</span> Turn on enforcement inside the cluster</h4>
+          <div class="code-block"><code><span class="cmd">helm</span> upgrade vbilling deploy/helm/vbilling <span class="flag">-n</span> vbilling-system <span class="flag">--reuse-values</span> \
+  <span class="flag">--set</span> enforcement.mode=enforce <span class="flag">--set</span> enforcement.inCluster=true</code></div>
+          <p>vBilling then installs a ValidatingAdmissionPolicy and binding named <code>vbilling-suspended</code> inside each of the tenant's clusters, through the cluster's own API. It needs <code>tenantAPI.enabled=true</code> (the default) and the cluster's <code>vbilling-kubeconfig</code> Secret.</p>
+
+          <h4><span class="fix-label">Fix</span> Let the exported service account manage the policy</h4>
+          <p>The read-only service account vCluster exports for vBilling cannot write admission policies. Grant it that with the ClusterRole and binding in <a href="private-nodes.html#enforcement">Billing-state enforcement inside the cluster</a>. Until then, the state change reports an error like:</p>
+          <div class="code-block"><code><span class="output">vcluster-globex-private-a100 (inside the cluster): read admission policy: validatingadmissionpolicies.admissionregistration.k8s.io "vbilling-suspended" is forbidden: ...</span></code></div>
+
+          <h4><span class="fix-label">Fix</span> Apply the state again</h4>
+          <p>vBilling installs the policy when a tenant's state changes and re-applies every state every two minutes, so after fixing access the cluster converges on its own. To apply it right away, send the state again:</p>
+          <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-X</span> PUT localhost:8080/api/v1/billing-states/globex <span class="flag">-H</span> <span class="string">"Authorization: Bearer $API_TOKEN"</span> \
+  <span class="flag">-d</span> <span class="string">'{"state": "suspended", "reason": "invoice unpaid"}'</span>
+
+<span class="comment"># inside the cluster</span>
+<span class="cmd">kubectl</span> get validatingadmissionpolicy/vbilling-suspended validatingadmissionpolicybinding/vbilling-suspended</code></div>
+          <p>New pods outside <code>kube-system</code> and namespaces labeled <code>vbilling.vcluster.com/enforcement-exempt</code> are then denied with the reason. Running pods keep running.</p>
+        </div>
+      </div>
+
       <h2 id="dcgm-missing">GPU Utilization or Energy Missing</h2>
       <div class="issue">
         <div class="issue-header">
@@ -456,9 +489,114 @@ vcluster.loft.sh/cluster=<span class="string">team-gpu</span>
             <li>For GPUs in MIG mode DCGM reports no <code>DCGM_FI_DEV_GPU_UTIL</code>. The default query falls back to each instance's <code>DCGM_FI_PROF_GR_ENGINE_ACTIVE</code>; a custom <code>GPU_UTIL_QUERY</code> needs the same fallback.</li>
             <li>Device-level fields (power, energy, framebuffer) repeat on every MIG instance: summing them bills the GPU once per slice. Keep one series per GPU with <code>max by (modelName, UUID, ...)</code> first.</li>
             <li>The exporter refreshes every 30 seconds by default (<code>DCGM_EXPORTER_INTERVAL</code>), so <code>increase()</code> over a 30 second window can read zero. Integrate a gauge instead: <code>avg_over_time(...[{{window}}]) * {{window_seconds}}</code>.</li>
-            <li>DCGM on private nodes runs inside the tenant cluster. Ship it to your Prometheus with an agent that adds an external label naming the tenant cluster, and select on it with <code>{{vcluster}}</code>.</li>
+            <li>DCGM on private nodes runs inside the cluster. Ship it to your Prometheus with an agent that adds an external label naming the cluster (<code>vcluster</code>, see <code>PROMETHEUS_SOURCE_LABEL</code>). The default utilization queries then select those series, and your own queries can use <code>{{selector}}</code>.</li>
           </ul>
           <p>The <a href="example-gke.html">GKE example</a> has working queries for all four cases.</p>
+        </div>
+      </div>
+
+      <h2 id="prometheus-metric-empty">A Prometheus Metric Returns Nothing</h2>
+      <div class="issue">
+        <div class="issue-header">
+          <h3>"[health] prometheus/&lt;metric&gt;/&lt;cluster&gt; returned no data"</h3>
+        </div>
+        <div class="issue-body">
+          <h4>Symptoms</h4>
+          <p>A metric from <code>prometheus.metrics</code>, or egress, has no events for a cluster. The dashboard's Usage sources panel shows the source as <code>empty</code>, and the log says:</p>
+          <div class="code-block"><code><span class="output">[health] prometheus/inference_output_tokens/vcluster-globex-private-a100 returned no data (1 in a row): no series for vcluster-globex-private-a100 (own nodes, selected by vcluster label) (hint: the selector matched nothing with {{matchers}} = vcluster="private-a100". ...)</span></code></div>
+
+          <h4>Cause</h4>
+          <ul>
+            <li>The query uses <code>{{namespace}}</code>. That is the cluster's namespace on the control plane cluster, and it matches only series scraped there, from clusters on shared or dedicated nodes. A cluster with its own nodes has no pods in that namespace.</li>
+            <li>The cluster runs on its own nodes, but its series do not carry <code>vcluster="&lt;cluster name&gt;"</code>: the Prometheus agent that remote writes them has no such external label, or uses another name.</li>
+            <li>vBilling cannot read the cluster's own API, so it does not know the cluster has its own nodes and selects it by namespace. The message then says <code>shared nodes, selected by namespace</code>.</li>
+            <li>The series has no sample in the window or in the <code>PROMETHEUS_LOOKBACK</code> (default <code>10m</code>) before it: it is scraped less often than that, or it stopped.</li>
+          </ul>
+
+          <h4><span class="fix-label">Fix</span> Read what vBilling tried</h4>
+          <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-s</span> <span class="string">'localhost:8080/api/v1/sources?kind=prometheus'</span> \
+  | <span class="cmd">jq</span> <span class="string">'.sources[] | select(.status != "ok") | {name, status, message, hint, last_success, last_error_message}'</span></code></div>
+          <p><code>message</code> says how the cluster was scoped: its own Prometheus, the vCluster Platform labels, matchers from the annotation, the source label for its own nodes, or the namespace for shared nodes. <code>hint</code> says what to change. A <code>failing</code> source has the error in <code>last_error_message</code>, for example an HTTP 401 from Prometheus. Run the selector from the message in Prometheus yourself, such as <code>vllm:generation_tokens_total{vcluster="private-a100"}</code>, to see what it matches.</p>
+
+          <h4><span class="fix-label">Fix</span> Use {{selector}}</h4>
+          <div class="code-block"><code><span class="comment"># matches only clusters on shared or dedicated nodes</span>
+counter: vllm:generation_tokens_total{namespace=<span class="string">"{{namespace}}"</span>}
+<span class="comment"># matches every cluster, whatever its tenancy model</span>
+counter: vllm:generation_tokens_total{{selector}}
+<span class="comment"># your own matchers as well</span>
+counter: vllm:generation_tokens_total{model_name=<span class="string">"llama-3.1-70b"</span>,{{matchers}}}</code></div>
+
+          <h4><span class="fix-label">Fix</span> Label the cluster's series</h4>
+          <p>Give the cluster's Prometheus agent the external label <code>vcluster: &lt;cluster name&gt;</code> (see <a href="private-nodes.html#prometheus">Prometheus for clusters with their own nodes</a>). If the label value differs from the cluster's name, set <code>vbilling.vcluster.com/prometheus-source</code> on the cluster. If the series carry other labels, set <code>vbilling.vcluster.com/prometheus-matchers</code>. If the cluster has a Prometheus of its own, point <code>vbilling.vcluster.com/prometheus-url</code> at it.</p>
+
+          <h4><span class="fix-label">Fix</span> Look back further</h4>
+          <p>Set <code>PROMETHEUS_LOOKBACK</code> (Helm <code>prometheus.lookback</code>) above the scrape interval plus any remote-write delay. A counter that was out of reach keeps its last sample, so the usage is billed once a sample is found again.</p>
+        </div>
+      </div>
+
+      <h2 id="token-decimals">Token Counts Have Decimals</h2>
+      <div class="issue">
+        <div class="issue-header">
+          <h3>A window shows 1199.976 tokens</h3>
+        </div>
+        <div class="issue-body">
+          <h4>Symptoms</h4>
+          <p>Token quantities have decimals, the dashboard marks the metric with &#8776;, and the windows do not add up to what the engine's counter shows.</p>
+
+          <h4>Cause</h4>
+          <p>The metric is a <code>query:</code> with <code>increase()</code> or <code>rate()</code>. They extrapolate from the samples inside a window to its edges, so the result is an estimate: every event carries <code>estimate: true</code>, and <code>GET /api/v1/catalog</code> reports <code>accuracy: estimate</code>. In a live run, <code>increase()</code> on a counter that grew by 20,500 tokens over 17 windows came to 20,700.13, and a partial window read 921.8 tokens where the counter grew by 800.</p>
+
+          <h4><span class="fix-label">Fix</span> Bill the counter itself</h4>
+          <div class="code-block"><code><span class="comment"># before: an estimate</span>
+query: sum by (model_name) (increase(vllm:generation_tokens_total{namespace=<span class="string">"{{namespace}}"</span>}[{{window}}]))
+<span class="comment"># after: exact</span>
+counter: vllm:generation_tokens_total{{selector}}
+dimensions: [model_name]
+skuLabel: model_name</code></div>
+          <p>A counter takes a plain series selector: no functions, no range. vBilling reads the raw samples and sums the series per dimension itself. Windows committed before the change keep their estimates; from the next window on, each window is exact, and the counter's earlier history is not billed again. See <a href="usage-sources.html#counters">How counters are billed</a>.</p>
+        </div>
+      </div>
+
+      <h2 id="per-request-undercounted">Per-Request Usage Is Undercounted</h2>
+      <div class="issue">
+        <div class="issue-header">
+          <h3>"same tenant, metric, window and dimensions as event 0 and no id"</h3>
+        </div>
+        <div class="issue-body">
+          <h4>Symptoms</h4>
+          <p>A gateway posts one event per request to <code>POST /api/v1/events</code>, without an <code>id</code>, and billed usage is lower than the gateway's own logs. Responses reject events with <code>same tenant, metric, window and dimensions as event 0 and no id: ...</code>, or warn that <code>3 event(s) without an id matched usage already in the ledger and were not counted again</code>.</p>
+
+          <h4>Cause</h4>
+          <p><code>POST /api/v1/events</code> takes window totals. An event without an <code>id</code> gets one derived from its tenant, metric, window and dimensions, so two requests in the same minute look like one event sent twice. v0.2 dropped the second one silently; v0.3 rejects it within a request and warns across requests.</p>
+
+          <h4><span class="fix-label">Fix</span> Send records instead</h4>
+          <p>Post each request with its request ID to <code>POST /api/v1/records</code> (for LiteLLM, <code>?format=litellm</code>). vBilling sums the records per window and drops only real retries. See <a href="usage-sources.html#records">Per-request records</a>.</p>
+
+          <h4><span class="fix-label">Fix</span> Or send real window totals</h4>
+          <p>Sum the requests per tenant, metric and window yourself, and send one event per window with a stable <code>id</code>.</p>
+        </div>
+      </div>
+
+      <h2 id="unknown-tenant-records">Records Billed to an Unknown Tenant</h2>
+      <div class="issue">
+        <div class="issue-header">
+          <h3>"billed to tenants vBilling does not know (...)"</h3>
+        </div>
+        <div class="issue-body">
+          <h4>Symptoms</h4>
+          <p><code>POST /api/v1/records</code> answers with <code>unknown_tenants</code> and a warning such as <code>billed to tenants vBilling does not know (e2f1c0de-7b1a-4c55-9a7e-2d4f8b3c6a10); map gateway identities with the vbilling.vcluster.com/aliases annotation or the format's tenantMap</code>. Source health shows <code>records/litellm/unknown-tenants</code> as <code>empty</code>, and a customer with that ID appears in your billing platform.</p>
+
+          <h4>Cause</h4>
+          <p>The record's tenant value is neither a tenant ID vBilling knows nor an alias of one. LiteLLM sends the team ID of the virtual key, a generated UUID unless the team was created with a <code>team_id</code>, or its organization, user or end user when the key has no team. By default such records are accepted and billed to that raw ID.</p>
+
+          <h4><span class="fix-label">Fix</span> Map the identity to the tenant</h4>
+          <div class="code-block"><code><span class="cmd">kubectl</span> annotate namespace globex <span class="flag">--overwrite</span> \
+  vbilling.vcluster.com/aliases=e2f1c0de-7b1a-4c55-9a7e-2d4f8b3c6a10</code></div>
+          <p>Set it on the tenant's cluster or its namespace in the control plane cluster; several identities are comma-separated. vBilling reads it at the next discovery (<code>RECONCILE_INTERVAL</code>, 30s by default). A custom format can map identities with <code>tenantMap</code> instead. A gateway that serves one tenant can use a token bound to it in <code>INGEST_TOKENS</code>, which wins over the payload.</p>
+
+          <h4><span class="fix-label">Fix</span> Refuse instead of accept</h4>
+          <p>With <code>RECORDS_UNKNOWN_TENANTS=reject</code> (Helm <code>records.unknownTenants=reject</code>), such records are refused and listed in the response's <code>rejected</code>, and <code>vbilling_records_rejected_total</code> counts them. An emitter that does not read the response loses them, so map identities first.</p>
+          <p>Records already accepted keep the tenant they were stored with: the ledger is append-only. Settle that usage in the billing platform.</p>
         </div>
       </div>
 
@@ -466,11 +604,11 @@ vcluster.loft.sh/cluster=<span class="string">team-gpu</span>
       <h2 id="lago-connection-failed">Lago Connection Failed</h2>
       <div class="issue">
         <div class="issue-header">
-          <h3>"lago API error" or connection refused</h3>
+          <h3>"HTTP 401" from Lago, or connection refused</h3>
         </div>
         <div class="issue-body">
           <h4>Symptoms</h4>
-          <p>vBilling logs show errors like <code>HTTP POST /api/v1/events/batch: connection refused</code> or <code>lago API error 401</code>. The bootstrap step may fail with a warning.</p>
+          <p>vBilling logs show errors like <code>HTTP POST /api/v1/events/batch: ... connection refused</code>, <code>GET /api/v1/plans/vcluster-standard: HTTP 401: ...</code> or, at startup, <code>[pipeline] lago: bootstrap failed (delivery paused, will retry): create billable metric "vcluster_cpu_core_hours": POST /api/v1/billable_metrics: HTTP 401: ...</code>. Each error names the Lago request and its HTTP status, followed by Lago's response body. Delivery to Lago waits and is retried; the usage stays in the ledger.</p>
 
           <h4><span class="fix-label">Fix</span> Check the Lago URL</h4>
           <div class="code-block"><code><span class="comment"># If running in-cluster, verify the service exists</span>
@@ -512,7 +650,7 @@ vcluster.loft.sh/cluster=<span class="string">team-gpu</span>
           <p>vBilling is successfully sending events (you can see them in the Lago UI under the customer's events tab), but the current usage and invoices all show $0.00.</p>
 
           <h4>Cause</h4>
-          <p>When vBilling bootstraps the <code>vcluster-standard</code> plan, <strong>all charge amounts default to $0.00 per unit</strong>. This is by design: vBilling creates the plan structure, and the prices are yours to set.</p>
+          <p>When vBilling bootstraps the <code>vcluster-standard</code> plan, <strong>all charge amounts default to $0.00 per unit</strong>. This is by design: vBilling creates the plan structure, and the prices are yours to set. A price card (<code>lago.priceCard</code>) sets the amounts vBilling uses when it creates charges; see <a href="lago.html#price-card">Prices as code</a>.</p>
 
           <h4><span class="fix-label">Fix</span> Configure pricing in Lago</h4>
           <ol>
@@ -613,6 +751,8 @@ LAGO_API_URL=<span class="string">http://localhost:3000</span></code></div>
             <li><code>[metrics]</code>: collection (CPU, memory, GPUs, Prometheus)</li>
             <li><code>[tenantapi]</code>: tenant clusters read through their own API (Private Nodes, Standalone)</li>
             <li><code>[pipeline]</code>: delivery to each adapter, retries and dead letters</li>
+            <li><code>[health]</code>: usage sources that fail, return nothing, diverge or recover</li>
+            <li><code>[records]</code>: late per-request records billed as adjustments</li>
             <li><code>[stripe]</code>, <code>[metronome]</code>, <code>[lago]</code>, <code>[bootstrap]</code>, <code>[noop]</code>: the billing adapters</li>
             <li><code>[enforcement]</code>, <code>[api]</code>: billing states, webhooks and the HTTP API</li>
           </ul>
@@ -639,7 +779,7 @@ LAGO_API_URL=<span class="string">http://localhost:3000</span></code></div>
 <span class="cmd">curl</span> <span class="flag">-s</span> http://localhost:3000/api/v1/billable_metrics \
   <span class="flag">-H</span> <span class="string">"Authorization: Bearer $LAGO_API_KEY"</span> | <span class="cmd">jq</span> <span class="string">'.billable_metrics | length'</span>
 
-<span class="output"># Should return: 9</span>
+<span class="output"># Should return: 11 (9 built-in metrics, inference_input_tokens and inference_output_tokens), plus one per custom metric</span>
 
 <span class="comment"># Check which customers exist in Lago</span>
 <span class="cmd">curl</span> <span class="flag">-s</span> http://localhost:3000/api/v1/customers \

@@ -5,7 +5,7 @@ replicaCount: 1
 
 image:
   repository: ghcr.io/vclusterlabs-experiments/vbilling
-  tag: v0.2.0
+  tag: v0.3.0
   pullPolicy: IfNotPresent
 
 # Destinations usage fans out to. Built-in: stripe, metronome, lago, webhook, noop.
@@ -34,6 +34,11 @@ billing:
   reconcileInterval: 30s
   maxBackfill: 6h # windows missed during downtime are backfilled up to this age
   offboardGrace: 1h # a tenant must be gone this long before RemoveTenant runs
+  # Plan for tenants without a vbilling.vcluster.com/plan setting, by tenant
+  # class (Lago plan code, Stripe plan tag or Metronome rate card).
+  planByClass: {}
+  #  enterprise: vcluster-enterprise
+  #  dev: vcluster-dev
 
 metering:
   cpuMemoryBasis: usage # usage | requests | max
@@ -45,9 +50,16 @@ metering:
   unhealthyNodeTaints: [node.kubernetes.io/not-ready, node.kubernetes.io/unreachable]
   dedicatedNodeLabel: "" # extra dedicated-node selector, "key=%s" (%s = tenant cluster name)
   regionFromNode: false # use topology.kubernetes.io/region from nodes instead of `region`
-  # Operator metrics accepted by the ingest API, "code:unit[:key|key],..."
-  # e.g. "inference_output_tokens:tokens:model|region,slurm_gpu_hours:gpu-hours"
-  customMetrics: ""
+  # Metrics you push through POST /api/v1/events or /api/v1/records. A list
+  # (or the v0.2 string "code:unit[:key|key],...").
+  customMetrics: []
+  # - code: inference_output_tokens
+  #   name: Inference output tokens
+  #   unit: tokens
+  #   groupKeys: [sku]
+  # - code: vllm_output_tokens   # a second source, compared with crossChecks
+  #   unit: tokens
+  #   billable: false
   watchDeletions: true # bill pods and nodes deleted between windows (short jobs, Auto Nodes scale-down)
   draGPUDrivers: [gpu.nvidia.com, gpu.amd.com] # DRA drivers whose devices are GPUs
 
@@ -85,16 +97,29 @@ prometheus:
   # "vcluster-platform": read vCluster Platform fleet observability, whose write
   # gateway labels every series with vcluster_platform_instance/project.
   preset: ""
-  # Metrics defined by PromQL, evaluated per tenant cluster at every window end.
-  # Templates: {{namespace}} {{vcluster}} {{instance}} {{project}} {{tenant}} {{tenant_cluster}} {{window}} {{window_seconds}}
+  # Label that names the source cluster on series from clusters with their
+  # own nodes (Private Nodes, Auto Nodes, Standalone): an external label their
+  # Prometheus agent adds when it remote writes, e.g. {vcluster: team-a}.
+  # A cluster can instead name a Prometheus that sees only it with the
+  # vbilling.vcluster.com/prometheus-url annotation (https://... or
+  # tenant-service://NAMESPACE/NAME:PORT through its API server).
+  sourceLabel: vcluster
+  # How far before a window a counter's starting sample may be.
+  lookback: 10m
+  # Metrics read from Prometheus for every cluster and window. Use counter:
+  # (a plain series selector) for anything you bill: vBilling reads the raw
+  # samples and bills the exact increase per window, and a Prometheus outage
+  # only delays usage. query: results are estimates and are marked as such.
+  # Templates: {{selector}} and {{matchers}} (scope the series to the
+  # cluster, whatever its tenancy model), {{namespace}} {{vcluster}}
+  # {{instance}} {{project}} {{tenant}} {{tenant_cluster}} {{window}} {{window_seconds}}
   metrics: []
   # - code: inference_output_tokens
   #   name: Inference output tokens
   #   unit: tokens
-  #   billable: true
   #   dimensions: [model_name]
-  #   sku: model_name
-  #   query: sum by (model_name) (increase(vllm:generation_tokens_total{namespace="{{namespace}}"}[{{window}}]))
+  #   skuLabel: model_name
+  #   counter: vllm:generation_tokens_total{{selector}}
 
 platform:
   cluster: "" # vCluster Platform cluster name of this control plane cluster (multi-cluster setups)
@@ -105,6 +130,21 @@ lago:
   apiURL: "http://lago-api.lago-system.svc.cluster.local:3000"
   apiKey: ""
   existingSecret: "" # key: api-key
+  # Price card: amounts vBilling uses when it creates a charge, or a charge
+  # filter for a new SKU. Amounts that already exist in Lago are never changed,
+  # so prices edited in the Lago UI stay. Quote amounts to keep every digit.
+  # A new SKU without an amount here is priced like its metric's charge.
+  priceCard: {}
+  # vcluster_gpu_hours:
+  #   amount: "0"
+  #   sku:
+  #     NVIDIA-H100-80GB-HBM3: "2.49"
+  # inference_output_tokens:
+  #   amount: "0.000002"
+  priceCardConfigMap: "" # existing ConfigMap with key price-card.yaml, used instead of priceCard
+  # Plans besides billing.defaultPlanCode whose charges and SKU filters vBilling
+  # keeps up to date. Other plans are never changed.
+  managedPlans: []
 
 stripe:
   apiKey: "" # sk_test_... / sk_live_... / rk_... (restricted keys work)
@@ -139,11 +179,46 @@ webhook:
 api:
   port: 8080
   token: "" # protects usage and admin endpoints
-  ingestToken: "" # enables POST /api/v1/events (defaults to token)
+  ingestToken: "" # enables POST /api/v1/events and /api/v1/records (defaults to token)
+  # Ingest tokens bound to one tenant ({tenant: token}): usage sent with such
+  # a token is always billed to that tenant, so a gateway inside a tenant's
+  # cluster can never report usage for another tenant.
+  tenantIngestTokens: {}
   existingSecret: "" # keys: api-token, ingest-token
   service:
     type: ClusterIP
     port: 8080
+
+# Per-request usage (POST /api/v1/records): AI gateways and inference servers
+# post one record per request; vBilling stores it durably and bills one event
+# per tenant, metric and window. See docs/usage-sources.html.
+records:
+  settle: 30s # records arriving later than this after their window are billed as a late adjustment
+  retention: 168h # raw request records kept for disputes; records older than this minus 1h are refused
+  allowUnkeyed: false # derive a request ID from the record when the emitter sends none
+  unknownTenants: accept # accept (and report) or reject records for tenants vBilling does not know
+  archive: false # also archive raw request records (needs persistence.archive): request-level evidence, high volume
+  # The built-in format for LiteLLM's generic API logger (?format=litellm). It
+  # declares inference_input_tokens and inference_output_tokens.
+  litellm: false
+  # Payload formats besides vbilling and litellm, e.g. a Kong HTTP Log payload:
+  formats: {}
+  #  kong:
+  #    id: request.id
+  #    time: started_at
+  #    tenant: consumer.username
+  #    usage:
+  #      inference_input_tokens: ai.proxy.usage.prompt_tokens
+  #      inference_output_tokens: ai.proxy.usage.completion_tokens
+  #    sku: ai.proxy.meta.response_model
+
+# Compare two sources of the same usage per tenant and hour, e.g. tokens from
+# the gateway (billed) and from the inference engine's counters. Divergence
+# above the tolerance shows in GET /api/v1/sources and /metrics.
+crossChecks: []
+# - primary: inference_output_tokens
+#   secondary: vllm_output_tokens
+#   tolerancePercent: 2
 
 enforcement:
   # observe: record billing state only. annotate: also annotate tenant
@@ -153,12 +228,43 @@ enforcement:
   rules: "" # "event.type=state,..." e.g. "alerts.spend_threshold_reached=suspended"
   admissionPolicy:
     enabled: false # ValidatingAdmissionPolicy (Kubernetes 1.30+) blocking new pods in suspended namespaces
+  # Also install the policy inside each suspended tenant's clusters through
+  # their own API. Clusters with their own nodes (Private Nodes, Auto Nodes,
+  # Standalone) never send pods through the control plane cluster, so this is
+  # the only enforcement that reaches them. The tenant API credentials need
+  # create on validatingadmissionpolicies and validatingadmissionpolicybindings,
+  # and get, update and delete on the one named vbilling-suspended (see
+  # docs/private-nodes.html#enforcement).
+  inCluster: false
 
 persistence:
   enabled: true # the ledger is the durable outbox: keep it on a volume
   size: 5Gi
   storageClass: ""
   retention: 168h
+  # Long-term archive for invoice disputes (ARCHIVE_DIR). Before compaction
+  # deletes a ledger segment past `retention`, vBilling gzips it into this
+  # volume and records it in archive.jsonl (about 86 bytes per usage event).
+  # vBilling never deletes from it: keep it as long as invoices can be disputed,
+  # 13 months or more. `vbilling ledger verify` proves it unaltered and
+  # `vbilling ledger export` reads usage back (docs: Retention and disputes).
+  #
+  # A bucket mounted through a CSI driver is the expected way to reach object
+  # storage, e.g. Cloud Storage FUSE (GCS) or Mountpoint for Amazon S3: bind a
+  # PersistentVolumeClaim to the bucket and set existingClaim. The mount must
+  # let the pod user (65532) create files, rename them and append to them.
+  # Each pod writes to <mountPath>/<pod name>, so replicas can share a bucket.
+  #
+  # Without existingClaim, the chart adds a volumeClaimTemplate. Kubernetes
+  # does not allow adding one to an existing StatefulSet: run
+  # `kubectl delete statefulset <name> --cascade=orphan` (pods, volumes and
+  # data stay) before the upgrade that enables it.
+  archive:
+    enabled: false
+    existingClaim: "" # PVC to mount, e.g. one bound to a bucket by a CSI driver
+    size: 20Gi # volumeClaimTemplate size when existingClaim is empty
+    storageClass: ""
+    mountPath: /var/lib/vbilling-archive
 
 serviceMonitor:
   enabled: false

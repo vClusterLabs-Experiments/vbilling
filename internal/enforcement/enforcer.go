@@ -5,7 +5,16 @@
 //	observe   record and expose the state (API, metrics) only
 //	annotate  also annotate the tenant cluster workload and label its namespace
 //	enforce   also label suspended namespaces vbilling.vcluster.com/suspended=true,
-//	          which the shipped ValidatingAdmissionPolicy uses to deny new pods
+//	          which the shipped ValidatingAdmissionPolicy uses to deny new pods,
+//	          and install a ValidatingAdmissionPolicy inside each of the
+//	          tenant's clusters through its own API. Clusters with their own
+//	          nodes (Private Nodes, Auto Nodes, Standalone) never send pods
+//	          through the control plane cluster, so only the in-cluster policy
+//	          reaches them.
+//
+// A tenant's state is the most severe of its holds. Billing webhooks own the
+// "billing" hold; operators can set others ("support", "abuse", ...) through
+// the API, and a payment never clears them.
 //
 // Running workloads are never deleted: suspension stops growth, not service.
 package enforcement
@@ -21,7 +30,9 @@ import (
 	"sync"
 	"time"
 
+	admissionv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
@@ -67,7 +78,8 @@ type Signal struct {
 	At         time.Time `json:"at"`
 }
 
-// TenantState is the current standing of one tenant.
+// TenantState is the current standing of one tenant: the most severe of
+// its holds.
 type TenantState struct {
 	Tenant    string    `json:"tenant"`
 	State     State     `json:"state"`
@@ -75,6 +87,44 @@ type TenantState struct {
 	Source    string    `json:"source"`
 	EventType string    `json:"event_type"`
 	Since     time.Time `json:"since"`
+	// Hold names the hold the state comes from ("billing", "abuse", ...).
+	Hold string `json:"hold,omitempty"`
+	// Holds are the independent reasons a tenant is not active, by name.
+	Holds map[string]Hold `json:"holds,omitempty"`
+}
+
+// Hold is one reason for a tenant's state.
+type Hold struct {
+	State     State     `json:"state"`
+	Reason    string    `json:"reason"`
+	Source    string    `json:"source"`
+	EventType string    `json:"event_type"`
+	Since     time.Time `json:"since"`
+}
+
+// HoldBilling is the hold billing webhooks set and clear.
+const HoldBilling = "billing"
+
+var severity = map[State]int{Active: 0, Warning: 1, Delinquent: 2, Suspended: 3}
+
+// effective folds holds into a state: the most severe wins.
+func effective(tenant string, holds map[string]Hold) TenantState {
+	ts := TenantState{Tenant: tenant, State: Active, Holds: holds}
+	names := make([]string, 0, len(holds))
+	for n := range holds {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		h := holds[n]
+		if severity[h.State] > severity[ts.State] || (ts.Since.IsZero() && h.State == ts.State) {
+			ts.State, ts.Reason, ts.Source, ts.EventType, ts.Since, ts.Hold = h.State, h.Reason, h.Source, h.EventType, h.Since, n
+			if n != HoldBilling {
+				ts.Reason = n + ": " + h.Reason
+			}
+		}
+	}
+	return ts
 }
 
 // Options configure the enforcer.
@@ -88,6 +138,11 @@ type Options struct {
 	State                  *kv.Store
 	Telemetry              *telemetry.Registry
 	Now                    func() time.Time
+	// TenantClient connects to a tenant's cluster through its own API. When
+	// set, enforce mode also installs an admission policy inside the
+	// cluster. The credentials need create, update and delete on
+	// validatingadmissionpolicies and validatingadmissionpolicybindings.
+	TenantClient func(ctx context.Context, cl discovery.TenantCluster) (kubernetes.Interface, error)
 }
 
 // Enforcer is safe for concurrent use.
@@ -114,6 +169,10 @@ func New(kube kubernetes.Interface, opts Options) *Enforcer {
 	for tenant, raw := range opts.State.WithPrefix("state/") {
 		var ts TenantState
 		if json.Unmarshal([]byte(raw), &ts) == nil {
+			if ts.Holds == nil && ts.State != "" && ts.State != Active {
+				// v0.2 state: one reason, owned by billing.
+				ts.Holds = map[string]Hold{HoldBilling: {State: ts.State, Reason: ts.Reason, Source: ts.Source, EventType: ts.EventType, Since: ts.Since}}
+			}
 			e.states[tenant] = ts
 		}
 	}
@@ -257,19 +316,48 @@ func (e *Enforcer) apply(ctx context.Context, sig *Signal) error {
 	return nil
 }
 
-// Set records a tenant's state and reflects it on its tenant clusters.
-// It is also used by the API for manual overrides.
+// Set records the billing hold of a tenant and reflects the resulting state
+// on its clusters.
 func (e *Enforcer) Set(ctx context.Context, tenant string, state State, reason, source, eventType string) error {
+	return e.SetHold(ctx, tenant, HoldBilling, state, reason, source, eventType)
+}
+
+// SetHold sets one named hold. Setting a hold to active removes it; the
+// tenant's state is the most severe hold left.
+func (e *Enforcer) SetHold(ctx context.Context, tenant, hold string, state State, reason, source, eventType string) error {
 	if !state.valid() {
 		return fmt.Errorf("invalid state %q", state)
+	}
+	if hold == "" {
+		hold = HoldBilling
 	}
 	now := e.opts.Now().UTC()
 	e.mu.Lock()
 	prev := e.states[tenant]
-	ts := TenantState{Tenant: tenant, State: state, Reason: reason, Source: source, EventType: eventType, Since: now}
-	if prev.State == state {
-		ts.Since = prev.Since
+	holds := map[string]Hold{}
+	for k, v := range prev.Holds {
+		holds[k] = v
 	}
+	if state == Active {
+		delete(holds, hold)
+	} else {
+		h := Hold{State: state, Reason: reason, Source: source, EventType: eventType, Since: now}
+		if old, ok := holds[hold]; ok && old.State == state {
+			h.Since = old.Since
+		}
+		holds[hold] = h
+	}
+	ts := effective(tenant, holds)
+	if len(holds) == 0 {
+		ts = TenantState{Tenant: tenant, State: Active, Reason: reason, Source: source, EventType: eventType}
+	}
+	// Since is when the effective state began.
+	if orActive(prev.State) == ts.State && !prev.Since.IsZero() {
+		ts.Since = prev.Since
+	} else {
+		ts.Since = now
+	}
+	state = ts.State
 	e.states[tenant] = ts
 	e.mu.Unlock()
 	b, _ := json.Marshal(ts)
@@ -277,7 +365,7 @@ func (e *Enforcer) Set(ctx context.Context, tenant string, state State, reason, 
 		return err
 	}
 	if prev.State != state {
-		log.Printf("[enforcement] tenant %s: %s -> %s (%s via %s %s, mode=%s)", tenant, orActive(prev.State), state, reason, source, eventType, e.opts.Mode)
+		log.Printf("[enforcement] tenant %s: %s -> %s (%s via %s %s, mode=%s)", tenant, orActive(prev.State), state, ts.Reason, source, eventType, e.opts.Mode)
 	}
 	for _, s := range []State{Active, Warning, Delinquent, Suspended} {
 		v := 0.0
@@ -291,11 +379,104 @@ func (e *Enforcer) Set(ctx context.Context, tenant string, state State, reason, 
 	}
 	var errs []error
 	for _, cl := range e.opts.Clusters(tenant) {
-		if err := e.reflect(ctx, cl, ts); err != nil {
+		if err := e.reflect(ctx, cl, ts, true); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", cl.ExternalID(), err))
+		}
+		if e.opts.Mode == "enforce" && e.opts.TenantClient != nil {
+			if err := e.reflectInside(ctx, cl, ts); err != nil {
+				errs = append(errs, fmt.Errorf("%s (inside the cluster): %w", cl.ExternalID(), err))
+			}
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// PolicyName is the admission policy (and binding) vBilling installs inside
+// a suspended tenant's clusters.
+const PolicyName = "vbilling-suspended"
+
+// LabelExempt on a namespace inside a tenant's cluster exempts it from the
+// in-cluster policy (kube-system always is).
+const LabelExempt = "vbilling.vcluster.com/enforcement-exempt"
+
+func suspendedMessage(ts TenantState) string {
+	if ts.Hold != "" && ts.Hold != HoldBilling {
+		return "This tenant is suspended (" + ts.Reason + "). New workloads are blocked until the hold is lifted; running workloads are not affected."
+	}
+	return "This tenant is suspended for billing (" + ts.Reason + "). New workloads are blocked until the account is current; running workloads are not affected."
+}
+
+// reflectInside installs or removes the in-cluster admission policy.
+func (e *Enforcer) reflectInside(ctx context.Context, cl discovery.TenantCluster, ts TenantState) error {
+	kube, err := e.opts.TenantClient(ctx, cl)
+	if err != nil {
+		return err
+	}
+	if kube == nil {
+		return nil
+	}
+	api := kube.AdmissionregistrationV1()
+	if ts.State != Suspended {
+		for _, del := range []func() error{
+			func() error {
+				return api.ValidatingAdmissionPolicyBindings().Delete(ctx, PolicyName, metav1.DeleteOptions{})
+			},
+			func() error { return api.ValidatingAdmissionPolicies().Delete(ctx, PolicyName, metav1.DeleteOptions{}) },
+		} {
+			if err := del(); err != nil && !apierrors.IsNotFound(err) {
+				return fmt.Errorf("remove admission policy: %w", err)
+			}
+		}
+		return nil
+	}
+	fail := admissionv1.Fail
+	forbidden := metav1.StatusReasonForbidden
+	labels := map[string]string{"app.kubernetes.io/managed-by": "vbilling"}
+	policy := &admissionv1.ValidatingAdmissionPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: PolicyName, Labels: labels},
+		Spec: admissionv1.ValidatingAdmissionPolicySpec{
+			FailurePolicy: &fail,
+			MatchConstraints: &admissionv1.MatchResources{
+				NamespaceSelector: &metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{
+					{Key: "kubernetes.io/metadata.name", Operator: metav1.LabelSelectorOpNotIn, Values: []string{"kube-system"}},
+					{Key: LabelExempt, Operator: metav1.LabelSelectorOpDoesNotExist},
+				}},
+				ResourceRules: []admissionv1.NamedRuleWithOperations{{RuleWithOperations: admissionv1.RuleWithOperations{
+					Operations: []admissionv1.OperationType{admissionv1.Create},
+					Rule:       admissionv1.Rule{APIGroups: []string{""}, APIVersions: []string{"v1"}, Resources: []string{"pods"}},
+				}}},
+			},
+			Validations: []admissionv1.Validation{{
+				Expression: "false",
+				Message:    suspendedMessage(ts),
+				Reason:     &forbidden,
+			}},
+		},
+	}
+	binding := &admissionv1.ValidatingAdmissionPolicyBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: PolicyName, Labels: labels},
+		Spec: admissionv1.ValidatingAdmissionPolicyBindingSpec{
+			PolicyName:        PolicyName,
+			ValidationActions: []admissionv1.ValidationAction{admissionv1.Deny},
+		},
+	}
+	if cur, err := api.ValidatingAdmissionPolicies().Get(ctx, PolicyName, metav1.GetOptions{}); err == nil {
+		policy.ResourceVersion = cur.ResourceVersion
+		_, err = api.ValidatingAdmissionPolicies().Update(ctx, policy, metav1.UpdateOptions{})
+		if err != nil {
+			return fmt.Errorf("update admission policy: %w", err)
+		}
+	} else if apierrors.IsNotFound(err) {
+		if _, err := api.ValidatingAdmissionPolicies().Create(ctx, policy, metav1.CreateOptions{}); err != nil {
+			return fmt.Errorf("create admission policy: %w", err)
+		}
+	} else {
+		return fmt.Errorf("read admission policy: %w", err)
+	}
+	if _, err := api.ValidatingAdmissionPolicyBindings().Create(ctx, binding, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("create admission policy binding: %w", err)
+	}
+	return nil
 }
 
 func orActive(s State) State {
@@ -305,8 +486,30 @@ func orActive(s State) State {
 	return s
 }
 
+// Resync re-applies every recorded state to its tenant's clusters, without
+// emitting events. A cluster created while its tenant was suspended, or one
+// that was unreachable when the state changed (so a paying tenant could stay
+// blocked), converges within one resync.
+func (e *Enforcer) Resync(ctx context.Context) {
+	if e.opts.Mode == "observe" || e.kube == nil || e.opts.Clusters == nil {
+		return
+	}
+	for _, ts := range e.States() {
+		for _, cl := range e.opts.Clusters(ts.Tenant) {
+			if err := e.reflect(ctx, cl, ts, false); err != nil {
+				log.Printf("[enforcement] resync %s: %v", cl.ExternalID(), err)
+			}
+			if e.opts.Mode == "enforce" && e.opts.TenantClient != nil {
+				if err := e.reflectInside(ctx, cl, ts); err != nil {
+					log.Printf("[enforcement] resync %s (inside the cluster): %v", cl.ExternalID(), err)
+				}
+			}
+		}
+	}
+}
+
 // reflect writes the state onto one tenant cluster.
-func (e *Enforcer) reflect(ctx context.Context, cl discovery.TenantCluster, ts TenantState) error {
+func (e *Enforcer) reflect(ctx context.Context, cl discovery.TenantCluster, ts TenantState, withEvent bool) error {
 	ann := map[string]any{AnnotationState: string(ts.State), AnnotationWhy: ts.Reason, AnnotationAt: ts.Since.Format(time.RFC3339)}
 	patch, _ := json.Marshal(map[string]any{"metadata": map[string]any{"annotations": ann}})
 	var err error
@@ -331,6 +534,9 @@ func (e *Enforcer) reflect(ctx context.Context, cl discovery.TenantCluster, ts T
 		return fmt.Errorf("label namespace: %w", err)
 	}
 
+	if !withEvent {
+		return nil
+	}
 	kind := "StatefulSet"
 	if cl.Source == "deployment" {
 		kind = "Deployment"
