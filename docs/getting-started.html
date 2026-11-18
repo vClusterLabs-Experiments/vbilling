@@ -343,14 +343,15 @@
 
       <!-- Step 2 -->
       <h2 id="step-2"><span class="step-marker">2</span>Install vBilling</h2>
-      <p>The chart defaults to the published image <code>ghcr.io/vclusterlabs-experiments/vbilling:v0.3.0</code> (<code>linux/amd64</code> and <code>linux/arm64</code>). Keep billing keys in Secrets, never in <code>--set</code> flags or values files. From a clone of the repository, with Stripe as the example:</p>
-      <div class="code-block"><code><span class="cmd">git</span> clone https://github.com/vClusterLabs-Experiments/vbilling.git &amp;&amp; <span class="cmd">cd</span> vbilling
+      <p>The chart defaults to the published image <code>ghcr.io/vclusterlabs-experiments/vbilling:v0.3.0</code> (<code>linux/amd64</code> and <code>linux/arm64</code>). Keep billing keys in Secrets, never in <code>--set</code> flags or values files. Install from a release tag, because <code>main</code> can be ahead of the published image. From a clone of the repository, with Stripe as the example:</p>
+      <div class="code-block"><code><span class="cmd">git</span> clone --branch v0.3.0 https://github.com/vClusterLabs-Experiments/vbilling.git &amp;&amp; <span class="cmd">cd</span> vbilling
 <span class="cmd">kubectl</span> create namespace vbilling-system
 <span class="cmd">kubectl</span> <span class="flag">-n</span> vbilling-system create secret generic vbilling-stripe <span class="flag">--from-file</span>=api-key=./stripe-test-key
 <span class="cmd">helm</span> upgrade <span class="flag">--install</span> vbilling deploy/helm/vbilling <span class="flag">-n</span> vbilling-system \
   <span class="flag">--set</span> adapters=<span class="string">'{stripe}'</span> \
   <span class="flag">--set</span> stripe.existingSecret=vbilling-stripe \
   <span class="flag">--set</span> region=us-east-1</code></div>
+      <p>Each <a href="https://github.com/vClusterLabs-Experiments/vbilling/releases">release</a> also has the packaged chart attached, so you can install without a clone: replace <code>deploy/helm/vbilling</code> with <code>https://github.com/vClusterLabs-Experiments/vbilling/releases/download/v0.3.0/vbilling-0.3.0.tgz</code>.</p>
       <p>The other adapters take the same shape:</p>
       <div class="config-table-wrap">
         <table class="config-table">
@@ -399,6 +400,17 @@ API listening on :8080
         <div class="callout-icon">&#10003;</div>
         <div>Once the destinations report deliveries, the usage is in your billing platform: meters and customers in Stripe, customers and usage in Metronome, or customers and subscriptions in Lago. A platform outage never loses usage: the ledger keeps it until the adapter catches up.</div>
       </div>
+
+      <h2 id="upgrading">Upgrading from v0.2</h2>
+      <p>Run <code>helm upgrade</code> with the v0.3.0 chart and keep the PVC. A ledger written by v0.2 opens, verifies and keeps its destination cursors and ingest dedupe, so nothing is billed twice or skipped. The chart adds read access to node Leases, and in <code>enforce</code> mode, delete access to pods.</p>
+      <ul>
+        <li><strong>CPU and memory now bill requests.</strong> <code>CPU_MEMORY_BASIS</code> (<code>metering.cpuMemoryBasis</code>) defaults to <code>requests</code>, which is exact. v0.2 defaulted to <code>usage</code>, a metrics-server reading per window. Set <code>metering.cpuMemoryBasis=usage</code> to keep v0.2 quantities. Pods that request nothing bill no CPU or memory under <code>requests</code>; <code>vbilling_pods_without_requests</code> counts them.</li>
+        <li><strong>Egress is a counter.</strong> Without <code>prometheus.egressQuery</code>, egress is read from <code>container_network_transmit_bytes_total</code> as an exact counter, not with <code>increase()</code> at the window end. Expect small differences from v0.2's estimate. A custom <code>egressQuery</code> stays an estimate.</li>
+        <li><strong>Prometheus metrics.</strong> <code>query:</code> metrics are marked as estimates. Use <code>counter:</code> for an exact counter (see <a href="usage-sources.html">Usage Sources</a>). The <code>sku</code> key is now <code>skuLabel</code>; <code>sku</code> still works and logs a warning.</li>
+        <li><strong>Custom metrics.</strong> <code>metering.customMetrics</code> takes a YAML list. The v0.2 string form still works.</li>
+        <li><strong>Ingest without IDs.</strong> <code>POST /api/v1/events</code> now rejects two ID-less events in one request that derive the same ID (v0.2 kept only the first). Send per-request usage to <code>POST /api/v1/records</code> instead.</li>
+        <li><strong>Billing platforms.</strong> Existing Stripe subscriptions and Metronome contracts are found and kept, not created again.</li>
+      </ul>
 
       <h2 id="next-steps">Next steps</h2>
       <ul>
