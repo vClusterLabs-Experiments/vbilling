@@ -424,10 +424,31 @@ func TestWindowsAreCollectedAfterTheKubeletReportedThem(t *testing.T) {
 	// of a container that exited in the last second of the window.
 	h.now = t0.Truncate(time.Minute).Add(500 * time.Millisecond)
 	got := h.c.untilNextWindow()
-	if want := time.Minute - 500*time.Millisecond + settle; got != want {
+	// The window that just ended is collected once its settle time passed.
+	if want := minSettle - 500*time.Millisecond; got != want {
 		t.Fatalf("next collection in %v, want %v", got, want)
 	}
-	if settle < 5*time.Second {
-		t.Fatalf("settle = %v: a real kubelet took about 3s to report a finished container", settle)
+	h.now = t0.Truncate(time.Minute).Add(minSettle)
+	if got, want := h.c.untilNextWindow(), time.Minute; got != want {
+		t.Fatalf("at the settle time the next collection is in %v, want %v", got, want)
+	}
+	if minSettle < 5*time.Second {
+		t.Fatalf("settle = %v: a real kubelet took about 3s to report a finished container", minSettle)
+	}
+
+	// COLLECTION_DELAY longer than a window (spot capacity): every window
+	// is collected that long after it ends, one per window, never early.
+	h.c.cfg.CollectionDelay = 75 * time.Second
+	b := t0.Truncate(time.Minute)
+	h.now = b.Add(15 * time.Second) // window ending at b-60s is due now; b only at b+75s
+	if got := h.c.latestDue(); !got.Equal(b.Add(-time.Minute)) {
+		t.Fatalf("latest due window ends %s, want %s", got, b.Add(-time.Minute))
+	}
+	if got, want := h.c.untilNextWindow(), time.Minute; got != want {
+		t.Fatalf("with a 75s delay the next collection is in %v, want %v (at b+75s)", got, want)
+	}
+	h.now = b.Add(74 * time.Second)
+	if got := h.c.latestDue(); !got.Equal(b.Add(-time.Minute)) {
+		t.Fatalf("window ending at %s collected before its delay", b)
 	}
 }

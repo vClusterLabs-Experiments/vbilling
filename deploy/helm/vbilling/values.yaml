@@ -33,6 +33,11 @@ billing:
   defaultPlanCode: vcluster-standard # Lago plan code / Stripe plan tag
   currency: USD
   collectionInterval: 60s # metering window; must divide an hour
+  # How long after a window ends it is metered (at least 5s). On spot or
+  # preemptible GPUs use 75s: Kubernetes marks a node that died without
+  # warning 40 to 50s after its last heartbeat, and the window it died in is
+  # then billed only up to that heartbeat. Usage reaches billing that much later.
+  collectionDelay: 5s
   reconcileInterval: 30s
   maxBackfill: 6h # windows missed during downtime are backfilled up to this age
   offboardGrace: 1h # a tenant must be gone this long before RemoveTenant runs
@@ -187,6 +192,20 @@ stripe:
   maxRPS: 0 # 0 = 20 in test mode, 200 in live mode
   cancelOnRemove: false
   webhookSecret: "" # whsec_... enables /webhooks/stripe (dunning, alerts)
+  # Prices vBilling creates in Stripe when missing, per plan, with their
+  # meters. Existing prices are never changed. Amounts are in the currency's
+  # main unit, per unit or per `per` units. See docs/stripe.html#price-card.
+  priceCard: {}
+  #  currency: usd
+  #  interval: month
+  #  plans:
+  #    dedicated-a100:
+  #      vcluster_gpu_hours: {sku: {NVIDIA-A100-SXM4-40GB: "2.20"}}
+  #      vcluster_instance_hours: {amount: "0.10", name: Cluster control plane hour}
+  #    serverless:
+  #      inference_input_tokens: {per: 1000000, sku: {qwen2.5-7b-instruct: "0.20"}}
+  #      inference_cached_input_tokens: {per: 1000000, sku: {qwen2.5-7b-instruct: "0.05"}}
+  #      inference_output_tokens: {per: 1000000, sku: {qwen2.5-7b-instruct: "0.60"}}
 
 metronome:
   apiToken: ""
@@ -283,6 +302,14 @@ enforcement:
   # namespaces so the admission policy below blocks new pods.
   mode: observe
   rules: "" # "event.type=state,..." e.g. "alerts.spend_threshold_reached=suspended"
+  # enforce mode: block a suspended or paused tenant's LiteLLM teams (its
+  # tenant ID and vbilling.vcluster.com/aliases) and unblock them when it is
+  # active again; blocks set by an administrator are never lifted. Uses
+  # records.pullLiteLLM's url and admin key. LiteLLM applies a block after its
+  # key cache expires (60s by default): set general_settings
+  # user_api_key_cache_ttl: 5 in LiteLLM to make it take effect within 5s.
+  gateway:
+    litellm: false
   admissionPolicy:
     enabled: false # ValidatingAdmissionPolicy (Kubernetes 1.30+) blocking new pods in suspended namespaces
   # Also install the policy inside each suspended tenant's clusters through

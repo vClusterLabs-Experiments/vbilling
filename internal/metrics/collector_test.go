@@ -611,3 +611,25 @@ func TestCustomAndDisabledGPUUtilQuery(t *testing.T) {
 		t.Errorf("with GPU_UTIL_QUERY=none only egress should run, got %q", *queries)
 	}
 }
+
+// On requests, a pod that requests nothing is billed nothing for CPU and
+// memory. It is counted, so operators can give such pods default requests.
+func TestPodsWithoutRequestsAreCounted(t *testing.T) {
+	n := node("cpu-1", nil, 0, true)
+	objs := []runtime.Object{n,
+		pod("besteffort", "cpu-1"),
+		pod("sized", "cpu-1", withRequests("1", "1Gi")),
+	}
+	opts := Options{Region: "r", GPUResources: []string{"nvidia.com/gpu"}, Basis: "requests", Now: func() time.Time { return we.Add(2 * time.Second) }}
+	c := NewCollector(fake.NewSimpleClientset(objs...), nil, opts)
+	out, st, err := c.Collect(context.Background(), []Target{target("gpu", true)}, latest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Unrequested != 1 {
+		t.Errorf("pods without requests = %d, want 1", st.Unrequested)
+	}
+	if got, _ := find(out[we], usage.MetricCPUCoreHours); !near(got, usage.Round(1.0/60)) {
+		t.Errorf("CPU core-hours = %v, want only the sized pod", got)
+	}
+}

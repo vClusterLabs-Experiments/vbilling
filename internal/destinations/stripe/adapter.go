@@ -32,7 +32,15 @@ func init() {
 		if err != nil {
 			return nil, fmt.Errorf("open stripe state: %w", err)
 		}
-		return New(NewClient(cfg.StripeAPIBase, cfg.StripeAPIKey, cfg.StripeAPIVersion, cfg.StripeMaxRPS), cfg, state), nil
+		a := New(NewClient(cfg.StripeAPIBase, cfg.StripeAPIKey, cfg.StripeAPIVersion, cfg.StripeMaxRPS), cfg, state)
+		if cfg.StripePriceCard != "" {
+			card, err := LoadPriceCard(cfg.StripePriceCard, cfg.BillingCurrency)
+			if err != nil {
+				return nil, fmt.Errorf("STRIPE_PRICE_CARD: %w", err)
+			}
+			a.card = card
+		}
+		return a, nil
 	})
 }
 
@@ -69,6 +77,8 @@ type Adapter struct {
 
 	subMu    sync.Mutex
 	subStart map[string]time.Time // tenant -> when its subscription starts invoicing
+
+	card *PriceCard // STRIPE_PRICE_CARD
 
 	workers int
 }
@@ -202,6 +212,7 @@ func (a *Adapter) Bootstrap(ctx context.Context, metrics []usage.MetricDef) erro
 			errs = append(errs, err)
 		}
 	}
+	errs = append(errs, a.applyPriceCard(ctx))
 	return errors.Join(errs...)
 }
 

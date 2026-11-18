@@ -227,6 +227,7 @@
         <div class="sidebar-label">Documentation</div>
         <a href="getting-started.html">Getting Started</a>
         <a href="how-metering-works.html">How Metering Works</a>
+        <a href="pricing-models.html">Pricing Models</a>
         <a href="configuration.html" class="active">Configuration</a>
         <a href="metrics.html">Metrics Reference</a>
         <a href="usage-sources.html">Usage Sources</a>
@@ -394,6 +395,11 @@
               <td><code>COLLECTION_INTERVAL</code></td>
               <td>Metering window size, aligned to the wall clock. Must be 10s to 1h and divide an hour.</td>
               <td class="td-default">60s</td>
+            </tr>
+            <tr>
+              <td><code>COLLECTION_DELAY</code></td>
+              <td>How long after a window ends it is metered (at least 5s, at most 10m). On spot or preemptible GPUs use <code>75s</code>: Kubernetes marks a node that died without warning 40 to 50 seconds after its last heartbeat, and with the longer delay the window it died in is billed only up to that heartbeat. Usage reaches billing platforms that much later. Helm: <code>billing.collectionDelay</code>.</td>
+              <td class="td-default">5s</td>
             </tr>
             <tr>
               <td><code>RECONCILE_INTERVAL</code></td>
@@ -608,6 +614,11 @@
               <td class="td-default">false</td>
             </tr>
             <tr>
+              <td><code>ENFORCEMENT_LITELLM</code></td>
+              <td>In <code>enforce</code> mode, block a suspended or paused tenant's LiteLLM teams and unblock them when it is active again (only blocks vBilling set). Uses <code>RECORDS_PULL_LITELLM_URL</code> and <code>RECORDS_PULL_LITELLM_KEY</code>. Helm: <code>enforcement.gateway.litellm</code>. See <a href="usage-sources.html#gateway-enforcement">Stopping a suspended tenant at the gateway</a>.</td>
+              <td class="td-default">false</td>
+            </tr>
+            <tr>
               <td><code>PAUSE_KEEP_BILLING</code></td>
               <td>What keeps billing while a cluster is paused (state <code>paused</code>): any of <code>storage</code>, <code>load_balancers</code>, <code>nodes</code>, <code>control_plane</code>, <code>workloads</code>, or <code>none</code>. Without <code>workloads</code>, the usage of a paused cluster's pods stops at the second of the pause, even while they take their grace period to stop. Helm: <code>enforcement.pause.keepBilling</code>. See <a href="private-nodes.html#pause">Pausing a tenant</a>.</td>
               <td class="td-default">storage,load_balancers</td>
@@ -657,6 +668,11 @@
               <td><code>STRIPE_CANCEL_ON_REMOVE</code></td>
               <td>Cancel the tenant's subscription at period end when it is offboarded.</td>
               <td class="td-default">false</td>
+            </tr>
+            <tr>
+              <td><code>STRIPE_PRICE_CARD</code></td>
+              <td>YAML file of each plan's metered prices, which vBilling creates in Stripe (with their meters) when missing, never changing existing ones. Helm: <code>stripe.priceCard</code>. See <a href="stripe.html#price-card">Price card</a>.</td>
+              <td class="td-default">(none)</td>
             </tr>
             <tr>
               <td><code>STRIPE_API_VERSION</code></td>

@@ -84,6 +84,10 @@ type Config struct {
 	PlatformProxy       bool // reach clusters with their own nodes through the Platform proxy
 
 	// Per-request usage records (POST /api/v1/records).
+	// CollectionDelay is how long after a window ends it is metered (at
+	// least 5s). 75s lets Kubernetes mark a node that died without warning
+	// before its last window is committed.
+	CollectionDelay      time.Duration
 	RecordsSettle        time.Duration
 	RecordsRetention     time.Duration
 	RecordsMappingsFile  string
@@ -138,6 +142,9 @@ type Config struct {
 	// is the only enforcement that reaches clusters with their own nodes,
 	// and needs write access to admission policies inside them.
 	EnforcementInCluster bool
+	// EnforcementLiteLLM blocks a suspended or paused tenant's LiteLLM teams
+	// (its tenant ID and aliases), using RECORDS_PULL_LITELLM_URL and _KEY.
+	EnforcementLiteLLM bool
 	// PauseKeepBilling is the capacity that keeps billing while a cluster
 	// is paused: storage, load_balancers, nodes, control_plane, workloads, or none.
 	PauseKeepBilling string
@@ -160,6 +167,9 @@ type Config struct {
 	StripeAutoSubscribe  bool
 	StripeMaxRPS         float64
 	StripeCancelOnRemove bool
+	// StripePriceCard is a YAML file of plan prices vBilling creates in
+	// Stripe when missing (never changes existing prices).
+	StripePriceCard string
 
 	// Metronome.
 	MetronomeAPIToken      string
@@ -236,6 +246,7 @@ func Load() *Config {
 		CustomMetrics:           os.Getenv("CUSTOM_METRICS"),
 		CustomMetricsFile:       os.Getenv("CUSTOM_METRICS_FILE"),
 		PlanByClass:             envMap("PLAN_BY_CLASS"),
+		CollectionDelay:         envDuration("COLLECTION_DELAY", 5*time.Second),
 		RecordsSettle:           envDuration("RECORDS_SETTLE", 30*time.Second),
 		RecordsRetention:        envDuration("RECORDS_RETENTION", 7*24*time.Hour),
 		RecordsMappingsFile:     os.Getenv("RECORDS_MAPPINGS_FILE"),
@@ -269,6 +280,7 @@ func Load() *Config {
 		EnforcementMode:      envOr("ENFORCEMENT_MODE", "observe"),
 		EnforcementRules:     os.Getenv("ENFORCEMENT_RULES"),
 		EnforcementInCluster: envBool("ENFORCEMENT_IN_CLUSTER", false),
+		EnforcementLiteLLM:   envBool("ENFORCEMENT_LITELLM", false),
 		PauseKeepBilling:     envOr("PAUSE_KEEP_BILLING", "storage,load_balancers"),
 		PauseDrainTimeout:    envDuration("PAUSE_DRAIN_TIMEOUT", 2*time.Minute),
 
@@ -285,6 +297,7 @@ func Load() *Config {
 		StripeAutoSubscribe:  envBool("STRIPE_AUTO_SUBSCRIBE", false),
 		StripeMaxRPS:         envFloat("STRIPE_MAX_RPS", 0),
 		StripeCancelOnRemove: envBool("STRIPE_CANCEL_ON_REMOVE", false),
+		StripePriceCard:      os.Getenv("STRIPE_PRICE_CARD"),
 
 		MetronomeAPIToken:      secretEnv("METRONOME_API_TOKEN"),
 		MetronomeAPIBase:       envOr("METRONOME_API_BASE", "https://api.metronome.com"),
@@ -323,6 +336,12 @@ func (c *Config) Validate() error {
 	}
 	if time.Hour%c.CollectionInterval != 0 {
 		return fmt.Errorf("COLLECTION_INTERVAL %s must divide an hour evenly so windows align with billing hours", c.CollectionInterval)
+	}
+	if c.EnforcementLiteLLM && (c.RecordsPullLiteLLMURL == "" || c.RecordsPullLiteLLMKey == "") {
+		return fmt.Errorf("ENFORCEMENT_LITELLM needs RECORDS_PULL_LITELLM_URL and RECORDS_PULL_LITELLM_KEY (a LiteLLM admin key)")
+	}
+	if c.CollectionDelay < 0 || c.CollectionDelay > 10*time.Minute {
+		return fmt.Errorf("COLLECTION_DELAY %s must be between 0 and 10m", c.CollectionDelay)
 	}
 	switch c.CPUMemoryBasis {
 	case "usage", "requests", "max":

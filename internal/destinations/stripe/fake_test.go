@@ -296,6 +296,17 @@ func (f *fakeStripe) route(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, c)
 
+	case r.Method == "POST" && p == "/v1/prices":
+		dec := r.Form.Get("unit_amount_decimal")
+		pr := Price{ID: f.id("price"), Active: true, Currency: r.Form.Get("currency"), Metadata: metadataOf(r), UnitAmountDecimal: &dec,
+			Recurring: &PriceRecurring{UsageType: r.Form.Get("recurring[usage_type]"), Meter: r.Form.Get("recurring[meter]"), Interval: r.Form.Get("recurring[interval]"), IntervalCount: 1}}
+		if pr.Recurring.Meter == "" || r.Form.Get("product_data[name]") == "" {
+			f.fail(w, 400, "parameter_missing", "meter and product_data[name] are required")
+			return
+		}
+		f.prices = append(f.prices, pr)
+		writeJSON(w, pr)
+
 	case r.Method == "GET" && p == "/v1/prices":
 		writeJSON(w, page(r, f.prices, func(p Price) string { return p.ID }))
 

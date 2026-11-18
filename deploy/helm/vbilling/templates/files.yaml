@@ -1,5 +1,6 @@
 {{- $custom := and .Values.metering.customMetrics (not (kindIs "string" .Values.metering.customMetrics)) -}}
-{{- if or .Values.records.formats $custom .Values.records.pull }}
+{{- $stripeCard := and (has "stripe" (include "vbilling.adapters" . | splitList ",")) .Values.stripe.priceCard -}}
+{{- if or .Values.records.formats $custom .Values.records.pull $stripeCard }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -19,5 +20,9 @@ data:
   {{- if .Values.records.pull }}
   records-pull.yaml: |
     {{- toYaml .Values.records.pull | nindent 4 }}
+  {{- end }}
+  {{- if $stripeCard }}
+  stripe-price-card.yaml: |
+    {{- toYaml .Values.stripe.priceCard | nindent 4 }}
   {{- end }}
 {{- end }}

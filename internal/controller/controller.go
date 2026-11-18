@@ -64,6 +64,8 @@ type Controller struct {
 	offboarded map[string]map[string]bool // tenant -> destinations done offboarding it
 	discovered bool
 	lastWindow time.Time
+	// lastUnrequested is the last logged count of pods without requests.
+	lastUnrequested int
 
 	// gaps: tenant cluster external ID -> end of the first window its own
 	// API could not be read for. Persisted, so a restart still fills them.
@@ -155,6 +157,21 @@ func (c *Controller) ResolveTenant(v string) (string, bool) {
 	return v, false
 }
 
+// GatewayIdentities lists a tenant's gateway identities: its ID and every
+// alias (vbilling.vcluster.com/aliases) that maps to it.
+func (c *Controller) GatewayIdentities(tenant string) []string {
+	out := []string{tenant}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for alias, t := range c.aliases {
+		if t == tenant {
+			out = append(out, alias)
+		}
+	}
+	sort.Strings(out[1:])
+	return out
+}
+
 func New(cfg *config.Config, disc Discoverer, coll Collector, sp *spool.Spool, tenants *pipeline.TenantRegistry,
 	dests []destinations.Destination, tel *telemetry.Registry) *Controller {
 	if tel == nil {
@@ -199,17 +216,28 @@ func (c *Controller) Run(ctx context.Context) error {
 	}
 }
 
-// settle gives the kubelet time to report state from before the boundary.
-// A container that exits shortly before a window ends shows as running
-// until the kubelet posts its status: on a DGX Spark a pod that finished at
-// 07:08:59 was still running at 07:09:02, so a 2s settle billed it a second
-// past its end. The kubelet relists every second and then writes the status,
-// so give it a few seconds; the window is committed that much later.
-const settle = 5 * time.Second
+// minSettle gives the kubelet time to report state from before the
+// boundary. A container that exits shortly before a window ends shows as
+// running until the kubelet posts its status: on a DGX Spark a pod that
+// finished at 07:08:59 was still running at 07:09:02, so a 2s settle billed
+// it a second past its end. The kubelet relists every second and then
+// writes the status, so give it a few seconds.
+const minSettle = 5 * time.Second
+
+// settle is how long after a window ends it is collected: COLLECTION_DELAY,
+// at least minSettle. A longer delay lets Kubernetes notice a node that died
+// without warning (it marks it Unknown 40 to 50 seconds after its last
+// heartbeat) before the window it died in is committed.
+func (c *Controller) settle() time.Duration { return max(c.cfg.CollectionDelay, minSettle) }
+
+// latestDue is the end of the newest window that is past its settle time.
+func (c *Controller) latestDue() time.Time {
+	return c.now().UTC().Add(-c.settle()).Truncate(c.cfg.CollectionInterval)
+}
 
 func (c *Controller) untilNextWindow() time.Duration {
 	now := c.now()
-	next := now.Truncate(c.cfg.CollectionInterval).Add(c.cfg.CollectionInterval).Add(settle)
+	next := c.latestDue().Add(c.cfg.CollectionInterval).Add(c.settle())
 	return next.Sub(now)
 }
 
@@ -408,7 +436,7 @@ func (c *Controller) CollectDue(ctx context.Context) {
 		return
 	}
 	size := c.cfg.CollectionInterval
-	latestEnd := c.now().UTC().Truncate(size)
+	latestEnd := c.latestDue()
 	firstEnd := latestEnd
 	note := ""
 	if wm, ok := c.spool.Watermark(spool.SourceCollector); ok {
@@ -466,6 +494,13 @@ func (c *Controller) CollectDue(ctx context.Context) {
 	c.tel.Set("vbilling_last_window_end_timestamp_seconds", "End of the last committed metering window.", nil, float64(latestEnd.Unix()))
 	c.tel.Set("vbilling_collection_duration_seconds", "Duration of the last metering run.", nil, time.Since(started).Seconds())
 	c.tel.Set("vbilling_nodes_down", "Nodes excluded from billing as not ready or unhealthy.", nil, float64(st.NodesDown))
+	c.tel.Set("vbilling_pods_without_requests", "Running pods on shared nodes that request no CPU or memory, so CPU_MEMORY_BASIS=requests bills them nothing.", nil, float64(st.Unrequested))
+	if st.Unrequested != c.lastUnrequested {
+		if st.Unrequested > 0 {
+			log.Printf("[controller] %d running pod(s) request no CPU or memory, so they are not billed for either (CPU_MEMORY_BASIS=requests); give them default requests with a vCluster LimitRange (policies.limitRange)", st.Unrequested)
+		}
+		c.lastUnrequested = st.Unrequested
+	}
 	if st.UsageUnmeasured > 0 {
 		log.Printf("[controller] CPU_MEMORY_BASIS=usage: CPU and memory of %d pod-window(s) collected late were not billed (metrics-server has no usage for past windows; requests is the exact basis)", st.UsageUnmeasured)
 		c.tel.Add("vbilling_cpu_memory_unmeasured_total", "Pod-windows whose CPU and memory were not billed: usage basis, window collected late.", nil, float64(st.UsageUnmeasured))
@@ -576,7 +611,7 @@ func (c *Controller) CollectPrometheusDue(ctx context.Context) {
 		return
 	}
 	size := c.cfg.CollectionInterval
-	latestEnd := c.now().UTC().Truncate(size)
+	latestEnd := c.latestDue()
 	firstEnd := latestEnd
 	if wm, ok := c.spool.Watermark(metrics.SourcePrometheus); ok {
 		if !latestEnd.After(wm) {

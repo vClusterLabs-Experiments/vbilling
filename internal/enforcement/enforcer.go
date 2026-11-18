@@ -166,6 +166,14 @@ type Options struct {
 	// DrainTimeout bounds the wait for workloads on a cluster's own nodes
 	// to stop before its control plane is stopped (default 2m).
 	DrainTimeout time.Duration
+	// Gateway, in enforce mode, blocks a suspended or paused tenant's
+	// requests at its AI gateway and unblocks them when it is active again.
+	Gateway Gateway
+}
+
+// Gateway stops and restarts a tenant's requests at its AI gateway.
+type Gateway interface {
+	Apply(ctx context.Context, tenant string, blocked bool) error
 }
 
 // Enforcer is safe for concurrent use.
@@ -405,10 +413,13 @@ func (e *Enforcer) SetHold(ctx context.Context, tenant, hold string, state State
 		}
 		e.opts.Telemetry.Set("vbilling_tenant_billing_state", "1 for the tenant's current billing state.", map[string]string{"tenant": tenant, "state": string(s)}, v)
 	}
-	if e.opts.Mode == "observe" || e.kube == nil || e.opts.Clusters == nil {
-		return nil
-	}
 	var errs []error
+	if e.opts.Mode == "enforce" && e.opts.Gateway != nil {
+		errs = append(errs, e.opts.Gateway.Apply(ctx, tenant, state.blocks()))
+	}
+	if e.opts.Mode == "observe" || e.kube == nil || e.opts.Clusters == nil {
+		return errors.Join(errs...)
+	}
 	for _, cl := range e.opts.Clusters(tenant) {
 		errs = append(errs, e.converge(ctx, tenant, cl, ts, true))
 	}
@@ -557,6 +568,15 @@ func orActive(s State) State {
 // that was unreachable when the state changed (so a paying tenant could stay
 // blocked), converges within one resync.
 func (e *Enforcer) Resync(ctx context.Context) {
+	if e.opts.Mode == "enforce" && e.opts.Gateway != nil {
+		// Tenants that only buy tokens have no cluster: the gateway is
+		// all there is to converge.
+		for _, ts := range e.States() {
+			if err := e.opts.Gateway.Apply(ctx, ts.Tenant, ts.State.blocks()); err != nil {
+				log.Printf("[enforcement] resync gateway: %v", err)
+			}
+		}
+	}
 	if e.opts.Mode == "observe" || e.kube == nil || e.opts.Clusters == nil {
 		return
 	}
