@@ -83,8 +83,12 @@ func TestPauseStopsSharedClusterAndResumeRestoresIt(t *testing.T) {
 	cl := discovery.TenantCluster{Name: "team-a", Namespace: ns, Source: "statefulset"}
 	spans := pause.Memory()
 	var calls pauseLog
+	// The pause worker reads the clock in the background, so the test's
+	// clock is guarded.
+	var clockMu sync.Mutex
 	now := time.Date(2026, 11, 18, 10, 0, 0, 0, time.UTC)
-	e := New(host, Options{Mode: "enforce", Now: func() time.Time { return now },
+	clock := func() time.Time { clockMu.Lock(); defer clockMu.Unlock(); return now }
+	e := New(host, Options{Mode: "enforce", Now: clock,
 		Clusters: func(string) []discovery.TenantCluster { return []discovery.TenantCluster{cl} },
 		Pauses:   spans,
 		OnPause: func(id string, paused bool) {
@@ -108,7 +112,7 @@ func TestPauseStopsSharedClusterAndResumeRestoresIt(t *testing.T) {
 	if pods := podNames(t, host, ns); len(pods) != 1 || !pods["team-a-0"] {
 		t.Fatalf("pods after pause = %v, want only the control plane pod (scaled down by its StatefulSet)", pods)
 	}
-	if sp, open := spans.Current(cl.ExternalID()); !open || !sp.From.Equal(now) || sp.By != "vbilling" {
+	if sp, open := spans.Current(cl.ExternalID()); !open || !sp.From.Equal(clock()) || sp.By != "vbilling" {
 		t.Fatalf("pause span = %+v, open %t", sp, open)
 	}
 	if got := e.Pauses(); len(got) != 1 || got[0].Phase != "paused" {
@@ -136,7 +140,9 @@ func TestPauseStopsSharedClusterAndResumeRestoresIt(t *testing.T) {
 	if err := e.SetHold(ctx, "acme", "abuse", Paused, "crypto mining", "api", "manual"); err != nil {
 		t.Fatal(err)
 	}
+	clockMu.Lock()
 	now = now.Add(time.Hour)
+	clockMu.Unlock()
 	if err := e.Set(ctx, "acme", Active, "top-up paid", "metronome", "payment_gate.payment_status"); err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +159,7 @@ func TestPauseStopsSharedClusterAndResumeRestoresIt(t *testing.T) {
 		t.Fatalf("control plane after resume: replicas %d, annotations %v", *s.Spec.Replicas, s.Annotations)
 	}
 	got := spans.Spans(cl.ExternalID())
-	if len(got) != 1 || !got[0].To.Equal(now) {
+	if len(got) != 1 || !got[0].To.Equal(clock()) {
 		t.Fatalf("pause spans = %+v, want one ending at the resume", got)
 	}
 	if ev := calls.list(); len(ev) < 2 || ev[len(ev)-1] != "resumed "+cl.ExternalID() {
