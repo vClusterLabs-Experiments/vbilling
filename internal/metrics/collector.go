@@ -131,7 +131,7 @@ func NewCollector(kube kubernetes.Interface, mc metricsclient.Interface, opts Op
 		opts.Now = time.Now
 	}
 	if opts.Basis == "" {
-		opts.Basis = "usage"
+		opts.Basis = "requests"
 	}
 	if opts.PrivateNodeBilling == "" {
 		opts.PrivateNodeBilling = "node"

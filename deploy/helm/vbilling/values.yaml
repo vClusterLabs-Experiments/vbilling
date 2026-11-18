@@ -56,7 +56,9 @@ billing:
     maxHold: 28d
 
 metering:
-  cpuMemoryBasis: usage # usage | requests | max
+  # requests (exact): requests times lifetime. usage or max: a metrics-server
+  # reading per window, an estimate, and none for windows collected late.
+  cpuMemoryBasis: requests # requests | usage | max
   meterControlPlane: false # also bill the tenant cluster's own control plane pods
   meterByNamespace: false # add the tenant cluster namespace as a dimension (internal chargeback)
   gpuResources: [nvidia.com/gpu, amd.com/gpu] # MIG resources (nvidia.com/mig-*) are always detected

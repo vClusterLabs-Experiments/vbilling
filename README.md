@@ -458,7 +458,7 @@ Alert on rising lag, dead letters, a stale last window, or any source that is no
 | `ARCHIVE_DIR` (`persistence.archive.*`) | | Long-term archive: compaction gzips each segment here and records it in `archive.jsonl` before deleting it. Check with `vbilling ledger verify` |
 | `COLLECTION_INTERVAL` | `60s` | Window size; must divide an hour |
 | `MAX_BACKFILL`, `OFFBOARD_GRACE` | `6h`, `1h` | |
-| `CPU_MEMORY_BASIS` | `usage` | `usage`, `requests` or `max` |
+| `CPU_MEMORY_BASIS` | `requests` | `requests` (exact), or `usage` or `max` (metrics-server readings: estimates) |
 | `METER_CONTROL_PLANE`, `METER_BY_NAMESPACE` | `false` | |
 | `GPU_RESOURCES` | `nvidia.com/gpu,amd.com/gpu` | MIG (`nvidia.com/mig-*`) and `nvidia.com/gpu.shared` are always detected |
 | `SKU_LABEL`, `CAPACITY_TYPE_LABEL` | `""`, `vbilling.vcluster.com/capacity-type` | |
