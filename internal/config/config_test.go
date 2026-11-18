@@ -9,7 +9,7 @@ import (
 func TestLoadDefaultsAndLegacyAdapter(t *testing.T) {
 	t.Setenv("ADAPTER", "noop")
 	c := Load()
-	if strings.Join(c.Adapters, ",") != "noop" || c.CollectionInterval != time.Minute || c.CPUMemoryBasis != "usage" || c.EnforcementMode != "observe" {
+	if strings.Join(c.Adapters, ",") != "noop" || c.CollectionInterval != time.Minute || c.CPUMemoryBasis != "requests" || c.EnforcementMode != "observe" {
 		t.Fatalf("defaults: %+v", c)
 	}
 	if err := c.Validate(); err != nil {

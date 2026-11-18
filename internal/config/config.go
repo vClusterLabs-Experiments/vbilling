@@ -194,7 +194,7 @@ func Load() *Config {
 		CollectionInterval: envDuration("COLLECTION_INTERVAL", 60*time.Second),
 		ReconcileInterval:  envDuration("RECONCILE_INTERVAL", 30*time.Second),
 		MaxBackfill:        envDuration("MAX_BACKFILL", 6*time.Hour),
-		CPUMemoryBasis:     envOr("CPU_MEMORY_BASIS", "usage"),
+		CPUMemoryBasis:     envOr("CPU_MEMORY_BASIS", "requests"),
 		MeterControlPlane:  envBool("METER_CONTROL_PLANE", false),
 		MeterByNamespace:   envBool("METER_BY_NAMESPACE", false),
 		GPUResources:       envList("GPU_RESOURCES", []string{"nvidia.com/gpu", "amd.com/gpu"}),
