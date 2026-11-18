@@ -400,6 +400,47 @@ presentation_group_key: [tenant_cluster]</code></div>
       </ul>
       <p>Price whole nodes either by node-hours or by their GPU, CPU and memory hours, not both (see <a href="private-nodes.html#billed">what gets billed</a>). Group-key properties an event does not carry are sent as <code>none</code>, so every event still matches its metric. vBilling sends quantities only: the rate card sets prices and currency.</p>
 
+      <h2 id="price-coverage">Price coverage</h2>
+      <p>Metronome rates usage it has no rate for at $0, without an error: a new GPU model or region that reaches Metronome before its rate does is missing from invoices, prepaid balances and spend alerts. vBilling checks, read-only, that the rate card prices everything it sends. It never creates products or rates and never writes to a rate card: Finance owns pricing.</p>
+      <p>For each billable metric, and for each series seen in the ledger within <code>PRICE_CHECK_LOOKBACK</code> (a metric, SKU and the values of the metric's other group keys, per rate card), the series is <strong>priced</strong> when:</p>
+      <ul>
+        <li>the metric's billable metric exists (vBilling creates it at bootstrap);</li>
+        <li>a usage product meters that billable metric;</li>
+        <li>the rate card of the tenant's contract (the tenant's <code>vbilling.vcluster.com/plan</code>, else <code>METRONOME_RATE_CARD</code>; an alias resolves to the rate card it points to now) has an entitled rate for that product, in effect now, whose <code>pricing_group_values</code> match the series on every key of the product's <code>pricing_group_key</code>: <code>sku</code>, and <code>region</code>, <code>capacity_type</code> or <code>billing_mode</code> if the product prices on them. Values an event does not carry match <code>none</code>, as vBilling sends them. A product without a pricing group key prices every SKU with one rate.</li>
+      </ul>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead><tr><th>Status</th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr><td><code>priced</code></td><td>A rate applies and is not 0.</td></tr>
+            <tr><td><code>unpriced</code></td><td>No billable metric, no usage product, no rate card with that ID or alias, or no entitled rate for the product and pricing group values. The hint names what to add, for example <code>add a rate for product "GPU Hours" (pricing group sku=NVIDIA-B200) to rate card "ai-cloud"</code>.</td></tr>
+            <tr><td><code>zero</code></td><td>The rate is 0 (flat 0, or every tier 0). This can be intentional, so it is information, not a gap.</td></tr>
+            <tr><td><code>unknown</code></td><td>A product meters the metric but no rate card is configured, so vBilling cannot tell which rates apply. Set <code>METRONOME_RATE_CARD</code> or the tenant's plan.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Checks run at startup, every <code>PRICE_CHECK_INTERVAL</code> (10 minutes), within seconds of a new series appearing in the ledger, and on <code>POST /api/v1/pricing/check</code>. Gaps show in <code>GET /api/v1/pricing</code>, as <code>unpriced</code> entries in <code>GET /api/v1/sources?kind=pricing</code> with the hint, in the dashboard's Price coverage tile, and as <code>vbilling_unpriced_series{destination="metronome"}</code>:</p>
+      <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-s</span> <span class="string">'localhost:8080/api/v1/pricing?destination=metronome&amp;status=unpriced'</span> | jq <span class="string">'.destinations[].series[]'</span>
+{
+  <span class="string">"plan"</span>: "ai-cloud",
+  <span class="string">"metric"</span>: "vcluster_gpu_hours",
+  <span class="string">"sku"</span>: "NVIDIA-B200",
+  <span class="string">"status"</span>: "unpriced",
+  <span class="string">"detail"</span>: "rate card \"ai-cloud\" has no rate for product \"GPU Hours\" (pricing group billing_mode=private_node, capacity_type=on-demand, region=us-east-1, sku=NVIDIA-B200)",
+  <span class="string">"hint"</span>: "add a rate for product \"GPU Hours\" (pricing group ...) to rate card \"ai-cloud\"",
+  <span class="string">"combinations"</span>: 2,
+  <span class="string">"missing"</span>: [{"billing_mode": "private_node", "capacity_type": "on-demand", "region": "us-east-1"}]
+}</code></div>
+      <p>With <code>PRICE_CHECK=hold</code>, events of an unpriced series are not sent to Metronome until its rate exists, then they ship in ledger order (see <a href="troubleshooting.html#unpriced-usage">Unpriced usage</a>). Metronome accepts usage up to 34 days old, so usage held longer than <code>PRICE_CHECK_MAX_HOLD</code> (28 days) is released without a rate: Metronome rates it at $0 until the rate is added, and the <code>pricing/metronome/...</code> source turns <code>failing</code>.</p>
+      <p>The check reads these endpoints (the adapter's tests validate the requests and the response fixtures against the schemas of these pages):</p>
+      <ul>
+        <li><code>GET /v1/billable-metrics</code>: <a href="https://docs.metronome.com/api-reference/billable-metrics/list-all-billable-metrics" target="_blank">List all billable metrics</a></li>
+        <li><code>POST /v1/contract-pricing/products/list</code> with <code>{"archive_filter": "NOT_ARCHIVED"}</code>: <a href="https://docs.metronome.com/api-reference/products/list-products" target="_blank">List products</a></li>
+        <li><code>POST /v1/contract-pricing/rate-cards/list</code> (aliases only): <a href="https://docs.metronome.com/api-reference/rate-cards/list-rate-cards" target="_blank">List rate cards</a></li>
+        <li><code>POST /v1/contract-pricing/rate-cards/getRates</code> with the rate card, <code>at</code> = now and one selector per product: <a href="https://docs.metronome.com/api-reference/rate-cards/get-rates" target="_blank">Get rates</a></li>
+      </ul>
+      <p>Not covered: contract-level overrides. The check reads the rate card, not each contract's rate schedule, so a rate that exists only as an override on one contract is reported as a gap (and held in hold mode). Also not covered: pricing per <code>tenant_cluster</code>, and rates scheduled to start later (they count from their <code>starting_at</code>). Series are tracked per rate card, so tenants on different rate cards are checked separately.</p>
+
       <h2 id="delivery">Delivery</h2>
       <p>vBilling posts events to <code>/v1/ingest</code> in batches of 100, one event per tenant, metric, window and set of dimensions. <code>customer_id</code> is the Metronome customer ID once vBilling knows it, and the ingest alias before that:</p>
       <div class="code-block"><code>{
@@ -499,6 +540,8 @@ enforcement:
       <p>Contract errors name the tenant and rate card: <code>create contract for &lt;tenant&gt; on &lt;rate card&gt;</code>. Check that the alias or ID exists in Metronome, and check the tenant's <code>vbilling.vcluster.com/plan</code> if it has one. When Metronome answers 400, the log reads <code>[pipeline] metronome: tenant &lt;tenant&gt; rejected</code> and usage keeps flowing to the customer without a contract; other errors pause delivery and retry.</p>
       <h3>Dead letters older than 34 days</h3>
       <p><code>older than Metronome's 34-day ingest window</code> comes from a cursor rewind or an outage longer than Metronome accepts backdated events. Metronome cannot take them. They stay in the dead-letter list, and reconciliation reports them as <code>dead_lettered</code>.</p>
+      <h3>A series is unpriced</h3>
+      <p><code>[pricing] metronome: vcluster_gpu_hours sku=NVIDIA-B200 (plan ai-cloud) is unpriced: ...</code> and the <code>pricing/metronome/...</code> source name the product and rate card, and the hint names the rate to add. Add it to the rate card, then run <code>curl -s -X POST localhost:8080/api/v1/pricing/check</code> or wait for the next check. A product on the wrong billable metric, a rate marked not entitled, or a rate card alias that points elsewhere show up the same way, with the detail saying which.</p>
       <h3>Reconciliation fails</h3>
       <p><code>metronome reconciliation needs whole UTC days (got ... to ...)</code> means <code>from</code> or <code>to</code> is not a UTC midnight. Pass dates as <code>YYYY-MM-DD</code>, or RFC 3339 times at <code>00:00:00Z</code>.</p>
     </main>

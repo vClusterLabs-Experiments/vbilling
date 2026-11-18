@@ -1,0 +1,1033 @@
+{
+ "kind": "APIResourceList",
+ "apiVersion": "v1",
+ "groupVersion": "management.loft.sh/v1",
+ "resources": [
+  {
+   "name": "agentauditevents",
+   "singularName": "agentauditevent",
+   "namespaced": false,
+   "kind": "AgentAuditEvent",
+   "verbs": [
+    "create"
+   ]
+  },
+  {
+   "name": "announcements",
+   "singularName": "announcement",
+   "namespaced": false,
+   "kind": "Announcement",
+   "verbs": [
+    "list"
+   ]
+  },
+  {
+   "name": "apps",
+   "singularName": "app",
+   "namespaced": false,
+   "kind": "App",
+   "verbs": [
+    "create",
+    "delete",
+    "deletecollection",
+    "get",
+    "list",
+    "patch",
+    "update",
+    "watch"
+   ]
+  },
+  {
+   "name": "apps/credentials",
+   "singularName": "",
+   "namespaced": false,
+   "kind": "AppCredentials",
+   "verbs": [
+    "get"
+   ]
+  },
+  {
+   "name": "backups",
+   "singularName": "backup",
+   "namespaced": false,
+   "kind": "Backup",
+   "verbs": [
+    "create"
+   ]
+  },
+  {
+   "name": "backups/apply",
+   "singularName": "",
+   "namespaced": false,
+   "kind": "BackupApply",
+   "verbs": [
+    "create"
+   ]
+  },
+  {
+   "name": "clusteraccesses",
+   "singularName": "clusteraccess",
+   "namespaced": false,
+   "kind": "ClusterAccess",
+   "verbs": [
+    "create",
+    "delete",
+    "deletecollection",
+    "get",
+    "list",
+    "patch",
+    "update",
+    "watch"
+   ]
+  },
+  {
+   "name": "clusterroletemplates",
+   "singularName": "clusterroletemplate",
+   "namespaced": false,
+   "kind": "ClusterRoleTemplate",
+   "verbs": [
+    "create",
+    "delete",
+    "deletecollection",
+    "get",
+    "list",
+    "patch",
+    "update",
+    "watch"
+   ]
+  },
+  {
+   "name": "clusters",
+   "singularName": "cluster",
+   "namespaced": false,
+   "kind": "Cluster",
+   "verbs": [
+    "create",
+    "delete",
+    "deletecollection",
+    "get",
+    "list",
+    "patch",
+    "update",
+    "watch"
+   ]
+  },
+  {
+   "name": "clusters/accesskey",
+   "singularName": "",
+   "namespaced": false,
+   "kind": "ClusterAccessKey",
+   "verbs": [
+    "get"
+   ]
+  },
+  {
+   "name": "clusters/agentconfig",
+   "singularName": "",
+   "namespaced": false,
+   "kind": "ClusterAgentConfig",
+   "verbs": [
+    "get"
+   ]
+  },
+  {
+   "name": "clusters/charts",
+   "singularName": "",
+   "namespaced": false,
+   "kind": "ClusterCharts",
+   "verbs": [
+    "create",
+    "get"
+   ]
+  },
+  {
+   "name": "clusters/domain",
+   "singularName": "",
+   "namespaced": false,
+   "kind": "ClusterDomain",
+   "verbs": [
+    "create",
+    "get"
+   ]
+  },
+  {
+   "name": "clusters/memberaccess",
+   "singularName": "",
+   "namespaced": false,
+   "kind": "ClusterMemberAccess",
+   "verbs": [
+    "get"
+   ]
+  },
+  {
+   "name": "clusters/members",
+   "singularName": "",
+   "namespaced": false,
+   "kind": "ClusterMembers",
+   "verbs": [
+    "get"
+   ]
+  },
+  {
+   "name": "clusters/reset",
+   "singularName": "",
+   "namespaced": false,
+   "kind": "ClusterReset",
+   "verbs": [
+    "create"
+   ]
+  },
+  {
+   "name": "clusters/status",
+   "singularName": "",
+   "namespaced": false,
+   "kind": "Cluster",
+   "verbs": [
+    "get",
+    "patch",
+    "update"
+   ]
+  },
+  {
+   "name": "configs",
+   "singularName": "config",
+   "namespaced": false,
+   "kind": "Config",
+   "verbs": [
+    "create",
+    "get"
+   ]
+  },
+  {
+   "name": "convertvirtualclusterconfig",
+   "singularName": "convertvirtualclusterconfig",
+   "namespaced": false,
+   "kind": "ConvertVirtualClusterConfig",
+   "verbs": [
+    "create"
+   ]
+  },
+  {
+   "name": "databaseconnectors",
+   "singularName": "databaseconnector",
+   "namespaced": false,
+   "kind": "DatabaseConnector",
+   "verbs": [
+    "list"
+   ]
+  },
+  {
+   "name": "directclusterendpointtokens",
+   "singularName": "directclusterendpointtoken",
+   "namespaced": false,
+   "kind": "DirectClusterEndpointToken",
+   "verbs": [
+    "create"
+   ]
+  },
+  {
+   "name": "events",
+   "singularName": "event",
+   "namespaced": false,
+   "kind": "Event",
+   "verbs": [
+    "list"
+   ]
+  },
+  {
+   "name": "features",
+   "singularName": "feature",
+   "namespaced": false,
+   "kind": "Feature",
+   "verbs": [
+    "get",
+    "list"
+   ]
+  },
+  {
+   "name": "features/status",
+   "singularName": "",
+   "namespaced": false,
+   "kind": "Feature",
+   "verbs": [
+    "update"
+   ]
+  },
+  {
+   "name": "ingressauthtokens",
+   "singularName": "ingressauthtoken",
+   "namespaced": false,
+   "kind": "IngressAuthToken",
+   "verbs": [
+    "create"
+   ]
+  },
+  {
+   "name": "kiosk",
+   "singularName": "user",
+   "namespaced": false,
+   "kind": "User",
+   "verbs": []
+  },
+  {
+   "name": "licenses",
+   "singularName": "license",
+   "namespaced": false,
+   "kind": "License",
+   "verbs": [
+    "get"
+   ]
+  },
+  {
+   "name": "licenses/request",
+   "singularName": "",
+   "namespaced": false,
+   "kind": "LicenseRequest",
+   "verbs": [
+    "create"
+   ]
+  },
+  {
+   "name": "loftupgrades",
+   "singularName": "loftupgrade",
+   "namespaced": false,
+   "kind": "LoftUpgrade",
+   "verbs": [
+    "create"
+   ]
+  },
+  {
+   "name": "networkpeers",
+   "singularName": "networkpeer",
+   "namespaced": false,
+   "kind": "NetworkPeer",
+   "verbs": [
+    "create",
+    "delete",
+    "deletecollection",
+    "get",
+    "list",
+    "patch",
+    "update",
+    "watch"
+   ]
+  },
+  {
+   "name": "networkpeers/debug",
+   "singularName": "",
+   "namespaced": false,
+   "kind": "NetworkPeerDebug",
+   "verbs": [
+    "get"
+   ]
+  },
+  {
+   "name": "nodeclaims",
+   "singularName": "nodeclaim",
+   "namespaced": true,
+   "kind": "NodeClaim",
+   "verbs": [
+    "create",
+    "delete",
+    "deletecollection",
+    "get",
+    "list",
+    "patch",
+    "update",
+    "watch"
+   ]
+  },
+  {
+   "name": "nodeclaims/status",
+   "singularName": "",
+   "namespaced": true,
+   "kind": "NodeClaim",
+   "verbs": [
+    "get",
+    "patch",
+    "update"
+   ]
+  },
+  {
+   "name": "nodeenvironments",
+   "singularName": "nodeenvironment",
+   "namespaced": true,
+   "kind": "NodeEnvironment",
+   "verbs": [
+    "create",
+    "delete",
+    "deletecollection",
+    "get",
+    "list",
+    "patch",
+    "update",
+    "watch"
+   ]
+  },
+  {
+   "name": "nodeenvironments/status",
+   "singularName": "",
+   "namespaced": true,
+   "kind": "NodeEnvironment",
+   "verbs": [
+    "get",
+    "patch",
+    "update"
+   ]
+  },
+  {
+   "name": "nodeproviders",
+   "singularName": "nodeprovider",
+   "namespaced": false,
+   "kind": "NodeProvider",
+   "verbs": [
+    "create",
+    "delete",
+    "deletecollection",
+    "get",
+    "list",
+    "patch",
+    "update",
+    "watch"
+   ]
+  },
+  {
+   "name": "nodeproviders/exec",
+   "singularName": "",
+   "namespaced": false,
+   "kind": "NodeProviderExec",
+   "verbs": [
+    "create"
+   ]
+  },
+  {
+   "name": "nodeproviders/status",
+   "singularName": "",
+   "namespaced": false,
+   "kind": "NodeProvider",
+   "verbs": [
+    "get",
+    "patch",
+    "update"
+   ]
+  },
+  {
+   "name": "nodetypes",
+   "singularName": "nodetype",
+   "namespaced": false,
+   "kind": "NodeType",
+   "verbs": [
+    "create",
+    "delete",
+    "deletecollection",
+    "get",
+    "list",
+    "patch",
+    "update",
+    "watch"
+   ]
+  },
+  {
+   "name": "nodetypes/status",
+   "singularName": "",
+   "namespaced": false,
+   "kind": "NodeType",
+   "verbs": [
+    "get",
+    "patch",
+    "update"
+   ]
+  },
+  {
+   "name": "oidcclients",
+   "singularName": "oidcclient",
+   "namespaced": false,
+   "kind": "OIDCClient",
+   "verbs": [
+    "create",
+    "delete",
+    "get",
+    "list",
+    "patch",
+    "update"
+   ]
+  },
+  {
+   "name": "osimages",
+   "singularName": "osimage",
+   "namespaced": false,
+   "kind": "OSImage",
+   "verbs": [
+    "create",
+    "delete",
+    "deletecollection",
+    "get",
+    "list",
+    "patch",
+    "update",
+    "watch"
+   ]
+  },
+  {
+   "name": "ownedaccesskeys",
+   "singularName": "ownedaccesskey",
+   "namespaced": false,
+   "kind": "OwnedAccessKey",
+   "verbs": [
+    "create",
+    "delete",
+    "get",
+    "patch",
+    "update"
+   ]
+  },
+  {
+   "name": "projects",
+   "singularName": "project",
+   "namespaced": false,
+   "kind": "Project",
+   "verbs": [
+    "create",
+    "delete",
+    "deletecollection",
+    "get",
+    "list",
+    "patch",
+    "update",
+    "watch"
+   ]
+  },
+  {
+   "name": "projects/chartinfo",
+   "singularName": "",
+   "namespaced": false,
+   "kind": "ProjectChartInfo",
+   "verbs": [
+    "create"
+   ]
+  },
+  {
+   "name": "projects/charts",
+   "singularName": "",
+   "namespaced": false,
+   "kind": "ProjectCharts",
+   "verbs": [
+    "get"
+   ]
+  },
+  {
+   "name": "projects/clusters",
+   "singularName": "",
+   "namespaced": false,
+   "kind": "ProjectClusters",
+   "verbs": [
+    "get"
+   ]
+  },
+  {
+   "name": "projects/importspace",
+   "singularName": "",
+   "namespaced": false,
+   "kind": "ProjectImportSpace",
+   "verbs": [
+    "create"
+   ]
+  },
+  {
+   "name": "projects/members",
+   "singularName": "",
+   "namespaced": false,
+   "kind": "ProjectMembers",
+   "verbs": [
+    "get"
+   ]
+  },
+  {
+   "name": "projects/migratespaceinstance",
+   "singularName": "",
+   "namespaced": false,
+   "kind": "ProjectMigrateSpaceInstance",
+   "verbs": [
+    "create"
+   ]
+  },
+  {
+   "name": "projects/migratevirtualclusterinstance",
+   "singularName": "",
+   "namespaced": false,
+   "kind": "ProjectMigrateVirtualClusterInstance",
+   "verbs": [
+    "create"
+   ]
+  },
+  {
+   "name": "projects/nodetypes",
+   "singularName": "",
+   "namespaced": false,
+   "kind": "ProjectNodeTypes",
+   "verbs": [
+    "get"
+   ]
+  },
+  {
+   "name": "projects/status",
+   "singularName": "",
+   "namespaced": false,
+   "kind": "Project",
+   "verbs": [
+    "get",
+    "patch",
+    "update"
+   ]
+  },
+  {
+   "name": "projects/templates",
+   "singularName": "",
+   "namespaced": false,
+   "kind": "ProjectTemplates",
+   "verbs": [
+    "get"
+   ]
+  },
+  {
+   "name": "projectsecrets",
+   "singularName": "projectsecret",
+   "namespaced": true,
+   "kind": "ProjectSecret",
+   "verbs": [
+    "create",
+    "delete",
+    "deletecollection",
+    "get",
+    "list",
+    "patch",
+    "update",
+    "watch"
+   ]
+  },
+  {
+   "name": "redirecttokens",
+   "singularName": "redirecttoken",
+   "namespaced": false,
+   "kind": "RedirectToken",
+   "verbs": [
+    "create"
+   ]
+  },
+  {
+   "name": "registervirtualclusters",
+   "singularName": "registervirtualcluster",
+   "namespaced": false,
+   "kind": "RegisterVirtualCluster",
+   "verbs": [
+    "create"
+   ]
+  },
+  {
+   "name": "resetaccesskeys",
+   "singularName": "resetaccesskey",
+   "namespaced": false,
+   "kind": "ResetAccessKey",
+   "verbs": [
+    "create"
+   ]
+  },
+  {
+   "name": "selfsubjectaccessreviews",
+   "singularName": "selfsubjectaccessreview",
+   "namespaced": false,
+   "kind": "SelfSubjectAccessReview",
+   "verbs": [
+    "create"
+   ]
+  },
+  {
+   "name": "selves",
+   "singularName": "self",
+   "namespaced": false,
+   "kind": "Self",
+   "verbs": [
+    "create",
+    "get"
+   ]
+  },
+  {
+   "name": "sharedsecrets",
+   "singularName": "sharedsecret",
+   "namespaced": true,
+   "kind": "SharedSecret",
+   "verbs": [
+    "create",
+    "delete",
+    "get",
+    "list",
+    "patch",
+    "update"
+   ]
+  },
+  {
+   "name": "spaceinstances",
+   "singularName": "spaceinstance",
+   "namespaced": true,
+   "kind": "SpaceInstance",
+   "verbs": [
+    "create",
+    "delete",
+    "deletecollection",
+    "get",
+    "list",
+    "patch",
+    "update",
+    "watch"
+   ]
+  },
+  {
+   "name": "spacetemplates",
+   "singularName": "spacetemplate",
+   "namespaced": false,
+   "kind": "SpaceTemplate",
+   "verbs": [
+    "create",
+    "delete",
+    "deletecollection",
+    "get",
+    "list",
+    "patch",
+    "update",
+    "watch"
+   ]
+  },
+  {
+   "name": "sshkeys",
+   "singularName": "sshkey",
+   "namespaced": false,
+   "kind": "SSHKey",
+   "verbs": [
+    "create",
+    "delete",
+    "deletecollection",
+    "get",
+    "list",
+    "patch",
+    "update",
+    "watch"
+   ]
+  },
+  {
+   "name": "subjectaccessreviews",
+   "singularName": "subjectaccessreview",
+   "namespaced": false,
+   "kind": "SubjectAccessReview",
+   "verbs": [
+    "create"
+   ]
+  },
+  {
+   "name": "tasks",
+   "singularName": "task",
+   "namespaced": false,
+   "kind": "Task",
+   "verbs": [
+    "create",
+    "delete",
+    "deletecollection",
+    "get",
+    "list",
+    "patch",
+    "update",
+    "watch"
+   ]
+  },
+  {
+   "name": "tasks/log",
+   "singularName": "",
+   "namespaced": false,
+   "kind": "TaskLog",
+   "verbs": [
+    "get"
+   ]
+  },
+  {
+   "name": "teams",
+   "singularName": "team",
+   "namespaced": false,
+   "kind": "Team",
+   "verbs": [
+    "create",
+    "delete",
+    "deletecollection",
+    "get",
+    "list",
+    "patch",
+    "update",
+    "watch"
+   ]
+  },
+  {
+   "name": "teams/accesskeys",
+   "singularName": "",
+   "namespaced": false,
+   "kind": "TeamAccessKeys",
+   "verbs": [
+    "get"
+   ]
+  },
+  {
+   "name": "teams/clusters",
+   "singularName": "",
+   "namespaced": false,
+   "kind": "TeamClusters",
+   "verbs": [
+    "get"
+   ]
+  },
+  {
+   "name": "teams/object-permissions",
+   "singularName": "",
+   "namespaced": false,
+   "kind": "TeamObjectPermissions",
+   "verbs": [
+    "get"
+   ]
+  },
+  {
+   "name": "teams/permissions",
+   "singularName": "",
+   "namespaced": false,
+   "kind": "TeamPermissions",
+   "verbs": [
+    "get"
+   ]
+  },
+  {
+   "name": "translatevclusterresourcenames",
+   "singularName": "translatevclusterresourcenames",
+   "namespaced": false,
+   "kind": "TranslateVClusterResourceName",
+   "verbs": [
+    "create"
+   ]
+  },
+  {
+   "name": "usagedownload",
+   "singularName": "usagedownload",
+   "namespaced": false,
+   "kind": "UsageDownload",
+   "verbs": [
+    "list"
+   ]
+  },
+  {
+   "name": "users",
+   "singularName": "user",
+   "namespaced": false,
+   "kind": "User",
+   "verbs": [
+    "create",
+    "delete",
+    "deletecollection",
+    "get",
+    "list",
+    "patch",
+    "update",
+    "watch"
+   ]
+  },
+  {
+   "name": "users/accesskeys",
+   "singularName": "",
+   "namespaced": false,
+   "kind": "UserAccessKeys",
+   "verbs": [
+    "get"
+   ]
+  },
+  {
+   "name": "users/clusters",
+   "singularName": "",
+   "namespaced": false,
+   "kind": "UserClusters",
+   "verbs": [
+    "get"
+   ]
+  },
+  {
+   "name": "users/object-permissions",
+   "singularName": "",
+   "namespaced": false,
+   "kind": "UserObjectPermissions",
+   "verbs": [
+    "get"
+   ]
+  },
+  {
+   "name": "users/permissions",
+   "singularName": "",
+   "namespaced": false,
+   "kind": "UserPermissions",
+   "verbs": [
+    "get"
+   ]
+  },
+  {
+   "name": "users/profile",
+   "singularName": "",
+   "namespaced": false,
+   "kind": "UserProfile",
+   "verbs": [
+    "create",
+    "get"
+   ]
+  },
+  {
+   "name": "virtualclusterinstances",
+   "singularName": "virtualclusterinstance",
+   "namespaced": true,
+   "kind": "VirtualClusterInstance",
+   "verbs": [
+    "create",
+    "delete",
+    "deletecollection",
+    "get",
+    "list",
+    "patch",
+    "update",
+    "watch"
+   ]
+  },
+  {
+   "name": "virtualclusterinstances/accesskey",
+   "singularName": "",
+   "namespaced": true,
+   "kind": "VirtualClusterAccessKey",
+   "verbs": [
+    "get"
+   ]
+  },
+  {
+   "name": "virtualclusterinstances/debug-shell",
+   "singularName": "",
+   "namespaced": true,
+   "kind": "VirtualClusterInstanceDebugShell",
+   "verbs": [
+    "create",
+    "get"
+   ]
+  },
+  {
+   "name": "virtualclusterinstances/debug-shell-pods",
+   "singularName": "",
+   "namespaced": true,
+   "kind": "VirtualClusterInstanceDebugShellPods",
+   "verbs": [
+    "get"
+   ]
+  },
+  {
+   "name": "virtualclusterinstances/externaldatabase",
+   "singularName": "",
+   "namespaced": true,
+   "kind": "VirtualClusterExternalDatabase",
+   "verbs": [
+    "create"
+   ]
+  },
+  {
+   "name": "virtualclusterinstances/joinscript",
+   "singularName": "",
+   "namespaced": true,
+   "kind": "VirtualClusterInstanceJoinScript",
+   "verbs": [
+    "create"
+   ]
+  },
+  {
+   "name": "virtualclusterinstances/kubeconfig",
+   "singularName": "",
+   "namespaced": true,
+   "kind": "VirtualClusterInstanceKubeConfig",
+   "verbs": [
+    "create"
+   ]
+  },
+  {
+   "name": "virtualclusterinstances/log",
+   "singularName": "",
+   "namespaced": true,
+   "kind": "VirtualClusterInstanceLog",
+   "verbs": [
+    "get"
+   ]
+  },
+  {
+   "name": "virtualclusterinstances/nodeaccesskey",
+   "singularName": "",
+   "namespaced": true,
+   "kind": "VirtualClusterNodeAccessKey",
+   "verbs": [
+    "create"
+   ]
+  },
+  {
+   "name": "virtualclusterinstances/resourceusage",
+   "singularName": "",
+   "namespaced": true,
+   "kind": "VirtualClusterResourceUsage",
+   "verbs": [
+    "get"
+   ]
+  },
+  {
+   "name": "virtualclusterinstances/shell",
+   "singularName": "",
+   "namespaced": true,
+   "kind": "VirtualClusterInstanceShell",
+   "verbs": [
+    "create"
+   ]
+  },
+  {
+   "name": "virtualclusterinstances/snapshot",
+   "singularName": "",
+   "namespaced": true,
+   "kind": "VirtualClusterInstanceSnapshot",
+   "verbs": [
+    "get"
+   ]
+  },
+  {
+   "name": "virtualclusterinstances/standalone",
+   "singularName": "",
+   "namespaced": true,
+   "kind": "VirtualClusterStandalone",
+   "verbs": [
+    "create"
+   ]
+  },
+  {
+   "name": "virtualclusterschemas",
+   "singularName": "virtualclusterchema",
+   "namespaced": false,
+   "kind": "VirtualClusterSchema",
+   "verbs": [
+    "create"
+   ]
+  },
+  {
+   "name": "virtualclustertemplates",
+   "singularName": "virtualclustertemplate",
+   "namespaced": false,
+   "kind": "VirtualClusterTemplate",
+   "verbs": [
+    "create",
+    "delete",
+    "deletecollection",
+    "get",
+    "list",
+    "patch",
+    "update",
+    "watch"
+   ]
+  }
+ ]
+}

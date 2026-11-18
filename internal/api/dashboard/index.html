@@ -131,6 +131,7 @@ th .est { color: var(--warning); }
     <div class="card tile"><div class="label">Destinations</div><div class="value" id="t-dest">-</div><div class="sub" id="t-dest-sub">-</div></div>
     <div class="card tile"><div class="label">Ledger</div><div class="value" id="t-ledger">-</div><div class="sub" id="t-ledger-sub">-</div></div>
     <div class="card tile"><div class="label">Usage sources</div><div class="value" id="t-src">-</div><div class="sub" id="t-src-sub">-</div></div>
+    <div class="card tile"><div class="label">Price coverage</div><div class="value" id="t-price">-</div><div class="sub" id="t-price-sub">-</div></div>
   </section>
 
   <section class="grid2">
@@ -241,7 +242,7 @@ function tenantCell(id) {
   const n = names[id];
   return n && n !== id ? esc(n) + '<div class="desc mono" style="margin:0">' + esc(id) + "</div>" : esc(id);
 }
-const STATE_LEVEL = { active: "good", warning: "warning", delinquent: "serious", suspended: "critical" };
+const STATE_LEVEL = { active: "good", warning: "warning", delinquent: "serious", suspended: "critical", paused: "critical" };
 
 // --- tooltip ---
 const tip = $("#tip");
@@ -397,7 +398,19 @@ async function loadUsage() {
   if ($("#tenant").value) p.set("tenant", $("#tenant").value);
   columns($("#hour-chart"), (await json("/api/v1/usage?" + p)).rows);
 }
-const SOURCE_LEVEL = { ok: "good", empty: "warning", diverged: "serious", failing: "critical" };
+const SOURCE_LEVEL = { ok: "good", empty: "warning", diverged: "serious", unpriced: "serious", failing: "critical" };
+async function loadPricing() {
+  const p = await json("/api/v1/pricing").catch(() => null);
+  if (!p || p.mode === "off" || !(p.destinations || []).length) {
+    $("#t-price").textContent = "-";
+    $("#t-price-sub").textContent = p && p.mode === "off" ? "PRICE_CHECK=off" : "no billing platform to check";
+    return;
+  }
+  const gaps = p.unpriced || 0, held = p.held_events || 0;
+  $("#t-price").innerHTML = gaps ? badge("serious", gaps + " unpriced") : badge("good", "All priced");
+  $("#t-price-sub").textContent = held ? fmt(held, 0) + " events held until priced" : "PRICE_CHECK=" + p.mode;
+  $("#t-price").title = gaps ? "See GET /api/v1/pricing and the pricing sources below" : "";
+}
 async function loadSources() {
   const s = await json("/api/v1/sources").catch(() => null);
   if (!s) return;
@@ -420,7 +433,7 @@ async function loadStates() {
 }
 async function refresh() {
   try {
-    await Promise.all([loadStatus(), loadTenants(), loadLedger(), loadStates(), loadSources()]);
+    await Promise.all([loadStatus(), loadTenants(), loadLedger(), loadStates(), loadSources(), loadPricing()]);
     await loadUsage();
     $("#auth").classList.remove("show");
   } catch (e) {

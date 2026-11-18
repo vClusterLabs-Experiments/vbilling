@@ -311,13 +311,43 @@
             </tr>
             <tr>
               <td><code>TENANT_SOURCE</code></td>
-              <td><code>cluster</code>: one customer per tenant cluster. <code>project</code>: one per vCluster Platform project. The <code>vbilling.vcluster.com/tenant</code> label always wins.</td>
+              <td><code>cluster</code>: one customer per tenant cluster. <code>project</code>: one per vCluster Platform project. With both, the <code>vbilling.vcluster.com/tenant</code> label always wins. <code>platform</code>: the vCluster Platform Tenant that owns the cluster's project, else the project, read from the Platform API; labels on clusters and namespaces never choose the customer (see <a href="private-nodes.html#platform">vCluster Platform mode</a>).</td>
               <td class="td-default">cluster</td>
             </tr>
             <tr>
               <td><code>PLATFORM_CLUSTER</code></td>
-              <td>vCluster Platform cluster name of this control plane cluster, so Platform enrichment only applies to local tenant clusters.</td>
+              <td>vCluster Platform cluster name of this control plane cluster, so Platform enrichment only applies to local tenant clusters. Set it with <code>TENANT_SOURCE=platform</code>: instances on other connected clusters then never match.</td>
               <td class="td-default">(none)</td>
+            </tr>
+            <tr>
+              <td><code>PLATFORM_URL</code></td>
+              <td><code>TENANT_SOURCE=platform</code>: vCluster Platform URL, the one <code>vcluster platform login</code> uses.</td>
+              <td class="td-default">(none)</td>
+            </tr>
+            <tr>
+              <td><code>PLATFORM_ACCESS_KEY</code></td>
+              <td>Access key of a Platform user with a global role that reads Projects, Tenants and VirtualClusterInstances and may <code>use</code> instances. From a Secret.</td>
+              <td class="td-default">(none)</td>
+            </tr>
+            <tr>
+              <td><code>PLATFORM_CA_FILE</code> / <code>PLATFORM_INSECURE</code></td>
+              <td>CA that signed the Platform's certificate, or skip verification (test installs with self-signed certificates only).</td>
+              <td class="td-default">(system roots) / false</td>
+            </tr>
+            <tr>
+              <td><code>PLATFORM_REFRESH</code></td>
+              <td>How often the Platform is read. A new cluster triggers an extra read. At least 10s.</td>
+              <td class="td-default">1m</td>
+            </tr>
+            <tr>
+              <td><code>PLATFORM_ORPHAN_GRACE</code></td>
+              <td>A cluster whose instance disappeared while its workload keeps running stays with its last owner this long, then falls back to the label rules. <code>0</code> keeps the last owner.</td>
+              <td class="td-default">0</td>
+            </tr>
+            <tr>
+              <td><code>PLATFORM_PROXY</code></td>
+              <td>Reach clusters with their own nodes through the Platform proxy with the same key. A <code>vbilling-kubeconfig</code> Secret still overrides it per cluster.</td>
+              <td class="td-default">true</td>
             </tr>
             <tr>
               <td><code>WATCH_NAMESPACES</code></td>
@@ -506,6 +536,12 @@
             <tr><td><code>RECORDS_ALLOW_UNKEYED</code></td><td>Derive a request ID from a record's content when the emitter sends none. Identical records then count once.</td><td class="td-default">false</td></tr>
             <tr><td><code>RECORDS_UNKNOWN_TENANTS</code></td><td><code>accept</code>: bill records for a tenant vBilling does not know to that tenant ID, and report it in the response and in source health. <code>reject</code>: refuse them.</td><td class="td-default">accept</td></tr>
             <tr><td><code>RECORDS_ARCHIVE</code></td><td>Also archive raw request records to <code>ARCHIVE_DIR/records</code> before retention deletes them: request-level evidence, at a high volume. Needs <code>ARCHIVE_DIR</code>.</td><td class="td-default">false</td></tr>
+            <tr><td><code>RECORDS_PULL_LITELLM_URL</code></td><td>Base URL of a LiteLLM proxy (v1.103.0 or later, with a database) whose spend logs vBilling reads back as records, to fill what the generic API logger's push lost. Pushed and pulled copies of a request count once. Enables the <code>litellm</code> format. See <a href="usage-sources.html#litellm-pull">Pulling LiteLLM's spend logs</a>.</td><td class="td-default">(none)</td></tr>
+            <tr><td><code>RECORDS_PULL_LITELLM_KEY</code></td><td>A LiteLLM key that can read every team's spend logs: the master key or a proxy admin key. Required with <code>RECORDS_PULL_LITELLM_URL</code>.</td><td class="td-default">(none)</td></tr>
+            <tr><td><code>RECORDS_PULL_LITELLM_CLIENT</code></td><td>The client the pulled records are stored under. It is part of every record ID, so it must equal the push's client: its <code>X-VBilling-Client</code> header, which defaults to the format name.</td><td class="td-default">litellm</td></tr>
+            <tr><td><code>RECORDS_PULL_LITELLM_TENANT</code></td><td>Bill every pulled request to this tenant. Set it to the tenant of the push's token when the push uses a tenant-bound token from <code>INGEST_TOKENS</code>.</td><td class="td-default">(none)</td></tr>
+            <tr><td><code>RECORDS_PULL_LITELLM_INTERVAL</code></td><td>Time between pulls. At least <code>10s</code>.</td><td class="td-default">5m</td></tr>
+            <tr><td><code>RECORDS_PULL_LITELLM_LOOKBACK</code></td><td>Each pull starts this long before the end of the last successful pull, so rows LiteLLM writes late are read, and the first pull after an outage covers the outage. Between <code>1m</code> and <code>RECORDS_RETENTION</code> minus 2h.</td><td class="td-default">1h</td></tr>
             <tr><td><code>CROSS_CHECKS</code></td><td>Compare two sources of the same usage per tenant and hour, <code>primary=secondary[:tolerance%],...</code>, for example <code>inference_output_tokens=vllm_output_tokens:2%</code>. Both metrics must be declared. Divergence above the tolerance shows in source health and <code>/metrics</code>.</td><td class="td-default">(none), tolerance 1%</td></tr>
           </tbody>
         </table>
@@ -513,6 +549,19 @@
       <div class="callout callout-warn">
         <div class="callout-icon">!</div>
         <div><code>RECORDS_SETTLE</code> must be shorter than the window. With <code>billing.collectionInterval</code> of 30s or less, vBilling uses half the window instead of the 30s default.</div>
+      </div>
+      <h3 id="price-check">Price coverage</h3>
+      <p>A billing platform bills usage it has no price for at $0, without an error. vBilling reads (never writes) each billing platform's products, rates, prices and charges, and reports every billable metric and recent series it cannot price in <code>GET /api/v1/pricing</code>, source health and <code>vbilling_unpriced_series</code>. See <a href="troubleshooting.html#unpriced-usage">Unpriced usage</a> and the <a href="metronome.html#price-coverage">Metronome</a>, <a href="stripe.html#price-coverage">Stripe</a> and <a href="lago.html#price-coverage">Lago</a> pages.</p>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead><tr><th>Variable</th><th>Description</th><th>Default</th></tr></thead>
+          <tbody>
+            <tr><td><code>PRICE_CHECK</code></td><td><code>warn</code>: report usage a billing platform has no price for. <code>hold</code>: also keep the events of an unpriced series (metric, SKU, plan) out of that destination. They stay in the ledger and in <code>DATA_DIR/held</code>, and ship in ledger order once the price exists; other series and destinations are not delayed. <code>off</code>: no checks. Switching from <code>hold</code> back to <code>warn</code> or <code>off</code> releases everything held.</td><td class="td-default">warn</td></tr>
+            <tr><td><code>PRICE_CHECK_INTERVAL</code></td><td>How often every billing platform is checked. A series seen for the first time is checked within seconds, and a destination with held events every minute. At least <code>1m</code>.</td><td class="td-default">10m</td></tr>
+            <tr><td><code>PRICE_CHECK_LOOKBACK</code></td><td>Series seen in the ledger this recently are checked; at startup vBilling reads the usage appended in this period. Billable metrics with no usage in it are checked as a whole. At least <code>1h</code>.</td><td class="td-default">24h</td></tr>
+            <tr><td><code>PRICE_CHECK_MAX_HOLD</code></td><td>Hold mode only. Held events whose window started longer ago than this are released without a price (oldest first, with any older held events of their series), so the billing platform still accepts them and can re-rate them once priced; the series' source turns <code>failing</code>. A duration such as <code>672h</code>, or days such as <code>28d</code>. Between <code>1h</code> and <code>32d</code>: Metronome refuses usage older than 34 days.</td><td class="td-default">28d</td></tr>
+          </tbody>
+        </table>
       </div>
       <h3>API and enforcement</h3>
       <div class="config-table-wrap">
@@ -548,13 +597,23 @@
             </tr>
             <tr>
               <td><code>ENFORCEMENT_RULES</code></td>
-              <td>Overrides, <code>event.type=state,...</code> (for example <code>alerts.spend_threshold_reached=suspended</code>).</td>
+              <td>Overrides, <code>event.type=state,...</code> (for example <code>alerts.spend_threshold_reached=suspended</code>, or <code>alerts.low_remaining_contract_credit_balance_reached=paused</code> to pause a tenant whose prepaid balance runs out).</td>
               <td class="td-default">(none)</td>
             </tr>
             <tr>
               <td><code>ENFORCEMENT_IN_CLUSTER</code></td>
               <td>In <code>enforce</code> mode, also install the <code>vbilling-suspended</code> admission policy inside each of a suspended tenant's clusters, through their own API. The only enforcement that reaches clusters with their own nodes. Needs <code>TENANT_API=true</code> and write access to admission policies in each cluster. See <a href="private-nodes.html#enforcement">Billing-state enforcement inside the cluster</a>.</td>
               <td class="td-default">false</td>
+            </tr>
+            <tr>
+              <td><code>PAUSE_KEEP_BILLING</code></td>
+              <td>What keeps billing while a cluster is paused (state <code>paused</code>): any of <code>storage</code>, <code>load_balancers</code>, <code>nodes</code>, <code>control_plane</code>, or <code>none</code>. Workload usage always stops, because the workloads are stopped. Helm: <code>enforcement.pause.keepBilling</code>. See <a href="private-nodes.html#pause">Pausing a tenant</a>.</td>
+              <td class="td-default">storage,load_balancers</td>
+            </tr>
+            <tr>
+              <td><code>PAUSE_DRAIN_TIMEOUT</code></td>
+              <td>How long a pause waits for workloads on a cluster's own nodes to stop before it stops the control plane. Helm: <code>enforcement.pause.drainTimeout</code>.</td>
+              <td class="td-default">2m</td>
             </tr>
           </tbody>
         </table>
@@ -779,6 +838,11 @@
               <td class="td-default">{}</td>
             </tr>
             <tr>
+              <td><code>billing.priceCheck.mode / interval / lookback / maxHold</code></td>
+              <td>PRICE_CHECK / PRICE_CHECK_INTERVAL / PRICE_CHECK_LOOKBACK / PRICE_CHECK_MAX_HOLD</td>
+              <td class="td-default">warn / 10m / 24h / 28d</td>
+            </tr>
+            <tr>
               <td><code>metering.*</code></td>
               <td>CPU_MEMORY_BASIS, METER_*, GPU_RESOURCES, SKU_LABEL, CAPACITY_TYPE_LABEL, UNHEALTHY_NODE_TAINTS, VCLUSTER_NODE_LABEL, REGION_FROM_NODE</td>
               <td class="td-default">see above</td>
@@ -809,6 +873,11 @@
               <td class="td-default">{}</td>
             </tr>
             <tr>
+              <td><code>records.pullLiteLLM.url / key / existingSecret / client / tenant / interval / lookback</code></td>
+              <td>RECORDS_PULL_LITELLM_URL / RECORDS_PULL_LITELLM_KEY (chart Secret, or <code>existingSecret</code> key <code>litellm-key</code>) / RECORDS_PULL_LITELLM_CLIENT / RECORDS_PULL_LITELLM_TENANT / RECORDS_PULL_LITELLM_INTERVAL / RECORDS_PULL_LITELLM_LOOKBACK, set only when <code>url</code> is</td>
+              <td class="td-default">"" / "" / "" / litellm / "" / 5m / 1h</td>
+            </tr>
+            <tr>
               <td><code>crossChecks</code></td>
               <td>CROSS_CHECKS, from a list of <code>{primary, secondary, tolerancePercent}</code> (tolerance default 1)</td>
               <td class="td-default">[]</td>
@@ -827,6 +896,11 @@
               <td><code>platform.cluster</code></td>
               <td>PLATFORM_CLUSTER</td>
               <td class="td-default">(none)</td>
+            </tr>
+            <tr>
+              <td><code>platform.url / accessKey / existingSecret (key access-key) / caSecret (key ca.crt) / insecure / refresh / orphanGrace / proxy</code></td>
+              <td>PLATFORM_URL / PLATFORM_ACCESS_KEY / PLATFORM_CA_FILE (mounted at /etc/vbilling/platform-ca) / PLATFORM_INSECURE / PLATFORM_REFRESH / PLATFORM_ORPHAN_GRACE / PLATFORM_PROXY, set when <code>tenantSource: platform</code></td>
+              <td class="td-default">"" / "" / "" / "" / false / 1m / 0s / true</td>
             </tr>
             <tr>
               <td><code>lago.apiURL / apiKey / existingSecret (key api-key)</code></td>
@@ -877,6 +951,11 @@
               <td><code>enforcement.mode / rules / inCluster</code></td>
               <td>ENFORCEMENT_MODE / ENFORCEMENT_RULES / ENFORCEMENT_IN_CLUSTER</td>
               <td class="td-default">observe / &quot;&quot; / false</td>
+            </tr>
+            <tr>
+              <td><code>enforcement.pause.keepBilling / drainTimeout</code></td>
+              <td>PAUSE_KEEP_BILLING / PAUSE_DRAIN_TIMEOUT</td>
+              <td class="td-default">storage,load_balancers / 2m</td>
             </tr>
             <tr>
               <td><code>enforcement.admissionPolicy.enabled</code></td>

@@ -1,0 +1,169 @@
+{
+  "kind": "VirtualClusterInstanceList",
+  "apiVersion": "management.loft.sh/v1",
+  "metadata": {},
+  "items": [
+    {
+      "kind": "VirtualClusterInstance",
+      "apiVersion": "management.loft.sh/v1",
+      "metadata": {
+        "name": "train-1",
+        "namespace": "p-acme-train",
+        "uid": "uid-vci-train-1",
+        "creationTimestamp": "2026-11-01T09:00:00Z",
+        "labels": {
+          "vbilling.vcluster.com/tenant": "someone-else"
+        }
+      },
+      "spec": {
+        "displayName": "Training 1",
+        "clusterRef": {
+          "cluster": "cp-1",
+          "namespace": "vc-train-1",
+          "virtualCluster": "train-1"
+        }
+      },
+      "status": {
+        "phase": "Ready"
+      }
+    },
+    {
+      "kind": "VirtualClusterInstance",
+      "apiVersion": "management.loft.sh/v1",
+      "metadata": {
+        "name": "infer-1",
+        "namespace": "p-acme-infer",
+        "uid": "uid-vci-infer-1",
+        "creationTimestamp": "2026-11-01T09:00:00Z"
+      },
+      "spec": {
+        "clusterRef": {
+          "cluster": "cp-1",
+          "namespace": "vc-infer-1",
+          "virtualCluster": "infer-1"
+        }
+      },
+      "status": {
+        "phase": "Sleeping"
+      }
+    },
+    {
+      "kind": "VirtualClusterInstance",
+      "apiVersion": "management.loft.sh/v1",
+      "metadata": {
+        "name": "lab",
+        "namespace": "p-research",
+        "uid": "uid-vci-lab",
+        "creationTimestamp": "2026-11-01T09:00:00Z"
+      },
+      "spec": {
+        "clusterRef": {
+          "cluster": "cp-1",
+          "namespace": "vc-lab",
+          "virtualCluster": "lab"
+        }
+      },
+      "status": {
+        "phase": "Ready"
+      }
+    },
+    {
+      "kind": "VirtualClusterInstance",
+      "apiVersion": "management.loft.sh/v1",
+      "metadata": {
+        "name": "mover",
+        "namespace": "p-acme-train",
+        "uid": "uid-vci-mover-old",
+        "creationTimestamp": "2026-11-01T09:00:00Z"
+      },
+      "spec": {
+        "clusterRef": {
+          "cluster": "cp-1",
+          "namespace": "vc-mover",
+          "virtualCluster": "mover"
+        }
+      },
+      "status": {
+        "phase": "Ready",
+        "ignoreReconciliation": true
+      }
+    },
+    {
+      "kind": "VirtualClusterInstance",
+      "apiVersion": "management.loft.sh/v1",
+      "metadata": {
+        "name": "mover",
+        "namespace": "p-research",
+        "uid": "uid-vci-mover-new",
+        "creationTimestamp": "2026-11-03T09:00:00Z"
+      },
+      "spec": {
+        "clusterRef": {
+          "cluster": "cp-1",
+          "namespace": "vc-mover",
+          "virtualCluster": "mover"
+        }
+      },
+      "status": {
+        "phase": "Ready"
+      }
+    },
+    {
+      "kind": "VirtualClusterInstance",
+      "apiVersion": "management.loft.sh/v1",
+      "metadata": {
+        "name": "elsewhere",
+        "namespace": "p-research",
+        "uid": "uid-vci-elsewhere",
+        "creationTimestamp": "2026-11-01T09:00:00Z"
+      },
+      "spec": {
+        "clusterRef": {
+          "cluster": "cp-2",
+          "namespace": "vc-train-1",
+          "virtualCluster": "train-1"
+        }
+      },
+      "status": {
+        "phase": "Ready"
+      }
+    },
+    {
+      "kind": "VirtualClusterInstance",
+      "apiVersion": "management.loft.sh/v1",
+      "metadata": {
+        "name": "standalone-1",
+        "namespace": "p-research",
+        "uid": "uid-vci-standalone",
+        "creationTimestamp": "2026-11-01T09:00:00Z"
+      },
+      "spec": {
+        "clusterRef": {},
+        "standalone": true
+      },
+      "status": {
+        "phase": "Ready"
+      }
+    },
+    {
+      "kind": "VirtualClusterInstance",
+      "apiVersion": "management.loft.sh/v1",
+      "metadata": {
+        "name": "ghost",
+        "namespace": "p-orphanage",
+        "uid": "uid-vci-ghost",
+        "creationTimestamp": "2026-11-01T09:00:00Z"
+      },
+      "spec": {
+        "clusterRef": {
+          "cluster": "cp-1",
+          "namespace": "vc-ghost",
+          "virtualCluster": "ghost"
+        }
+      },
+      "status": {
+        "phase": "Ready"
+      }
+    }
+  ]
+}

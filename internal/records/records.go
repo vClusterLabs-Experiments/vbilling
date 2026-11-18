@@ -26,6 +26,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -80,16 +81,29 @@ type Mapping struct {
 	// Metrics are declared when the format is loaded, unless a metric with
 	// the same code already exists (CUSTOM_METRICS wins).
 	Metrics []usage.CustomMetricSpec `json:"metrics,omitempty"`
+	// RequestID, when set, derives the request ID instead of ID, for
+	// emitters where no single field identifies a request.
+	RequestID func(obj map[string]any) string `json:"-"`
+	// TimePrecision rounds each record's time, to the precision at which an
+	// emitter stores its own copy of the request. A record it pushes and
+	// the same request read back from its store then fall in the same
+	// window, where their IDs deduplicate.
+	TimePrecision time.Duration `json:"-"`
 }
 
 // LiteLLM maps LiteLLM's StandardLoggingPayload, as its generic API logger
 // (callback_type: generic_api) posts it. Records are billed to the team of
 // the virtual key, falling back to its organization and user; failed calls
-// are skipped; the model group becomes the SKU.
+// are skipped; the model group becomes the SKU. The request ID is
+// LiteLLMRequestID, and times are rounded to the millisecond, the precision
+// of LiteLLM's spend logs, so the spend log puller (LiteLLMPuller) produces
+// the same record for the same request.
 var LiteLLM = Mapping{
-	ID:     Path{"id"},
-	Time:   Path{"endTime", "startTime"},
-	Tenant: Path{"metadata.user_api_key_team_id", "metadata.user_api_key_org_id", "metadata.user_api_key_user_id", "end_user"},
+	ID:            Path{"id"},
+	RequestID:     LiteLLMRequestID,
+	Time:          Path{"endTime", "startTime"},
+	TimePrecision: time.Millisecond,
+	Tenant:        Path{"metadata.user_api_key_team_id", "metadata.user_api_key_org_id", "metadata.user_api_key_user_id", "end_user"},
 	Usage: map[string]Path{
 		"inference_input_tokens":  {"prompt_tokens"},
 		"inference_output_tokens": {"completion_tokens"},
@@ -100,6 +114,31 @@ var LiteLLM = Mapping{
 		{Code: "inference_input_tokens", Name: "Inference input tokens", Unit: "tokens", GroupKeys: []string{"sku"}},
 		{Code: "inference_output_tokens", Name: "Inference output tokens", Unit: "tokens", GroupKeys: []string{"sku"}},
 	},
+}
+
+// liteLLMIDSuffix matches what LiteLLM appends to a response ID when it
+// logs a request. Each copy of a request (the logging payload, the spend log
+// row) appends its own cache-hit timestamp, so the suffix is cut.
+var liteLLMIDSuffix = regexp.MustCompile(`(_cache_hit[0-9.]+|_batch_cost|_background_cost)$`)
+
+// LiteLLMRequestID identifies one LiteLLM request, in a logging payload or
+// a spend log row converted to one: LiteLLM's call ID for the request,
+// joined with the response ID. Neither is enough alone. A client can set
+// the call ID (the x-litellm-call-id header), so keying on it alone would
+// let a tenant collapse its requests into one. Response IDs repeat: every
+// cache hit of one entry returns the cached response's ID, and some
+// providers and mocks return the same ID for every call.
+func LiteLLMRequestID(obj map[string]any) string {
+	call, _ := lookupString(obj, Path{"litellm_call_id"})
+	resp, _ := lookupString(obj, Path{"id"})
+	resp = liteLLMIDSuffix.ReplaceAllString(resp, "")
+	switch {
+	case call == "":
+		return resp
+	case resp == "":
+		return call
+	}
+	return call + "/" + resp
 }
 
 // Formats holds the payload formats by name.
@@ -168,8 +207,12 @@ func mustYAML(v any) []byte {
 
 // Record is a parsed request.
 type Record struct {
-	ID            string
-	Tenant        string
+	ID     string
+	Tenant string
+	// TenantKey is the emitter's own tenant value, before tenantMap and
+	// aliases resolve it. Record IDs use it, so a request keeps its ID when
+	// an alias is added, changed or not loaded yet.
+	TenantKey     string
 	Time          time.Time
 	Usage         map[string]float64
 	SKU           string
@@ -228,15 +271,25 @@ func Map(format string, m Mapping, obj map[string]any) (rec Record, skip bool, e
 			return Record{}, true, nil
 		}
 	}
-	rec.ID, _ = lookupString(obj, m.ID)
+	if m.RequestID != nil {
+		rec.ID = m.RequestID(obj)
+	} else {
+		rec.ID, _ = lookupString(obj, m.ID)
+	}
 	rawTenant, _ := lookupString(obj, m.Tenant)
-	rec.Tenant = rawTenant
+	rec.Tenant, rec.TenantKey = rawTenant, rawTenant
 	if t, ok := m.TenantMap[rawTenant]; ok {
 		rec.Tenant = t
 	}
 	if tv, ok := lookup(obj, m.Time); ok {
 		if rec.Time, err = parseTime(tv); err != nil {
 			return Record{}, false, err
+		}
+		if m.TimePrecision > 0 {
+			// Undo float error first (Unix seconds as a float carry a few
+			// hundred nanoseconds of it), then round half up like a database
+			// storing the time at that precision.
+			rec.Time = rec.Time.Round(time.Microsecond).Round(m.TimePrecision)
 		}
 	}
 	rec.Usage = map[string]float64{}
@@ -270,6 +323,7 @@ func mapNative(obj map[string]any) (Record, bool, error) {
 	var rec Record
 	rec.ID, _ = lookupString(obj, Path{"id"})
 	rec.Tenant, _ = lookupString(obj, Path{"tenant"})
+	rec.TenantKey = rec.Tenant
 	if tv, ok := lookup(obj, Path{"time", "timestamp"}); ok {
 		t, err := parseTime(tv)
 		if err != nil {
@@ -418,7 +472,11 @@ func parseTime(v any) (time.Time, error) {
 
 // RecordID derives the ledger ID of one metric of one request. The client
 // is part of it so two emitters with overlapping request ID schemes never
-// deduplicate each other's records.
+// deduplicate each other's records. tenant is the token's bound tenant, or
+// else the emitter's tenant value before aliases resolve it (TenantKey):
+// the same request then gets the same ID however and whenever it arrives,
+// pushed by a gateway or pulled from its logs, before or after an alias
+// changes.
 func RecordID(client, tenant, requestID, metric string) string {
 	sum := sha256.Sum256([]byte(client + "\x00" + tenant + "\x00" + requestID + "\x00" + metric))
 	return "rq1_" + hex.EncodeToString(sum[:16])

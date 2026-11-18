@@ -640,6 +640,41 @@ skuLabel: model_name</code></div>
       </div>
 
       <!-- Issue 6: Events Sent But $0 -->
+      <h2 id="unpriced-usage">Unpriced Usage</h2>
+      <div class="issue">
+        <div class="issue-header">
+          <h3>"[pricing] &lt;destination&gt;: &lt;metric&gt; sku=&lt;sku&gt; (plan &lt;plan&gt;) is unpriced"</h3>
+        </div>
+        <div class="issue-body">
+          <h4>Symptoms</h4>
+          <p>The status API warns about <code>pricing/&lt;destination&gt;/...: unpriced</code> sources, the dashboard's Price coverage tile shows unpriced series, or <code>vbilling_unpriced_series</code> is above 0.</p>
+
+          <h4>Cause</h4>
+          <p>A billing platform has no price for usage vBilling sends it: a new SKU, region, metric or plan reached vBilling before Finance priced it. Billing platforms bill such usage at $0 without an error, so invoices, prepaid balances and spend alerts undercount. vBilling reads each platform's pricing (Metronome rate cards, Stripe prices, Lago charges) at startup, every <code>PRICE_CHECK_INTERVAL</code>, and within seconds of a new series. It never writes a price.</p>
+
+          <h4><span class="fix-label">Fix</span> Add the missing price</h4>
+          <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-s</span> <span class="string">'localhost:8080/api/v1/pricing?status=unpriced'</span> | jq <span class="string">'.destinations[] | {destination, series: [.series[] | {plan, metric, sku, hint, held_events}]}'</span></code></div>
+          <p>Each row's hint names what to create: a rate for a product on a Metronome rate card, a metered price on a Stripe meter, or a price for a SKU in a Lago charge. Once it exists, run <code>curl -s -X POST localhost:8080/api/v1/pricing/check</code> or wait for the next check; the log says <code>is priced now</code> and the source recovers. A billable metric with no usage yet shows with <code>"no_usage_yet": true</code>: price it before its first event, or price it at 0 if it is free. Statuses: <code>priced</code>, <code>unpriced</code>, <code>zero</code> (a price of 0, which can be intentional, so it is not a gap) and <code>unknown</code> (the check cannot tell, for example Metronome without <code>METRONOME_RATE_CARD</code>).</p>
+
+          <h4>Holding unpriced usage (<code>PRICE_CHECK=hold</code>)</h4>
+          <p>In hold mode, the events of an unpriced series (metric, SKU, plan, and any other dimension the platform prices on) are not sent to that destination:</p>
+          <ul>
+            <li>They stay in the ledger, and are also written to <code>DATA_DIR/held</code> (fsynced) before the destination's cursor moves past them, so a restart loses nothing.</li>
+            <li>Other series, and other destinations, keep flowing. Later events of a held series are held behind the earlier ones.</li>
+            <li>A series is held until a check finds its price. A new series is checked before its first delivery (up to 20 seconds), so a series that is priced already never waits. While a destination has held events it is checked every minute, and once the price exists the held events ship in ledger order, before newer usage of the series. The log says <code>released N held event(s)</code>.</li>
+            <li>Events ship once: destinations deduplicate on event IDs, and vBilling does not resend events a release delivered. Rejections during a release are dead-lettered like any other.</li>
+            <li>The tenant is created in the billing platform when its usage is held, so its subscription or contract period covers the usage.</li>
+            <li>If a check fails, series confirmed as priced keep flowing, and series never confirmed stay held (<code>price not confirmed yet: last check failed</code>). Series the check cannot decide (<code>unknown</code>) are not held, because nothing could release them.</li>
+            <li>Setting <code>PRICE_CHECK</code> back to <code>warn</code> or <code>off</code> releases everything held at the next start.</li>
+          </ul>
+          <p>Held counts: <code>held_events</code> in <code>GET /api/v1/pricing</code> (per series, with <code>held_since</code>), in <code>GET /api/v1/destinations</code>, in the dashboard, and <code>vbilling_held_events{destination}</code>. The source warns once the oldest held usage is a week old.</p>
+          <p>Metronome accepts usage up to 34 days old and Stripe up to 35 days. So that held usage is never lost, events whose window started more than <code>PRICE_CHECK_MAX_HOLD</code> (default 28 days, at most 32) ago are released <strong>without a price</strong>, oldest first, together with any older held events of their series; younger usage stays held. The log says <code>WARNING: ... released N held event(s) of ... WITHOUT A PRICE</code>, the series' source turns <code>failing</code> with <code>Finance must add the price ... so it re-rates the released usage</code>, its row in <code>GET /api/v1/pricing</code> shows <code>released_unpriced_events</code>, and <code>vbilling_events_released_unpriced_total{destination}</code> counts them. Add the price so the billing platform can re-rate the released usage (Lago applies a new price to the usage of the open billing period when it computes it; with Metronome and Stripe, check that the period's draft invoice picks it up), and the source recovers. Alert on:</p>
+          <div class="code-block"><code>vbilling_unpriced_series &gt; 0
+vbilling_held_events &gt; 0
+increase(vbilling_events_released_unpriced_total[1h]) &gt; 0</code></div>
+        </div>
+      </div>
+
       <h2 id="zero-dollar-invoices">Events Sent But $0.00 in Lago</h2>
       <div class="issue">
         <div class="issue-header">
@@ -660,7 +695,7 @@ skuLabel: model_name</code></div>
             <li>For each charge, click the edit icon and set a non-zero price per unit</li>
             <li>Save the plan</li>
           </ol>
-          <p>See <a href="configuration.html#lago-pricing">Configuration: Lago Pricing</a> for recommended pricing for each metric.</p>
+          <p>See <a href="configuration.html#lago-pricing">Configuration: Lago Pricing</a> for recommended pricing for each metric. <code>GET /api/v1/pricing?destination=lago</code> lists every SKU and metric Lago bills at 0 (see <a href="#unpriced-usage">Unpriced usage</a>).</p>
 
           <div class="callout callout-info">
             <div class="callout-icon">i</div>

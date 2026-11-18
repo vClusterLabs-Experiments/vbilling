@@ -33,6 +33,12 @@ const (
 	Failing Status = "failing"
 	// Diverged is used by cross-checks whose sources disagree.
 	Diverged Status = "diverged"
+	// Paused is a source that is stopped on purpose (a paused cluster). It
+	// is not a problem.
+	Paused Status = "paused"
+	// Unpriced is used by price coverage checks: a billing platform has no
+	// price for usage vBilling sends it, so it would bill that usage at $0.
+	Unpriced Status = "unpriced"
 )
 
 // Source is the health of one usage source.
@@ -141,7 +147,7 @@ func (r *Registry) report(name, kind, subject string, status Status, message, hi
 		r.logf("[health] %s failing (%d in a row): %s%s", name, failures, message, hintSuffix(hint))
 	case status == Empty && (changed || isPow10(empties)):
 		r.logf("[health] %s returned no data (%d in a row): %s%s", name, empties, message, hintSuffix(hint))
-	case status == Diverged && changed:
+	case (status == Diverged || status == Unpriced) && changed:
 		r.logf("[health] %s: %s%s", name, message, hintSuffix(hint))
 	}
 	r.export()
@@ -173,7 +179,7 @@ func (r *Registry) export() {
 	}
 	r.mu.Unlock()
 	for k := range kinds {
-		for _, st := range []Status{OK, Empty, Failing, Diverged} {
+		for _, st := range []Status{OK, Empty, Failing, Diverged, Unpriced} {
 			r.tel.Set("vbilling_sources", "Usage sources by kind and status (see GET /api/v1/sources).",
 				map[string]string{"kind": k, "status": string(st)}, float64(counts[[2]string{k, string(st)}]))
 		}
@@ -188,7 +194,7 @@ func (r *Registry) List() []Source {
 		out = append(out, *s)
 	}
 	r.mu.Unlock()
-	rank := map[Status]int{Failing: 0, Diverged: 1, Empty: 2, OK: 3}
+	rank := map[Status]int{Failing: 0, Diverged: 1, Unpriced: 1, Empty: 2, OK: 3}
 	sort.Slice(out, func(i, j int) bool {
 		if rank[out[i].Status] != rank[out[j].Status] {
 			return rank[out[i].Status] < rank[out[j].Status]
@@ -202,7 +208,7 @@ func (r *Registry) List() []Source {
 func (r *Registry) Problems() []Source {
 	var out []Source
 	for _, s := range r.List() {
-		if s.Status != OK {
+		if s.Status != OK && s.Status != Paused {
 			out = append(out, s)
 		}
 	}

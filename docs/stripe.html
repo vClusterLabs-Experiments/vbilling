@@ -422,7 +422,7 @@
         <li>A plan's prices are the active metered prices on vBilling's meters tagged <code>metadata[vbilling_plan]=&lt;plan&gt;</code>, in the tenant's currency (<code>vbilling.vcluster.com/currency</code>, or <code>billing.currency</code>).</li>
         <li>A plan holds up to 20 prices, Stripe's limit per subscription. A tenant on a larger plan is logged as rejected and not subscribed, and its usage keeps reaching its meters.</li>
         <li>An existing vBilling subscription gets missing prices added. Prices are never removed from it.</li>
-        <li>New prices reach new tenants within five minutes, and existing tenants when vBilling restarts or their labels and annotations change.</li>
+        <li>New prices reach new tenants within five minutes. Existing tenants get a new price with their next usage once the price check (below) finds it, and otherwise when vBilling restarts or their labels and annotations change.</li>
       </ul>
       <p>Plans let each tenant pay for what it buys. A tenant that rents whole GPU machines (<a href="private-nodes.html">dedicated or private nodes</a>) can be on a plan with node-hour prices only, and a tenant that pays per GPU-hour on a plan with GPU-hour prices. Stripe only invoices a customer for the meters its subscription has prices on.</p>
 
@@ -431,6 +431,16 @@
       <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-s</span> https://api.stripe.com/v1/invoices/create_preview <span class="flag">-u</span> <span class="string">"$STRIPE_KEY:"</span> <span class="flag">-d</span> customer=cus_... \
   | jq <span class="string">'.lines.data[] | {description, amount}'</span></code></div>
       <p>Stripe processes meter events asynchronously, so new usage can take a few minutes to show up.</p>
+
+      <h2 id="price-coverage">Price coverage</h2>
+      <p>Stripe bills nothing for a meter without a price, and accepts its events without an error. vBilling checks, read-only, that every billable metric and every series seen in the ledger within <code>PRICE_CHECK_LOOKBACK</code> has a price. It never creates or changes a price. A series is one meter: with the default <code>STRIPE_SPLIT_METERS_BY=sku</code>, a metric and SKU, and with more split keys, each combination of their values.</p>
+      <ul>
+        <li><strong>priced:</strong> the series' meter exists, is active, and has an active, recurring, metered price that is not 0. With <code>autoSubscribe</code>, the price must also carry <code>metadata[vbilling_plan]</code> of the tenant's plan, or subscriptions on that plan do not include it.</li>
+        <li><strong>unpriced:</strong> no meter yet, a deactivated meter, no active metered price, or (with <code>autoSubscribe</code>) no price tagged with the plan. The hint names the meter, for example <code>create a metered price on meter "vcluster_gpu_hours__nvidia_b200" (mtr_...)</code>.</li>
+        <li><strong>zero:</strong> every price on the meter is 0 (<code>unit_amount_decimal</code> 0, or tiers whose unit and flat amounts are all 0). Information, not a gap.</li>
+      </ul>
+      <p>Without <code>autoSubscribe</code>, a priced series still needs its customers subscribed to the price: vBilling cannot see that, and the detail says so. When a series appears, vBilling creates its meter right away (never a price), so Finance can price it before its first event is delivered. With <code>autoSubscribe</code>, a series that becomes priced makes vBilling add the new price to existing subscriptions with each tenant's next usage.</p>
+      <p>Checks run at startup, every <code>PRICE_CHECK_INTERVAL</code>, within seconds of a new SKU and on <code>POST /api/v1/pricing/check</code>. Read gaps from <code>GET /api/v1/pricing?destination=stripe&amp;status=unpriced</code>, <code>GET /api/v1/sources?kind=pricing</code> or <code>vbilling_unpriced_series{destination="stripe"}</code>. With <code>PRICE_CHECK=hold</code>, events of an unpriced meter wait in vBilling until the price exists. Stripe accepts usage up to 35 days old, so usage held longer than <code>PRICE_CHECK_MAX_HOLD</code> (28 days) is released without a price and its source turns <code>failing</code>. The check reads <code>GET /v1/billing/meters</code> and <code>GET /v1/prices?active=true&amp;type=recurring&amp;expand[]=data.tiers</code>; the adapter's tests run both, and the meter creation, against stripe-mock.</p>
 
       <h2 id="delivery">Delivery and idempotency</h2>
       <p>Every closed window is committed to the ledger first. The Stripe destination sends it from its own cursor, so a Stripe outage never loses usage and never holds up other destinations.</p>
@@ -554,6 +564,7 @@ spec:
         <li>The price is on a meter that receives nothing, usually the base meter instead of the SKU meter. List the meters and compare with the event names in the log.</li>
         <li>The tenant is not subscribed. With <code>autoSubscribe</code>, the log says <code>[stripe] no active metered prices tagged vbilling_plan=&lt;plan&gt; in &lt;currency&gt;; tenant &lt;id&gt; not subscribed</code>: check that the price is active and metered, carries the plan in its metadata, and is in the tenant's currency.</li>
         <li>The usage is still being processed: Stripe aggregates meter events asynchronously.</li>
+        <li>The meter has no price: <code>GET /api/v1/pricing?destination=stripe&amp;status=unpriced</code> lists every meter vBilling sends usage to without one, with the price to create.</li>
       </ul>
       <h3>Deliveries stop with 401 or 403</h3>
       <p>The key is wrong or revoked, or a restricted key lacks a permission. Nothing is lost: events wait in the ledger and are retried. Fix the Secret and restart vBilling; <code>/api/v1/status</code> shows each destination's failures and its oldest pending event.</p>

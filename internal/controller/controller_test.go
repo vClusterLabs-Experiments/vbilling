@@ -12,6 +12,7 @@ import (
 	"github.com/vclusterlabs-experiments/vbilling/internal/destinations"
 	"github.com/vclusterlabs-experiments/vbilling/internal/discovery"
 	"github.com/vclusterlabs-experiments/vbilling/internal/metrics"
+	"github.com/vclusterlabs-experiments/vbilling/internal/pause"
 	"github.com/vclusterlabs-experiments/vbilling/internal/pipeline"
 	"github.com/vclusterlabs-experiments/vbilling/internal/spool"
 	"github.com/vclusterlabs-experiments/vbilling/internal/usage"
@@ -365,5 +366,53 @@ func TestOffboardingIsFinalPerDestination(t *testing.T) {
 	}
 	if _, ok := h.reg.Get("vcluster-team-a-train"); ok {
 		t.Fatal("tenant still registered after offboarding")
+	}
+}
+
+func TestPausesSeenInDiscoveryReachMetering(t *testing.T) {
+	h := newHarness(t)
+	spans := pause.Memory()
+	h.c.UsePauses(spans)
+	ctx := context.Background()
+	paused := cluster("vc-a", "a", map[string]string{
+		discovery.AnnotationPausedBy: "vbilling",
+		discovery.AnnotationPausedAt: t0.Add(-90 * time.Second).Format(time.RFC3339Nano),
+	})
+	paused.Paused = true
+	external := cluster("vc-b", "b", nil)
+	external.Paused = true // vcluster pause by an operator: no vBilling annotations
+	h.disc.clusters = []discovery.TenantCluster{paused, external}
+	h.c.Reconcile(ctx)
+
+	a, b := paused.ExternalID(), external.ExternalID()
+	if sp, open := spans.Current(a); !open || !sp.From.Equal(t0.Add(-90*time.Second)) || sp.By != "vbilling" {
+		t.Fatalf("vBilling pause span = %+v %t, want it from its paused-at annotation", sp, open)
+	}
+	if sp, open := spans.Current(b); !open || !sp.From.Equal(t0) || sp.By != "external" {
+		t.Fatalf("external pause span = %+v %t, want it from when it was seen", sp, open)
+	}
+	h.now = t0.Add(time.Minute)
+	h.c.CollectDue(ctx)
+	for _, tg := range h.coll.targets {
+		if len(tg.Paused) != 1 {
+			t.Fatalf("target %s carries %d pause spans", tg.Cluster.ExternalID(), len(tg.Paused))
+		}
+	}
+
+	// Resumed outside vBilling: the span ends when discovery sees it.
+	h.now = t0.Add(5 * time.Minute)
+	external.Paused = false
+	h.disc.clusters = []discovery.TenantCluster{paused, external}
+	h.c.Reconcile(ctx)
+	got := spans.Spans(b)
+	if len(got) != 1 || !got[0].To.Equal(h.now) {
+		t.Fatalf("external spans after resume = %+v", got)
+	}
+	// vBilling's own pause and resume are reflected at once.
+	h.c.SetPaused(a, false)
+	for _, cl := range h.c.Clusters() {
+		if cl.ExternalID() == a && cl.Paused {
+			t.Fatal("SetPaused did not update the cluster")
+		}
 	}
 }

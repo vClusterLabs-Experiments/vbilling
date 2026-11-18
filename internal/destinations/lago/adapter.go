@@ -114,13 +114,45 @@ func (a *Adapter) EnsureTenant(ctx context.Context, t usage.Tenant) error {
 		plan = a.cfg.DefaultPlanCode
 	}
 	sub := Subscription{ExternalCustomerID: t.ID, PlanCode: plan, ExternalID: subID}
+	usageStart, _ := destinations.UsageStart(ctx)
+	if at := subscriptionStart(t.CreatedAt, usageStart, a.now()); !at.IsZero() {
+		sub.SubscriptionAt = at.UTC().Format(time.RFC3339)
+	}
 	if _, err := a.client.CreateSubscription(ctx, sub); err != nil {
 		// Returned, not swallowed: without a subscription Lago drops the
 		// tenant's events, so EnsureTenant must be retried.
 		return fmt.Errorf("create subscription %s on plan %s: %w", subID, plan, err)
 	}
-	log.Printf("[lago] subscribed tenant %s to plan %s", t.ID, plan)
+	if sub.SubscriptionAt != "" {
+		log.Printf("[lago] subscribed tenant %s to plan %s from %s", t.ID, plan, sub.SubscriptionAt)
+	} else {
+		log.Printf("[lago] subscribed tenant %s to plan %s", t.ID, plan)
+	}
 	return nil
+}
+
+// subscriptionStart is when a new subscription starts. Lago counts usage from
+// a subscription's start, and a subscription created when the first usage is
+// delivered starts after that usage's window: the first window would never
+// be billed. So it starts at the earliest of the usage being delivered and
+// the tenant's creation, both in the past. The creation time alone never
+// moves the start to an earlier UTC day than today: Lago v1.17 then skips the
+// in-advance invoice it issues when a subscription starts today, and bills
+// an arrears base fee from the earlier date, with no usage to show for it.
+// Usage from earlier days (backfill, held usage) does move it: that usage
+// must count.
+func subscriptionStart(created, usageStart, now time.Time) time.Time {
+	var start time.Time
+	if !created.IsZero() && created.Before(now) {
+		start = created
+		if today := now.UTC().Truncate(24 * time.Hour); start.Before(today) {
+			start = today
+		}
+	}
+	if !usageStart.IsZero() && usageStart.Before(now) && (start.IsZero() || usageStart.Before(start)) {
+		start = usageStart
+	}
+	return start
 }
 
 // RemoveTenant terminates the subscription, which makes Lago issue the final

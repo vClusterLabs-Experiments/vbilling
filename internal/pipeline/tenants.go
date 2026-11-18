@@ -69,6 +69,14 @@ func (r *TenantRegistry) NeedsEnsure(dest string, t usage.Tenant) bool {
 	return r.ensured[dest][t.ID] != fingerprint(t)
 }
 
+// Reensure makes every tenant be ensured in dest again before its next
+// event reaches dest, e.g. so a new price joins existing subscriptions.
+func (r *TenantRegistry) Reensure(dest string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.ensured, dest)
+}
+
 func (r *TenantRegistry) MarkEnsured(dest string, t usage.Tenant) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

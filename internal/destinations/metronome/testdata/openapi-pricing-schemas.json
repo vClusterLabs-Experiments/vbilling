@@ -1,0 +1,1041 @@
+{
+ "get_rates": {
+  "method": "POST",
+  "path": "/v1/contract-pricing/rate-cards/getRates",
+  "query": {
+   "limit": {
+    "maximum": 100,
+    "minimum": 1,
+    "type": "integer"
+   },
+   "next_page": {
+    "type": "string"
+   }
+  },
+  "request": {
+   "properties": {
+    "at": {
+     "format": "date-time",
+     "type": "string"
+    },
+    "rate_card_id": {
+     "format": "uuid",
+     "type": "string"
+    },
+    "selectors": {
+     "items": {
+      "properties": {
+       "billing_frequency": {
+        "enum": [
+         "MONTHLY",
+         "Monthly",
+         "monthly",
+         "QUARTERLY",
+         "Quarterly",
+         "quarterly",
+         "SEMI_ANNUAL",
+         "semi_annual",
+         "ANNUAL",
+         "Annual",
+         "annual",
+         "WEEKLY",
+         "Weekly",
+         "weekly"
+        ],
+        "type": "string"
+       },
+       "partial_pricing_group_values": {
+        "additionalProperties": {
+         "type": "string"
+        },
+        "type": "object"
+       },
+       "pricing_group_values": {
+        "additionalProperties": {
+         "type": "string"
+        },
+        "type": "object"
+       },
+       "product_id": {
+        "format": "uuid",
+        "type": "string"
+       },
+       "product_tags": {
+        "items": {
+         "type": "string"
+        },
+        "type": "array"
+       }
+      },
+      "type": "object"
+     },
+     "type": "array"
+    }
+   },
+   "required": [
+    "rate_card_id",
+    "at"
+   ],
+   "type": "object"
+  },
+  "response": {
+   "properties": {
+    "data": {
+     "items": {
+      "properties": {
+       "billing_frequency": {
+        "enum": [
+         "MONTHLY",
+         "QUARTERLY",
+         "SEMI_ANNUAL",
+         "ANNUAL",
+         "WEEKLY"
+        ],
+        "type": "string"
+       },
+       "commit_rate": {
+        "properties": {
+         "minimum_config": {
+          "properties": {
+           "minimum": {
+            "type": "number"
+           }
+          },
+          "required": [
+           "minimum"
+          ],
+          "type": "object"
+         },
+         "price": {
+          "type": "number"
+         },
+         "rate_type": {
+          "enum": [
+           "FLAT",
+           "flat",
+           "PERCENTAGE",
+           "percentage",
+           "SUBSCRIPTION",
+           "subscription",
+           "TIERED",
+           "tiered",
+           "TIERED_PERCENTAGE",
+           "tiered_percentage",
+           "CUSTOM",
+           "custom"
+          ],
+          "type": "string"
+         },
+         "tiers": {
+          "items": {
+           "properties": {
+            "price": {
+             "type": "number"
+            },
+            "size": {
+             "type": "number"
+            }
+           },
+           "required": [
+            "price"
+           ],
+           "type": "object"
+          },
+          "type": "array"
+         }
+        },
+        "required": [
+         "rate_type"
+        ],
+        "type": "object"
+       },
+       "ending_before": {
+        "format": "date-time",
+        "type": "string"
+       },
+       "entitled": {
+        "type": "boolean"
+       },
+       "pricing_group_values": {
+        "additionalProperties": {
+         "type": "string"
+        },
+        "type": "object"
+       },
+       "product_custom_fields": {
+        "additionalProperties": {
+         "type": "string"
+        },
+        "type": "object"
+       },
+       "product_id": {
+        "format": "uuid",
+        "type": "string"
+       },
+       "product_name": {
+        "type": "string"
+       },
+       "product_tags": {
+        "items": {
+         "type": "string"
+        },
+        "type": "array"
+       },
+       "rate": {
+        "properties": {
+         "credit_type": {
+          "properties": {
+           "id": {
+            "format": "uuid",
+            "type": "string"
+           },
+           "name": {
+            "type": "string"
+           }
+          },
+          "required": [
+           "name",
+           "id"
+          ],
+          "type": "object"
+         },
+         "custom_rate": {
+          "additionalProperties": true,
+          "type": "object"
+         },
+         "is_prorated": {
+          "type": "boolean"
+         },
+         "minimum_config": {
+          "properties": {
+           "minimum": {
+            "type": "number"
+           }
+          },
+          "required": [
+           "minimum"
+          ],
+          "type": "object"
+         },
+         "price": {
+          "type": "number"
+         },
+         "pricing_group_values": {
+          "additionalProperties": {
+           "type": "string"
+          },
+          "type": "object"
+         },
+         "quantity": {
+          "type": "number"
+         },
+         "rate_type": {
+          "enum": [
+           "FLAT",
+           "flat",
+           "PERCENTAGE",
+           "percentage",
+           "SUBSCRIPTION",
+           "subscription",
+           "CUSTOM",
+           "custom",
+           "TIERED",
+           "tiered",
+           "TIERED_PERCENTAGE",
+           "tiered_percentage"
+          ],
+          "type": "string"
+         },
+         "tiers": {
+          "items": {
+           "properties": {
+            "price": {
+             "type": "number"
+            },
+            "size": {
+             "type": "number"
+            }
+           },
+           "required": [
+            "price"
+           ],
+           "type": "object"
+          },
+          "type": "array"
+         }
+        },
+        "required": [
+         "rate_type"
+        ],
+        "type": "object"
+       },
+       "starting_at": {
+        "format": "date-time",
+        "type": "string"
+       }
+      },
+      "required": [
+       "product_id",
+       "product_name",
+       "product_tags",
+       "product_custom_fields",
+       "starting_at",
+       "entitled",
+       "rate"
+      ],
+      "type": "object"
+     },
+     "type": "array"
+    },
+    "next_page": {
+     "nullable": true,
+     "type": "string"
+    }
+   },
+   "required": [
+    "data"
+   ],
+   "type": "object"
+  }
+ },
+ "list_billable_metrics": {
+  "method": "GET",
+  "path": "/v1/billable-metrics",
+  "query": {
+   "include_archived": {
+    "type": "boolean"
+   },
+   "limit": {
+    "maximum": 100,
+    "minimum": 1,
+    "type": "integer"
+   },
+   "next_page": {
+    "type": "string"
+   }
+  },
+  "response": {
+   "properties": {
+    "data": {
+     "items": {
+      "properties": {
+       "aggregation_key": {
+        "type": "string"
+       },
+       "aggregation_type": {
+        "enum": [
+         "count",
+         "Count",
+         "COUNT",
+         "latest",
+         "Latest",
+         "LATEST",
+         "max",
+         "Max",
+         "MAX",
+         "sum",
+         "Sum",
+         "SUM",
+         "unique",
+         "Unique",
+         "UNIQUE"
+        ],
+        "type": "string"
+       },
+       "archived_at": {
+        "format": "date-time",
+        "type": "string"
+       },
+       "custom_fields": {
+        "additionalProperties": {
+         "type": "string"
+        },
+        "type": "object"
+       },
+       "event_type_filter": {
+        "properties": {
+         "in_values": {
+          "items": {
+           "type": "string"
+          },
+          "type": "array"
+         },
+         "not_in_values": {
+          "items": {
+           "type": "string"
+          },
+          "type": "array"
+         }
+        },
+        "type": "object"
+       },
+       "group_keys": {
+        "items": {
+         "items": {
+          "type": "string"
+         },
+         "type": "array"
+        },
+        "type": "array"
+       },
+       "id": {
+        "format": "uuid",
+        "type": "string"
+       },
+       "name": {
+        "type": "string"
+       },
+       "property_filters": {
+        "items": {
+         "properties": {
+          "exists": {
+           "type": "boolean"
+          },
+          "in_values": {
+           "items": {
+            "type": "string"
+           },
+           "type": "array"
+          },
+          "name": {
+           "type": "string"
+          },
+          "not_in_values": {
+           "items": {
+            "type": "string"
+           },
+           "type": "array"
+          }
+         },
+         "required": [
+          "name"
+         ],
+         "type": "object"
+        },
+        "type": "array"
+       },
+       "sql": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "id",
+       "name"
+      ],
+      "type": "object"
+     },
+     "type": "array"
+    },
+    "next_page": {
+     "nullable": true,
+     "type": "string"
+    }
+   },
+   "required": [
+    "data",
+    "next_page"
+   ],
+   "type": "object"
+  }
+ },
+ "list_products": {
+  "method": "POST",
+  "path": "/v1/contract-pricing/products/list",
+  "query": {
+   "limit": {
+    "maximum": 100,
+    "minimum": 1,
+    "type": "integer"
+   },
+   "next_page": {
+    "type": "string"
+   }
+  },
+  "request": {
+   "properties": {
+    "archive_filter": {
+     "enum": [
+      "ARCHIVED",
+      "NOT_ARCHIVED",
+      "ALL"
+     ],
+     "type": "string"
+    }
+   },
+   "type": "object"
+  },
+  "response": {
+   "properties": {
+    "data": {
+     "items": {
+      "properties": {
+       "archived_at": {
+        "format": "date-time",
+        "nullable": true,
+        "type": "string"
+       },
+       "current": {
+        "properties": {
+         "billable_metric_id": {
+          "type": "string"
+         },
+         "composite_product_ids": {
+          "items": {
+           "format": "uuid",
+           "type": "string"
+          },
+          "type": "array"
+         },
+         "composite_scope": {
+          "enum": [
+           "CUSTOMER",
+           "CONTRACT"
+          ],
+          "type": "string"
+         },
+         "composite_tags": {
+          "items": {
+           "type": "string"
+          },
+          "type": "array"
+         },
+         "created_at": {
+          "format": "date-time",
+          "type": "string"
+         },
+         "created_by": {
+          "type": "string"
+         },
+         "exclude_free_usage": {
+          "type": "boolean"
+         },
+         "include_composite_spend": {
+          "type": "boolean"
+         },
+         "is_refundable": {
+          "type": "boolean"
+         },
+         "name": {
+          "type": "string"
+         },
+         "netsuite_internal_item_id": {
+          "type": "string"
+         },
+         "netsuite_overage_item_id": {
+          "type": "string"
+         },
+         "presentation_group_key": {
+          "items": {
+           "type": "string"
+          },
+          "type": "array"
+         },
+         "pricing_group_key": {
+          "items": {
+           "type": "string"
+          },
+          "type": "array"
+         },
+         "quantity_conversion": {
+          "nullable": true,
+          "properties": {
+           "conversion_factor": {
+            "type": "number"
+           },
+           "name": {
+            "type": "string"
+           },
+           "operation": {
+            "enum": [
+             "multiply",
+             "divide",
+             "MULTIPLY",
+             "DIVIDE"
+            ],
+            "type": "string"
+           }
+          },
+          "required": [
+           "conversion_factor",
+           "operation"
+          ],
+          "type": "object"
+         },
+         "quantity_rounding": {
+          "nullable": true,
+          "properties": {
+           "decimal_places": {
+            "minimum": 0,
+            "type": "number"
+           },
+           "rounding_method": {
+            "enum": [
+             "round_up",
+             "round_down",
+             "round_half_up",
+             "ROUND_UP",
+             "ROUND_DOWN",
+             "ROUND_HALF_UP"
+            ],
+            "type": "string"
+           }
+          },
+          "required": [
+           "rounding_method",
+           "decimal_places"
+          ],
+          "type": "object"
+         },
+         "starting_at": {
+          "format": "date-time",
+          "type": "string"
+         },
+         "tags": {
+          "items": {
+           "type": "string"
+          },
+          "type": "array"
+         }
+        },
+        "required": [
+         "name",
+         "created_at",
+         "created_by"
+        ],
+        "type": "object"
+       },
+       "custom_fields": {
+        "additionalProperties": {
+         "type": "string"
+        },
+        "type": "object"
+       },
+       "id": {
+        "format": "uuid",
+        "type": "string"
+       },
+       "initial": {
+        "properties": {
+         "billable_metric_id": {
+          "type": "string"
+         },
+         "composite_product_ids": {
+          "items": {
+           "format": "uuid",
+           "type": "string"
+          },
+          "type": "array"
+         },
+         "composite_scope": {
+          "enum": [
+           "CUSTOMER",
+           "CONTRACT"
+          ],
+          "type": "string"
+         },
+         "composite_tags": {
+          "items": {
+           "type": "string"
+          },
+          "type": "array"
+         },
+         "created_at": {
+          "format": "date-time",
+          "type": "string"
+         },
+         "created_by": {
+          "type": "string"
+         },
+         "exclude_free_usage": {
+          "type": "boolean"
+         },
+         "include_composite_spend": {
+          "type": "boolean"
+         },
+         "is_refundable": {
+          "type": "boolean"
+         },
+         "name": {
+          "type": "string"
+         },
+         "netsuite_internal_item_id": {
+          "type": "string"
+         },
+         "netsuite_overage_item_id": {
+          "type": "string"
+         },
+         "presentation_group_key": {
+          "items": {
+           "type": "string"
+          },
+          "type": "array"
+         },
+         "pricing_group_key": {
+          "items": {
+           "type": "string"
+          },
+          "type": "array"
+         },
+         "quantity_conversion": {
+          "nullable": true,
+          "properties": {
+           "conversion_factor": {
+            "type": "number"
+           },
+           "name": {
+            "type": "string"
+           },
+           "operation": {
+            "enum": [
+             "multiply",
+             "divide",
+             "MULTIPLY",
+             "DIVIDE"
+            ],
+            "type": "string"
+           }
+          },
+          "required": [
+           "conversion_factor",
+           "operation"
+          ],
+          "type": "object"
+         },
+         "quantity_rounding": {
+          "nullable": true,
+          "properties": {
+           "decimal_places": {
+            "minimum": 0,
+            "type": "number"
+           },
+           "rounding_method": {
+            "enum": [
+             "round_up",
+             "round_down",
+             "round_half_up",
+             "ROUND_UP",
+             "ROUND_DOWN",
+             "ROUND_HALF_UP"
+            ],
+            "type": "string"
+           }
+          },
+          "required": [
+           "rounding_method",
+           "decimal_places"
+          ],
+          "type": "object"
+         },
+         "starting_at": {
+          "format": "date-time",
+          "type": "string"
+         },
+         "tags": {
+          "items": {
+           "type": "string"
+          },
+          "type": "array"
+         }
+        },
+        "required": [
+         "name",
+         "created_at",
+         "created_by"
+        ],
+        "type": "object"
+       },
+       "type": {
+        "enum": [
+         "USAGE",
+         "SUBSCRIPTION",
+         "COMPOSITE",
+         "FIXED",
+         "PRO_SERVICE"
+        ],
+        "type": "string"
+       },
+       "updates": {
+        "items": {
+         "properties": {
+          "billable_metric_id": {
+           "format": "uuid",
+           "type": "string"
+          },
+          "composite_product_ids": {
+           "items": {
+            "format": "uuid",
+            "type": "string"
+           },
+           "type": "array"
+          },
+          "composite_tags": {
+           "items": {
+            "type": "string"
+           },
+           "type": "array"
+          },
+          "created_at": {
+           "format": "date-time",
+           "type": "string"
+          },
+          "created_by": {
+           "type": "string"
+          },
+          "exclude_free_usage": {
+           "type": "boolean"
+          },
+          "include_composite_spend": {
+           "type": "boolean"
+          },
+          "is_refundable": {
+           "type": "boolean"
+          },
+          "name": {
+           "type": "string"
+          },
+          "netsuite_internal_item_id": {
+           "type": "string"
+          },
+          "netsuite_overage_item_id": {
+           "type": "string"
+          },
+          "presentation_group_key": {
+           "items": {
+            "type": "string"
+           },
+           "type": "array"
+          },
+          "pricing_group_key": {
+           "items": {
+            "type": "string"
+           },
+           "type": "array"
+          },
+          "quantity_conversion": {
+           "nullable": true,
+           "properties": {
+            "conversion_factor": {
+             "type": "number"
+            },
+            "name": {
+             "type": "string"
+            },
+            "operation": {
+             "enum": [
+              "multiply",
+              "divide",
+              "MULTIPLY",
+              "DIVIDE"
+             ],
+             "type": "string"
+            }
+           },
+           "required": [
+            "conversion_factor",
+            "operation"
+           ],
+           "type": "object"
+          },
+          "quantity_rounding": {
+           "nullable": true,
+           "properties": {
+            "decimal_places": {
+             "minimum": 0,
+             "type": "number"
+            },
+            "rounding_method": {
+             "enum": [
+              "round_up",
+              "round_down",
+              "round_half_up",
+              "ROUND_UP",
+              "ROUND_DOWN",
+              "ROUND_HALF_UP"
+             ],
+             "type": "string"
+            }
+           },
+           "required": [
+            "rounding_method",
+            "decimal_places"
+           ],
+           "type": "object"
+          },
+          "starting_at": {
+           "format": "date-time",
+           "type": "string"
+          },
+          "tags": {
+           "items": {
+            "type": "string"
+           },
+           "type": "array"
+          }
+         },
+         "required": [
+          "created_at",
+          "created_by"
+         ],
+         "type": "object"
+        },
+        "type": "array"
+       }
+      },
+      "required": [
+       "id",
+       "type",
+       "initial",
+       "current",
+       "updates"
+      ],
+      "type": "object"
+     },
+     "type": "array"
+    },
+    "next_page": {
+     "nullable": true,
+     "type": "string"
+    }
+   },
+   "required": [
+    "data",
+    "next_page"
+   ],
+   "type": "object"
+  }
+ },
+ "list_rate_cards": {
+  "method": "POST",
+  "path": "/v1/contract-pricing/rate-cards/list",
+  "query": {
+   "limit": {
+    "maximum": 100,
+    "minimum": 1,
+    "type": "integer"
+   },
+   "next_page": {
+    "type": "string"
+   }
+  },
+  "request": {
+   "additionalProperties": false,
+   "type": "object"
+  },
+  "response": {
+   "properties": {
+    "data": {
+     "items": {
+      "properties": {
+       "aliases": {
+        "items": {
+         "properties": {
+          "ending_before": {
+           "format": "date-time",
+           "type": "string"
+          },
+          "name": {
+           "type": "string"
+          },
+          "starting_at": {
+           "format": "date-time",
+           "type": "string"
+          }
+         },
+         "required": [
+          "name"
+         ],
+         "type": "object"
+        },
+        "type": "array"
+       },
+       "created_at": {
+        "format": "date-time",
+        "type": "string"
+       },
+       "created_by": {
+        "type": "string"
+       },
+       "credit_type_conversions": {
+        "items": {
+         "properties": {
+          "custom_credit_type": {
+           "properties": {
+            "id": {
+             "format": "uuid",
+             "type": "string"
+            },
+            "name": {
+             "type": "string"
+            }
+           },
+           "required": [
+            "name",
+            "id"
+           ],
+           "type": "object"
+          },
+          "fiat_per_custom_credit": {
+           "type": "string"
+          }
+         },
+         "required": [
+          "fiat_per_custom_credit",
+          "custom_credit_type"
+         ],
+         "type": "object"
+        },
+        "type": "array"
+       },
+       "custom_fields": {
+        "additionalProperties": {
+         "type": "string"
+        },
+        "type": "object"
+       },
+       "fiat_credit_type": {
+        "properties": {
+         "id": {
+          "format": "uuid",
+          "type": "string"
+         },
+         "name": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "name",
+         "id"
+        ],
+        "type": "object"
+       },
+       "id": {
+        "format": "uuid",
+        "type": "string"
+       },
+       "name": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "id",
+       "name",
+       "created_at",
+       "created_by"
+      ],
+      "type": "object"
+     },
+     "type": "array"
+    },
+    "next_page": {
+     "nullable": true,
+     "type": "string"
+    }
+   },
+   "required": [
+    "data",
+    "next_page"
+   ],
+   "type": "object"
+  }
+ }
+}

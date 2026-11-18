@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"log"
 	"sort"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -25,6 +26,7 @@ import (
 
 	"github.com/vclusterlabs-experiments/vbilling/internal/discovery"
 	"github.com/vclusterlabs-experiments/vbilling/internal/health"
+	"github.com/vclusterlabs-experiments/vbilling/internal/pause"
 	"github.com/vclusterlabs-experiments/vbilling/internal/usage"
 )
 
@@ -55,7 +57,10 @@ type Options struct {
 	PrivateNodeBilling      string
 	TenantExcludeNamespaces []string // usage mode: namespaces never billed (default kube-system)
 	DRAGPUDrivers           []string // DRA drivers whose devices are GPUs (default gpu.nvidia.com, gpu.amd.com)
-	Now                     func() time.Time
+	// PauseKeep is the capacity that keeps billing while a cluster is
+	// paused (PAUSE_KEEP_BILLING). Nil means pause.DefaultKeep.
+	PauseKeep pause.Keep
+	Now       func() time.Time
 }
 
 // Collector gathers billable state from the Kubernetes API.
@@ -71,6 +76,10 @@ type Collector struct {
 
 	excludedTenantNS map[string]bool
 	health           *health.Registry // nil: not reported
+
+	pauses  *pause.Store // inventories of paused clusters; nil = none
+	invMu   sync.Mutex
+	lastInv map[string]*tenantInventory // last inventory read from each cluster's own API
 }
 
 // UseGraveyard makes the collector bill pods and nodes deleted between
@@ -133,7 +142,10 @@ func NewCollector(kube kubernetes.Interface, mc metricsclient.Interface, opts Op
 	if opts.DRAGPUDrivers == nil {
 		opts.DRAGPUDrivers = DefaultDRAGPUDrivers
 	}
-	c := &Collector{kube: kube, metrics: mc, opts: opts, excludedTenantNS: map[string]bool{}}
+	if opts.PauseKeep == nil {
+		opts.PauseKeep, _ = pause.ParseKeep(pause.DefaultKeep)
+	}
+	c := &Collector{kube: kube, metrics: mc, opts: opts, excludedTenantNS: map[string]bool{}, lastInv: map[string]*tenantInventory{}}
 	for _, ns := range opts.TenantExcludeNamespaces {
 		c.excludedTenantNS[ns] = true
 	}
@@ -156,7 +168,29 @@ type Target struct {
 	Tenant      string
 	Project     string
 	TenantClass string
+	// Paused are the times the cluster was paused. Capacity that does not
+	// keep billing while paused (PauseKeep) is not billed for them.
+	Paused []pause.Span
 }
+
+// pausedFor returns the part of [start, end) inside [ws, we) during which
+// the target was paused, for capacity of the given kind (pause.Keep*). It
+// is zero when that kind keeps billing while paused.
+func (c *Collector) pausedFor(t Target, kind string, start, end, ws, we time.Time) time.Duration {
+	if len(t.Paused) == 0 || c.opts.PauseKeep[kind] {
+		return 0
+	}
+	return pause.Overlap(t.Paused, start, end, ws, we)
+}
+
+// clip returns a pausedFor bound to one target and kind.
+func (c *Collector) clip(t Target, kind string) pausedFn {
+	return func(start, end, ws, we time.Time) time.Duration { return c.pausedFor(t, kind, start, end, ws, we) }
+}
+
+// pausedFn returns how much of [start, end) inside [ws, we) is not billed
+// because the cluster was paused.
+type pausedFn func(start, end, ws, we time.Time) time.Duration
 
 // Stats summarize one collection run.
 type Stats struct {
@@ -349,7 +383,7 @@ func (c *Collector) collectTarget(ctx context.Context, t Target, nodes map[strin
 		if n.labels[LabelBillable] == "false" {
 			continue // the tenant's own hardware: neither the node nor its pods are billed
 		}
-		c.meterWholeNode(name, n, windows, accs, base, "dedicated_node")
+		c.meterWholeNode(name, n, windows, accs, base, "dedicated_node", c.clip(t, pause.KeepNodes))
 	}
 
 	// Storage: bound PVCs synced from the tenant cluster, per storage class.
@@ -357,7 +391,7 @@ func (c *Collector) collectTarget(ctx context.Context, t Target, nodes map[strin
 	if err != nil {
 		return fmt.Errorf("list pvcs: %w", err)
 	}
-	meterVolumes(pvcs.Items, ownedFilter(pvcLabels(pvcs.Items), cl.Name, c.opts.MeterControlPlane), windows, accs, base)
+	meterVolumes(pvcs.Items, ownedFilter(pvcLabels(pvcs.Items), cl.Name, c.opts.MeterControlPlane), windows, accs, base, c.clip(t, pause.KeepStorage))
 
 	// Load balancers with an assigned address.
 	svcs, err := c.kube.CoreV1().Services(ns).List(ctx, metav1.ListOptions{})
@@ -366,12 +400,25 @@ func (c *Collector) collectTarget(ctx context.Context, t Target, nodes map[strin
 	}
 	meterLoadBalancers(svcs.Items, func(svc *corev1.Service) bool {
 		return !isControlPlane(svc.Labels, cl.Name) || c.opts.MeterControlPlane
-	}, windows, accs, base)
+	}, windows, accs, base, c.clip(t, pause.KeepLoadBalancers))
 
-	// Control plane hours, only while ready (no charge while provisioning or asleep).
-	if cl.Ready {
+	// Control plane hours, only while ready (no charge while provisioning,
+	// asleep or paused, including paused time in backfilled windows). A
+	// cluster that is paused now ran until the second its pause began.
+	bill, until := cl.Ready, time.Time{}
+	if n := len(t.Paused); !cl.Ready && cl.Paused && n > 0 && t.Paused[n-1].Open() {
+		bill = true
+		if !c.opts.PauseKeep[pause.KeepControlPlane] {
+			until = t.Paused[n-1].From
+		}
+	}
+	if bill {
 		for _, w := range windows {
-			ov := usage.Overlap(cl.CreatedAt, time.Time{}, w.Start, w.End)
+			ov := usage.Overlap(cl.CreatedAt, until, w.Start, w.End)
+			ov -= c.pausedFor(t, pause.KeepControlPlane, cl.CreatedAt, until, w.Start, w.End)
+			if ov < 0 {
+				ov = 0
+			}
 			accs[w.End].add(base(usage.MetricInstanceHours, nil), ov.Hours(), nil)
 		}
 	}
@@ -548,10 +595,20 @@ func (c *Collector) meterPods(pods []podEntry, include func(*corev1.Pod) bool, n
 // meterWholeNode bills a node's full capacity (node-hours, whole GPUs, CPU
 // and memory) to one tenant cluster: dedicated nodes of the control plane
 // cluster and private nodes of the tenant cluster itself.
-func (c *Collector) meterWholeNode(name string, n *nodeInfo, windows []Window, accs map[time.Time]*accumulator, base baseFn, mode string) {
+func (c *Collector) meterWholeNode(name string, n *nodeInfo, windows []Window, accs map[time.Time]*accumulator, base baseFn, mode string, paused pausedFn) {
 	for _, w := range windows {
 		acc := accs[w.End]
 		billable, down := n.split(n.created, n.deletedAt, w.Start, w.End)
+		if paused != nil {
+			// A paused cluster's nodes are idle and unusable: their paused
+			// time is neither usage nor downtime.
+			from := n.downFrom(n.created, n.deletedAt)
+			billable -= paused(n.created, from, w.Start, w.End)
+			if down > 0 {
+				down -= paused(from, n.deletedAt, w.Start, w.End)
+			}
+			billable, down = max(billable, 0), max(down, 0)
+		}
 		h := billable.Hours()
 		sku := nodeSKU(n)
 		nodeEv := base(usage.MetricPrivateNodeHours, n)
@@ -616,7 +673,7 @@ func (c *Collector) meterWholeNode(name string, n *nodeInfo, windows []Window, a
 }
 
 // meterVolumes bills bound volumes per storage class.
-func meterVolumes(pvcs []corev1.PersistentVolumeClaim, include func(map[string]string) bool, windows []Window, accs map[time.Time]*accumulator, base baseFn) {
+func meterVolumes(pvcs []corev1.PersistentVolumeClaim, include func(map[string]string) bool, windows []Window, accs map[time.Time]*accumulator, base baseFn, paused pausedFn) {
 	for _, pvc := range pvcs {
 		if pvc.Status.Phase != corev1.ClaimBound || !include(pvc.Labels) {
 			continue
@@ -631,6 +688,9 @@ func meterVolumes(pvcs []corev1.PersistentVolumeClaim, include func(map[string]s
 		}
 		for _, w := range windows {
 			ov := usage.Overlap(pvc.CreationTimestamp.Time, time.Time{}, w.Start, w.End)
+			if paused != nil {
+				ov = max(ov-paused(pvc.CreationTimestamp.Time, time.Time{}, w.Start, w.End), 0)
+			}
 			ev := base(usage.MetricStorageGBHours, nil)
 			ev.SKU = class
 			accs[w.End].add(ev, float64(size.Value())/gib*ov.Hours(), map[string]any{"volumes": 1})
@@ -639,7 +699,7 @@ func meterVolumes(pvcs []corev1.PersistentVolumeClaim, include func(map[string]s
 }
 
 // meterLoadBalancers bills LoadBalancer services that have an address.
-func meterLoadBalancers(svcs []corev1.Service, include func(*corev1.Service) bool, windows []Window, accs map[time.Time]*accumulator, base baseFn) {
+func meterLoadBalancers(svcs []corev1.Service, include func(*corev1.Service) bool, windows []Window, accs map[time.Time]*accumulator, base baseFn, paused pausedFn) {
 	for i := range svcs {
 		svc := &svcs[i]
 		if svc.Spec.Type != corev1.ServiceTypeLoadBalancer || len(svc.Status.LoadBalancer.Ingress) == 0 || !include(svc) {
@@ -647,6 +707,9 @@ func meterLoadBalancers(svcs []corev1.Service, include func(*corev1.Service) boo
 		}
 		for _, w := range windows {
 			ov := usage.Overlap(svc.CreationTimestamp.Time, time.Time{}, w.Start, w.End)
+			if paused != nil {
+				ov = max(ov-paused(svc.CreationTimestamp.Time, time.Time{}, w.Start, w.End), 0)
+			}
 			accs[w.End].add(base(usage.MetricLBHours, nil), ov.Hours(), map[string]any{"load_balancers": 1})
 		}
 	}

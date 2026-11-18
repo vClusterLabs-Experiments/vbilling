@@ -30,7 +30,10 @@ import (
 	"github.com/vclusterlabs-experiments/vbilling/internal/health"
 	"github.com/vclusterlabs-experiments/vbilling/internal/kv"
 	"github.com/vclusterlabs-experiments/vbilling/internal/metrics"
+	"github.com/vclusterlabs-experiments/vbilling/internal/pause"
 	"github.com/vclusterlabs-experiments/vbilling/internal/pipeline"
+	"github.com/vclusterlabs-experiments/vbilling/internal/platform"
+	"github.com/vclusterlabs-experiments/vbilling/internal/pricing"
 	"github.com/vclusterlabs-experiments/vbilling/internal/records"
 	"github.com/vclusterlabs-experiments/vbilling/internal/spool"
 	"github.com/vclusterlabs-experiments/vbilling/internal/telemetry"
@@ -138,14 +141,45 @@ func main() {
 	tel := telemetry.Default
 	sources := health.New(tel)
 	tenants := pipeline.NewTenantRegistry()
+	// Events held until their billing platform prices them (PRICE_CHECK=hold).
+	// Always opened, so whatever an earlier run held is released.
+	held, err := pipeline.OpenHeld(filepath.Join(cfg.DataDir, "held"), false)
+	if err != nil {
+		log.Fatalf("open held events: %v", err)
+	}
+	var prices *pricing.Service
+	if cfg.PriceCheck != pricing.ModeOff {
+		prices = pricing.New(sp, dests, tenants, held, sources, tel, pricing.Options{
+			Mode: cfg.PriceCheck, Interval: cfg.PriceCheckInterval, Lookback: cfg.PriceCheckLookback, MaxHold: cfg.PriceCheckMaxHold,
+		})
+	}
+	var gate pipeline.Gate
+	if prices != nil {
+		gate = prices.Gate()
+	}
 	disp := pipeline.New(sp, dests, pipeline.Options{
 		Tenants:   tenants,
 		Bootstrap: func(ctx context.Context, d destinations.Destination) error { return d.Bootstrap(ctx, usage.Catalog()) },
+		Held:      held,
+		Gate:      gate,
+		MaxHold:   cfg.PriceCheckMaxHold,
 	}, tel)
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
 	disc := discovery.NewDiscoverer(kube, dynamicClient, cfg.WatchNamespaces, cfg.PlatformCluster)
+	owners := newPlatformResolver(cfg, sources, sp)
+	if owners != nil {
+		disc.WithBinder(owners)
+	}
+	pauseKeep, err := pause.ParseKeep(cfg.PauseKeepBilling)
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+	pauses, err := pause.Open(cfg.DataDir)
+	if err != nil {
+		log.Fatalf("open pause spans: %v", err)
+	}
 	coll := metrics.NewCollector(kube, metricsClient, metrics.Options{
 		Region:             cfg.Region,
 		RegionFromNode:     cfg.RegionFromNode,
@@ -169,8 +203,10 @@ func main() {
 		PrivateNodeBilling:      cfg.PrivateNodeBilling,
 		TenantExcludeNamespaces: cfg.TenantExcludeNamespaces,
 		DRAGPUDrivers:           cfg.DRAGPUDrivers,
+		PauseKeep:               pauseKeep,
 	})
 	coll.UseDynamic(dynamicClient)
+	coll.UsePauses(pauses)
 	coll.UseHealth(sources)
 	prom, err := coll.NewPromSource(metrics.PromOptions{
 		SourceLabel: cfg.PromSourceLabel,
@@ -195,13 +231,18 @@ func main() {
 		if err != nil {
 			log.Fatalf("TENANT_CLUSTERS_FILE: %v", err)
 		}
-		mgr := tenantapi.New(ctx, kube, tenantapi.Options{
+		topts := tenantapi.Options{
 			SecretName:    cfg.TenantKubeconfigSecret,
 			AdminFallback: cfg.TenantAdminFallback,
 			External:      ext,
 			WatchPods:     cfg.PrivateNodeBilling == "usage",
 			Retention:     retention,
-		})
+		}
+		if owners != nil && cfg.PlatformProxy {
+			topts.Platform = owners // the vbilling-kubeconfig Secret still overrides it per cluster
+			log.Printf("Tenant APIs: clusters bound to vCluster Platform are reached through its proxy at %s", owners.Client().Host())
+		}
+		mgr := tenantapi.New(ctx, kube, topts)
 		coll.UseTenantAPI(mgr)
 		tenantMgr = mgr
 		disc.WithExternal(mgr.Clusters())
@@ -214,7 +255,14 @@ func main() {
 	}
 	ctrl := controller.New(cfg, disc, coll, sp, tenants, dests, tel)
 	ctrl.UsePrometheus(prom)
-	enf := newEnforcer(cfg, kube, ctrl, dests, tel, tenantMgr)
+	ctrl.UsePauses(pauses)
+	if prices != nil {
+		prices.SetReady(ctrl.Ready) // plans are known once tenants are discovered
+	}
+	if owners != nil {
+		ctrl.UseOwners(owners)
+	}
+	enf := newEnforcer(cfg, kube, ctrl, dests, tel, tenantMgr, pauses, coll)
 
 	recOpts := records.Options{
 		Window:               cfg.CollectionInterval,
@@ -228,10 +276,27 @@ func main() {
 	// records ledger's clock past every window already committed.
 	agg := records.NewAggregator(recSpool, sp, recOpts, sources, tel)
 	ingester := records.NewIngester(recSpool, formats, recOpts, ctrl.ResolveTenant, sources, tel)
+	// LiteLLM's spend logs, read back as records: they fill what the
+	// generic API logger's push lost, under the same record IDs.
+	var litellmPuller *records.LiteLLMPuller
+	if cfg.RecordsPullLiteLLMURL != "" {
+		state, err := kv.Open(filepath.Join(cfg.DataDir, "litellm-pull.json"))
+		if err != nil {
+			log.Fatalf("open LiteLLM pull state: %v", err)
+		}
+		litellmPuller = records.NewLiteLLMPuller(ingester, records.LiteLLMPullOptions{
+			URL: cfg.RecordsPullLiteLLMURL, Key: cfg.RecordsPullLiteLLMKey,
+			Client: cfg.RecordsPullLiteLLMClient, Tenant: cfg.RecordsPullLiteLLMTenant,
+			Interval: cfg.RecordsPullLiteLLMInterval, Lookback: cfg.RecordsPullLiteLLMLookback,
+			State: state, Ready: ctrl.Ready,
+		}, sources, tel)
+		log.Printf("Records: pulling LiteLLM spend logs from %s every %s (lookback %s, client %q)",
+			cfg.RecordsPullLiteLLMURL, cfg.RecordsPullLiteLLMInterval, cfg.RecordsPullLiteLLMLookback, cfg.RecordsPullLiteLLMClient)
+	}
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           api.New(cfg, sp, disp, tenants, ctrl, enf, tel, version).WithHealth(sources).WithRecords(ingester).WithCrossChecks(checks).Handler(),
+		Handler:           api.New(cfg, sp, disp, tenants, ctrl, enf, tel, version).WithHealth(sources).WithPauses(pauses).WithRecords(ingester).WithCrossChecks(checks).WithPricing(prices).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	if cfg.APIToken == "" {
@@ -263,15 +328,20 @@ func main() {
 		}
 	}()
 	go func() {
-		// Converge clusters created or unreachable during a state change.
+		// Converge clusters created or unreachable during a state change,
+		// and pause again at once any cluster of a paused tenant that runs.
 		t := time.NewTicker(2 * time.Minute)
 		defer t.Stop()
+		guard := time.NewTicker(15 * time.Second)
+		defer guard.Stop()
 		for {
 			select {
 			case <-ctx.Done():
-				return
+				return // a pause cut short here is finished at the next start
 			case <-t.C:
 				enf.Resync(ctx)
+			case <-guard.C:
+				enf.Guard(ctx)
 			}
 		}
 	}()
@@ -290,10 +360,25 @@ func main() {
 		defer wg.Done()
 		disp.Run(ctx)
 	}()
+	if prices != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			prices.Run(ctx)
+		}()
+	}
 	go func() {
 		defer wg.Done()
 		compactLoop(ctx, sp, cfg.Adapters)
 	}()
+
+	if litellmPuller != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			litellmPuller.Run(ctx)
+		}()
+	}
 
 	if err := ctrl.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		log.Printf("controller: %v", err)
@@ -315,7 +400,7 @@ func main() {
 // Metronome webhooks set them once their secrets are configured, and
 // PUT /api/v1/billing-states/{tenant} sets them from anywhere else, such as
 // Lago or a custom billing platform.
-func newEnforcer(cfg *config.Config, kube kubernetes.Interface, ctrl *controller.Controller, dests []destinations.Destination, tel *telemetry.Registry, tenantMgr *tenantapi.Manager) *enforcement.Enforcer {
+func newEnforcer(cfg *config.Config, kube kubernetes.Interface, ctrl *controller.Controller, dests []destinations.Destination, tel *telemetry.Registry, tenantMgr *tenantapi.Manager, pauses *pause.Store, coll *metrics.Collector) *enforcement.Enforcer {
 	rules, err := enforcement.ParseRules(cfg.EnforcementRules)
 	if err != nil {
 		log.Fatalf("ENFORCEMENT_RULES: %v", err)
@@ -338,8 +423,8 @@ func newEnforcer(cfg *config.Config, kube kubernetes.Interface, ctrl *controller
 	if err != nil {
 		log.Fatalf("open billing state: %v", err)
 	}
-	log.Printf("Billing states: mode=%s, Stripe webhooks %s, Metronome webhooks %s", cfg.EnforcementMode,
-		onOff(cfg.StripeWebhookSecret != ""), onOff(cfg.MetronomeWebhookSecret != ""))
+	log.Printf("Billing states: mode=%s, Stripe webhooks %s, Metronome webhooks %s, paused clusters keep billing %s", cfg.EnforcementMode,
+		onOff(cfg.StripeWebhookSecret != ""), onOff(cfg.MetronomeWebhookSecret != ""), cfg.PauseKeepBilling)
 	var tenantClient func(ctx context.Context, cl discovery.TenantCluster) (kubernetes.Interface, error)
 	if cfg.EnforcementInCluster {
 		if tenantMgr == nil {
@@ -367,7 +452,45 @@ func newEnforcer(cfg *config.Config, kube kubernetes.Interface, ctrl *controller
 		Resolvers:              resolvers,
 		State:                  state,
 		Telemetry:              tel,
+		Pauses:                 pauses,
+		Freeze:                 coll.Freeze,
+		OnPause:                ctrl.SetPaused,
+		DrainTimeout:           cfg.PauseDrainTimeout,
 	})
+}
+
+// newPlatformResolver sets up TENANT_SOURCE=platform: tenant identity from
+// vCluster Platform Tenants, Projects and VirtualClusterInstances.
+func newPlatformResolver(cfg *config.Config, sources *health.Registry, sp *spool.Spool) *platform.Resolver {
+	if cfg.TenantSource != "platform" {
+		return nil
+	}
+	r, err := platform.New(platform.Options{
+		Client: platform.ClientOptions{
+			URL:       cfg.PlatformURL,
+			AccessKey: cfg.PlatformAccessKey,
+			CAFile:    cfg.PlatformCAFile,
+			Insecure:  cfg.PlatformInsecure,
+			UserAgent: "vbilling/" + version,
+		},
+		Cluster:     cfg.PlatformCluster,
+		Refresh:     cfg.PlatformRefresh,
+		OrphanGrace: cfg.PlatformOrphanGrace,
+		StatePath:   filepath.Join(cfg.DataDir, "platform-bindings.json"),
+		Committed:   func() (time.Time, bool) { return sp.Watermark(spool.SourceCollector) },
+		Health:      sources,
+	})
+	if err != nil {
+		log.Fatalf("vCluster Platform: %v", err)
+	}
+	if cfg.PlatformInsecure {
+		log.Printf("WARNING: PLATFORM_INSECURE=true: the Platform's TLS certificate is not verified; set PLATFORM_CA_FILE instead")
+	}
+	if cfg.PlatformCluster == "" {
+		log.Printf("WARNING: PLATFORM_CLUSTER is not set: instances on every connected cluster can match this control plane cluster's workloads")
+	}
+	log.Printf("Tenants: vCluster Platform at %s (Tenant, else Project), refreshed every %s", cfg.PlatformURL, cfg.PlatformRefresh)
+	return r
 }
 
 // compactLoop applies ledger retention hourly.

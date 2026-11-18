@@ -1,0 +1,49 @@
+{
+  "kind": "APIResourceList",
+  "apiVersion": "v1",
+  "groupVersion": "management.loft.sh/v1",
+  "resources": [
+    {
+      "name": "projects",
+      "singularName": "",
+      "namespaced": false,
+      "kind": "Project",
+      "verbs": [
+        "get",
+        "list",
+        "watch"
+      ]
+    },
+    {
+      "name": "tenants",
+      "singularName": "",
+      "namespaced": false,
+      "kind": "Tenant",
+      "verbs": [
+        "get",
+        "list",
+        "watch"
+      ]
+    },
+    {
+      "name": "virtualclusterinstances",
+      "singularName": "",
+      "namespaced": true,
+      "kind": "VirtualClusterInstance",
+      "verbs": [
+        "get",
+        "list",
+        "watch"
+      ]
+    },
+    {
+      "name": "selves",
+      "singularName": "",
+      "namespaced": false,
+      "kind": "Self",
+      "verbs": [
+        "create"
+      ]
+    }
+  ]
+}

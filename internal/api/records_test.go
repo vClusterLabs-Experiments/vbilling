@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/vclusterlabs-experiments/vbilling/internal/config"
+	"github.com/vclusterlabs-experiments/vbilling/internal/discovery"
 	"github.com/vclusterlabs-experiments/vbilling/internal/health"
 	"github.com/vclusterlabs-experiments/vbilling/internal/pipeline"
 	"github.com/vclusterlabs-experiments/vbilling/internal/records"
@@ -21,6 +22,7 @@ import (
 )
 
 type recEnv struct {
+	server  *Server
 	srv     *httptest.Server
 	records *spool.Spool
 	health  *health.Registry
@@ -61,7 +63,7 @@ func setupRecords(t *testing.T) *recEnv {
 	s.now = clock
 	srv := httptest.NewServer(s.Handler())
 	t.Cleanup(srv.Close)
-	return &recEnv{srv: srv, records: rs, health: h}
+	return &recEnv{server: s, srv: srv, records: rs, health: h}
 }
 
 func postJSON(t *testing.T, url, token, body string, headers ...string) (int, map[string]any) {
@@ -172,5 +174,36 @@ func TestStatusShowsSourceProblems(t *testing.T) {
 	resp.Body.Close()
 	if len(src.Sources) != 1 || src.Sources[0].Status != health.Empty {
 		t.Fatalf("sources = %+v", src)
+	}
+}
+
+type startingCtrl struct{ ready bool }
+
+func (c *startingCtrl) Ready() bool                         { return c.ready }
+func (c *startingCtrl) Clusters() []discovery.TenantCluster { return nil }
+func (c *startingCtrl) LastWindow() time.Time               { return time.Time{} }
+
+func TestRecordsWaitForTheFirstDiscovery(t *testing.T) {
+	env := setupRecords(t)
+	ctrl := &startingCtrl{}
+	env.server.ctrl = ctrl
+	rec := `{"id":"r1","tenant":"team-acme","time":"2026-10-05T11:59:10Z","usage":{"inference_input_tokens":5}}`
+	// Unbound: the alias cannot be mapped yet, so the gateway must retry.
+	if code, body := postJSON(t, env.srv.URL+"/api/v1/records", "ingest-secret", rec); code != http.StatusServiceUnavailable {
+		t.Fatalf("before discovery: %d %v", code, body)
+	}
+	// A token bound to a tenant needs no mapping.
+	if code, body := postJSON(t, env.srv.URL+"/api/v1/records", "gw-globex", rec); code != http.StatusOK {
+		t.Fatalf("bound token before discovery: %d %v", code, body)
+	}
+	ctrl.ready = true
+	if code, body := postJSON(t, env.srv.URL+"/api/v1/records", "ingest-secret", rec); code != http.StatusOK {
+		t.Fatalf("after discovery: %d %v", code, body)
+	}
+	// Discovery that never succeeds does not block ingest for good.
+	ctrl.ready = false
+	env.server.started = time.Now().Add(-recordsStartupGrace - time.Second)
+	if code, body := postJSON(t, env.srv.URL+"/api/v1/records", "ingest-secret", strings.Replace(rec, "r1", "r2", 1)); code != http.StatusOK {
+		t.Fatalf("after the grace: %d %v", code, body)
 	}
 }
