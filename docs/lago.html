@@ -367,6 +367,24 @@
       amount: <span class="string">"0.000002"</span></code></div>
       <p>SKUs listed under <code>sku</code> get their charge filters when vBilling starts, before any usage arrives. vBilling manages charges and filters on the default plan and on the plans in <code>lago.managedPlans</code>, and never changes other plans. To keep the price card in your own ConfigMap, set <code>lago.priceCardConfigMap</code>. Outside Helm, point <code>LAGO_PRICE_CARD</code> at the YAML file and list extra plans in <code>LAGO_MANAGED_PLANS</code>.</p>
 
+      <h2 id="price-coverage">Price coverage</h2>
+      <p>A charge filter that copies a charge's price of 0 bills a new SKU at $0 while the other SKUs have prices. vBilling checks, read-only, what Lago will charge for every billable metric and for every SKU seen in the ledger within <code>PRICE_CHECK_LOOKBACK</code>, on the plan of each tenant (its <code>vbilling.vcluster.com/plan</code>, else <code>billing.defaultPlanCode</code>). The price of a SKU is its own charge filter's, or else the charge's default price.</p>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead><tr><th>Status</th><th>When</th></tr></thead>
+          <tbody>
+            <tr><td><code>priced</code></td><td>The plan has a charge for the metric, and the SKU's price is not 0 (any non-zero amount, rate or range of the charge model counts).</td></tr>
+            <tr><td><code>unpriced</code></td><td>No billable metric, no plan, or no charge for the metric on the plan. Or the SKU has no price of its own and the charge's default price is 0 while other SKUs of the metric have prices: a rate miss. A charge filter vBilling split out by copying a price of 0 is not a price of its own. The hint names the SKU, charge and plan to price.</td></tr>
+            <tr><td><code>zero</code></td><td>The SKU's own filter is 0, the price card lists the SKU at <code>"0"</code>, or the whole charge is 0 (a new <code>vcluster-standard</code> plan without a price card). Information, not a gap.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>To bill a SKU at 0 on purpose while others have prices, list it with <code>"0"</code> in the price card. Lago applies filters when it computes usage, so a price added before the invoice is finalized also prices the usage sent earlier in the period. With <code>PRICE_CHECK=hold</code>, the usage of an unpriced SKU stays out of Lago (current usage, wallets and invoices do not see it) until the SKU has a price, then ships in ledger order. vBilling adds the held SKU to the billable metric's <code>sku</code> filter values (never a charge filter or a price), because Lago only accepts a charge filter for a value its billable metric lists. Then price it in the Lago UI.</p>
+      <p>The check reads <code>GET /api/v1/billable_metrics/{code}</code> and <code>GET /api/v1/plans/{code}</code>. Gaps show in <code>GET /api/v1/pricing?destination=lago</code>, in <code>GET /api/v1/sources?kind=pricing</code>, in the dashboard and as <code>vbilling_unpriced_series{destination="lago"}</code>:</p>
+      <div class="code-block"><code><span class="output">[pricing] lago: vcluster_gpu_hours sku=NVIDIA-B200 (plan vcluster-standard) is unpriced: plan "vcluster-standard", charge for vcluster_gpu_hours: the charge filter vBilling split out for sku=NVIDIA-B200 copied the default price 0, so Lago bills it at 0 while other SKUs have prices (sku=NVIDIA-H100) (hint: price sku=NVIDIA-B200 in the charge for vcluster_gpu_hours on plan "vcluster-standard" ...)
+[pricing] lago: vcluster_gpu_hours sku=NVIDIA-B200 (plan vcluster-standard) is priced now: plan "vcluster-standard", charge for vcluster_gpu_hours: the charge filter for sku=NVIDIA-B200</span></code></div>
+      <p>Lago counts a subscription's usage from the subscription's start (<code>subscription_at</code>). vBilling subscribes a tenant when its first usage is delivered or held, and starts the subscription at the earliest window of that usage, so the first window counts. The cluster's creation time moves the start earlier only within the current UTC day: Lago v1.17 bills an arrears base fee from an earlier start, and issues the in-advance invoice of a plan only for a subscription that starts today. A subscription vBilling created before this version keeps its start.</p>
+
       <h2 id="events">Events in Lago</h2>
       <p>Each event carries the quantity under the metric's field name, which the billable metric sums, and every dimension as a property (trimmed here):</p>
       <div class="code-block"><code>{
@@ -391,6 +409,7 @@
 
       <h2 id="limits">Good to know</h2>
       <ul>
+        <li><code>GET /api/v1/pricing?destination=lago</code> lists every SKU Lago bills at 0 by accident (see <a href="#price-coverage">Price coverage</a>).</li>
         <li><code>GET /api/v1/reconcile</code> covers Stripe and Metronome. For Lago, compare the ledger (<code>GET /api/v1/usage</code>) with Lago's current usage for the subscription.</li>
         <li>Lago sends no billing signals to vBilling. Set billing states from your own automation with <code>PUT /api/v1/billing-states/{tenant}</code>, for example <code>{"state": "suspended", "reason": "invoice overdue"}</code>.</li>
         <li>Lago also receives <code>vcluster_gpu_utilization</code>, an informational metric that v0.1 created in Lago and existing plans may still reference. Leave it unpriced.</li>

@@ -1,0 +1,27 @@
+{
+  "kind": "Self",
+  "apiVersion": "management.loft.sh/v1",
+  "metadata": {},
+  "spec": {},
+  "status": {
+    "user": {
+      "name": "vbilling",
+      "displayName": "vBilling metering",
+      "username": "vbilling",
+      "subject": "vbilling"
+    },
+    "accessKey": "vbilling-reader",
+    "accessKeyType": "User",
+    "subject": "vbilling",
+    "uid": "9de8e54b-7c1f-4a16-b7d5-e249f9c5b44e",
+    "groups": [
+      "system:authenticated",
+      "loft:authenticated",
+      "loft:user:*",
+      "loft:user:vbilling"
+    ],
+    "instanceID": "0000000000000000000000000000000000000000000000000000000000000000",
+    "loftHost": "localhost:28401",
+    "projectNamespacePrefix": "p-"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "kind": "Self",
+  "apiVersion": "management.loft.sh/v1",
+  "metadata": {},
+  "spec": {},
+  "status": {
+    "subject": "vbilling",
+    "projectNamespacePrefix": "p-"
+  }
+}

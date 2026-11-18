@@ -331,7 +331,7 @@
             <tr>
               <td><strong>Per-request records</strong><br><code>POST /api/v1/records</code> from AI gateways, inference servers or any emitter</td>
               <td><strong>Durable, deduplicated, late-safe.</strong> A record is on disk before vBilling answers 2xx. Retries are dropped by request ID. A record that arrives late becomes a separate adjustment to its own window.</td>
-              <td>vBilling sees only what the emitter sends. A batch the gateway loses before posting never arrives: <a href="#cross-checks">cross-check</a> it.</td>
+              <td>vBilling sees only what the emitter sends. A batch the gateway loses before posting never arrives: <a href="#cross-checks">cross-check</a> it. For LiteLLM, <a href="#litellm-pull">pull its spend logs</a> to recover lost batches.</td>
             </tr>
             <tr>
               <td><strong>Prometheus counters</strong><br><code>counter:</code> in <code>prometheus.metrics</code></td>
@@ -365,6 +365,12 @@
         <li>A simulated LiteLLM gateway sent 60 requests (5,400 output tokens) and retried 10 of its batches. The ledger shows exactly 5,400. A record sent 4 minutes late became a separate 77-token adjustment to its own window.</li>
       </ul>
       <p><code>scripts/e2e-usage-sources.sh</code> in the repository runs these checks on a laptop.</p>
+      <p>Against a real LiteLLM v1.108.11 proxy with Postgres and mock responses, with both the push and the <a href="#litellm-pull">spend log pull</a> on, six teams, users and end users made 312 successful requests (9,546 input and 3,744 output tokens) and 108 failed ones:</p>
+      <ul>
+        <li>Per tenant, the ledger matched LiteLLM's own spend logs and the clients' responses exactly. Failed requests were skipped.</li>
+        <li>vBilling was stopped for 90 seconds. LiteLLM retried each batch three times, then dropped it, with the records of all 113 requests made meanwhile. The first pull after the restart stored exactly those 113 (3,529 input and 1,312 output tokens), billed as late adjustments to their own windows, and found the other 110 requests in its range already stored.</li>
+        <li>199 requests delivered by both the push and the pull counted once.</li>
+      </ul>
 
       <!-- Records -->
       <h2 id="records">Per-request records</h2>
@@ -412,7 +418,7 @@
             <tr><td>400</td><td>Nothing stored: an unknown format, a body that is not JSON, or every record rejected.</td></tr>
             <tr><td>401, 403</td><td>A wrong token, or ingest disabled because no ingest token is set.</td></tr>
             <tr><td>413</td><td>The body is over 16 MiB. Send smaller batches.</td></tr>
-            <tr><td>503</td><td>The records ledger could not be written. Retry.</td></tr>
+            <tr><td>503</td><td>Nothing stored. Retry. Either the records ledger could not be written, or vBilling has just started and has not discovered tenants yet, so it cannot map gateway identities with <code>vbilling.vcluster.com/aliases</code> (the response carries <code>Retry-After: 5</code>; this lasts until the first discovery, normally under a second and never more than two minutes, and does not apply to tokens bound to a tenant).</td></tr>
           </tbody>
         </table>
       </div>
@@ -461,17 +467,22 @@
       <p>LiteLLM's generic API logger posts a <code>StandardLoggingPayload</code> for every request. The built-in <code>litellm</code> format reads it as posted. Enable it with <code>RECORDS_LITELLM=true</code> (Helm <code>records.litellm: true</code>); it is off by default because it declares <code>inference_input_tokens</code> and <code>inference_output_tokens</code>, which every billing adapter then creates.</p>
       <div class="code-block"><code><span class="comment"># LiteLLM proxy config.yaml</span>
 litellm_settings:
-  callbacks: [<span class="string">"generic_api"</span>]</code></div>
-      <div class="code-block"><code><span class="comment"># LiteLLM proxy environment</span>
-GENERIC_LOGGER_ENDPOINT=<span class="string">http://vbilling.vbilling-system.svc:8080/api/v1/records?format=litellm</span>
-GENERIC_LOGGER_HEADERS=<span class="string">"Authorization=Bearer &lt;ingest token&gt;"</span></code></div>
-      <p>The endpoint assumes LiteLLM runs in the control plane cluster and vBilling in <code>vbilling-system</code>. A gateway elsewhere needs a route to vBilling's Service. LiteLLM can also take the endpoint and headers from <code>callback_settings</code> with <code>callback_type: generic_api</code>; see LiteLLM's <a href="https://docs.litellm.ai/docs/observability/generic_api" target="_blank">Generic API Callback</a> docs.</p>
+  callbacks: [<span class="string">"vbilling"</span>]
+callback_settings:
+  vbilling:
+    callback_type: generic_api
+    endpoint: <span class="string">http://vbilling.vbilling-system.svc:8080/api/v1/records?format=litellm</span>
+    headers:
+      Authorization: <span class="string">os.environ/VBILLING_AUTHORIZATION</span>   <span class="comment"># "Bearer &lt;ingest token&gt;"</span>
+    max_retries: 5      <span class="comment"># retries after a connection error, a timeout or a 5xx</span>
+    retry_delay: 1      <span class="comment"># seconds, doubled on each retry: 1, 2, 4, 8, 16</span></code></div>
+      <p>The endpoint assumes LiteLLM runs in the control plane cluster and vBilling in <code>vbilling-system</code>. A gateway elsewhere needs a route to vBilling's Service. The shorter form, <code>callbacks: ["generic_api"]</code> with <code>GENERIC_LOGGER_ENDPOINT</code> and <code>GENERIC_LOGGER_HEADERS</code> in the environment, works too, but never retries. See LiteLLM's <a href="https://docs.litellm.ai/docs/observability/generic_api" target="_blank">Generic API Callback</a> docs.</p>
       <div class="config-table-wrap">
         <table class="config-table">
           <thead><tr><th>vBilling</th><th>LiteLLM field</th></tr></thead>
           <tbody>
-            <tr><td>Request ID</td><td><code>id</code></td></tr>
-            <tr><td>Time</td><td><code>endTime</code>, else <code>startTime</code></td></tr>
+            <tr><td>Request ID</td><td><code>litellm_call_id</code> and <code>id</code> (the response ID), joined as <code>&lt;litellm_call_id&gt;/&lt;id&gt;</code>, with LiteLLM's <code>_cache_hit&lt;time&gt;</code> suffix cut</td></tr>
+            <tr><td>Time</td><td><code>endTime</code>, else <code>startTime</code>, rounded to the millisecond as LiteLLM's spend logs store it</td></tr>
             <tr><td>Tenant</td><td><code>metadata.user_api_key_team_id</code>, else <code>metadata.user_api_key_org_id</code>, <code>metadata.user_api_key_user_id</code>, <code>end_user</code></td></tr>
             <tr><td><code>inference_input_tokens</code></td><td><code>prompt_tokens</code></td></tr>
             <tr><td><code>inference_output_tokens</code></td><td><code>completion_tokens</code></td></tr>
@@ -480,10 +491,43 @@ GENERIC_LOGGER_HEADERS=<span class="string">"Authorization=Bearer &lt;ingest tok
           </tbody>
         </table>
       </div>
+      <p>Neither ID alone identifies a request. A client can set <code>litellm_call_id</code> with the <code>x-litellm-call-id</code> header, so keying on it would let a tenant make its requests look like retries of one. Response IDs repeat: every cache hit of one entry returns the cached response's ID, and some providers return the same ID for every call.</p>
       <p>Records are billed to the team of the virtual key. LiteLLM generates team IDs unless you pass <code>team_id</code> when you create a team, so either create teams with the tenant ID as their <code>team_id</code>, or list each team ID in the <code>vbilling.vcluster.com/aliases</code> of the tenant's cluster. A LiteLLM that serves one tenant can use a tenant-bound token instead.</p>
+      <p>What LiteLLM v1.108.11 did when the post failed, measured:</p>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead><tr><th>vBilling</th><th><code>GENERIC_LOGGER_ENDPOINT</code></th><th><code>callback_settings</code> with <code>max_retries: 3</code>, <code>retry_delay: 1</code></th></tr></thead>
+          <tbody>
+            <tr><td>Down (connection refused) or answers 5xx</td><td>One attempt, then the batch is dropped and an error logged.</td><td>Four attempts, 1, 2 and 4 seconds apart, then the batch is dropped. A 5-second vBilling restart was bridged on the third attempt.</td></tr>
+            <tr><td>Answers 4xx</td><td>Dropped.</td><td>Dropped, no retry.</td></tr>
+          </tbody>
+        </table>
+      </div>
       <div class="callout callout-warn">
         <div class="callout-icon">!</div>
-        <div>LiteLLM queues records in memory and posts them in batches: by default every 512 records or 5 seconds (<code>DEFAULT_BATCH_SIZE</code>, <code>DEFAULT_FLUSH_INTERVAL_SECONDS</code>). A batch still in the queue when the proxy stops is lost, and LiteLLM's documentation does not say that a failed post is retried. <a href="#cross-checks">Cross-check</a> the gateway against the engine's own counters. Each record also carries the messages and the response, so lower <code>DEFAULT_BATCH_SIZE</code> when prompts are long: vBilling accepts up to 16 MiB per request.</div>
+        <div>LiteLLM queues records in memory and posts them in batches: by default every 512 records or 5 seconds (<code>DEFAULT_BATCH_SIZE</code>, <code>DEFAULT_FLUSH_INTERVAL_SECONDS</code>). A batch dropped after its retries, or still in the queue when the proxy stops, is never sent again. To recover them, <a href="#litellm-pull">pull LiteLLM's spend logs</a>. Each record also carries the messages and the response, so lower <code>DEFAULT_BATCH_SIZE</code> when prompts are long: vBilling accepts up to 16 MiB per request.</div>
+      </div>
+
+      <h3 id="litellm-pull">Pulling LiteLLM's spend logs</h3>
+      <p>LiteLLM also writes every request to its own database, in the <code>LiteLLM_SpendLogs</code> table. vBilling can read those rows back through LiteLLM's <code>GET /spend/logs/v2</code> API and ingest them as <code>litellm</code> records. The push stays the fast path; the pull fills whatever the push lost, such as batches LiteLLM dropped while vBilling was down.</p>
+      <div class="code-block"><code>records:
+  pullLiteLLM:
+    url: <span class="string">http://litellm.litellm.svc:4000</span>
+    existingSecret: litellm-admin   <span class="comment"># key litellm-key: the master key or a proxy admin key</span>
+    interval: 5m
+    lookback: 1h</code></div>
+      <p>Without Helm, set <code>RECORDS_PULL_LITELLM_URL</code> and <code>RECORDS_PULL_LITELLM_KEY</code>. Setting the URL also enables the <code>litellm</code> format. It needs LiteLLM v1.103.0 or later, with a database.</p>
+      <ul>
+        <li><strong>Counted once.</strong> A pulled row gets the same record ID as the pushed record of the same request: the same client, the same tenant value, the same <code>&lt;litellm_call_id&gt;/&lt;id&gt;</code> and a time rounded to the same millisecond. The pull does not store rows that are already in the records ledger, and the aggregator drops any duplicate that slips through.</li>
+        <li><strong>Same identity as the push.</strong> The client is part of every record ID. The puller uses <code>litellm</code>, which is what the push uses unless it sends <code>X-VBilling-Client</code>; if it does, set <code>records.pullLiteLLM.client</code> to the same value. If the push uses a tenant-bound token, set <code>records.pullLiteLLM.tenant</code> to that token's tenant.</li>
+        <li><strong>Late rows are adjustments.</strong> A pulled request whose window has already settled is billed as a <a href="#windows">late adjustment</a> to its own window, never merged into the committed event.</li>
+        <li><strong>Outages are covered.</strong> Each pull starts <code>lookback</code> before the end of the last successful pull, which vBilling keeps in <code>DATA_DIR/litellm-pull.json</code>. The first pull after an outage reads the whole outage, up to the records retention. Pulls start once vBilling has discovered its tenants, so aliases apply.</li>
+        <li><strong>Only successful requests</strong> are read, as with the push.</li>
+      </ul>
+      <p>The pull reports as the source <code>records/litellm/pull</code> in <a href="#source-health">source health</a>, with the rows read by the last pull as <code>series</code>. On <code>/metrics</code>: <code>vbilling_records_pull_runs_total</code>, <code>vbilling_records_pulled_rows_total</code>, <code>vbilling_records_pulled_new_total</code> (requests the push had missed), <code>vbilling_records_pull_failures_total</code> and <code>vbilling_records_pull_last_success_timestamp_seconds</code>, each with a <code>client</code> label.</p>
+      <div class="callout callout-warn">
+        <div class="callout-icon">!</div>
+        <div>The pull recovers only what LiteLLM stored. LiteLLM writes spend logs in batches too, so requests it had not written when it stopped are in neither copy. LiteLLM keeps one row per response ID: in a test where a mock model returned one ID for 20 requests, its spend logs kept one row, while the push billed all 20. Rows without <code>litellm_call_id</code>, from LiteLLM releases before v1.103.0, are not ingested and turn the source <code>failing</code>, because they cannot be matched to pushed requests.</div>
       </div>
 
       <h3 id="custom-mapping">Any other gateway</h3>
@@ -513,7 +557,7 @@ GENERIC_LOGGER_HEADERS=<span class="string">"Authorization=Bearer &lt;ingest tok
           </tbody>
         </table>
       </div>
-      <p>A path is dotted, or a list of paths of which the first non-empty one wins. The built-in <code>litellm</code> format declares <code>inference_input_tokens</code> and <code>inference_output_tokens</code> (unit tokens, priced by <code>sku</code>) on every install, so any format can use them, and billing adapters create them at startup. Declare other metrics in a format's <code>metrics</code> or in <a href="metrics.html#custom-metrics"><code>metering.customMetrics</code></a>, which wins. A format named <code>litellm</code> replaces the built-in one; <code>vbilling</code> cannot be redefined.</p>
+      <p>A path is dotted, or a list of paths of which the first non-empty one wins. When it is enabled, the built-in <code>litellm</code> format declares <code>inference_input_tokens</code> and <code>inference_output_tokens</code> (unit tokens, priced by <code>sku</code>), so any format can use them, and billing adapters create them at startup. Declare other metrics in a format's <code>metrics</code> or in <a href="metrics.html#custom-metrics"><code>metering.customMetrics</code></a>, which wins. A format named <code>litellm</code> replaces the built-in one; <code>vbilling</code> cannot be redefined.</p>
 
       <!-- Prometheus -->
       <h2 id="prometheus">Prometheus counters and queries</h2>
@@ -632,6 +676,7 @@ crossChecks:
             <tr><td>A Prometheus metric, per cluster</td><td><code>prometheus/&lt;metric&gt;/&lt;cluster&gt;</code></td></tr>
             <tr><td>A cluster's own API</td><td><code>tenant-api/&lt;cluster&gt;</code></td></tr>
             <tr><td>A records client</td><td><code>records/&lt;client&gt;</code>, and <code>records/&lt;client&gt;/unknown-tenants</code></td></tr>
+            <tr><td>The LiteLLM spend log pull</td><td><code>records/&lt;client&gt;/pull</code></td></tr>
             <tr><td>The records aggregator</td><td><code>records/aggregator</code></td></tr>
             <tr><td>A cross-check, per tenant</td><td><code>crosscheck/&lt;primary&gt;~&lt;secondary&gt;/&lt;tenant&gt;</code></td></tr>
           </tbody>
@@ -686,6 +731,9 @@ crossChecks:
             <tr><td><code>RECORDS_ALLOW_UNKEYED</code></td><td><code>records.allowUnkeyed</code></td><td>false</td></tr>
             <tr><td><code>RECORDS_UNKNOWN_TENANTS</code></td><td><code>records.unknownTenants</code></td><td>accept</td></tr>
             <tr><td><code>RECORDS_ARCHIVE</code></td><td><code>records.archive</code></td><td>false</td></tr>
+            <tr><td><code>RECORDS_PULL_LITELLM_URL</code>, <code>RECORDS_PULL_LITELLM_KEY</code></td><td><code>records.pullLiteLLM.url</code>, <code>records.pullLiteLLM.key</code> or <code>existingSecret</code></td><td>(none)</td></tr>
+            <tr><td><code>RECORDS_PULL_LITELLM_CLIENT</code>, <code>RECORDS_PULL_LITELLM_TENANT</code></td><td><code>records.pullLiteLLM.client</code>, <code>records.pullLiteLLM.tenant</code></td><td>litellm, (none)</td></tr>
+            <tr><td><code>RECORDS_PULL_LITELLM_INTERVAL</code>, <code>RECORDS_PULL_LITELLM_LOOKBACK</code></td><td><code>records.pullLiteLLM.interval</code>, <code>records.pullLiteLLM.lookback</code></td><td>5m, 1h</td></tr>
             <tr><td><code>INGEST_TOKEN</code>, <code>INGEST_TOKENS</code></td><td><code>api.ingestToken</code>, <code>api.tenantIngestTokens</code></td><td>(none)</td></tr>
             <tr><td><code>PROMETHEUS_METRICS_FILE</code></td><td><code>prometheus.metrics</code></td><td>(none)</td></tr>
             <tr><td><code>PROMETHEUS_SOURCE_LABEL</code></td><td><code>prometheus.sourceLabel</code></td><td>vcluster</td></tr>

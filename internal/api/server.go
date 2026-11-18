@@ -28,7 +28,9 @@ import (
 	"github.com/vclusterlabs-experiments/vbilling/internal/discovery"
 	"github.com/vclusterlabs-experiments/vbilling/internal/enforcement"
 	"github.com/vclusterlabs-experiments/vbilling/internal/health"
+	"github.com/vclusterlabs-experiments/vbilling/internal/pause"
 	"github.com/vclusterlabs-experiments/vbilling/internal/pipeline"
+	"github.com/vclusterlabs-experiments/vbilling/internal/pricing"
 	"github.com/vclusterlabs-experiments/vbilling/internal/records"
 	"github.com/vclusterlabs-experiments/vbilling/internal/spool"
 	"github.com/vclusterlabs-experiments/vbilling/internal/telemetry"
@@ -59,7 +61,10 @@ type Server struct {
 
 	health  *health.Registry  // nil: no source health
 	records *records.Ingester // nil: POST /api/v1/records disabled
+	pauses  *pause.Store      // nil: pause spans not exposed
+	started time.Time         // records wait for the first discovery after this
 	checks  []crosscheck.Check
+	pricing *pricing.Service // nil: PRICE_CHECK=off
 }
 
 // WithCrossChecks enables GET /api/v1/crosscheck.
@@ -68,12 +73,18 @@ func (s *Server) WithCrossChecks(c []crosscheck.Check) *Server { s.checks = c; r
 // WithHealth exposes source health in the status API and /api/v1/sources.
 func (s *Server) WithHealth(h *health.Registry) *Server { s.health = h; return s }
 
+// WithPauses exposes when clusters were paused in GET /api/v1/billing-states.
+func (s *Server) WithPauses(p *pause.Store) *Server { s.pauses = p; return s }
+
 // WithRecords enables POST /api/v1/records.
 func (s *Server) WithRecords(in *records.Ingester) *Server { s.records = in; return s }
 
+// WithPricing enables GET /api/v1/pricing and POST /api/v1/pricing/check.
+func (s *Server) WithPricing(p *pricing.Service) *Server { s.pricing = p; return s }
+
 func New(cfg *config.Config, sp *spool.Spool, disp *pipeline.Dispatcher, tenants *pipeline.TenantRegistry,
 	ctrl Controller, enf *enforcement.Enforcer, tel *telemetry.Registry, version string) *Server {
-	return &Server{cfg: cfg, spool: sp, disp: disp, tenants: tenants, ctrl: ctrl, enf: enf, tel: tel, version: version, now: time.Now}
+	return &Server{cfg: cfg, spool: sp, disp: disp, tenants: tenants, ctrl: ctrl, enf: enf, tel: tel, version: version, now: time.Now, started: time.Now()}
 }
 
 // Handler returns the routed handler.
@@ -92,6 +103,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/records", s.ingestRecords)
 	mux.HandleFunc("GET /api/v1/sources", s.auth(s.sources))
 	mux.HandleFunc("GET /api/v1/crosscheck", s.auth(s.crossCheck))
+	mux.HandleFunc("GET /api/v1/pricing", s.auth(s.pricingReport))
+	mux.HandleFunc("POST /api/v1/pricing/check", s.auth(s.pricingReport))
 	mux.HandleFunc("GET /api/v1/reconcile", s.auth(s.reconcile))
 	mux.HandleFunc("GET /api/v1/ledger/verify", s.auth(s.verify))
 	mux.HandleFunc("GET /api/v1/destinations", s.auth(s.listDestinations))
@@ -289,6 +302,10 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	if s.disp != nil {
 		out["destinations"] = s.disp.Statuses()
 	}
+	if s.pricing != nil {
+		rep := s.pricing.Report()
+		out["pricing"] = map[string]any{"mode": rep.Mode, "unpriced": rep.Unpriced, "held_events": rep.HeldEvents}
+	}
 	if s.health != nil {
 		problems := s.health.Problems()
 		out["sources"] = s.health.Summary()
@@ -367,6 +384,48 @@ func (s *Server) crossCheck(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"checks": s.checks, "ok": ok, "rows": rows})
 }
 
+// pricingReport returns price coverage per destination: whether each billing
+// platform prices every billable metric and every recent series (metric,
+// SKU, plan). POST runs the checks first. Filters: destination, status.
+func (s *Server) pricingReport(w http.ResponseWriter, r *http.Request) {
+	if s.pricing == nil {
+		writeJSON(w, http.StatusOK, pricing.Report{Mode: pricing.ModeOff, OK: true, Destinations: []pricing.DestReport{}})
+		return
+	}
+	var rep pricing.Report
+	if r.Method == http.MethodPost {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+		defer cancel()
+		rep = s.pricing.CheckNow(ctx)
+	} else {
+		rep = s.pricing.Report()
+	}
+	q := r.URL.Query()
+	if dest, status := q.Get("destination"), q.Get("status"); dest != "" || status != "" {
+		kept := rep.Destinations[:0]
+		for _, d := range rep.Destinations {
+			if dest != "" && d.Destination != dest {
+				continue
+			}
+			if status != "" {
+				rows := d.Series[:0]
+				for _, row := range d.Series {
+					if row.Status == status {
+						rows = append(rows, row)
+					}
+				}
+				d.Series = rows
+			}
+			kept = append(kept, d)
+		}
+		rep.Destinations = kept
+	}
+	if rep.Destinations == nil {
+		rep.Destinations = []pricing.DestReport{}
+	}
+	writeJSON(w, http.StatusOK, rep)
+}
+
 // ingestAuth checks an ingest token. A token from INGEST_TOKENS is bound to
 // a tenant: everything sent with it is billed to that tenant.
 func (s *Server) ingestAuth(w http.ResponseWriter, r *http.Request) (boundTenant string, ok bool) {
@@ -392,6 +451,9 @@ func (s *Server) ingestAuth(w http.ResponseWriter, r *http.Request) (boundTenant
 // are on disk; any non-2xx answer means nothing was stored and the emitter
 // should retry. ?format= (or X-VBilling-Format) picks the payload format:
 // vbilling (default), litellm, or a name from RECORDS_MAPPINGS_FILE.
+// recordsStartupGrace bounds how long records wait for the first discovery.
+const recordsStartupGrace = 2 * time.Minute
+
 func (s *Server) ingestRecords(w http.ResponseWriter, r *http.Request) {
 	if s.records == nil {
 		writeErr(w, http.StatusNotFound, "records ingest is not enabled")
@@ -416,6 +478,15 @@ func (s *Server) ingestRecords(w http.ResponseWriter, r *http.Request) {
 	client := r.Header.Get("X-VBilling-Client")
 	if client == "" {
 		client = format
+	}
+	// Until the first discovery, gateway identities cannot be mapped to
+	// tenants (vbilling.vcluster.com/aliases): ask the emitter to retry
+	// rather than bill a raw identity. Tokens bound to a tenant need no
+	// mapping. Never wait for longer than a short startup grace.
+	if bound == "" && s.ctrl != nil && !s.ctrl.Ready() && time.Since(s.started) < recordsStartupGrace {
+		w.Header().Set("Retry-After", "5")
+		writeErr(w, http.StatusServiceUnavailable, "vBilling is starting and has not discovered tenants yet; retry in a few seconds")
+		return
 	}
 	res, err := s.records.Ingest(format, client, bound, body)
 	var unknown records.ErrUnknownFormat
@@ -1014,7 +1085,14 @@ func (s *Server) billingStates(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"enforcement": "disabled", "states": []any{}})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"mode": s.cfg.EnforcementMode, "states": s.enf.States()})
+	out := map[string]any{"mode": s.cfg.EnforcementMode, "states": s.enf.States(), "pauses": s.enf.Pauses()}
+	if s.pauses != nil {
+		// When each cluster was paused (to the second): capacity is not
+		// billed for these spans, except what PAUSE_KEEP_BILLING keeps.
+		out["pause_spans"] = s.pauses.All()
+		out["pause_keep_billing"] = s.cfg.PauseKeepBilling
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) setBillingState(w http.ResponseWriter, r *http.Request) {

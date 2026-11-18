@@ -16,7 +16,12 @@
 // "billing" hold; operators can set others ("support", "abuse", ...) through
 // the API, and a payment never clears them.
 //
-// Running workloads are never deleted: suspension stops growth, not service.
+// Suspension stops growth, not service: running workloads keep running.
+// Pausing (state "paused", enforce mode) stops service: each of the tenant's
+// clusters is paused the way `vcluster pause` does it, after its own nodes
+// are drained, and billing for capacity stops (see package pause). The
+// tenant cannot restart it: its control plane is stopped, and vBilling
+// pauses it again if anything else resumes it. Clearing the hold resumes it.
 package enforcement
 
 import (
@@ -42,6 +47,7 @@ import (
 	"github.com/vclusterlabs-experiments/vbilling/internal/destinations/stripe"
 	"github.com/vclusterlabs-experiments/vbilling/internal/discovery"
 	"github.com/vclusterlabs-experiments/vbilling/internal/kv"
+	"github.com/vclusterlabs-experiments/vbilling/internal/pause"
 	"github.com/vclusterlabs-experiments/vbilling/internal/telemetry"
 )
 
@@ -53,9 +59,15 @@ const (
 	Warning    State = "warning"    // budget or credit alert
 	Delinquent State = "delinquent" // payment failed, retries pending
 	Suspended  State = "suspended"  // unpaid, canceled, or a rule says so
+	Paused     State = "paused"     // workloads stopped and capacity not billed until the hold clears
 )
 
-func (s State) valid() bool { return s == Active || s == Warning || s == Delinquent || s == Suspended }
+func (s State) valid() bool {
+	return s == Active || s == Warning || s == Delinquent || s == Suspended || s == Paused
+}
+
+// blocks reports whether the state blocks new workloads.
+func (s State) blocks() bool { return s == Suspended || s == Paused }
 
 // Labels and annotations written to tenant clusters.
 const (
@@ -105,7 +117,7 @@ type Hold struct {
 // HoldBilling is the hold billing webhooks set and clear.
 const HoldBilling = "billing"
 
-var severity = map[State]int{Active: 0, Warning: 1, Delinquent: 2, Suspended: 3}
+var severity = map[State]int{Active: 0, Warning: 1, Delinquent: 2, Suspended: 3, Paused: 4}
 
 // effective folds holds into a state: the most severe wins.
 func effective(tenant string, holds map[string]Hold) TenantState {
@@ -143,6 +155,17 @@ type Options struct {
 	// cluster. The credentials need create, update and delete on
 	// validatingadmissionpolicies and validatingadmissionpolicybindings.
 	TenantClient func(ctx context.Context, cl discovery.TenantCluster) (kubernetes.Interface, error)
+
+	// Pausing (state paused, enforce mode).
+	Pauses *pause.Store // pause spans, so capacity is not billed while paused
+	// Freeze stores a cluster's inventory right before its control plane
+	// stops, to meter its volumes from while paused.
+	Freeze func(ctx context.Context, cl discovery.TenantCluster) error
+	// OnPause tells metering a cluster was paused or resumed.
+	OnPause func(id string, paused bool)
+	// DrainTimeout bounds the wait for workloads on a cluster's own nodes
+	// to stop before its control plane is stopped (default 2m).
+	DrainTimeout time.Duration
 }
 
 // Enforcer is safe for concurrent use.
@@ -153,6 +176,12 @@ type Enforcer struct {
 
 	mu     sync.Mutex
 	states map[string]TenantState
+
+	bg                         sync.WaitGroup // background pauses and resumes
+	resumeTimeout, resumeEvery time.Duration
+	wmu                        sync.Mutex
+	workers                    map[string]*worker
+	status                     map[string]PauseStatus
 }
 
 func New(kube kubernetes.Interface, opts Options) *Enforcer {
@@ -165,7 +194,9 @@ func New(kube kubernetes.Interface, opts Options) *Enforcer {
 	if opts.Telemetry == nil {
 		opts.Telemetry = telemetry.New()
 	}
-	e := &Enforcer{kube: kube, opts: opts, seen: destinations.NewSentCache(10_000), states: map[string]TenantState{}}
+	e := &Enforcer{kube: kube, opts: opts, seen: destinations.NewSentCache(10_000), states: map[string]TenantState{},
+		resumeTimeout: 10 * time.Minute, resumeEvery: 5 * time.Second,
+		workers: map[string]*worker{}, status: map[string]PauseStatus{}}
 	for tenant, raw := range opts.State.WithPrefix("state/") {
 		var ts TenantState
 		if json.Unmarshal([]byte(raw), &ts) == nil {
@@ -189,7 +220,7 @@ func ParseRules(spec string) (map[string]State, error) {
 		}
 		k, v, ok := strings.Cut(item, "=")
 		if !ok || !State(v).valid() {
-			return nil, fmt.Errorf("enforcement rule %q must be event.type=active|warning|delinquent|suspended", item)
+			return nil, fmt.Errorf("enforcement rule %q must be event.type=active|warning|delinquent|suspended|paused", item)
 		}
 		out[strings.TrimSpace(k)] = State(strings.TrimSpace(v))
 	}
@@ -367,7 +398,7 @@ func (e *Enforcer) SetHold(ctx context.Context, tenant, hold string, state State
 	if prev.State != state {
 		log.Printf("[enforcement] tenant %s: %s -> %s (%s via %s %s, mode=%s)", tenant, orActive(prev.State), state, ts.Reason, source, eventType, e.opts.Mode)
 	}
-	for _, s := range []State{Active, Warning, Delinquent, Suspended} {
+	for _, s := range []State{Active, Warning, Delinquent, Suspended, Paused} {
 		v := 0.0
 		if s == state {
 			v = 1
@@ -379,13 +410,29 @@ func (e *Enforcer) SetHold(ctx context.Context, tenant, hold string, state State
 	}
 	var errs []error
 	for _, cl := range e.opts.Clusters(tenant) {
-		if err := e.reflect(ctx, cl, ts, true); err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", cl.ExternalID(), err))
-		}
-		if e.opts.Mode == "enforce" && e.opts.TenantClient != nil {
-			if err := e.reflectInside(ctx, cl, ts); err != nil {
-				errs = append(errs, fmt.Errorf("%s (inside the cluster): %w", cl.ExternalID(), err))
-			}
+		errs = append(errs, e.converge(ctx, tenant, cl, ts, true))
+	}
+	return errors.Join(errs...)
+}
+
+// converge makes one cluster match its tenant's state: annotations and
+// labels on the control plane cluster, then, in enforce mode, the policy
+// inside the cluster, and pause or resume.
+func (e *Enforcer) converge(ctx context.Context, tenant string, cl discovery.TenantCluster, ts TenantState, withEvent bool) error {
+	var errs []error
+	if err := e.reflect(ctx, cl, ts, withEvent); err != nil {
+		errs = append(errs, fmt.Errorf("%s: %w", cl.ExternalID(), err))
+	}
+	if e.opts.Mode != "enforce" {
+		return errors.Join(errs...)
+	}
+	if e.needsWorker(ctx, cl, ts) {
+		e.kick(tenant, cl) // pausing or resuming, in the background
+		return errors.Join(errs...)
+	}
+	if e.opts.TenantClient != nil && !cl.Paused {
+		if err := e.reflectInside(ctx, cl, ts); err != nil {
+			errs = append(errs, fmt.Errorf("%s (inside the cluster): %w", cl.ExternalID(), err))
 		}
 	}
 	return errors.Join(errs...)
@@ -400,13 +447,20 @@ const PolicyName = "vbilling-suspended"
 const LabelExempt = "vbilling.vcluster.com/enforcement-exempt"
 
 func suspendedMessage(ts TenantState) string {
+	if ts.State == Paused {
+		if ts.Hold != "" && ts.Hold != HoldBilling {
+			return "This tenant is paused (" + ts.Reason + "). Workloads stay stopped until the hold is lifted."
+		}
+		return "This tenant is paused for billing (" + ts.Reason + "). Workloads stay stopped until the account is current."
+	}
 	if ts.Hold != "" && ts.Hold != HoldBilling {
 		return "This tenant is suspended (" + ts.Reason + "). New workloads are blocked until the hold is lifted; running workloads are not affected."
 	}
 	return "This tenant is suspended for billing (" + ts.Reason + "). New workloads are blocked until the account is current; running workloads are not affected."
 }
 
-// reflectInside installs or removes the in-cluster admission policy.
+// reflectInside installs or removes the in-cluster admission policy, and
+// lifts the pause taint from the cluster's own nodes when it is not paused.
 func (e *Enforcer) reflectInside(ctx context.Context, cl discovery.TenantCluster, ts TenantState) error {
 	kube, err := e.opts.TenantClient(ctx, cl)
 	if err != nil {
@@ -415,8 +469,20 @@ func (e *Enforcer) reflectInside(ctx context.Context, cl discovery.TenantCluster
 	if kube == nil {
 		return nil
 	}
+	if err := e.policyInside(ctx, kube, ts); err != nil {
+		return err
+	}
+	if ts.State != Paused {
+		return e.untaint(ctx, kube)
+	}
+	return nil
+}
+
+// policyInside installs the admission policy inside a cluster while its
+// tenant's state blocks new workloads, and removes it otherwise.
+func (e *Enforcer) policyInside(ctx context.Context, kube kubernetes.Interface, ts TenantState) error {
 	api := kube.AdmissionregistrationV1()
-	if ts.State != Suspended {
+	if !ts.State.blocks() {
 		for _, del := range []func() error{
 			func() error {
 				return api.ValidatingAdmissionPolicyBindings().Delete(ctx, PolicyName, metav1.DeleteOptions{})
@@ -496,13 +562,8 @@ func (e *Enforcer) Resync(ctx context.Context) {
 	}
 	for _, ts := range e.States() {
 		for _, cl := range e.opts.Clusters(ts.Tenant) {
-			if err := e.reflect(ctx, cl, ts, false); err != nil {
-				log.Printf("[enforcement] resync %s: %v", cl.ExternalID(), err)
-			}
-			if e.opts.Mode == "enforce" && e.opts.TenantClient != nil {
-				if err := e.reflectInside(ctx, cl, ts); err != nil {
-					log.Printf("[enforcement] resync %s (inside the cluster): %v", cl.ExternalID(), err)
-				}
+			if err := e.converge(ctx, ts.Tenant, cl, ts, false); err != nil {
+				log.Printf("[enforcement] resync: %v", err)
 			}
 		}
 	}
@@ -510,6 +571,9 @@ func (e *Enforcer) Resync(ctx context.Context) {
 
 // reflect writes the state onto one tenant cluster.
 func (e *Enforcer) reflect(ctx context.Context, cl discovery.TenantCluster, ts TenantState, withEvent bool) error {
+	if cl.External {
+		return nil // nothing of it lives in the control plane cluster: only the in-cluster policy applies
+	}
 	ann := map[string]any{AnnotationState: string(ts.State), AnnotationWhy: ts.Reason, AnnotationAt: ts.Since.Format(time.RFC3339)}
 	patch, _ := json.Marshal(map[string]any{"metadata": map[string]any{"annotations": ann}})
 	var err error
@@ -524,7 +588,7 @@ func (e *Enforcer) reflect(ctx context.Context, cl discovery.TenantCluster, ts T
 	}
 
 	labels := map[string]any{LabelState: string(ts.State)}
-	if e.opts.Mode == "enforce" && ts.State == Suspended {
+	if e.opts.Mode == "enforce" && ts.State.blocks() {
 		labels[LabelSuspended] = "true"
 	} else {
 		labels[LabelSuspended] = nil // merge patch: remove

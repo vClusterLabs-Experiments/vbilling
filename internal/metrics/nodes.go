@@ -212,6 +212,18 @@ func (n *nodeInfo) markDown(since time.Time) {
 	}
 }
 
+// downFrom is when the node's downtime began within [start, end): end when
+// it is not down.
+func (n *nodeInfo) downFrom(start, end time.Time) time.Time {
+	if n == nil || !n.down {
+		return end
+	}
+	if !n.downSince.IsZero() && n.downSince.After(start) {
+		return n.downSince
+	}
+	return start
+}
+
 // split divides the part of [start, end) inside [ws, we) into billable and
 // downtime durations for this node.
 func (n *nodeInfo) split(start, end, ws, we time.Time) (billable, down time.Duration) {

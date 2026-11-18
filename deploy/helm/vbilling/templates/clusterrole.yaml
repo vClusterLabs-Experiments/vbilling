@@ -51,4 +51,10 @@ rules:
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create"]
+  {{- if eq .Values.enforcement.mode "enforce" }}
+  # Pausing a cluster deletes the pods it synced here, as `vcluster pause` does.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["delete"]
+  {{- end }}
   {{- end }}

@@ -34,6 +34,16 @@ type Options struct {
 	// Tenants, when set, is used to create each tenant in a destination
 	// before its first event reaches it.
 	Tenants *TenantRegistry
+	// Held, when set, parks events the Gate holds (PRICE_CHECK=hold) and
+	// releases them in order once the Gate allows. Without a Gate, anything
+	// left held (from an earlier run in hold mode) is released at once.
+	Held *HeldStore
+	Gate Gate
+	// MaxHold bounds how long usage is held: once a held event's window
+	// started longer ago than this, it is released unpriced (with every
+	// older held event of its series), so billing platforms with a
+	// backdating limit can still take it. Zero holds without a limit.
+	MaxHold time.Duration
 }
 
 func (o *Options) defaults() {
@@ -66,6 +76,12 @@ type Status struct {
 	LastErrorAt         time.Time `json:"last_error_at,omitempty"`
 	ConsecutiveFailures int       `json:"consecutive_failures"`
 	OldestPending       time.Time `json:"oldest_pending,omitempty"`
+	// Held events wait for a price (PRICE_CHECK=hold); Released counts the
+	// held events delivered since the start.
+	Held     uint64 `json:"held_events"`
+	Released uint64 `json:"released_events,omitempty"`
+	// ReleasedUnpriced counts held events released after MaxHold without a price.
+	ReleasedUnpriced uint64 `json:"released_unpriced_events,omitempty"`
 }
 
 // Dispatcher fans the ledger out to destinations.
@@ -75,8 +91,9 @@ type Dispatcher struct {
 	opts  Options
 	tel   *telemetry.Registry
 
-	mu     sync.Mutex
-	status map[string]*Status
+	mu      sync.Mutex
+	status  map[string]*Status
+	shipped shippedLog
 }
 
 // New builds a dispatcher. tel may be nil.
@@ -152,10 +169,35 @@ func (d *Dispatcher) loop(ctx context.Context, dest destinations.Destination) {
 		backoff = 0
 	}
 	d.update(name, func(s *Status) { s.Ready = true })
+	if d.opts.Held != nil {
+		d.publishHeld(name)
+	}
 
 	for ctx.Err() == nil {
-		cursor = d.spool.Cursor(name) // re-read so an operator rewind takes effect
-		changed := d.spool.Changed()  // taken before Read so no append is missed
+		if d.opts.Held != nil {
+			// Held events whose series is priced now go first, in order.
+			if err := d.release(ctx, dest); err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				log.Printf("[pipeline] %s: %v (will retry)", name, err)
+				d.tel.Add("vbilling_delivery_failures_total", "Failed delivery attempts.", labels, 1)
+				d.update(name, func(s *Status) {
+					s.LastError = err.Error()
+					s.LastErrorAt = time.Now().UTC()
+					s.ConsecutiveFailures++
+				})
+				backoff = d.sleepBackoff(ctx, backoff)
+				continue
+			}
+		}
+		// Re-read so an operator rewind takes effect.
+		cur := d.spool.Cursor(name)
+		if cur < cursor {
+			d.shipped.reset(name) // a replay sends released events again too
+		}
+		cursor = cur
+		changed := d.spool.Changed() // taken before Read so no append is missed
 		recs, err := d.spool.Read(cursor, d.opts.BatchSize)
 		if err != nil {
 			log.Printf("[pipeline] %s: read spool: %v", name, err)
@@ -168,12 +210,14 @@ func (d *Dispatcher) loop(ctx context.Context, dest destinations.Destination) {
 			case <-ctx.Done():
 				return
 			case <-changed:
+			case <-d.gateChanged(name):
 			case <-time.After(d.opts.IdlePoll):
 			}
 			continue
 		}
 
 		var events []usage.Event
+		var seqs []uint64
 		var skipped uint64
 		for _, r := range recs {
 			if r.Type != spool.TypeEvent || r.Event == nil {
@@ -184,6 +228,18 @@ func (d *Dispatcher) loop(ctx context.Context, dest destinations.Destination) {
 				continue
 			}
 			events = append(events, *r.Event)
+			seqs = append(seqs, r.Seq)
+		}
+		if len(events) > 0 && d.opts.Held != nil {
+			if events, err = d.park(ctx, dest, events, seqs); err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				log.Printf("[pipeline] %s: %v (will retry)", name, err)
+				d.update(name, func(s *Status) { s.LastError, s.LastErrorAt = err.Error(), time.Now().UTC() })
+				backoff = d.sleepBackoff(ctx, backoff)
+				continue
+			}
 		}
 		if len(events) > 0 {
 			oldest := events[0].RecordedAt
@@ -242,17 +298,25 @@ func (d *Dispatcher) ensureTenants(ctx context.Context, dest destinations.Destin
 	if d.opts.Tenants == nil {
 		return nil
 	}
-	seen := map[string]bool{}
+	// Each tenant's earliest window in the batch: a billing period that starts
+	// when the customer is subscribed must start early enough to count it.
+	first := map[string]time.Time{}
+	var order []string
 	for _, e := range events {
-		if seen[e.Tenant] {
-			continue
+		at, seen := first[e.Tenant]
+		if !seen {
+			order = append(order, e.Tenant)
 		}
-		seen[e.Tenant] = true
-		t, _ := d.opts.Tenants.Get(e.Tenant)
+		if !seen || e.WindowStart.Before(at) {
+			first[e.Tenant] = e.WindowStart
+		}
+	}
+	for _, id := range order {
+		t, _ := d.opts.Tenants.Get(id)
 		if !d.opts.Tenants.NeedsEnsure(dest.Name(), t) {
 			continue
 		}
-		if err := dest.EnsureTenant(ctx, t); err != nil {
+		if err := dest.EnsureTenant(destinations.WithUsageStart(ctx, first[id]), t); err != nil {
 			if destinations.IsPermanent(err) {
 				log.Printf("[pipeline] %s: tenant %s rejected: %v", dest.Name(), t.ID, err)
 				continue

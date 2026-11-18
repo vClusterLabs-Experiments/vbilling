@@ -189,6 +189,7 @@ func (a *Adapter) addSKUFilters(ctx context.Context, planCode string, bm *Billab
 	}
 
 	var added []string
+	inherited := map[string]string{} // sku -> amount copied from the charge
 	for _, sku := range skus {
 		if coversSKU(charge.Filters, sku) {
 			continue
@@ -196,6 +197,9 @@ func (a *Adapter) addSKUFilters(ctx context.Context, planCode string, bm *Billab
 		props, err := a.filterProperties(bm.Code, sku, charge.Properties)
 		if err != nil {
 			return fmt.Errorf("plan %s, charge for %s: %w", planCode, bm.Code, err)
+		}
+		if _, carded := a.priceCard.skuAmount(bm.Code, sku); !carded {
+			inherited[sku], _ = amountOf(props)
 		}
 		name, _ := json.Marshal(bm.Name + " - " + sku)
 		charge.Filters = append(charge.Filters, ChargeFilter{InvoiceDisplayName: name, Properties: props, Values: map[string][]string{"sku": {sku}}})
@@ -206,6 +210,13 @@ func (a *Adapter) addSKUFilters(ctx context.Context, planCode string, bm *Billab
 	}
 	if _, err := a.client.UpdatePlan(ctx, plan); err != nil {
 		return err
+	}
+	// Remember which filters only copy the charge's price: the price check
+	// treats them as the charge's default price, not as a price for the SKU.
+	for sku, amount := range inherited {
+		if err := a.state.Set(inheritKey(planCode, bm.Code, sku), amount); err != nil {
+			log.Printf("[lago] save state: %v", err)
+		}
 	}
 	log.Printf("[lago] plan %s: added %s charge filters for sku %s", planCode, bm.Code, strings.Join(added, ", "))
 	return nil

@@ -197,6 +197,19 @@ type Price struct {
 		UsageType string `json:"usage_type"`
 		Meter     string `json:"meter"`
 	} `json:"recurring"`
+	// Amounts, read by the price coverage check (pricing.go).
+	BillingScheme     string      `json:"billing_scheme,omitempty"` // per_unit | tiered
+	UnitAmount        *int64      `json:"unit_amount,omitempty"`
+	UnitAmountDecimal *string     `json:"unit_amount_decimal,omitempty"`
+	Tiers             []PriceTier `json:"tiers,omitempty"` // only with expand[]=data.tiers
+}
+
+// PriceTier is one tier of a tiered price.
+type PriceTier struct {
+	UnitAmount        *int64  `json:"unit_amount,omitempty"`
+	UnitAmountDecimal *string `json:"unit_amount_decimal,omitempty"`
+	FlatAmount        *int64  `json:"flat_amount,omitempty"`
+	FlatAmountDecimal *string `json:"flat_amount_decimal,omitempty"`
 }
 
 type Subscription struct {

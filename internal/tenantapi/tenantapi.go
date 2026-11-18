@@ -9,6 +9,10 @@
 //     TENANT_KUBECONFIG_SECRET (default vbilling-kubeconfig) in their
 //     namespace. vCluster writes it through exportKubeConfig.additionalSecrets
 //     with a read-only service account, so vBilling never holds admin access;
+//   - with TENANT_SOURCE=platform, clusters bound to a vCluster Platform
+//     instance are reached through the Platform proxy with the Platform
+//     access key, the way `vcluster platform connect vcluster` does, when
+//     no dedicated Secret exists (the Secret stays an override);
 //   - with TENANT_ADMIN_FALLBACK=true, the tenant cluster's admin kubeconfig
 //     (Secret vc-<name>) is used when no dedicated Secret exists.
 //
@@ -21,6 +25,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -94,10 +99,17 @@ func (e External) Cluster() discovery.TenantCluster {
 		Project: e.Project, DisplayName: e.DisplayName, Annotations: ann}
 }
 
+// PlatformRoute reaches clusters bound to vCluster Platform through its
+// proxy. version changes when the route or the credentials change.
+type PlatformRoute interface {
+	ProxyConfig(cl discovery.TenantCluster) (cfg *rest.Config, version string, err error)
+}
+
 // Options configure the Manager.
 type Options struct {
 	SecretName    string
 	AdminFallback bool
+	Platform      PlatformRoute // nil: no Platform proxy
 	External      []External
 	WatchPods     bool          // watch pod deletions too (usage-mode billing)
 	Retention     time.Duration // how long deleted nodes and pods are kept
@@ -219,33 +231,47 @@ func (m *Manager) restConfig(ctx context.Context, cl discovery.TenantCluster) (*
 		sum := sha256.Sum256(data)
 		return cfg, hex.EncodeToString(sum[:8]), nil
 	}
-	names := []string{m.opts.SecretName}
-	if m.opts.AdminFallback {
-		names = append(names, "vc-"+cl.Name)
+	cfg, version, err := m.fromSecret(ctx, cl, m.opts.SecretName)
+	if !errors.Is(err, metrics.ErrNoTenantAPI) {
+		return cfg, version, err // the dedicated Secret overrides every other route
 	}
-	for _, name := range names {
-		sec, err := m.host.CoreV1().Secrets(cl.Namespace).Get(ctx, name, metav1.GetOptions{})
-		if kerrors.IsNotFound(err) || kerrors.IsForbidden(err) {
-			continue
-		}
+	if m.opts.Platform != nil && cl.Platform != nil {
+		cfg, version, err := m.opts.Platform.ProxyConfig(cl)
 		if err != nil {
-			return nil, "", fmt.Errorf("read secret %s/%s: %w", cl.Namespace, name, err)
-		}
-		data := firstKey(sec.Data, "config", "kubeconfig", "value")
-		if data == nil {
-			return nil, "", fmt.Errorf("secret %s/%s has no kubeconfig (keys config, kubeconfig or value)", cl.Namespace, name)
-		}
-		cfg, err := clientcmd.RESTConfigFromKubeConfig(data)
-		if err != nil {
-			return nil, "", fmt.Errorf("parse kubeconfig in secret %s/%s: %w", cl.Namespace, name, err)
-		}
-		if host, serverName, ok := inCluster(cfg.Host, cl.Name, cl.Namespace); ok {
-			cfg.Host, cfg.TLSClientConfig.ServerName = host, serverName
+			return nil, "", err
 		}
 		cfg.Timeout = m.opts.Timeout
-		return cfg, name + "@" + sec.ResourceVersion, nil
+		return cfg, version, nil
+	}
+	if m.opts.AdminFallback {
+		return m.fromSecret(ctx, cl, "vc-"+cl.Name)
 	}
 	return nil, "", metrics.ErrNoTenantAPI
+}
+
+// fromSecret reads a kubeconfig Secret in the cluster's namespace, or
+// returns metrics.ErrNoTenantAPI when it does not exist or is not readable.
+func (m *Manager) fromSecret(ctx context.Context, cl discovery.TenantCluster, name string) (*rest.Config, string, error) {
+	sec, err := m.host.CoreV1().Secrets(cl.Namespace).Get(ctx, name, metav1.GetOptions{})
+	if kerrors.IsNotFound(err) || kerrors.IsForbidden(err) {
+		return nil, "", metrics.ErrNoTenantAPI
+	}
+	if err != nil {
+		return nil, "", fmt.Errorf("read secret %s/%s: %w", cl.Namespace, name, err)
+	}
+	data := firstKey(sec.Data, "config", "kubeconfig", "value")
+	if data == nil {
+		return nil, "", fmt.Errorf("secret %s/%s has no kubeconfig (keys config, kubeconfig or value)", cl.Namespace, name)
+	}
+	cfg, err := clientcmd.RESTConfigFromKubeConfig(data)
+	if err != nil {
+		return nil, "", fmt.Errorf("parse kubeconfig in secret %s/%s: %w", cl.Namespace, name, err)
+	}
+	if host, serverName, ok := inCluster(cfg.Host, cl.Name, cl.Namespace); ok {
+		cfg.Host, cfg.TLSClientConfig.ServerName = host, serverName
+	}
+	cfg.Timeout = m.opts.Timeout
+	return cfg, name + "@" + sec.ResourceVersion, nil
 }
 
 // inCluster points kubeconfigs written for local port-forwarding (the

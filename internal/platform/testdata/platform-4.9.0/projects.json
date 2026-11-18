@@ -1,0 +1,215 @@
+{
+  "kind": "ProjectList",
+  "apiVersion": "management.loft.sh/v1",
+  "metadata": {
+    "resourceVersion": "2958"
+  },
+  "items": [
+    {
+      "kind": "Project",
+      "apiVersion": "management.loft.sh/v1",
+      "metadata": {
+        "name": "acme-ai",
+        "uid": "f384d739-3c2b-465d-8fc2-6fdb5095233c",
+        "resourceVersion": "1273",
+        "generation": 2,
+        "creationTimestamp": "2026-11-18T03:37:32Z",
+        "annotations": {
+          "kubectl.kubernetes.io/last-applied-configuration": "{\"apiVersion\":\"management.loft.sh/v1\",\"kind\":\"Project\",\"metadata\":{\"annotations\":{},\"name\":\"acme-ai\"},\"spec\":{\"allowedClusters\":[{\"name\":\"*\"}],\"allowedTemplates\":[{\"group\":\"storage.loft.sh\",\"kind\":\"VirtualClusterTemplate\",\"name\":\"*\"}],\"displayName\":\"Acme AI Training\",\"members\":[{\"clusterRole\":\"loft-management-project-admin\",\"group\":\"storage.loft.sh\",\"kind\":\"User\",\"name\":\"admin\"}]}}\n",
+          "loft.sh/project-namespace": "p-acme-ai"
+        },
+        "finalizers": [
+          "loft.sh/cleanup"
+        ]
+      },
+      "spec": {
+        "displayName": "Acme AI Training",
+        "quotas": {},
+        "allowedClusters": [
+          {
+            "name": "*"
+          }
+        ],
+        "allowedTemplates": [
+          {
+            "kind": "VirtualClusterTemplate",
+            "group": "storage.loft.sh",
+            "name": "*"
+          }
+        ],
+        "requireTemplate": {},
+        "requirePreset": {},
+        "members": [
+          {
+            "kind": "User",
+            "group": "storage.loft.sh",
+            "name": "admin",
+            "clusterRole": "loft-management-project-admin"
+          }
+        ],
+        "access": [
+          {
+            "name": "loft-access",
+            "verbs": [
+              "get"
+            ],
+            "subresources": [
+              "members",
+              "clusters",
+              "templates",
+              "nodetypes",
+              "chartinfo",
+              "charts",
+              "runners"
+            ],
+            "users": [
+              "admin"
+            ]
+          }
+        ]
+      },
+      "status": {}
+    },
+    {
+      "kind": "Project",
+      "apiVersion": "management.loft.sh/v1",
+      "metadata": {
+        "name": "default",
+        "uid": "4786a01d-4383-4f23-ba75-e9488227899d",
+        "resourceVersion": "978",
+        "generation": 2,
+        "creationTimestamp": "2026-11-18T03:36:35Z",
+        "annotations": {
+          "loft.sh/apply": "{\"kind\":\"Project\",\"apiVersion\":\"storage.loft.sh/v1\",\"metadata\":{\"name\":\"default\"},\"spec\":{\"displayName\":\"Default Project\",\"description\":\"This is the default project\",\"quotas\":{},\"allowedClusters\":[{\"name\":\"*\"}],\"allowedRunners\":[{\"name\":\"*\"}],\"allowedTemplates\":[{\"kind\":\"VirtualClusterTemplate\",\"group\":\"storage.loft.sh\",\"name\":\"*\"},{\"kind\":\"SpaceTemplate\",\"group\":\"storage.loft.sh\",\"name\":\"*\"}],\"requireTemplate\":{},\"requirePreset\":{},\"members\":[{\"kind\":\"User\",\"group\":\"storage.loft.sh\",\"name\":\"*\",\"clusterRole\":\"loft-management-project-user\"}]},\"status\":{}}\n",
+          "loft.sh/project-namespace": "p-default"
+        },
+        "finalizers": [
+          "loft.sh/cleanup"
+        ]
+      },
+      "spec": {
+        "displayName": "Default Project",
+        "description": "This is the default project",
+        "quotas": {},
+        "allowedClusters": [
+          {
+            "name": "*"
+          }
+        ],
+        "allowedRunners": [
+          {
+            "name": "*"
+          }
+        ],
+        "allowedTemplates": [
+          {
+            "kind": "VirtualClusterTemplate",
+            "group": "storage.loft.sh",
+            "name": "*"
+          },
+          {
+            "kind": "SpaceTemplate",
+            "group": "storage.loft.sh",
+            "name": "*"
+          }
+        ],
+        "requireTemplate": {},
+        "requirePreset": {},
+        "members": [
+          {
+            "kind": "User",
+            "group": "storage.loft.sh",
+            "name": "*",
+            "clusterRole": "loft-management-project-user"
+          }
+        ],
+        "access": [
+          {
+            "name": "loft-access",
+            "verbs": [
+              "get"
+            ],
+            "subresources": [
+              "members",
+              "clusters",
+              "templates",
+              "nodetypes",
+              "chartinfo",
+              "charts",
+              "runners"
+            ],
+            "users": [
+              "*"
+            ]
+          }
+        ]
+      },
+      "status": {}
+    },
+    {
+      "kind": "Project",
+      "apiVersion": "management.loft.sh/v1",
+      "metadata": {
+        "name": "globex",
+        "uid": "2ab68d91-ef42-4f08-96fe-6b74f8bef0af",
+        "resourceVersion": "1275",
+        "generation": 2,
+        "creationTimestamp": "2026-11-18T03:37:32Z",
+        "annotations": {
+          "kubectl.kubernetes.io/last-applied-configuration": "{\"apiVersion\":\"management.loft.sh/v1\",\"kind\":\"Project\",\"metadata\":{\"annotations\":{},\"name\":\"globex\"},\"spec\":{\"allowedClusters\":[{\"name\":\"*\"}],\"allowedTemplates\":[{\"group\":\"storage.loft.sh\",\"kind\":\"VirtualClusterTemplate\",\"name\":\"*\"}],\"displayName\":\"Globex Research\",\"members\":[{\"clusterRole\":\"loft-management-project-admin\",\"group\":\"storage.loft.sh\",\"kind\":\"User\",\"name\":\"admin\"}]}}\n",
+          "loft.sh/project-namespace": "p-globex"
+        },
+        "finalizers": [
+          "loft.sh/cleanup"
+        ]
+      },
+      "spec": {
+        "displayName": "Globex Research",
+        "quotas": {},
+        "allowedClusters": [
+          {
+            "name": "*"
+          }
+        ],
+        "allowedTemplates": [
+          {
+            "kind": "VirtualClusterTemplate",
+            "group": "storage.loft.sh",
+            "name": "*"
+          }
+        ],
+        "requireTemplate": {},
+        "requirePreset": {},
+        "members": [
+          {
+            "kind": "User",
+            "group": "storage.loft.sh",
+            "name": "admin",
+            "clusterRole": "loft-management-project-admin"
+          }
+        ],
+        "access": [
+          {
+            "name": "loft-access",
+            "verbs": [
+              "get"
+            ],
+            "subresources": [
+              "members",
+              "clusters",
+              "templates",
+              "nodetypes",
+              "chartinfo",
+              "charts",
+              "runners"
+            ],
+            "users": [
+              "admin"
+            ]
+          }
+        ]
+      },
+      "status": {}
+    }
+  ]
+}

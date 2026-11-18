@@ -76,6 +76,14 @@ spec:
               value: {{ .Values.billing.defaultPlanCode | quote }}
             - name: BILLING_CURRENCY
               value: {{ .Values.billing.currency | quote }}
+            - name: PRICE_CHECK
+              value: {{ (.Values.billing.priceCheck).mode | default "warn" | quote }}
+            - name: PRICE_CHECK_INTERVAL
+              value: {{ (.Values.billing.priceCheck).interval | default "10m" | quote }}
+            - name: PRICE_CHECK_LOOKBACK
+              value: {{ (.Values.billing.priceCheck).lookback | default "24h" | quote }}
+            - name: PRICE_CHECK_MAX_HOLD
+              value: {{ (.Values.billing.priceCheck).maxHold | default "28d" | quote }}
             - name: COLLECTION_INTERVAL
               value: {{ .Values.billing.collectionInterval | quote }}
             - name: RECONCILE_INTERVAL
@@ -129,6 +137,21 @@ spec:
               value: {{ .Values.records.litellm | quote }}
             - name: RECORDS_ARCHIVE
               value: {{ and .Values.records.archive .Values.persistence.archive.enabled | quote }}
+            {{- with .Values.records.pullLiteLLM }}
+            {{- if .url }}
+            - name: RECORDS_PULL_LITELLM_URL
+              value: {{ .url | quote }}
+            - name: RECORDS_PULL_LITELLM_CLIENT
+              value: {{ .client | default "litellm" | quote }}
+            - name: RECORDS_PULL_LITELLM_TENANT
+              value: {{ .tenant | quote }}
+            - name: RECORDS_PULL_LITELLM_INTERVAL
+              value: {{ .interval | quote }}
+            - name: RECORDS_PULL_LITELLM_LOOKBACK
+              value: {{ .lookback | quote }}
+            {{- include "vbilling.secretEnv" (dict "env" "RECORDS_PULL_LITELLM_KEY" "existing" .existingSecret "key" "litellm-key" "inline" .key "chartKey" "litellm-key" "root" $) | nindent 12 }}
+            {{- end }}
+            {{- end }}
             {{- if .Values.records.formats }}
             - name: RECORDS_MAPPINGS_FILE
               value: /etc/vbilling/files/records-formats.yaml
@@ -153,6 +176,23 @@ spec:
             {{- end }}
             - name: PLATFORM_CLUSTER
               value: {{ .Values.platform.cluster | quote }}
+            {{- if eq .Values.tenantSource "platform" }}
+            - name: PLATFORM_URL
+              value: {{ required "platform.url is required when tenantSource is platform" .Values.platform.url | quote }}
+            - name: PLATFORM_INSECURE
+              value: {{ .Values.platform.insecure | quote }}
+            - name: PLATFORM_REFRESH
+              value: {{ .Values.platform.refresh | quote }}
+            - name: PLATFORM_ORPHAN_GRACE
+              value: {{ .Values.platform.orphanGrace | quote }}
+            - name: PLATFORM_PROXY
+              value: {{ .Values.platform.proxy | quote }}
+            {{- if .Values.platform.caSecret }}
+            - name: PLATFORM_CA_FILE
+              value: /etc/vbilling/platform-ca/ca.crt
+            {{- end }}
+            {{- include "vbilling.secretEnv" (dict "env" "PLATFORM_ACCESS_KEY" "existing" .Values.platform.existingSecret "key" "access-key" "inline" .Values.platform.accessKey "chartKey" "platform-access-key" "root" .) | nindent 12 }}
+            {{- end }}
             - name: WATCH_NAMESPACES
               value: {{ join "," .Values.watchNamespaces | quote }}
             - name: ENFORCEMENT_MODE
@@ -161,6 +201,10 @@ spec:
               value: {{ .Values.enforcement.rules | quote }}
             - name: ENFORCEMENT_IN_CLUSTER
               value: {{ .Values.enforcement.inCluster | quote }}
+            - name: PAUSE_KEEP_BILLING
+              value: {{ .Values.enforcement.pause.keepBilling | quote }}
+            - name: PAUSE_DRAIN_TIMEOUT
+              value: {{ .Values.enforcement.pause.drainTimeout | quote }}
             {{- if .Values.prometheus.url }}
             - name: PROMETHEUS_URL
               value: {{ .Values.prometheus.url | quote }}
@@ -251,6 +295,11 @@ spec:
               mountPath: /etc/vbilling/tenants
               readOnly: true
             {{- end }}
+            {{- if .Values.platform.caSecret }}
+            - name: platform-ca
+              mountPath: /etc/vbilling/platform-ca
+              readOnly: true
+            {{- end }}
             {{- if .Values.prometheus.metrics }}
             - name: prometheus-metrics
               mountPath: /etc/vbilling/prometheus
@@ -269,7 +318,7 @@ spec:
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
       {{- $archiveClaim := and .Values.persistence.archive.enabled .Values.persistence.archive.existingClaim }}
-      {{- if or (not .Values.persistence.enabled) .Values.tenantAPI.externalClustersSecret .Values.prometheus.metrics $files $lagoPriceCard $archiveClaim }}
+      {{- if or (not .Values.persistence.enabled) .Values.tenantAPI.externalClustersSecret .Values.platform.caSecret .Values.prometheus.metrics $files $lagoPriceCard $archiveClaim }}
       volumes:
         {{- if not .Values.persistence.enabled }}
         - name: data
@@ -284,6 +333,12 @@ spec:
         - name: tenant-clusters
           secret:
             secretName: {{ .Values.tenantAPI.externalClustersSecret }}
+        {{- end }}
+        {{- if .Values.platform.caSecret }}
+        - name: platform-ca
+          secret:
+            secretName: {{ .Values.platform.caSecret }}
+            items: [{key: ca.crt, path: ca.crt}]
         {{- end }}
         {{- if .Values.prometheus.metrics }}
         - name: prometheus-metrics

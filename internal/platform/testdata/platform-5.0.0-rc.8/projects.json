@@ -1,0 +1,155 @@
+{
+  "kind": "ProjectList",
+  "apiVersion": "management.loft.sh/v1",
+  "metadata": {},
+  "items": [
+    {
+      "kind": "Project",
+      "apiVersion": "management.loft.sh/v1",
+      "metadata": {
+        "name": "acme-train",
+        "uid": "uid-project-acme-train",
+        "creationTimestamp": "2026-11-01T09:00:00Z",
+        "labels": {
+          "tenant.vcluster.com/owner": "acme"
+        },
+        "annotations": {
+          "loft.sh/project-namespace": "p-acme-train",
+          "vbilling.vcluster.com/plan": "free"
+        }
+      },
+      "spec": {
+        "displayName": "Acme training",
+        "quotas": {},
+        "allowedNodeTypes": null,
+        "allowedNodeProfiles": null,
+        "allowedNetworkEnvironments": null,
+        "requireTemplate": {},
+        "requirePreset": {}
+      },
+      "status": {}
+    },
+    {
+      "kind": "Project",
+      "apiVersion": "management.loft.sh/v1",
+      "metadata": {
+        "name": "acme-infer",
+        "uid": "uid-project-acme-infer",
+        "creationTimestamp": "2026-11-01T09:00:00Z",
+        "labels": {
+          "tenant.vcluster.com/owner": "acme"
+        },
+        "annotations": {
+          "loft.sh/project-namespace": "p-acme-infer"
+        }
+      },
+      "spec": {
+        "displayName": "Acme inference",
+        "quotas": {},
+        "allowedNodeTypes": null,
+        "allowedNodeProfiles": null,
+        "allowedNetworkEnvironments": null,
+        "requireTemplate": {},
+        "requirePreset": {}
+      },
+      "status": {}
+    },
+    {
+      "kind": "Project",
+      "apiVersion": "management.loft.sh/v1",
+      "metadata": {
+        "name": "research",
+        "uid": "uid-project-research",
+        "creationTimestamp": "2026-11-01T09:00:00Z",
+        "annotations": {
+          "loft.sh/project-namespace": "p-research",
+          "vbilling.vcluster.com/tenant": "research-legacy"
+        }
+      },
+      "spec": {
+        "displayName": "Research",
+        "quotas": {},
+        "allowedNodeTypes": null,
+        "allowedNodeProfiles": null,
+        "allowedNetworkEnvironments": null,
+        "requireTemplate": {},
+        "requirePreset": {}
+      },
+      "status": {}
+    },
+    {
+      "kind": "Project",
+      "apiVersion": "management.loft.sh/v1",
+      "metadata": {
+        "name": "orphanage",
+        "uid": "uid-project-orphanage",
+        "creationTimestamp": "2026-11-01T09:00:00Z",
+        "labels": {
+          "tenant.vcluster.com/owner": "initech"
+        },
+        "annotations": {
+          "loft.sh/project-namespace": "p-orphanage"
+        }
+      },
+      "spec": {
+        "quotas": {},
+        "allowedNodeTypes": null,
+        "allowedNodeProfiles": null,
+        "allowedNetworkEnvironments": null,
+        "requireTemplate": {},
+        "requirePreset": {}
+      },
+      "status": {}
+    },
+    {
+      "kind": "Project",
+      "apiVersion": "management.loft.sh/v1",
+      "metadata": {
+        "name": "globex-lab",
+        "uid": "uid-project-globex-lab",
+        "creationTimestamp": "2026-11-01T09:00:00Z",
+        "labels": {
+          "tenant.vcluster.com/exclusive-to": "globex"
+        },
+        "annotations": {
+          "loft.sh/project-namespace": "p-globex-lab"
+        }
+      },
+      "spec": {
+        "displayName": "Globex lab",
+        "quotas": {},
+        "allowedNodeTypes": null,
+        "allowedNodeProfiles": null,
+        "allowedNetworkEnvironments": null,
+        "requireTemplate": {},
+        "requirePreset": {}
+      },
+      "status": {}
+    },
+    {
+      "kind": "Project",
+      "apiVersion": "management.loft.sh/v1",
+      "metadata": {
+        "name": "conflict",
+        "uid": "uid-project-conflict",
+        "creationTimestamp": "2026-11-01T09:00:00Z",
+        "labels": {
+          "tenant.vcluster.com/exclusive-to": "globex",
+          "tenant.vcluster.com/owner": "acme"
+        },
+        "annotations": {
+          "loft.sh/project-namespace": "p-conflict"
+        }
+      },
+      "spec": {
+        "quotas": {},
+        "allowedNodeTypes": null,
+        "allowedNodeProfiles": null,
+        "allowedNetworkEnvironments": null,
+        "requireTemplate": {},
+        "requirePreset": {}
+      },
+      "status": {}
+    }
+  ]
+}

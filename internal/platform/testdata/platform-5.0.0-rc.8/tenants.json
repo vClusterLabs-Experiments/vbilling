@@ -1,0 +1,37 @@
+{
+  "kind": "TenantList",
+  "apiVersion": "management.loft.sh/v1",
+  "metadata": {},
+  "items": [
+    {
+      "kind": "Tenant",
+      "apiVersion": "management.loft.sh/v1",
+      "metadata": {
+        "name": "acme",
+        "uid": "uid-tenant-acme",
+        "creationTimestamp": "2026-11-01T09:00:00Z",
+        "annotations": {
+          "vbilling.vcluster.com/email": "billing@acme.example",
+          "vbilling.vcluster.com/plan": "enterprise"
+        }
+      },
+      "spec": {
+        "displayName": "Acme AI"
+      },
+      "status": {}
+    },
+    {
+      "kind": "Tenant",
+      "apiVersion": "management.loft.sh/v1",
+      "metadata": {
+        "name": "globex",
+        "uid": "uid-tenant-globex",
+        "creationTimestamp": "2026-11-01T09:00:00Z"
+      },
+      "spec": {
+        "displayName": "Globex"
+      },
+      "status": {}
+    }
+  ]
+}

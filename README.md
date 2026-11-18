@@ -29,6 +29,7 @@ vBilling is the **metering pipe**, not the billing engine. It turns what runs in
 - **Source health.** Every Prometheus metric per cluster, every cluster API, every records client and every cross-check reports `ok`, `empty`, `failing` or `diverged`, with the last success, the last error and a hint, in the API, `/metrics`, the log and the dashboard. A selector that matches nothing no longer looks like zero usage.
 - **Cross-checks.** Compare the gateway's tokens with the engine's own counters per tenant and hour, and see divergence before an invoice goes out.
 - **Enforcement inside clusters with their own nodes.** `ENFORCEMENT_IN_CLUSTER` installs an admission policy inside a suspended tenant's clusters. Holds keep reasons apart: a payment never lifts an operator's `abuse` hold.
+- **Pause that stops billing.** The `paused` state stops a tenant's clusters the way `vcluster pause` does, after draining their own nodes, and capacity stops billing at that second. The tenant cannot restart them: vBilling pauses a cluster again within 15 seconds if anything else brings it back, and `vcluster connect` refuses a paused cluster instead of resuming it. Clearing the hold (a top-up, an operator) resumes them. Volumes and load balancers keep billing unless `PAUSE_KEEP_BILLING` says otherwise.
 - **A dashboard built from the catalog.** Every metric with usage gets a column with its unit, estimates are marked, and each tenant expands to its SKUs.
 - **Smaller additions.** Custom metrics as a YAML list, including informational ones (`billable: false`); a plan per tenant class (`PLAN_BY_CLASS`); Lago price cards and managed plans.
 
@@ -193,6 +194,8 @@ Select one or more with `ADAPTERS` (Helm: `adapters`). Each has a full guide on 
 | `webhook` | Signed CloudEvents 1.0 batches (`application/cloudevents-batch+json`), including tenant, offboarding and catalog events. Use it to feed a data platform, Kafka bridge or homegrown rating engine. | wherever you send it |
 | `noop` | Logs events (dry run). | n/a |
 
+**Price coverage.** A billing platform bills usage it has no price for at $0, without an error. vBilling reads (never writes) each platform's pricing and reports every billable metric and recent series (metric, SKU, plan) it cannot price: a Metronome rate on the tenant's rate card, an active Stripe price on the SKU's meter, a Lago charge and SKU price. `PRICE_CHECK=hold` also keeps that usage out of the platform until the price exists, then ships it in order. See `GET /api/v1/pricing` and [Unpriced usage](https://vclusterlabs-experiments.github.io/vbilling/troubleshooting.html#unpriced-usage).
+
 Stripe acquired Metronome in January 2026. Both paths are supported here: Billing Meters for straightforward pay-as-you-go, Metronome for dimensional pricing, commits, credits and multi-currency rate cards.
 
 ## Quick start
@@ -260,7 +263,7 @@ By default every tenant cluster is its own billing customer, with ID `vcluster-<
 | `stripe-customer-id`, `metronome-customer-id` | Pin an existing customer instead of creating one |
 | `exclude` | `"true"` stops metering this tenant cluster |
 
-`TENANT_SOURCE=project` maps every tenant cluster in a vCluster Platform project to one customer (`project-<name>`). `METER_BY_NAMESPACE=true` adds the namespace inside the tenant cluster as a dimension, so tenants can run their own internal chargeback.
+`TENANT_SOURCE=project` maps every tenant cluster in a vCluster Platform project to one customer (`project-<name>`). `TENANT_SOURCE=platform` reads identity from vCluster Platform itself (`PLATFORM_URL` plus an access key from a Secret): the Platform Tenant that owns the cluster's project pays (`tenant-<name>`), else the project; customer settings come from the Tenant or Project, never from labels the people who create clusters can set; clusters with their own nodes are reached through the Platform proxy instead of an exported kubeconfig; and owners survive Platform outages and are kept per window across moves between projects. See [vCluster Platform mode](docs/private-nodes.html#platform). `METER_BY_NAMESPACE=true` adds the namespace inside the tenant cluster as a dimension, so tenants can run their own internal chargeback.
 
 On nodes, `vbilling.vcluster.com/capacity-type` (`on-demand`, `spot`, `preemptible`, `reserved`) and an optional SKU label (`SKU_LABEL`) take precedence over cloud-provider labels. Nodes become **dedicated** to a tenant cluster with `vbilling.vcluster.com/tenant-cluster=<id or name>`, `vcluster.loft.sh/managed-by=<namespace or name>`, or the `VCLUSTER_NODE_LABEL` pattern.
 
@@ -309,6 +312,8 @@ Override any mapping with `ENFORCEMENT_RULES`, for example `alerts.spend_thresho
 
 Clusters with their own nodes (Private Nodes, Auto Nodes, Standalone) run their pods only inside themselves. With `ENFORCEMENT_IN_CLUSTER=true` (Helm `enforcement.inCluster`) in `enforce` mode, vBilling also installs a ValidatingAdmissionPolicy and binding named `vbilling-suspended` inside each of a suspended tenant's clusters, through their own API. It denies new pods outside `kube-system` and namespaces labeled `vbilling.vcluster.com/enforcement-exempt`, never stops running ones, and is removed when the tenant is active again. The exported service account needs `create` on validatingadmissionpolicies and validatingadmissionpolicybindings, and `get`, `update` and `delete` on `vbilling-suspended` (see [Dedicated and Private Nodes](https://vclusterlabs-experiments.github.io/vbilling/private-nodes.html#enforcement)).
 
+**Pause.** The `paused` state (`PUT /api/v1/billing-states/{tenant}` with `{"state": "paused"}`, or a rule such as `alerts.low_remaining_contract_credit_balance_reached=paused`) stops service, not only growth. In `enforce` mode vBilling marks each of the tenant's clusters paused (`vbilling.vcluster.com/paused-by`), drains the cluster's own nodes (taint `vbilling.vcluster.com/paused:NoExecute`, with `ENFORCEMENT_IN_CLUSTER`), saves its inventory, scales its control plane to zero and deletes the pods it synced to the control plane cluster. Workload usage, control plane hours and dedicated or private node capacity stop at the second of the pause; volumes and load balancers keep billing (`PAUSE_KEEP_BILLING`). A cluster brought back by anything else is paused again within 15 seconds. Clearing the hold resumes it. See [Pausing a tenant](https://vclusterlabs-experiments.github.io/vbilling/private-nodes.html#pause).
+
 **Holds.** A tenant's state is the most severe of its holds. Billing webhooks own the `billing` hold; `PUT /api/v1/billing-states/{tenant}` with `{"state": "suspended", "hold": "abuse", "reason": "..."}` sets any other, which only an operator clears by setting it `active`. A payment therefore never lifts an operator's hold. Without `hold`, the PUT sets the `billing` hold.
 
 Payment failures on invoices that Stripe collects arrive through Stripe's webhooks, so in Metronome + Stripe mode, send Stripe's webhooks to vBilling as well. Billing states are always available: Stripe and Metronome webhooks set them once `STRIPE_WEBHOOK_SECRET` or `METRONOME_WEBHOOK_SECRET` is set, and `PUT /api/v1/billing-states/{tenant}` sets them from anything else, such as Lago or a custom billing platform.
@@ -320,16 +325,18 @@ Gateways and inference servers post one record per request to `POST /api/v1/reco
 ```yaml
 # LiteLLM proxy config.yaml
 litellm_settings:
-  callbacks: ["generic_api"]
+  callbacks: ["vbilling"]
+callback_settings:
+  vbilling:
+    callback_type: generic_api
+    endpoint: http://vbilling.vbilling-system.svc:8080/api/v1/records?format=litellm
+    headers:
+      Authorization: os.environ/VBILLING_AUTHORIZATION # "Bearer <ingest token>"
+    max_retries: 5 # without it, LiteLLM drops a batch on the first failed post
+    retry_delay: 1
 ```
 
-```bash
-# LiteLLM proxy environment
-GENERIC_LOGGER_ENDPOINT=http://vbilling.vbilling-system.svc:8080/api/v1/records?format=litellm
-GENERIC_LOGGER_HEADERS="Authorization=Bearer <ingest token>"
-```
-
-Prompt and completion tokens become `inference_input_tokens` and `inference_output_tokens`, the model group becomes the SKU, and failed calls are skipped. Records are billed to the LiteLLM team of the virtual key: list team IDs in the `vbilling.vcluster.com/aliases` annotation of the tenant's cluster, or give a gateway that serves one tenant its own token in `INGEST_TOKENS`, which wins over the payload. Other gateways, such as Kong, need a few lines of YAML in `records.formats`. LiteLLM keeps records in memory until it posts a batch, so cross-check it against the engine's own counters (`crossChecks`). See [Usage sources](https://vclusterlabs-experiments.github.io/vbilling/usage-sources.html).
+Prompt and completion tokens become `inference_input_tokens` and `inference_output_tokens`, the model group becomes the SKU, and failed calls are skipped. Records are billed to the LiteLLM team of the virtual key: list team IDs in the `vbilling.vcluster.com/aliases` annotation of the tenant's cluster, or give a gateway that serves one tenant its own token in `INGEST_TOKENS`, which wins over the payload. Other gateways, such as Kong, need a few lines of YAML in `records.formats`. LiteLLM keeps records in memory until it posts a batch and drops a batch once its retries fail, so let vBilling also pull LiteLLM's spend logs (`records.pullLiteLLM.url`, LiteLLM v1.103.0 or later): pulled rows fill what the push lost, and a request seen by both counts once. See [Usage sources](https://vclusterlabs-experiments.github.io/vbilling/usage-sources.html#litellm-pull).
 
 ## Custom usage: tokens, Slurm, storage, network
 
@@ -419,6 +426,7 @@ Divergence above the tolerance turns the check `diverged`. Every source (each Pr
 | `GET /api/v1/sources?kind=prometheus\|tenant-api\|records\|crosscheck` | Source health: status, last success, last error and a hint for every usage source |
 | `GET /api/v1/crosscheck?from&to&tenant&bucket=hour\|day` | Cross-check rows per tenant and hour or day (default: the last 24 complete hours) |
 | `GET /api/v1/reconcile?from&to&destination` | Ledger vs. billing platform totals (default: previous UTC day) |
+| `GET /api/v1/pricing?destination&status`, `POST /api/v1/pricing/check` | Price coverage per destination: each (plan, metric, SKU) `priced`, `unpriced`, `zero` or `unknown`, with a hint naming the missing product, rate, price or charge, and held events (`PRICE_CHECK=hold`) |
 | `GET /api/v1/ledger/verify` | Hash-chain verification |
 | `GET /api/v1/destinations`, `GET …/{name}/dead-letters`, `POST …/{name}/dead-letters/replay`, `POST …/{name}/cursor` | Delivery operations |
 | `GET /api/v1/tenants`, `GET /api/v1/billing-states`, `PUT /api/v1/billing-states/{tenant}` | Tenants and billing state (`{"state", "reason", "hold"}`; `hold` defaults to `billing`) |
@@ -433,6 +441,7 @@ Notable metrics on `/metrics`:
 - **Metering:** `vbilling_events_metered_total`, `vbilling_backfilled_windows_total`, `vbilling_last_window_end_timestamp_seconds`, `vbilling_nodes_down`
 - **Tenants:** `vbilling_tenant_billing_state{tenant,state}`
 - **Ledger:** `vbilling_ledger_bytes`
+- **Pricing:** `vbilling_unpriced_series{destination}`, `vbilling_price_series{destination,status}`, `vbilling_held_events{destination}`, `vbilling_events_released_total{destination}`, `vbilling_price_check_errors_total{destination}`
 - **Sources:** `vbilling_sources{kind,status}`, `vbilling_crosscheck_divergence_ratio{check,tenant}`, `vbilling_prometheus_events_total`
 - **Records:** `vbilling_records_received_total{client}`, `vbilling_records_accepted_total{client}`, `vbilling_records_rejected_total{client}`, `vbilling_records_events_total{kind}` (`on_time` or `late`)
 
@@ -470,13 +479,17 @@ Alert on rising lag, dead letters, a stale last window, or any source that is no
 | `RECORDS_SETTLE` (`records.settle`), `RECORDS_RETENTION` (`records.retention`) | `30s`, `168h` | When a window's records are summed (later ones become a late adjustment; with windows of 30s or less, half the window); how long raw records are kept |
 | `RECORDS_LITELLM` (`records.litellm`) | `false` | Enable the built-in `litellm` format (declares `inference_input_tokens` and `inference_output_tokens`) |
 | `RECORDS_MAPPINGS_FILE` (`records.formats`) | | Payload formats besides `vbilling` and `litellm` |
+| `RECORDS_PULL_LITELLM_URL`, `RECORDS_PULL_LITELLM_KEY` (`records.pullLiteLLM.url`, `.key` or `.existingSecret`) | | Pull LiteLLM's spend logs with a master or proxy admin key, to fill what the push lost |
+| `RECORDS_PULL_LITELLM_CLIENT`, `_TENANT`, `_INTERVAL`, `_LOOKBACK` (`records.pullLiteLLM.*`) | `litellm`, none, `5m`, `1h` | Must match the push's client and bound tenant; how often; how far before the last pull each pull starts |
 | `RECORDS_ALLOW_UNKEYED`, `RECORDS_UNKNOWN_TENANTS`, `RECORDS_ARCHIVE` (`records.*`) | `false`, `accept`, `false` | Derive missing request IDs; `accept` or `reject` records for unknown tenants; archive raw records (needs `ARCHIVE_DIR`) |
 | `CROSS_CHECKS` (`crossChecks`) | | `primary=secondary[:tolerance%],...`, default tolerance 1% |
 | `PLAN_BY_CLASS` (`billing.planByClass`) | | `class=plan,...` for tenants whose clusters set no `plan` |
+| `PRICE_CHECK`, `PRICE_CHECK_INTERVAL`, `PRICE_CHECK_LOOKBACK`, `PRICE_CHECK_MAX_HOLD` (`billing.priceCheck.*`) | `warn`, `10m`, `24h`, `28d` | Price coverage: `warn` reports unpriced usage, `hold` also holds it until priced (at most `PRICE_CHECK_MAX_HOLD`, then it is released unpriced and its source fails), `off` |
 | `API_TOKEN`, `INGEST_TOKEN`, `LISTEN_ADDR` | `:8080` | |
 | `INGEST_TOKENS` (`api.tenantIngestTokens`) | | Ingest tokens bound to a tenant, `token=tenant,...` (the Helm value is `{tenant: token}`) |
 | `ENFORCEMENT_MODE`, `ENFORCEMENT_RULES` | `observe` | |
 | `ENFORCEMENT_IN_CLUSTER` (`enforcement.inCluster`) | `false` | Also enforce inside each suspended tenant's clusters, through their own API |
+| `PAUSE_KEEP_BILLING` (`enforcement.pause.keepBilling`), `PAUSE_DRAIN_TIMEOUT` (`enforcement.pause.drainTimeout`) | `storage,load_balancers`, `2m` | What keeps billing while paused; how long to wait for workloads on a cluster's own nodes to stop |
 | `STRIPE_API_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_SPLIT_METERS_BY` (`sku`), `STRIPE_AUTO_SUBSCRIBE`, `STRIPE_MAX_RPS`, `STRIPE_API_VERSION` (`2026-09-30.endive`), `STRIPE_API_BASE` | | |
 | `METRONOME_API_TOKEN`, `METRONOME_WEBHOOK_SECRET`, `METRONOME_RATE_CARD`, `METRONOME_STRIPE_LINK`, `METRONOME_STRIPE_COLLECTION_METHOD` | | |
 | `LAGO_API_URL`, `LAGO_API_KEY`, `DEFAULT_PLAN_CODE`, `BILLING_CURRENCY` | | |
@@ -508,6 +521,7 @@ internal/metrics/        window metering: lifetimes, fractional GPUs, fairness, 
 internal/records/        per-request records: formats, durable ingest, window aggregation
 internal/health/         source health
 internal/crosscheck/     comparisons of two sources of the same usage
+internal/pricing/        price coverage checks and the hold gate
 internal/spool/          hash-chained ledger, window commits, cursors, dead letters
 internal/pipeline/       per-destination delivery, retries, poison isolation, tenant sync
 internal/destinations/   stripe, metronome, lago, webhook, noop

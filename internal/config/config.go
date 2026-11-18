@@ -65,7 +65,7 @@ type Config struct {
 	WatchNamespaces         []string
 	DedicatedNodeLabel      string // extra node selector for dedicated nodes, "key=%s" (%s = cluster name)
 	RegionFromNode          bool   // use topology.kubernetes.io/region from nodes instead of REGION
-	TenantSource            string // cluster | project
+	TenantSource            string // cluster | project | platform
 	PlatformCluster         string
 	OffboardGrace           time.Duration
 	CustomMetrics           string
@@ -73,6 +73,15 @@ type Config struct {
 	// PlanByClass picks a plan (Lago plan code, Stripe plan tag, Metronome
 	// rate card) for tenants without a vbilling.vcluster.com/plan setting.
 	PlanByClass map[string]string
+
+	// TENANT_SOURCE=platform: tenant identity from vCluster Platform objects.
+	PlatformURL         string
+	PlatformAccessKey   string
+	PlatformCAFile      string
+	PlatformInsecure    bool
+	PlatformRefresh     time.Duration
+	PlatformOrphanGrace time.Duration
+	PlatformProxy       bool // reach clusters with their own nodes through the Platform proxy
 
 	// Per-request usage records (POST /api/v1/records).
 	RecordsSettle        time.Duration
@@ -86,6 +95,15 @@ type Config struct {
 	// RecordsLiteLLM enables the built-in litellm payload format.
 	RecordsLiteLLM bool
 	IngestTokens   map[string]string // token -> tenant the token is bound to
+	// RecordsPullLiteLLM* read LiteLLM's spend logs back as records, to fill
+	// what the generic API logger's push lost. Setting the URL enables it,
+	// and the litellm format with it.
+	RecordsPullLiteLLMURL      string
+	RecordsPullLiteLLMKey      string
+	RecordsPullLiteLLMClient   string // must equal the push's client (X-VBilling-Client)
+	RecordsPullLiteLLMTenant   string // like a tenant-bound ingest token
+	RecordsPullLiteLLMInterval time.Duration
+	RecordsPullLiteLLMLookback time.Duration
 	// CrossChecks compares two sources of the same usage per tenant and hour:
 	// "primary=secondary[:tolerance%],...".
 	CrossChecks string
@@ -93,6 +111,16 @@ type Config struct {
 	// Billing defaults.
 	DefaultPlanCode string
 	BillingCurrency string
+
+	// Price coverage (internal/pricing): warn reports usage a billing
+	// platform has no price for; hold also keeps that usage from it until
+	// the price exists; off disables the check.
+	PriceCheck         string
+	PriceCheckInterval time.Duration
+	PriceCheckLookback time.Duration
+	// PriceCheckMaxHold releases held usage without a price once its window
+	// started this long ago, before billing platforms refuse it as too old.
+	PriceCheckMaxHold time.Duration
 
 	// HTTP API.
 	ListenAddr  string
@@ -107,6 +135,12 @@ type Config struct {
 	// is the only enforcement that reaches clusters with their own nodes,
 	// and needs write access to admission policies inside them.
 	EnforcementInCluster bool
+	// PauseKeepBilling is the capacity that keeps billing while a cluster
+	// is paused: storage, load_balancers, nodes, control_plane, or none.
+	PauseKeepBilling string
+	// PauseDrainTimeout bounds the wait for workloads on a cluster's own
+	// nodes to stop before its control plane is stopped.
+	PauseDrainTimeout time.Duration
 
 	// Lago.
 	LagoAPIURL       string
@@ -188,6 +222,13 @@ func Load() *Config {
 		RegionFromNode:          envBool("REGION_FROM_NODE", false),
 		TenantSource:            envOr("TENANT_SOURCE", "cluster"),
 		PlatformCluster:         os.Getenv("PLATFORM_CLUSTER"),
+		PlatformURL:             os.Getenv("PLATFORM_URL"),
+		PlatformAccessKey:       secretEnv("PLATFORM_ACCESS_KEY"),
+		PlatformCAFile:          os.Getenv("PLATFORM_CA_FILE"),
+		PlatformInsecure:        envBool("PLATFORM_INSECURE", false),
+		PlatformRefresh:         envDuration("PLATFORM_REFRESH", time.Minute),
+		PlatformOrphanGrace:     envDuration("PLATFORM_ORPHAN_GRACE", 0),
+		PlatformProxy:           envBool("PLATFORM_PROXY", true),
 		OffboardGrace:           envDuration("OFFBOARD_GRACE", time.Hour),
 		CustomMetrics:           os.Getenv("CUSTOM_METRICS"),
 		CustomMetricsFile:       os.Getenv("CUSTOM_METRICS_FILE"),
@@ -202,8 +243,20 @@ func Load() *Config {
 		IngestTokens:            secretMap("INGEST_TOKENS"),
 		CrossChecks:             os.Getenv("CROSS_CHECKS"),
 
+		RecordsPullLiteLLMURL:      os.Getenv("RECORDS_PULL_LITELLM_URL"),
+		RecordsPullLiteLLMKey:      secretEnv("RECORDS_PULL_LITELLM_KEY"),
+		RecordsPullLiteLLMClient:   envOr("RECORDS_PULL_LITELLM_CLIENT", "litellm"),
+		RecordsPullLiteLLMTenant:   os.Getenv("RECORDS_PULL_LITELLM_TENANT"),
+		RecordsPullLiteLLMInterval: envDuration("RECORDS_PULL_LITELLM_INTERVAL", 5*time.Minute),
+		RecordsPullLiteLLMLookback: envDuration("RECORDS_PULL_LITELLM_LOOKBACK", time.Hour),
+
 		DefaultPlanCode: envOr("DEFAULT_PLAN_CODE", "vcluster-standard"),
 		BillingCurrency: envOr("BILLING_CURRENCY", "USD"),
+
+		PriceCheck:         envOr("PRICE_CHECK", "warn"),
+		PriceCheckInterval: envDuration("PRICE_CHECK_INTERVAL", 10*time.Minute),
+		PriceCheckLookback: envDuration("PRICE_CHECK_LOOKBACK", 24*time.Hour),
+		PriceCheckMaxHold:  envDays("PRICE_CHECK_MAX_HOLD", 28*24*time.Hour),
 
 		ListenAddr:  envOr("LISTEN_ADDR", ":8080"),
 		APIToken:    secretEnv("API_TOKEN"),
@@ -212,6 +265,8 @@ func Load() *Config {
 		EnforcementMode:      envOr("ENFORCEMENT_MODE", "observe"),
 		EnforcementRules:     os.Getenv("ENFORCEMENT_RULES"),
 		EnforcementInCluster: envBool("ENFORCEMENT_IN_CLUSTER", false),
+		PauseKeepBilling:     envOr("PAUSE_KEEP_BILLING", "storage,load_balancers"),
+		PauseDrainTimeout:    envDuration("PAUSE_DRAIN_TIMEOUT", 2*time.Minute),
 
 		LagoAPIURL:       envOr("LAGO_API_URL", "http://localhost:3000"),
 		LagoAPIKey:       secretEnv("LAGO_API_KEY"),
@@ -246,6 +301,9 @@ func Load() *Config {
 	if c.IngestToken == "" {
 		c.IngestToken = c.APIToken
 	}
+	if c.RecordsPullLiteLLMURL != "" {
+		c.RecordsLiteLLM = true // pulled rows are read with the litellm format
+	}
 	// Records are on time until Settle after their window; it must be
 	// shorter than the window, so short windows get half the window.
 	if c.RecordsSettle >= c.CollectionInterval {
@@ -269,13 +327,29 @@ func (c *Config) Validate() error {
 	}
 	switch c.TenantSource {
 	case "cluster", "project":
+	case "platform":
+		if c.PlatformURL == "" || c.PlatformAccessKey == "" {
+			return fmt.Errorf("TENANT_SOURCE=platform needs PLATFORM_URL and PLATFORM_ACCESS_KEY")
+		}
+		if c.PlatformCAFile != "" && c.PlatformInsecure {
+			return fmt.Errorf("PLATFORM_CA_FILE and PLATFORM_INSECURE exclude each other")
+		}
+		if c.PlatformRefresh < 10*time.Second {
+			return fmt.Errorf("PLATFORM_REFRESH %s must be at least 10s", c.PlatformRefresh)
+		}
+		if c.PlatformOrphanGrace < 0 {
+			return fmt.Errorf("PLATFORM_ORPHAN_GRACE %s must not be negative", c.PlatformOrphanGrace)
+		}
 	default:
-		return fmt.Errorf("TENANT_SOURCE %q must be cluster or project", c.TenantSource)
+		return fmt.Errorf("TENANT_SOURCE %q must be cluster, project or platform", c.TenantSource)
 	}
 	switch c.EnforcementMode {
 	case "observe", "annotate", "enforce":
 	default:
 		return fmt.Errorf("ENFORCEMENT_MODE %q must be observe, annotate or enforce", c.EnforcementMode)
+	}
+	if c.PauseDrainTimeout <= 0 {
+		return fmt.Errorf("PAUSE_DRAIN_TIMEOUT %s must be positive", c.PauseDrainTimeout)
 	}
 	switch c.PrivateNodeBilling {
 	case "node", "usage":
@@ -300,6 +374,35 @@ func (c *Config) Validate() error {
 		if tok == "" || tenant == "" {
 			return fmt.Errorf("INGEST_TOKENS entries must be token=tenant")
 		}
+	}
+	if c.RecordsPullLiteLLMURL != "" {
+		if c.RecordsPullLiteLLMKey == "" {
+			return fmt.Errorf("RECORDS_PULL_LITELLM_URL needs RECORDS_PULL_LITELLM_KEY, a LiteLLM master or proxy admin key")
+		}
+		if c.RecordsPullLiteLLMInterval < 10*time.Second {
+			return fmt.Errorf("RECORDS_PULL_LITELLM_INTERVAL %s must be at least 10s", c.RecordsPullLiteLLMInterval)
+		}
+		// Pulled records older than the records retention minus an hour are
+		// refused, and late records are deduplicated against stored ones.
+		if c.RecordsPullLiteLLMLookback < time.Minute || c.RecordsPullLiteLLMLookback > c.RecordsRetention-2*time.Hour {
+			return fmt.Errorf("RECORDS_PULL_LITELLM_LOOKBACK %s must be between 1m and RECORDS_RETENTION minus 2h (%s)",
+				c.RecordsPullLiteLLMLookback, c.RecordsRetention-2*time.Hour)
+		}
+	}
+	switch c.PriceCheck {
+	case "warn", "hold", "off":
+	default:
+		return fmt.Errorf("PRICE_CHECK %q must be warn, hold or off", c.PriceCheck)
+	}
+	if c.PriceCheckInterval < time.Minute {
+		return fmt.Errorf("PRICE_CHECK_INTERVAL %s must be at least 1m", c.PriceCheckInterval)
+	}
+	if c.PriceCheckLookback < time.Hour {
+		return fmt.Errorf("PRICE_CHECK_LOOKBACK %s must be at least 1h", c.PriceCheckLookback)
+	}
+	if c.PriceCheckMaxHold < time.Hour || c.PriceCheckMaxHold > MaxPriceHold {
+		return fmt.Errorf("PRICE_CHECK_MAX_HOLD %s must be between 1h and %s: Metronome refuses usage older than 34 days, "+
+			"and vBilling keeps a 2-day margin to deliver what it releases", c.PriceCheckMaxHold, MaxPriceHold)
 	}
 	switch c.PrometheusPreset {
 	case "", "default", "vcluster-platform":
@@ -327,6 +430,30 @@ func envDuration(key string, fallback time.Duration) time.Duration {
 		}
 	}
 	return fallback
+}
+
+// MaxPriceHold is the longest PRICE_CHECK_MAX_HOLD: the smallest backdating
+// limit of a billing platform (Metronome, 34 days) minus a 2-day margin.
+const MaxPriceHold = 32 * 24 * time.Hour
+
+// envDays is envDuration that also accepts whole days ("28d"). An invalid
+// value yields -1, which Validate rejects, instead of the default.
+func envDays(key string, fallback time.Duration) time.Duration {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return fallback
+	}
+	if n, ok := strings.CutSuffix(v, "d"); ok {
+		if d, err := strconv.Atoi(n); err == nil {
+			return time.Duration(d) * 24 * time.Hour
+		}
+		return -1
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return -1
+	}
+	return d
 }
 
 func envFloat(key string, fallback float64) float64 {

@@ -16,6 +16,7 @@ import (
 	"github.com/vclusterlabs-experiments/vbilling/internal/discovery"
 	"github.com/vclusterlabs-experiments/vbilling/internal/kv"
 	"github.com/vclusterlabs-experiments/vbilling/internal/metrics"
+	"github.com/vclusterlabs-experiments/vbilling/internal/pause"
 	"github.com/vclusterlabs-experiments/vbilling/internal/pipeline"
 	"github.com/vclusterlabs-experiments/vbilling/internal/spool"
 	"github.com/vclusterlabs-experiments/vbilling/internal/telemetry"
@@ -70,6 +71,70 @@ type Controller struct {
 
 	prom    PromCollector
 	aliases map[string]string // gateway or external identity -> tenant ID
+	owners  Owners            // optional: past owners of clusters (TENANT_SOURCE=platform)
+
+	pauses *pause.Store // pause spans; nil = pauses are not tracked
+}
+
+// UsePauses tracks when clusters are paused, so capacity is not billed for
+// that time (PAUSE_KEEP_BILLING decides what keeps billing).
+func (c *Controller) UsePauses(p *pause.Store) { c.pauses = p }
+
+// SetPaused updates the known state of a cluster right after vBilling
+// paused or resumed it, ahead of the next discovery.
+func (c *Controller) SetPaused(id string, paused bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i := range c.clusters {
+		if c.clusters[i].ExternalID() == id {
+			c.clusters[i].Paused = paused
+		}
+	}
+}
+
+type pauseForgetter interface{ ForgetPaused(id string) }
+
+// observePauses records pauses seen in discovery: ones vBilling did not
+// make (vcluster pause, an operator) and resumes made outside vBilling.
+// vBilling's own pauses start at their paused-at annotation, to the second.
+func (c *Controller) observePauses(clusters []discovery.TenantCluster, now time.Time) {
+	if c.pauses == nil {
+		return
+	}
+	forget, _ := c.coll.(pauseForgetter)
+	for _, cl := range clusters {
+		if cl.External {
+			continue // no control plane here to see paused: vBilling's enforcer records its pauses
+		}
+		id := cl.ExternalID()
+		_, open := c.pauses.Current(id)
+		switch {
+		case cl.Paused && !open:
+			at, by := now, "external"
+			if cl.Annotations[discovery.AnnotationPausedBy] == "vbilling" {
+				by = "vbilling"
+				if t, err := time.Parse(time.RFC3339Nano, cl.Annotations[discovery.AnnotationPausedAt]); err == nil && !t.After(now) {
+					at = t
+				}
+			}
+			if _, err := c.pauses.Begin(id, at, by); err != nil {
+				log.Printf("[controller] %s: record pause: %v", id, err)
+			} else {
+				log.Printf("[controller] %s: paused since %s (%s)", id, at.UTC().Format(time.RFC3339), by)
+			}
+		case !cl.Paused && open:
+			if _, err := c.pauses.End(id, now); err != nil {
+				log.Printf("[controller] %s: record resume: %v", id, err)
+			} else {
+				log.Printf("[controller] %s: resumed", id)
+			}
+		}
+		if !cl.Paused && forget != nil {
+			forget.ForgetPaused(id)
+		}
+	}
+	// Pauses that ended before any window that can still be metered.
+	_ = c.pauses.Prune(now.Add(-c.cfg.MaxBackfill - time.Hour))
 }
 
 // UsePrometheus enables Prometheus-read usage.
@@ -200,6 +265,7 @@ func (c *Controller) Reconcile(ctx context.Context) {
 			}
 		}
 	}
+	c.observePauses(clusters, now)
 	c.mu.Lock()
 	c.aliases = aliases
 	c.clusters = clusters
@@ -300,6 +366,11 @@ func (c *Controller) tenantsFrom(clusters []discovery.TenantCluster) []usage.Ten
 		if v := cl.Meta("cost-center"); v != "" {
 			t.Metadata["cost_center"] = v
 		}
+		for k, v := range cl.PlatformMetadata() {
+			if _, set := t.Metadata[k]; !set {
+				t.Metadata[k] = v
+			}
+		}
 	}
 	out := make([]usage.Tenant, 0, len(ids))
 	sort.Strings(ids)
@@ -357,7 +428,7 @@ func (c *Controller) CollectDue(ctx context.Context) {
 	targets := c.targets()
 
 	started := time.Now()
-	byWindow, st, err := c.coll.Collect(ctx, targets, windows)
+	byWindow, st, err := c.collectAttributed(ctx, targets, windows, c.coll.Collect)
 	if err != nil {
 		log.Printf("[controller] metering failed for %d window(s), will retry: %v", len(windows), err)
 		c.tel.Add("vbilling_collection_failures_total", "Failed metering runs (windows are retried).", nil, 1)
@@ -433,7 +504,7 @@ func (c *Controller) fillTenantGaps(ctx context.Context, st metrics.Stats, windo
 			_ = c.gaps.Delete(id)
 			continue
 		}
-		byWindow, fst, err := filler.CollectTenantAPI(ctx, []metrics.Target{t}, missed)
+		byWindow, fst, err := c.collectAttributed(ctx, []metrics.Target{t}, missed, filler.CollectTenantAPI)
 		if err != nil || len(fst.TenantAPIFailed) > 0 {
 			continue // still unreachable: try again next window
 		}
@@ -475,7 +546,11 @@ func (c *Controller) targets() []metrics.Target {
 	var targets []metrics.Target
 	for _, cl := range c.Clusters() {
 		t, _ := c.tenants.Get(cl.TenantID(src))
-		targets = append(targets, metrics.Target{Cluster: cl, Tenant: t.ID, Project: cl.Project, TenantClass: t.Class})
+		target := metrics.Target{Cluster: cl, Tenant: t.ID, Project: cl.Project, TenantClass: t.Class}
+		if c.pauses != nil {
+			target.Paused = c.pauses.Spans(cl.ExternalID())
+		}
+		targets = append(targets, target)
 	}
 	return targets
 }
@@ -517,6 +592,7 @@ func (c *Controller) CollectPrometheusDue(ctx context.Context) {
 	}
 	total := 0
 	err = c.prom.Commit(results, func(w metrics.Window, evs []usage.Event) error {
+		stampPlatform(evs, platformProps(c.targets()))
 		total += len(evs)
 		return c.spool.AppendWindow(metrics.SourcePrometheus, w.End, evs, "")
 	})

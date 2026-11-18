@@ -54,6 +54,30 @@ type TenantCluster struct {
 	DisplayName string
 	Labels      map[string]string
 	Annotations map[string]string
+	// Platform is the cluster's owner in vCluster Platform when
+	// TENANT_SOURCE=platform resolved one. It decides the tenant.
+	Platform *PlatformBinding
+	// Paused is true while the control plane is paused: by vBilling
+	// (vbilling.vcluster.com/paused-by) or by `vcluster pause`
+	// (loft.sh/paused).
+	Paused bool
+}
+
+// AnnotationPaused is the annotation `vcluster pause` sets on a paused
+// cluster's StatefulSet or Deployment. vBilling marks its own pauses with
+// the other three instead: `vcluster connect` resumes a cluster that
+// carries loft.sh/paused, while it refuses one that is only scaled down, so
+// connecting to debug never lifts a billing pause by accident.
+const (
+	AnnotationPaused         = "loft.sh/paused"
+	AnnotationPausedBy       = AnnotationPrefix + "paused-by"
+	AnnotationPausedAt       = AnnotationPrefix + "paused-at"
+	AnnotationPausedReplicas = AnnotationPrefix + "paused-replicas"
+)
+
+// pausedBy reports whether workload annotations mark a paused cluster.
+func pausedBy(ann map[string]string) bool {
+	return ann[AnnotationPaused] == "true" || ann[AnnotationPausedBy] == "vbilling"
 }
 
 // ExternalID is the stable tenant-cluster identifier (v0.1 compatible).
@@ -76,19 +100,41 @@ func (c *TenantCluster) Meta(key string) string {
 type TenantSource string
 
 const (
-	TenantPerCluster TenantSource = "cluster" // default: one customer per tenant cluster
-	TenantPerProject TenantSource = "project" // one customer per vCluster Platform project
+	TenantPerCluster  TenantSource = "cluster"  // default: one customer per tenant cluster
+	TenantPerProject  TenantSource = "project"  // one customer per vCluster Platform project
+	TenantPerPlatform TenantSource = "platform" // the Platform Tenant that owns the project, else the project
 )
 
-// TenantID resolves the billing customer. An explicit tenant label always wins.
+// TenantID resolves the billing customer. A vCluster Platform binding
+// decides for the clusters it covers; otherwise an explicit tenant label
+// wins.
 func (c *TenantCluster) TenantID(src TenantSource) string {
+	if c.Platform != nil {
+		return c.Platform.TenantID()
+	}
 	if v := c.Meta("tenant"); v != "" {
 		return v
 	}
-	if src == TenantPerProject && c.Project != "" {
+	if (src == TenantPerProject || src == TenantPerPlatform) && c.Project != "" {
 		return "project-" + c.Project
 	}
 	return c.ExternalID()
+}
+
+// Binder resolves clusters to their owners in vCluster Platform. Bind sets
+// TenantCluster.Platform on the clusters it knows and returns the clusters
+// to meter: it holds back a cluster whose owner it cannot know yet rather
+// than bill it to a guess. An error means it cannot tell anything yet (the
+// Platform has never answered), never "no owners".
+type Binder interface {
+	Bind(ctx context.Context, clusters []TenantCluster) ([]TenantCluster, error)
+}
+
+// WithBinder makes vCluster Platform objects the source of tenant identity
+// (TENANT_SOURCE=platform).
+func (d *Discoverer) WithBinder(b Binder) *Discoverer {
+	d.binder = b
+	return d
 }
 
 // Discoverer finds tenant clusters.
@@ -98,6 +144,7 @@ type Discoverer struct {
 	namespaces      []string
 	platformCluster string
 	external        []TenantCluster
+	binder          Binder
 }
 
 // WithExternal adds tenant clusters configured outside this control plane
@@ -135,7 +182,11 @@ func (d *Discoverer) Discover(ctx context.Context) ([]TenantCluster, error) {
 			c.Annotations = merge(ns.Annotations, c.Annotations)
 		}
 	}
-	if d.dynamicClient != nil {
+	if d.binder != nil {
+		if clusters, err = d.binder.Bind(ctx, clusters); err != nil {
+			return nil, err
+		}
+	} else if d.dynamicClient != nil {
 		d.enrichFromPlatform(ctx, clusters)
 	}
 	clusters = append(clusters, d.external...)
@@ -144,11 +195,13 @@ func (d *Discoverer) Discover(ctx context.Context) ([]TenantCluster, error) {
 		if c.Instance == "" {
 			c.Instance = c.Name
 		}
-		if v := c.Meta("project"); v != "" {
-			c.Project = v // an explicit annotation beats the Platform project
-		}
-		if v := c.Meta("display-name"); v != "" {
-			c.DisplayName = v
+		if c.Platform == nil {
+			if v := c.Meta("project"); v != "" {
+				c.Project = v // an explicit annotation beats the Platform project
+			}
+			if v := c.Meta("display-name"); v != "" {
+				c.DisplayName = v
+			}
 		}
 		if c.Meta("exclude") == "true" {
 			continue
@@ -186,7 +239,7 @@ func (d *Discoverer) fromWorkloads(ctx context.Context) ([]TenantCluster, error)
 			seen[key] = true
 			out = append(out, TenantCluster{
 				Name: s.Name, Namespace: s.Namespace, UID: string(s.UID), CreatedAt: s.CreationTimestamp.Time,
-				Ready: s.Status.ReadyReplicas > 0, Source: "statefulset",
+				Ready: s.Status.ReadyReplicas > 0, Source: "statefulset", Paused: pausedBy(s.Annotations),
 				Labels: copyMap(s.Labels), Annotations: copyMap(s.Annotations),
 			})
 		}
@@ -202,7 +255,7 @@ func (d *Discoverer) fromWorkloads(ctx context.Context) ([]TenantCluster, error)
 			seen[key] = true
 			out = append(out, TenantCluster{
 				Name: dep.Name, Namespace: dep.Namespace, UID: string(dep.UID), CreatedAt: dep.CreationTimestamp.Time,
-				Ready: dep.Status.ReadyReplicas > 0, Source: "deployment",
+				Ready: dep.Status.ReadyReplicas > 0, Source: "deployment", Paused: pausedBy(dep.Annotations),
 				Labels: copyMap(dep.Labels), Annotations: copyMap(dep.Annotations),
 			})
 		}

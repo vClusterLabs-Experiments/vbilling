@@ -105,6 +105,9 @@ type Result struct {
 	Rejected          []Rejection `json:"rejected,omitempty"`
 	UnknownTenants    []string    `json:"unknown_tenants,omitempty"`
 	Warnings          []string    `json:"warnings,omitempty"`
+	// AlreadyStored counts valid records a puller read again: every usage
+	// row of each was in the records ledger already, so none was stored.
+	AlreadyStored int `json:"already_stored,omitempty"`
 }
 
 // ErrUnknownFormat is returned for a format that is not configured.
@@ -119,22 +122,45 @@ func (e ErrUnknownFormat) Error() string {
 // It returns only after the records are fsynced; a returned error means
 // nothing was stored and the emitter should retry.
 func (in *Ingester) Ingest(format, client, boundTenant string, body []byte) (Result, error) {
-	res := Result{Format: format}
-	mapping, ok := in.formats[format]
-	if !ok && format != Native {
-		return res, ErrUnknownFormat{format}
+	if _, ok := in.formats[format]; !ok && format != Native {
+		return Result{Format: format}, ErrUnknownFormat{format}
 	}
 	objs, err := Parse(body)
 	if err != nil {
-		return res, err
+		return Result{Format: format}, err
 	}
+	return in.ingest(format, client, boundTenant, objs, nil)
+}
+
+// ingestPulled stores records a puller read from an emitter's own logs,
+// such as LiteLLM's spend logs, exactly as if the emitter had pushed them:
+// same format, same client, same record IDs, so a request that was both
+// pushed and pulled counts once. Records already in the records ledger
+// (stored, or in its index) are not stored again, so a puller can re-read
+// a trailing range on every pass. Pulled records do not touch the health
+// of the client's push source.
+func (in *Ingester) ingestPulled(format, client, boundTenant string, objs []map[string]any, stored *storedIndex) (Result, error) {
+	if _, ok := in.formats[format]; !ok && format != Native {
+		return Result{Format: format}, ErrUnknownFormat{format}
+	}
+	if stored == nil {
+		stored = &storedIndex{ids: map[string]struct{}{}}
+	}
+	return in.ingest(format, client, boundTenant, objs, stored)
+}
+
+// ingest stores records; stored is non-nil for pulled records.
+func (in *Ingester) ingest(format, client, boundTenant string, objs []map[string]any, stored *storedIndex) (Result, error) {
+	pulled := stored != nil
+	res := Result{Format: format}
+	mapping := in.formats[format]
 	res.Received = len(objs)
 	now := in.opts.Now().UTC()
 	source := "records:" + client
 	seen := map[string]bool{}
 	unknown := map[string]bool{}
 	noTime := 0
-	var rows []usage.Event
+	var recs [][]usage.Event // usage rows per accepted record
 	for i, obj := range objs {
 		rec, skip, err := Map(format, mapping, obj)
 		if skip {
@@ -156,7 +182,7 @@ func (in *Ingester) Ingest(format, client, boundTenant string, body []byte) (Res
 		switch {
 		case boundTenant != "":
 			// The token identifies the source, and the source is the tenant.
-			rec.Tenant = boundTenant
+			rec.Tenant, rec.TenantKey = boundTenant, boundTenant
 		case rec.Tenant == "":
 			reject("no tenant: the record has no tenant field (or use an ingest token bound to a tenant, see INGEST_TOKENS)")
 			continue
@@ -201,7 +227,7 @@ func (in *Ingester) Ingest(format, client, boundTenant string, body []byte) (Res
 			if q == 0 {
 				continue
 			}
-			id := RecordID(client, rec.Tenant, rec.ID, metric)
+			id := RecordID(client, rec.TenantKey, rec.ID, metric)
 			if seen[id] {
 				res.DuplicatesInBatch++
 				continue
@@ -214,6 +240,9 @@ func (in *Ingester) Ingest(format, client, boundTenant string, body []byte) (Res
 				Dimensions: map[string]string{},
 				Properties: map[string]any{"request_id": rec.ID, "at": rec.Time.Format(time.RFC3339Nano)},
 				Source:     source, RecordedAt: now,
+			}
+			if pulled {
+				ev.Properties["via"] = "pull"
 			}
 			if ev.Region == "" {
 				ev.Region = in.opts.Region
@@ -236,12 +265,31 @@ func (in *Ingester) Ingest(format, client, boundTenant string, body []byte) (Res
 			continue
 		}
 		res.Accepted++
-		rows = append(rows, recRows...)
+		recs = append(recs, recRows)
+	}
+	if pulled {
+		var err error
+		if recs, err = in.dropStored(recs, stored); err != nil {
+			return res, fmt.Errorf("read records ledger: %w", err)
+		}
+		res.AlreadyStored = res.Accepted - len(recs)
+		res.Accepted = len(recs)
+	}
+	var rows []usage.Event
+	for _, r := range recs {
+		rows = append(rows, r...)
 	}
 	if len(rows) > 0 {
 		if _, err := in.spool.AppendBatch(source, rows); err != nil {
-			in.health.Fail(health.Name("records", client), "records", client, err, "the records ledger could not be written; the emitter must retry")
+			if !pulled {
+				in.health.Fail(health.Name("records", client), "records", client, err, "the records ledger could not be written; the emitter must retry")
+			}
 			return res, fmt.Errorf("records ledger write failed: %w", err)
+		}
+		if pulled {
+			for _, ev := range rows {
+				stored.ids[ev.ID] = struct{}{}
+			}
 		}
 	}
 	res.UsageRows = len(rows)
@@ -257,6 +305,9 @@ func (in *Ingester) Ingest(format, client, boundTenant string, body []byte) (Res
 	if noTime > 0 {
 		res.Warnings = append(res.Warnings, fmt.Sprintf("%d record(s) had no time; the arrival time was used", noTime))
 	}
+	if pulled {
+		return res, nil // the puller reports its own health and counters
+	}
 	if res.Accepted > 0 {
 		in.health.OK(health.Name("records", client), "records", client, res.Accepted)
 	}
@@ -264,4 +315,76 @@ func (in *Ingester) Ingest(format, client, boundTenant string, body []byte) (Res
 	in.tel.Add("vbilling_records_accepted_total", "Per-request usage records durably stored.", map[string]string{"client": client}, float64(res.Accepted))
 	in.tel.Add("vbilling_records_rejected_total", "Per-request usage records refused.", map[string]string{"client": client}, float64(len(res.Rejected)))
 	return res, nil
+}
+
+// storedIndex holds the IDs of the records stored for windows within
+// [from, to), so a puller scans the records ledger once per range it reads
+// instead of once per page.
+type storedIndex struct {
+	from, to time.Time
+	ids      map[string]struct{}
+}
+
+// indexStored scans the records ledger for windows within [from, to).
+func (in *Ingester) indexStored(from, to time.Time) (*storedIndex, error) {
+	idx := &storedIndex{from: from, to: to, ids: map[string]struct{}{}}
+	err := in.spool.ScanRecords(from, to, func(ev *usage.Event, _ time.Time) error {
+		idx.ids[ev.ID] = struct{}{}
+		return nil
+	})
+	return idx, err
+}
+
+func (idx *storedIndex) covers(ev *usage.Event) bool {
+	return !idx.from.IsZero() && !ev.WindowStart.Before(idx.from) && !ev.WindowEnd.After(idx.to)
+}
+
+// dropStored removes the usage rows already in the records ledger, and the
+// records left with none. Rows the index does not cover (a request longer
+// than the range the puller indexed) are looked up in the ledger. A row
+// stored between the scan and the append is stored twice, which the
+// aggregator's deduplication absorbs.
+func (in *Ingester) dropStored(recs [][]usage.Event, idx *storedIndex) ([][]usage.Event, error) {
+	have := func(ev *usage.Event) bool { _, ok := idx.ids[ev.ID]; return ok }
+	want := map[string]bool{}
+	var from, to time.Time
+	for _, r := range recs {
+		for i := range r {
+			ev := &r[i]
+			if idx.covers(ev) {
+				continue
+			}
+			want[ev.ID] = false
+			if from.IsZero() || ev.WindowStart.Before(from) {
+				from = ev.WindowStart
+			}
+			if ev.WindowEnd.After(to) {
+				to = ev.WindowEnd
+			}
+		}
+	}
+	if len(want) > 0 {
+		err := in.spool.ScanRecords(from, to, func(ev *usage.Event, _ time.Time) error {
+			if _, ok := want[ev.ID]; ok {
+				want[ev.ID] = true
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	kept := recs[:0]
+	for _, r := range recs {
+		var left []usage.Event
+		for i := range r {
+			if !have(&r[i]) && !want[r[i].ID] {
+				left = append(left, r[i])
+			}
+		}
+		if len(left) > 0 {
+			kept = append(kept, left)
+		}
+	}
+	return kept, nil
 }

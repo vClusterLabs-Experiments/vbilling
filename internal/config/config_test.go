@@ -64,3 +64,61 @@ func TestSecretsFromFilesAreTrimmed(t *testing.T) {
 		t.Fatalf("secrets not trimmed: %q %q %q", c.StripeAPIKey, c.MetronomeAPIToken, c.WebhookSecret)
 	}
 }
+
+func TestLiteLLMPullSettings(t *testing.T) {
+	t.Setenv("ADAPTER", "noop")
+	t.Setenv("RECORDS_PULL_LITELLM_URL", "http://litellm.litellm.svc:4000")
+	c := Load()
+	if !c.RecordsLiteLLM || c.RecordsPullLiteLLMClient != "litellm" || c.RecordsPullLiteLLMInterval != 5*time.Minute || c.RecordsPullLiteLLMLookback != time.Hour {
+		t.Fatalf("pull defaults: %+v", c)
+	}
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "RECORDS_PULL_LITELLM_KEY") {
+		t.Errorf("a pull without a key must be refused: %v", err)
+	}
+	t.Setenv("RECORDS_PULL_LITELLM_KEY", "sk-admin\n")
+	c = Load()
+	if err := c.Validate(); err != nil || c.RecordsPullLiteLLMKey != "sk-admin" {
+		t.Fatalf("valid pull settings: %v %q", err, c.RecordsPullLiteLLMKey)
+	}
+	c.RecordsPullLiteLLMLookback = c.RecordsRetention // pulled records would be older than the ledger accepts
+	if err := c.Validate(); err == nil {
+		t.Error("a lookback beyond the records retention must be refused")
+	}
+}
+
+func TestPriceCheckSettings(t *testing.T) {
+	c := Load()
+	if c.PriceCheck != "warn" || c.PriceCheckInterval != 10*time.Minute || c.PriceCheckLookback != 24*time.Hour {
+		t.Fatalf("price check defaults: %q %s %s", c.PriceCheck, c.PriceCheckInterval, c.PriceCheckLookback)
+	}
+	if c.PriceCheckMaxHold != 28*24*time.Hour {
+		t.Fatalf("max hold default %s", c.PriceCheckMaxHold)
+	}
+	for v, want := range map[string]time.Duration{"20d": 20 * 24 * time.Hour, "100h": 100 * time.Hour, "32d": MaxPriceHold, "33d": 33 * 24 * time.Hour, "soon": -1} {
+		t.Setenv("PRICE_CHECK_MAX_HOLD", v)
+		c := Load()
+		if c.PriceCheckMaxHold != want {
+			t.Errorf("PRICE_CHECK_MAX_HOLD=%s: %s", v, c.PriceCheckMaxHold)
+		}
+		if ok := c.Validate() == nil; ok != (want > 0 && want <= MaxPriceHold) {
+			t.Errorf("PRICE_CHECK_MAX_HOLD=%s: valid %t", v, ok)
+		}
+	}
+	t.Setenv("PRICE_CHECK_MAX_HOLD", "")
+	t.Setenv("PRICE_CHECK", "hold")
+	t.Setenv("PRICE_CHECK_INTERVAL", "5m")
+	if c = Load(); c.PriceCheck != "hold" || c.PriceCheckInterval != 5*time.Minute || c.Validate() != nil {
+		t.Fatalf("hold: %+v", c)
+	}
+	for name, mutate := range map[string]func(*Config){
+		"bad mode":      func(c *Config) { c.PriceCheck = "block" },
+		"tiny period":   func(c *Config) { c.PriceCheckInterval = time.Second },
+		"tiny lookback": func(c *Config) { c.PriceCheckLookback = time.Minute },
+	} {
+		c := Load()
+		mutate(c)
+		if c.Validate() == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}

@@ -23,8 +23,10 @@ clusterName: control-plane
 # Default tenant class stamped on events (public, enterprise, government, dev, ...).
 tenantClass: ""
 # How tenant clusters map to billing customers: "cluster" (one customer per
-# tenant cluster) or "project" (one per vCluster Platform project). The
-# vbilling.vcluster.com/tenant label always wins.
+# tenant cluster) or "project" (one per vCluster Platform project), where the
+# vbilling.vcluster.com/tenant label always wins; or "platform": the vCluster
+# Platform Tenant that owns the cluster's project, else the project, read
+# from the Platform API (see platform below).
 tenantSource: cluster
 
 billing:
@@ -39,6 +41,19 @@ billing:
   planByClass: {}
   #  enterprise: vcluster-enterprise
   #  dev: vcluster-dev
+  # Price coverage: vBilling reads (never writes) each billing platform's
+  # products, rates, prices and charges, and reports usage it has no price
+  # for (GET /api/v1/pricing). warn: report only. hold: also keep that usage
+  # out of the billing platform until the price exists, then ship it in
+  # order. off: no checks.
+  priceCheck:
+    mode: warn # warn | hold | off
+    interval: 10m # every destination is checked this often (and when a new series appears)
+    lookback: 24h # series seen in the ledger this recently are checked
+    # hold only: usage held this long (by window start) is released without a
+    # price, so the billing platform still accepts it and can re-rate it once
+    # priced. At most 32d (Metronome refuses usage older than 34 days).
+    maxHold: 28d
 
 metering:
   cpuMemoryBasis: usage # usage | requests | max
@@ -123,6 +138,18 @@ prometheus:
 
 platform:
   cluster: "" # vCluster Platform cluster name of this control plane cluster (multi-cluster setups)
+  # tenantSource: platform. Owners come from Platform Tenants, Projects and
+  # VirtualClusterInstances; clusters with their own nodes are reached through
+  # the Platform proxy with the same access key (a vbilling-kubeconfig Secret
+  # still overrides it per cluster). See docs/private-nodes.html#platform.
+  url: "" # e.g. https://platform.example.com
+  accessKey: "" # prefer existingSecret
+  existingSecret: "" # Secret with key access-key
+  caSecret: "" # Secret with key ca.crt that signed the Platform's certificate
+  insecure: false # skip TLS verification (self-signed test installs only)
+  refresh: 1m
+  orphanGrace: 0s # 0: a cluster whose instance disappeared keeps its last owner
+  proxy: true # reach clusters with their own nodes through the Platform proxy
 
 watchNamespaces: []
 
@@ -201,6 +228,18 @@ records:
   # The built-in format for LiteLLM's generic API logger (?format=litellm). It
   # declares inference_input_tokens and inference_output_tokens.
   litellm: false
+  # Read LiteLLM's spend logs back as records, to fill what the generic API
+  # logger's push lost (vBilling down, a dropped batch). Pushed and pulled
+  # copies of a request count once. Setting url enables it and the litellm
+  # format. Needs LiteLLM v1.103.0 or later with a database.
+  pullLiteLLM:
+    url: "" # LiteLLM proxy base URL, e.g. http://litellm.litellm.svc:4000
+    key: "" # LiteLLM master or proxy admin key, stored in the chart's Secret
+    existingSecret: "" # or a Secret with the key under litellm-key
+    client: litellm # the push's X-VBilling-Client (default: the format name, litellm)
+    tenant: "" # bill every pulled request to this tenant; set it when the push uses a tenant-bound token
+    interval: 5m
+    lookback: 1h # each pull starts this long before the end of the last one
   # Payload formats besides vbilling and litellm, e.g. a Kong HTTP Log payload:
   formats: {}
   #  kong:
@@ -236,6 +275,18 @@ enforcement:
   # and get, update and delete on the one named vbilling-suspended (see
   # docs/private-nodes.html#enforcement).
   inCluster: false
+  # Pausing (state "paused", enforce mode): each of the tenant's clusters is
+  # paused the way `vcluster pause` does it, after the workloads on its own
+  # nodes are stopped, and capacity stops billing at that second. Clearing
+  # the hold resumes it. See docs/private-nodes.html#pause.
+  pause:
+    # What keeps billing while paused: storage, load_balancers, nodes,
+    # control_plane, or none. Workload usage always stops, because the
+    # workloads are stopped.
+    keepBilling: storage,load_balancers
+    # How long to wait for workloads on a cluster's own nodes to stop before
+    # its control plane is stopped.
+    drainTimeout: 2m
 
 persistence:
   enabled: true # the ledger is the durable outbox: keep it on a volume

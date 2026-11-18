@@ -1,0 +1,205 @@
+{
+  "kind": "VirtualClusterInstanceList",
+  "apiVersion": "management.loft.sh/v1",
+  "metadata": {
+    "resourceVersion": "2958"
+  },
+  "items": [
+    {
+      "kind": "VirtualClusterInstance",
+      "apiVersion": "management.loft.sh/v1",
+      "metadata": {
+        "name": "acme-train",
+        "namespace": "p-acme-ai",
+        "uid": "e3ba5b9a-41e5-412f-bbae-540798dd28a3",
+        "resourceVersion": "1462",
+        "generation": 4,
+        "creationTimestamp": "2026-11-18T03:39:07Z",
+        "annotations": {
+          "kubectl.kubernetes.io/last-applied-configuration": "{\"apiVersion\":\"storage.loft.sh/v1\",\"kind\":\"VirtualClusterInstance\",\"metadata\":{\"annotations\":{},\"name\":\"acme-train\",\"namespace\":\"p-acme-ai\"},\"spec\":{\"clusterRef\":{\"cluster\":\"loft-cluster\"},\"displayName\":\"Acme training cluster\",\"owner\":{\"user\":\"admin\"},\"template\":{\"helmRelease\":{\"chart\":{\"version\":\"0.36.1\"},\"values\":\"controlPlane:\\n  coredns:\\n    embedded: true\\n\"},\"pro\":{\"enabled\":true}}}}\n"
+        }
+      },
+      "spec": {
+        "displayName": "Acme training cluster",
+        "owner": {
+          "user": "admin"
+        },
+        "template": {
+          "metadata": {},
+          "instanceTemplate": {
+            "metadata": {}
+          },
+          "pro": {
+            "enabled": true
+          },
+          "helmRelease": {
+            "chart": {
+              "version": "0.36.1"
+            },
+            "values": "controlPlane:\n  coredns:\n    embedded: true\n"
+          },
+          "accessPoint": {
+            "ingress": {}
+          },
+          "spaceTemplate": {
+            "metadata": {}
+          }
+        },
+        "clusterRef": {
+          "cluster": "loft-cluster",
+          "namespace": "loft-acme-ai-v-acme-train",
+          "virtualCluster": "acme-train"
+        }
+      },
+      "status": {
+        "phase": "Pending",
+        "reason": "ConditionMissing",
+        "message": "Condition SpaceSynced is missing",
+        "conditions": [
+          {
+            "type": "Ready",
+            "status": "False",
+            "severity": "Warning",
+            "lastTransitionTime": "2026-11-18T03:39:07Z",
+            "reason": "ConditionMissing",
+            "message": "Condition SpaceSynced is missing"
+          },
+          {
+            "type": "Scheduled",
+            "status": "True",
+            "lastTransitionTime": "2026-11-18T03:39:07Z"
+          },
+          {
+            "type": "TemplateResolved",
+            "status": "True",
+            "lastTransitionTime": "2026-11-18T03:39:07Z"
+          },
+          {
+            "type": "TemplateSynced",
+            "status": "True",
+            "lastTransitionTime": "2026-11-18T03:39:07Z"
+          }
+        ],
+        "virtualCluster": {
+          "metadata": {},
+          "instanceTemplate": {
+            "metadata": {}
+          },
+          "pro": {
+            "enabled": true
+          },
+          "helmRelease": {
+            "chart": {
+              "version": "0.36.1"
+            },
+            "values": "controlPlane:\n  coredns:\n    embedded: true\n"
+          },
+          "accessPoint": {
+            "ingress": {}
+          },
+          "spaceTemplate": {
+            "metadata": {}
+          }
+        }
+      }
+    },
+    {
+      "kind": "VirtualClusterInstance",
+      "apiVersion": "management.loft.sh/v1",
+      "metadata": {
+        "name": "globex-infer",
+        "namespace": "p-globex",
+        "uid": "e8afbf1e-f5d3-48b4-9c15-57fc32334b91",
+        "resourceVersion": "1466",
+        "generation": 4,
+        "creationTimestamp": "2026-11-18T03:39:07Z",
+        "annotations": {
+          "kubectl.kubernetes.io/last-applied-configuration": "{\"apiVersion\":\"storage.loft.sh/v1\",\"kind\":\"VirtualClusterInstance\",\"metadata\":{\"annotations\":{},\"name\":\"globex-infer\",\"namespace\":\"p-globex\"},\"spec\":{\"clusterRef\":{\"cluster\":\"loft-cluster\"},\"displayName\":\"Globex inference\",\"owner\":{\"user\":\"admin\"},\"template\":{\"helmRelease\":{\"chart\":{\"version\":\"0.36.1\"},\"values\":\"controlPlane:\\n  coredns:\\n    embedded: true\\n\"},\"pro\":{\"enabled\":true}}}}\n"
+        }
+      },
+      "spec": {
+        "displayName": "Globex inference",
+        "owner": {
+          "user": "admin"
+        },
+        "template": {
+          "metadata": {},
+          "instanceTemplate": {
+            "metadata": {}
+          },
+          "pro": {
+            "enabled": true
+          },
+          "helmRelease": {
+            "chart": {
+              "version": "0.36.1"
+            },
+            "values": "controlPlane:\n  coredns:\n    embedded: true\n"
+          },
+          "accessPoint": {
+            "ingress": {}
+          },
+          "spaceTemplate": {
+            "metadata": {}
+          }
+        },
+        "clusterRef": {
+          "cluster": "loft-cluster",
+          "namespace": "loft-globex-v-globex-infer",
+          "virtualCluster": "globex-infer"
+        }
+      },
+      "status": {
+        "phase": "Pending",
+        "reason": "ConditionMissing",
+        "message": "Condition SpaceSynced is missing",
+        "conditions": [
+          {
+            "type": "Ready",
+            "status": "False",
+            "severity": "Warning",
+            "lastTransitionTime": "2026-11-18T03:39:07Z",
+            "reason": "ConditionMissing",
+            "message": "Condition SpaceSynced is missing"
+          },
+          {
+            "type": "Scheduled",
+            "status": "True",
+            "lastTransitionTime": "2026-11-18T03:39:07Z"
+          },
+          {
+            "type": "TemplateResolved",
+            "status": "True",
+            "lastTransitionTime": "2026-11-18T03:39:07Z"
+          },
+          {
+            "type": "TemplateSynced",
+            "status": "True",
+            "lastTransitionTime": "2026-11-18T03:39:07Z"
+          }
+        ],
+        "virtualCluster": {
+          "metadata": {},
+          "instanceTemplate": {
+            "metadata": {}
+          },
+          "pro": {
+            "enabled": true
+          },
+          "helmRelease": {
+            "chart": {
+              "version": "0.36.1"
+            },
+            "values": "controlPlane:\n  coredns:\n    embedded: true\n"
+          },
+          "accessPoint": {
+            "ingress": {}
+          },
+          "spaceTemplate": {
+            "metadata": {}
+          }
+        }
+      }
+    }
+  ]
+}

@@ -12,6 +12,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/rest"
 
 	"github.com/vclusterlabs-experiments/vbilling/internal/discovery"
 	"github.com/vclusterlabs-experiments/vbilling/internal/metrics"
@@ -136,4 +137,52 @@ func writeFile(t *testing.T, dir, name, body string) string {
 		t.Fatal(err)
 	}
 	return p
+}
+
+type fakeRoute struct {
+	calls int
+	err   error
+}
+
+func (f *fakeRoute) ProxyConfig(cl discovery.TenantCluster) (*rest.Config, string, error) {
+	f.calls++
+	if f.err != nil {
+		return nil, "", f.err
+	}
+	return &rest.Config{Host: "https://platform.example.com/kubernetes/project/" + cl.Platform.Project + "/virtualcluster/" + cl.Platform.Instance,
+		BearerToken: "platform-key"}, "platform:" + cl.Platform.Project + "/" + cl.Platform.Instance, nil
+}
+
+func TestPlatformProxyReplacesExportedKubeconfig(t *testing.T) {
+	bound := team
+	bound.Platform = &discovery.PlatformBinding{Project: "acme-train", Instance: "team-p"}
+	route := &fakeRoute{}
+
+	// No Secret: the Platform proxy, with the Platform key.
+	m := New(context.Background(), fake.NewSimpleClientset(), Options{Platform: route, AdminFallback: true, Timeout: 7 * time.Second})
+	cfg, version, err := m.restConfig(context.Background(), bound)
+	if err != nil || cfg.Host != "https://platform.example.com/kubernetes/project/acme-train/virtualcluster/team-p" ||
+		cfg.BearerToken != "platform-key" || version != "platform:acme-train/team-p" || cfg.Timeout != 7*time.Second {
+		t.Fatalf("proxy route: %+v %s %v", cfg, version, err)
+	}
+
+	// The dedicated Secret stays an override.
+	m = New(context.Background(), fake.NewSimpleClientset(secret("team-p", DefaultSecretName, "https://localhost:8443")), Options{Platform: route})
+	if _, version, err := m.restConfig(context.Background(), bound); err != nil || !strings.HasPrefix(version, DefaultSecretName+"@") {
+		t.Fatalf("Secret override: %s %v", version, err)
+	}
+
+	// Clusters the Platform does not know keep the Secret rules.
+	route.calls = 0
+	m = New(context.Background(), fake.NewSimpleClientset(), Options{Platform: route})
+	if _, _, err := m.restConfig(context.Background(), team); !errors.Is(err, metrics.ErrNoTenantAPI) || route.calls != 0 {
+		t.Fatalf("unbound cluster: %v (route called %d times)", err, route.calls)
+	}
+
+	// A sleeping instance is an outage of its tenant API, not "no API":
+	// its windows are filled once it answers.
+	route.err = errors.New("instance acme-train/team-p is sleeping in vCluster Platform and is not woken for metering")
+	if _, _, err := m.restConfig(context.Background(), bound); err == nil || errors.Is(err, metrics.ErrNoTenantAPI) {
+		t.Fatalf("sleeping: %v", err)
+	}
 }

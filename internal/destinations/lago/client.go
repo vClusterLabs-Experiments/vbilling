@@ -156,6 +156,9 @@ type Subscription struct {
 	ExternalCustomerID string `json:"external_customer_id"`
 	PlanCode           string `json:"plan_code"`
 	ExternalID         string `json:"external_id"`
+	// SubscriptionAt starts the subscription (ISO 8601). Lago counts usage
+	// from it; without it the subscription starts when it is created.
+	SubscriptionAt string `json:"subscription_at,omitempty"`
 }
 
 type Event struct {
