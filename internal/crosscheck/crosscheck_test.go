@@ -66,3 +66,44 @@ func TestCrossCheckFlagsDivergingTenants(t *testing.T) {
 		t.Errorf("health problems = %+v", problems)
 	}
 }
+
+// A gateway bills cached and uncached input apart; the engine counts all
+// prompt tokens. Their sum is checked against the engine.
+func TestCrossCheckSums(t *testing.T) {
+	for _, m := range []string{"cs_input", "cs_cached", "cs_engine_prompt"} {
+		_ = usage.RegisterCustom(usage.MetricDef{Code: m, Unit: "tokens"})
+	}
+	checks, err := Parse("cs_input + cs_cached=cs_engine_prompt")
+	if err != nil || len(checks) != 1 || checks[0].Name() != "cs_input+cs_cached~cs_engine_prompt" {
+		t.Fatalf("parse: %+v %v", checks, err)
+	}
+	if _, err := Parse("cs_input+cs_input=cs_engine_prompt"); err == nil {
+		t.Error("a metric on both sides, or twice, must fail")
+	}
+	hour := time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC)
+	now := hour.Add(80 * time.Minute)
+	sp, err := spool.Open(t.TempDir(), spool.Options{NoSync: true, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sp.Close()
+	var evs []usage.Event
+	for i, m := range []struct {
+		metric string
+		q      float64
+	}{{"cs_input", 400}, {"cs_cached", 600}, {"cs_engine_prompt", 1000}} {
+		e := usage.Event{Tenant: "acme", Metric: m.metric, Quantity: m.q, WindowStart: hour.Add(time.Duration(i) * time.Minute),
+			WindowEnd: hour.Add(time.Duration(i+1) * time.Minute), RecordedAt: now}
+		e.Finalize()
+		evs = append(evs, e)
+	}
+	if _, _, err := sp.AppendIngest("test", evs); err != nil {
+		t.Fatal(err)
+	}
+	h := health.New(nil)
+	h.SetLogger(func(string, ...any) {})
+	rows := (&Runner{Spool: sp, Checks: checks, Health: h, Now: func() time.Time { return now }}).Once()
+	if len(rows) != 1 || !rows[0].OK || rows[0].Primary != 1000 || rows[0].Secondary != 1000 {
+		t.Fatalf("rows = %+v", rows)
+	}
+}

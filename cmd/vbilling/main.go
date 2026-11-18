@@ -27,6 +27,7 @@ import (
 	"github.com/vclusterlabs-experiments/vbilling/internal/destinations/stripe"
 	"github.com/vclusterlabs-experiments/vbilling/internal/discovery"
 	"github.com/vclusterlabs-experiments/vbilling/internal/enforcement"
+	"github.com/vclusterlabs-experiments/vbilling/internal/gateway"
 	"github.com/vclusterlabs-experiments/vbilling/internal/health"
 	"github.com/vclusterlabs-experiments/vbilling/internal/kv"
 	"github.com/vclusterlabs-experiments/vbilling/internal/metrics"
@@ -268,7 +269,7 @@ func main() {
 	if owners != nil {
 		ctrl.UseOwners(owners)
 	}
-	enf := newEnforcer(cfg, kube, ctrl, dests, tel, tenantMgr, pauses, coll)
+	enf := newEnforcer(cfg, kube, ctrl, dests, tel, tenantMgr, pauses, coll, newGateway(cfg, ctrl, formats, tel))
 
 	recOpts := records.Options{
 		Window:               cfg.CollectionInterval,
@@ -433,7 +434,35 @@ func main() {
 // Metronome webhooks set them once their secrets are configured, and
 // PUT /api/v1/billing-states/{tenant} sets them from anywhere else, such as
 // Lago or a custom billing platform.
-func newEnforcer(cfg *config.Config, kube kubernetes.Interface, ctrl *controller.Controller, dests []destinations.Destination, tel *telemetry.Registry, tenantMgr *tenantapi.Manager, pauses *pause.Store, coll *metrics.Collector) *enforcement.Enforcer {
+// newGateway sets up ENFORCEMENT_LITELLM: suspended and paused tenants'
+// LiteLLM teams are blocked. A team is one of the tenant's identities: its
+// ID, its aliases, or a value the litellm format's tenantMap maps to it.
+func newGateway(cfg *config.Config, ctrl *controller.Controller, formats records.Formats, tel *telemetry.Registry) enforcement.Gateway {
+	if !cfg.EnforcementLiteLLM {
+		return nil
+	}
+	if cfg.EnforcementMode != "enforce" {
+		log.Printf("ENFORCEMENT_LITELLM is set but ENFORCEMENT_MODE=%s: LiteLLM teams are only blocked in enforce mode", cfg.EnforcementMode)
+	}
+	state, err := kv.Open(filepath.Join(cfg.DataDir, "gateway-blocks.json"))
+	if err != nil {
+		log.Fatalf("open gateway state: %v", err)
+	}
+	tenantMap := formats["litellm"].TenantMap
+	identities := func(tenant string) []string {
+		ids := ctrl.GatewayIdentities(tenant)
+		for raw, t := range tenantMap {
+			if t == tenant {
+				ids = append(ids, raw)
+			}
+		}
+		return ids
+	}
+	log.Printf("Gateway enforcement: LiteLLM teams of suspended and paused tenants are blocked at %s", cfg.RecordsPullLiteLLMURL)
+	return gateway.New(state, tel, identities, gateway.NewLiteLLM(cfg.RecordsPullLiteLLMURL, cfg.RecordsPullLiteLLMKey))
+}
+
+func newEnforcer(cfg *config.Config, kube kubernetes.Interface, ctrl *controller.Controller, dests []destinations.Destination, tel *telemetry.Registry, tenantMgr *tenantapi.Manager, pauses *pause.Store, coll *metrics.Collector, gw enforcement.Gateway) *enforcement.Enforcer {
 	rules, err := enforcement.ParseRules(cfg.EnforcementRules)
 	if err != nil {
 		log.Fatalf("ENFORCEMENT_RULES: %v", err)
@@ -489,6 +518,7 @@ func newEnforcer(cfg *config.Config, kube kubernetes.Interface, ctrl *controller
 		Freeze:                 coll.Freeze,
 		OnPause:                ctrl.SetPaused,
 		DrainTimeout:           cfg.PauseDrainTimeout,
+		Gateway:                gw,
 	})
 }
 

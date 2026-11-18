@@ -213,6 +213,10 @@ type Stats struct {
 	// billed: CPU_MEMORY_BASIS=usage, and the window was collected late
 	// (after a restart or outage), when metrics-server has no usage for it.
 	UsageUnmeasured int
+	// Unrequested counts running pods on shared nodes that request no CPU
+	// or memory: on CPU_MEMORY_BASIS=requests they run unbilled. A vCluster
+	// LimitRange (policies.limitRange) gives them default requests.
+	Unrequested int
 	// TenantAPIFailed lists tenant clusters (external IDs) whose own API
 	// could not be read; nothing from it was metered for these windows.
 	TenantAPIFailed []string
@@ -545,6 +549,9 @@ func (c *Collector) meterPods(pods []podEntry, include func(*corev1.Pod) bool, n
 			st.GPUPods++
 		}
 		reqCPU, reqMem := podRequests(p)
+		if c.opts.Basis == "requests" && reqCPU == 0 && reqMem == 0 && end.IsZero() {
+			st.Unrequested++
+		}
 		// A pod of a paused cluster stops billing at the second of the
 		// pause, even while it takes its grace period to stop.
 		parts := [][2]time.Time{{start, end}}

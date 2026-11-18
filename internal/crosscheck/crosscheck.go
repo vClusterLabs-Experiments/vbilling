@@ -36,9 +36,41 @@ type Check struct {
 // Name identifies the check.
 func (c Check) Name() string { return c.Primary + "~" + c.Secondary }
 
+func (c Check) primaries() []string   { return splitSum(c.Primary) }
+func (c Check) secondaries() []string { return splitSum(c.Secondary) }
+
+func splitSum(side string) []string {
+	var out []string
+	for _, m := range strings.Split(side, "+") {
+		if m = strings.TrimSpace(m); m != "" {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// side reports which side of the check a metric is on: 0 primary,
+// 1 secondary, -1 neither.
+func (c Check) side(metric string) int {
+	for _, m := range c.primaries() {
+		if m == metric {
+			return 0
+		}
+	}
+	for _, m := range c.secondaries() {
+		if m == metric {
+			return 1
+		}
+	}
+	return -1
+}
+
 // Parse reads CROSS_CHECKS: "primary=secondary[:tolerance%],...", e.g.
 // "inference_output_tokens=vllm_output_tokens:2%". The default tolerance
-// is 1%.
+// is 1%. Either side may be a sum of metrics joined by "+", for a source
+// that splits what the other counts as one: a gateway bills cached and
+// uncached input apart, an engine counts all prompt tokens, so
+// "inference_input_tokens+inference_cached_input_tokens=vllm_prompt_tokens".
 func Parse(spec string) ([]Check, error) {
 	var out []Check
 	for _, item := range strings.Split(spec, ",") {
@@ -51,7 +83,7 @@ func Parse(spec string) ([]Check, error) {
 		if !ok || p == "" || s == "" {
 			return nil, fmt.Errorf("cross-check %q: expected primary=secondary[:tolerance%%]", item)
 		}
-		c := Check{Primary: strings.TrimSpace(p), Secondary: strings.TrimSpace(s), Tolerance: 0.01}
+		c := Check{Primary: strings.Join(splitSum(p), "+"), Secondary: strings.Join(splitSum(s), "+"), Tolerance: 0.01}
 		if hasTol {
 			v, err := strconv.ParseFloat(strings.TrimSuffix(strings.TrimSpace(tol), "%"), 64)
 			if err != nil || v < 0 {
@@ -59,10 +91,15 @@ func Parse(spec string) ([]Check, error) {
 			}
 			c.Tolerance = v / 100
 		}
-		for _, m := range []string{c.Primary, c.Secondary} {
+		seen := map[string]bool{}
+		for _, m := range append(c.primaries(), c.secondaries()...) {
 			if _, ok := usage.Lookup(m); !ok {
 				return nil, fmt.Errorf("cross-check %q: unknown metric %q", item, m)
 			}
+			if seen[m] {
+				return nil, fmt.Errorf("cross-check %q: metric %q appears twice", item, m)
+			}
+			seen[m] = true
 		}
 		out = append(out, c)
 	}
@@ -98,13 +135,7 @@ func Evaluate(sp *spool.Spool, checks []Check, from, to time.Time, bucket time.D
 		}
 		b := e.WindowStart.Truncate(bucket)
 		for _, c := range checks {
-			side := -1
-			switch e.Metric {
-			case c.Primary:
-				side = 0
-			case c.Secondary:
-				side = 1
-			}
+			side := c.side(e.Metric)
 			if side < 0 {
 				continue
 			}

@@ -1,5 +1,5 @@
 {{- $adapters := include "vbilling.adapters" . | splitList "," -}}
-{{- $files := or .Values.records.formats .Values.records.pull (and .Values.metering.customMetrics (not (kindIs "string" .Values.metering.customMetrics))) -}}
+{{- $files := or .Values.records.formats .Values.records.pull (and .Values.metering.customMetrics (not (kindIs "string" .Values.metering.customMetrics))) (and (has "stripe" $adapters) .Values.stripe.priceCard) -}}
 {{- $lagoPriceCard := and (has "lago" $adapters) (or .Values.lago.priceCard .Values.lago.priceCardConfigMap) -}}
 apiVersion: apps/v1
 kind: StatefulSet
@@ -86,6 +86,8 @@ spec:
               value: {{ (.Values.billing.priceCheck).maxHold | default "28d" | quote }}
             - name: COLLECTION_INTERVAL
               value: {{ .Values.billing.collectionInterval | quote }}
+            - name: COLLECTION_DELAY
+              value: {{ .Values.billing.collectionDelay | default "5s" | quote }}
             - name: RECONCILE_INTERVAL
               value: {{ .Values.billing.reconcileInterval | quote }}
             - name: MAX_BACKFILL
@@ -213,6 +215,8 @@ spec:
               value: {{ .Values.enforcement.rules | quote }}
             - name: ENFORCEMENT_IN_CLUSTER
               value: {{ .Values.enforcement.inCluster | quote }}
+            - name: ENFORCEMENT_LITELLM
+              value: {{ ((.Values.enforcement).gateway).litellm | default false | quote }}
             - name: PAUSE_KEEP_BILLING
               value: {{ .Values.enforcement.pause.keepBilling | quote }}
             - name: PAUSE_DRAIN_TIMEOUT
@@ -271,6 +275,10 @@ spec:
               value: {{ .Values.stripe.maxRPS | quote }}
             - name: STRIPE_CANCEL_ON_REMOVE
               value: {{ .Values.stripe.cancelOnRemove | quote }}
+            {{- if .Values.stripe.priceCard }}
+            - name: STRIPE_PRICE_CARD
+              value: /etc/vbilling/files/stripe-price-card.yaml
+            {{- end }}
             {{- include "vbilling.secretEnv" (dict "env" "STRIPE_API_KEY" "existing" .Values.stripe.existingSecret "key" "api-key" "inline" .Values.stripe.apiKey "chartKey" "stripe-api-key" "root" .) | nindent 12 }}
             {{- end }}
             {{- include "vbilling.secretEnv" (dict "env" "STRIPE_WEBHOOK_SECRET" "existing" .Values.stripe.existingSecret "key" "webhook-secret" "inline" .Values.stripe.webhookSecret "chartKey" "stripe-webhook-secret" "root" .) | nindent 12 }}

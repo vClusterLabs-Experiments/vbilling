@@ -251,6 +251,7 @@
         <div class="sidebar-label">Documentation</div>
         <a href="getting-started.html">Getting Started</a>
         <a href="how-metering-works.html">How Metering Works</a>
+        <a href="pricing-models.html">Pricing Models</a>
         <a href="configuration.html">Configuration</a>
         <a href="metrics.html">Metrics Reference</a>
         <a href="usage-sources.html">Usage Sources</a>
@@ -428,6 +429,30 @@
       </ul>
       <p>Plans let each tenant pay for what it buys. A tenant that rents whole GPU machines (<a href="private-nodes.html">dedicated or private nodes</a>) can be on a plan with node-hour prices only, and a tenant that pays per GPU-hour on a plan with GPU-hour prices. Stripe only invoices a customer for the meters its subscription has prices on.</p>
 
+      <h3 id="price-card">Price card</h3>
+      <p>Instead of creating each plan's prices by hand, describe them in <code>stripe.priceCard</code> (<code>STRIPE_PRICE_CARD</code>, a YAML file). At startup vBilling creates every missing meter and price, tagged with the plan (<code>metadata[vbilling_plan]</code>) so <code>autoSubscribe</code> picks them up. It never changes or archives a price: Stripe prices cannot be edited, so to change one, create the new price and archive the old one in Stripe, and vBilling logs any amount that differs from the card.</p>
+      <div class="code-block"><code>stripe:
+  autoSubscribe: true
+  priceCard:
+    currency: usd                <span class="comment"># default: billing.currency</span>
+    interval: month              <span class="comment"># day, week, month or year</span>
+    plans:
+      dedicated-a100:
+        vcluster_gpu_hours:
+          sku: {NVIDIA-A100-SXM4-40GB: "2.20"}         <span class="comment"># dollars per GPU-hour</span>
+          names: {NVIDIA-A100-SXM4-40GB: A100 40GB GPU-hour}
+        vcluster_instance_hours: {amount: "0.10", name: Cluster control plane hour}
+      serverless:
+        inference_input_tokens:        {per: 1000000, sku: {qwen2.5-7b-instruct: "0.20"}}
+        inference_cached_input_tokens: {per: 1000000, sku: {qwen2.5-7b-instruct: "0.05"}}
+        inference_output_tokens:       {per: 1000000, sku: {qwen2.5-7b-instruct: "0.60"}}</code></div>
+      <ul>
+        <li>Amounts are in the currency's main unit (dollars, not cents). <code>per</code> divides them: <code>per: 1000000</code> with <code>"0.60"</code> is $0.60 per million tokens, created as 0.00006 cents per token. Stripe takes at most 12 decimal places of a cent; a card that needs more is refused at startup.</li>
+        <li><code>amount</code> prices usage without a SKU (control plane hours, CPU, memory); <code>sku</code> prices each SKU's own meter (see <code>splitMetersBy</code>). A price on the base meter of a metric whose usage has SKUs receives nothing.</li>
+        <li><code>name</code> and <code>names</code> become the product names on the invoice; the default is the meter's name.</li>
+      </ul>
+      <p>Checked against a Stripe sandbox: a card of three prices, including a per-million token price, created exactly those amounts, and applying it again created nothing.</p>
+
       <h3 id="invoices">Invoices</h3>
       <p>Stripe sums each meter over the billing period and adds a line per price to the subscription's invoice; payment collection, tax, retries and dunning stay in Stripe. To see what a tenant owes so far, open the customer's upcoming invoice in the Dashboard, or preview it:</p>
       <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-s</span> https://api.stripe.com/v1/invoices/create_preview <span class="flag">-u</span> <span class="string">"$STRIPE_KEY:"</span> <span class="flag">-d</span> customer=cus_... \
@@ -538,6 +563,7 @@ spec:
           </tbody>
         </table>
       </div>
+      <p>In <code>enforce</code> mode with <code>enforcement.gateway.litellm=true</code>, a suspended or paused tenant's LiteLLM teams are also blocked, which is how a tenant that only buys tokens is stopped. See <a href="usage-sources.html#gateway-enforcement">Stopping a suspended tenant at the gateway</a>.</p>
       <p>Override a mapping with <code>enforcement.rules</code> (<code>ENFORCEMENT_RULES</code>), for example <code>invoice.payment_failed=suspended</code> to suspend on the first failed payment, or <code>billing.alert.triggered=suspended</code> to turn a Stripe usage alert into a hard cap. Operators can also set a state by hand:</p>
       <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-s -X PUT</span> localhost:8080/api/v1/billing-states/acme-ai <span class="flag">-d</span> <span class="string">'{"state": "active", "reason": "paid by bank transfer"}'</span></code></div>
 

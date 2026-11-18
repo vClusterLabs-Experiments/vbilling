@@ -65,16 +65,20 @@ func (p *Path) UnmarshalJSON(b []byte) error {
 
 // Mapping describes one payload format.
 type Mapping struct {
-	ID            Path              `json:"id"`
-	Time          Path              `json:"time"`
-	Tenant        Path              `json:"tenant"`
-	TenantMap     map[string]string `json:"tenantMap,omitempty"` // emitter value -> tenant ID
-	Usage         map[string]Path   `json:"usage"`               // metric code -> quantity
-	Dimensions    map[string]Path   `json:"dimensions,omitempty"`
-	SKU           Path              `json:"sku,omitempty"`
-	Region        Path              `json:"region,omitempty"`
-	Project       Path              `json:"project,omitempty"`
-	TenantCluster Path              `json:"tenantCluster,omitempty"`
+	ID        Path              `json:"id"`
+	Time      Path              `json:"time"`
+	Tenant    Path              `json:"tenant"`
+	TenantMap map[string]string `json:"tenantMap,omitempty"` // emitter value -> tenant ID
+	Usage     map[string]Path   `json:"usage"`               // metric code -> quantity
+	// Subtract takes other metrics out of a metric, for emitters whose
+	// totals include a part priced on its own: LiteLLM's prompt tokens
+	// include the cached ones, so input = prompt - cached. Never below 0.
+	Subtract      map[string][]string `json:"subtract,omitempty"`
+	Dimensions    map[string]Path     `json:"dimensions,omitempty"`
+	SKU           Path                `json:"sku,omitempty"`
+	Region        Path                `json:"region,omitempty"`
+	Project       Path                `json:"project,omitempty"`
+	TenantCluster Path                `json:"tenantCluster,omitempty"`
 	// Where skips records unless every path has the given value, e.g.
 	// {status: success} to bill only successful requests.
 	Where map[string]string `json:"where,omitempty"`
@@ -98,7 +102,10 @@ type Mapping struct {
 // LiteLLM maps LiteLLM's StandardLoggingPayload, as its generic API logger
 // (callback_type: generic_api) posts it. Records are billed to the team of
 // the virtual key, falling back to its organization and user; failed calls
-// are skipped; the model group becomes the SKU. The request ID is
+// are skipped; the model group becomes the SKU. Input tokens served from a
+// prompt cache are their own metric (inference_cached_input_tokens) and are
+// taken out of inference_input_tokens, as token factories price them
+// separately; a requested service tier (priority, flex) is a dimension. The request ID is
 // LiteLLMRequestID, and times are rounded to the millisecond, the precision
 // of LiteLLM's spend logs, so the spend log puller (LiteLLMPuller) produces
 // the same record for the same request.
@@ -109,13 +116,19 @@ var LiteLLM = Mapping{
 	TimePrecision: time.Millisecond,
 	Tenant:        Path{"metadata.user_api_key_team_id", "metadata.user_api_key_org_id", "metadata.user_api_key_user_id", "end_user"},
 	Usage: map[string]Path{
-		"inference_input_tokens":  {"prompt_tokens"},
-		"inference_output_tokens": {"completion_tokens"},
+		"inference_input_tokens":        {"prompt_tokens"},
+		"inference_cached_input_tokens": {"metadata.usage_object.prompt_tokens_details.cached_tokens"},
+		"inference_output_tokens":       {"completion_tokens"},
 	},
-	SKU:   Path{"model_group", "model"},
-	Where: map[string]string{"status": "success"},
+	Subtract: map[string][]string{"inference_input_tokens": {"inference_cached_input_tokens"}},
+	// The pushed payload carries cost_breakdown at the top; a spend log row
+	// keeps it in its metadata.
+	Dimensions: map[string]Path{"service_tier": {"cost_breakdown.service_tier", "metadata.cost_breakdown.service_tier"}},
+	SKU:        Path{"model_group", "model"},
+	Where:      map[string]string{"status": "success"},
 	Metrics: []usage.CustomMetricSpec{
 		{Code: "inference_input_tokens", Name: "Inference input tokens", Unit: "tokens", GroupKeys: []string{"sku"}},
+		{Code: "inference_cached_input_tokens", Name: "Inference cached input tokens", Unit: "tokens", GroupKeys: []string{"sku"}},
 		{Code: "inference_output_tokens", Name: "Inference output tokens", Unit: "tokens", GroupKeys: []string{"sku"}},
 	},
 }
@@ -150,7 +163,7 @@ type Formats map[string]Mapping
 
 // LoadFormats returns the formats in path (a YAML map of name -> Mapping),
 // plus the built-in litellm format when enabled (RECORDS_LITELLM). It is
-// opt-in because it declares two token metrics, which every billing adapter
+// opt-in because it declares three token metrics, which every billing adapter
 // then creates. A file entry named like a built-in replaces it.
 func LoadFormats(path string, litellm bool) (Formats, error) {
 	f := Formats{}
@@ -177,6 +190,13 @@ func LoadFormats(path string, litellm bool) (Formats, error) {
 		}
 		if m.TimeRound < 0 {
 			return nil, fmt.Errorf("%s: format %q: timePrecision must be positive", path, name)
+		}
+		for metric, parts := range m.Subtract {
+			for _, mm := range append([]string{metric}, parts...) {
+				if _, ok := m.Usage[mm]; !ok {
+					return nil, fmt.Errorf("%s: format %q: subtract names %q, which is not in its usage", path, name, mm)
+				}
+			}
 		}
 		m.TimePrecision = time.Duration(m.TimeRound)
 		f[name] = m
@@ -311,6 +331,16 @@ func Map(format string, m Mapping, obj map[string]any) (rec Record, skip bool, e
 			return Record{}, false, fmt.Errorf("%s: %w", metric, err)
 		}
 		rec.Usage[metric] = q
+	}
+	for metric, parts := range m.Subtract {
+		q, ok := rec.Usage[metric]
+		if !ok {
+			continue
+		}
+		for _, part := range parts {
+			q -= rec.Usage[part]
+		}
+		rec.Usage[metric] = max(q, 0)
 	}
 	rec.SKU, _ = lookupString(obj, m.SKU)
 	rec.Region, _ = lookupString(obj, m.Region)

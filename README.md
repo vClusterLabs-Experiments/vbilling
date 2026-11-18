@@ -31,6 +31,9 @@ vBilling is the **metering pipe**, not the billing engine. It turns what runs in
 - **Enforcement inside clusters with their own nodes.** `ENFORCEMENT_IN_CLUSTER` installs an admission policy inside a suspended tenant's clusters. Holds keep reasons apart: a payment never lifts an operator's `abuse` hold.
 - **Pause that stops billing.** The `paused` state stops a tenant's clusters the way `vcluster pause` does, after draining their own nodes, and capacity stops billing at that second. The tenant cannot restart them: vBilling pauses a cluster again within 15 seconds if anything else brings it back, and `vcluster connect` refuses a paused cluster instead of resuming it. Clearing the hold (a top-up, an operator) resumes them. Volumes and load balancers keep billing unless `PAUSE_KEEP_BILLING` says otherwise.
 - **A dashboard built from the catalog.** Every metric with usage gets a column with its unit, estimates are marked, and each tenant expands to its SKUs.
+- **Pricing models.** Ready setups for dedicated GPUs, serverless inference, blended plans and enterprise chargeback ([Pricing Models](https://vclusterlabs-experiments.github.io/vbilling/pricing-models.html)). A Stripe price card (`STRIPE_PRICE_CARD`) creates each plan's meters and prices, including per-million token prices. Cached input tokens are billed as their own metric, and a requested service tier is a dimension.
+- **Stopping token customers at the gateway.** In `enforce` mode, `ENFORCEMENT_LITELLM` blocks a suspended or paused tenant's LiteLLM teams and unblocks them when it is active again, lifting only blocks vBilling set.
+- **Spot capacity.** `COLLECTION_DELAY` (for example `75s`) waits for Kubernetes to notice a node that died without warning before its last window is billed.
 - **Smaller additions.** Custom metrics as a YAML list, including informational ones (`billable: false`); a plan per tenant class (`PLAN_BY_CLASS`); Lago price cards and managed plans.
 
 See [Usage sources](https://vclusterlabs-experiments.github.io/vbilling/usage-sources.html) for what each source guarantees.
@@ -336,7 +339,7 @@ callback_settings:
     retry_delay: 1
 ```
 
-Prompt and completion tokens become `inference_input_tokens` and `inference_output_tokens`, the model group becomes the SKU, and failed calls are skipped. Records are billed to the LiteLLM team of the virtual key: list team IDs in the `vbilling.vcluster.com/aliases` annotation of the tenant's cluster, or give a gateway that serves one tenant its own token in `INGEST_TOKENS`, which wins over the payload. Other gateways, such as Kong, need a few lines of YAML in `records.formats`. LiteLLM keeps records in memory until it posts a batch and drops a batch once its retries fail, so let vBilling also pull LiteLLM's spend logs (`records.pullLiteLLM.url`, LiteLLM v1.103.0 or later): pulled rows fill what the push lost, and a request seen by both counts once. See [Usage sources](https://vclusterlabs-experiments.github.io/vbilling/usage-sources.html#litellm-pull).
+Prompt and completion tokens become `inference_input_tokens` and `inference_output_tokens` (input served from a prompt cache is `inference_cached_input_tokens`, taken out of the input), the model group becomes the SKU, and failed calls are skipped. Records are billed to the LiteLLM team of the virtual key: list team IDs in the `vbilling.vcluster.com/aliases` annotation of the tenant's cluster, or give a gateway that serves one tenant its own token in `INGEST_TOKENS`, which wins over the payload. Other gateways, such as Kong, need a few lines of YAML in `records.formats`. LiteLLM keeps records in memory until it posts a batch and drops a batch once its retries fail, so let vBilling also pull LiteLLM's spend logs (`records.pullLiteLLM.url`, LiteLLM v1.103.0 or later): pulled rows fill what the push lost, and a request seen by both counts once. See [Usage sources](https://vclusterlabs-experiments.github.io/vbilling/usage-sources.html#litellm-pull).
 
 ## Custom usage: tokens, Slurm, storage, network
 
@@ -458,6 +461,7 @@ Alert on rising lag, dead letters, a stale last window, or any source that is no
 | `ARCHIVE_DIR` (`persistence.archive.*`) | | Long-term archive: compaction gzips each segment here and records it in `archive.jsonl` before deleting it. Check with `vbilling ledger verify` |
 | `COLLECTION_INTERVAL` | `60s` | Window size; must divide an hour |
 | `MAX_BACKFILL`, `OFFBOARD_GRACE` | `6h`, `1h` | |
+| `COLLECTION_DELAY` | `5s` | How long after a window ends it is metered; `75s` on spot or preemptible GPUs |
 | `CPU_MEMORY_BASIS` | `requests` | `requests` (exact), or `usage` or `max` (metrics-server readings: estimates) |
 | `METER_CONTROL_PLANE`, `METER_BY_NAMESPACE` | `false` | |
 | `GPU_RESOURCES` | `nvidia.com/gpu,amd.com/gpu` | MIG (`nvidia.com/mig-*`) and `nvidia.com/gpu.shared` are always detected |
@@ -490,8 +494,9 @@ Alert on rising lag, dead letters, a stale last window, or any source that is no
 | `INGEST_TOKENS` (`api.tenantIngestTokens`) | | Ingest tokens bound to a tenant, `token=tenant,...` (the Helm value is `{tenant: token}`) |
 | `ENFORCEMENT_MODE`, `ENFORCEMENT_RULES` | `observe` | |
 | `ENFORCEMENT_IN_CLUSTER` (`enforcement.inCluster`) | `false` | Also enforce inside each suspended tenant's clusters, through their own API |
+| `ENFORCEMENT_LITELLM` (`enforcement.gateway.litellm`) | `false` | Block suspended and paused tenants' LiteLLM teams (uses `RECORDS_PULL_LITELLM_URL` and `_KEY`) |
 | `PAUSE_KEEP_BILLING` (`enforcement.pause.keepBilling`), `PAUSE_DRAIN_TIMEOUT` (`enforcement.pause.drainTimeout`) | `storage,load_balancers`, `2m` | What keeps billing while paused; how long to wait for workloads on a cluster's own nodes to stop |
-| `STRIPE_API_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_SPLIT_METERS_BY` (`sku`), `STRIPE_AUTO_SUBSCRIBE`, `STRIPE_MAX_RPS`, `STRIPE_API_VERSION` (`2026-09-30.endive`), `STRIPE_API_BASE` | | |
+| `STRIPE_API_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_SPLIT_METERS_BY` (`sku`), `STRIPE_AUTO_SUBSCRIBE`, `STRIPE_MAX_RPS`, `STRIPE_API_VERSION` (`2026-09-30.endive`), `STRIPE_API_BASE`, `STRIPE_PRICE_CARD` (`stripe.priceCard`) | | |
 | `METRONOME_API_TOKEN`, `METRONOME_WEBHOOK_SECRET`, `METRONOME_RATE_CARD`, `METRONOME_STRIPE_LINK`, `METRONOME_STRIPE_COLLECTION_METHOD` | | |
 | `LAGO_API_URL`, `LAGO_API_KEY`, `DEFAULT_PLAN_CODE`, `BILLING_CURRENCY` | | |
 | `LAGO_PRICE_CARD` (`lago.priceCard`), `LAGO_MANAGED_PLANS` (`lago.managedPlans`) | | YAML amounts for the charges and SKU charge filters vBilling creates (never changes existing amounts); plans besides the default whose charges vBilling manages |

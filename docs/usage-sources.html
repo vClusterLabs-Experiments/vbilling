@@ -285,6 +285,7 @@
         <div class="sidebar-label">Documentation</div>
         <a href="getting-started.html">Getting Started</a>
         <a href="how-metering-works.html">How Metering Works</a>
+        <a href="pricing-models.html">Pricing Models</a>
         <a href="configuration.html">Configuration</a>
         <a href="metrics.html">Metrics Reference</a>
         <a href="usage-sources.html" class="active">Usage Sources</a>
@@ -466,7 +467,7 @@
       <h2 id="gateways">AI gateways</h2>
       <p>An AI Cloud that sells inference bills per token, and only the gateway in front of the inference engines knows which customer sent each request. Any gateway works: it posts one record per request, in vBilling's own format, in LiteLLM's built-in format, or in any JSON shape through a mapping. If the gateway also keeps its own log of requests (a database or a logs API), vBilling can read that log back to fill what the push lost. LiteLLM has a built-in format and a built-in pull; every other gateway uses a mapping and a <a href="#gateway-pull">pull spec</a>.</p>
       <h3 id="litellm">LiteLLM</h3>
-      <p>LiteLLM's generic API logger posts a <code>StandardLoggingPayload</code> for every request. The built-in <code>litellm</code> format reads it as posted. Enable it with <code>RECORDS_LITELLM=true</code> (Helm <code>records.litellm: true</code>); it is off by default because it declares <code>inference_input_tokens</code> and <code>inference_output_tokens</code>, which every billing adapter then creates.</p>
+      <p>LiteLLM's generic API logger posts a <code>StandardLoggingPayload</code> for every request. The built-in <code>litellm</code> format reads it as posted. Enable it with <code>RECORDS_LITELLM=true</code> (Helm <code>records.litellm: true</code>); it is off by default because it declares <code>inference_input_tokens</code>, <code>inference_cached_input_tokens</code> and <code>inference_output_tokens</code>, which every billing adapter then creates.</p>
       <div class="code-block"><code><span class="comment"># LiteLLM proxy config.yaml</span>
 litellm_settings:
   callbacks: [<span class="string">"vbilling"</span>]
@@ -486,8 +487,10 @@ callback_settings:
             <tr><td>Request ID</td><td><code>litellm_call_id</code> and <code>id</code> (the response ID), joined as <code>&lt;litellm_call_id&gt;/&lt;id&gt;</code>, with LiteLLM's <code>_cache_hit&lt;time&gt;</code> suffix cut</td></tr>
             <tr><td>Time</td><td><code>endTime</code>, else <code>startTime</code>, rounded to the millisecond as LiteLLM's spend logs store it</td></tr>
             <tr><td>Tenant</td><td><code>metadata.user_api_key_team_id</code>, else <code>metadata.user_api_key_org_id</code>, <code>metadata.user_api_key_user_id</code>, <code>end_user</code></td></tr>
-            <tr><td><code>inference_input_tokens</code></td><td><code>prompt_tokens</code></td></tr>
+            <tr><td><code>inference_input_tokens</code></td><td><code>prompt_tokens</code> minus the cached ones: input billed at the input rate</td></tr>
+            <tr><td><code>inference_cached_input_tokens</code></td><td><code>metadata.usage_object.prompt_tokens_details.cached_tokens</code>: input served from a prompt cache, which token factories price lower. Zero when the model server reports none (vLLM reports them with <code>--enable-prompt-tokens-details</code>).</td></tr>
             <tr><td><code>inference_output_tokens</code></td><td><code>completion_tokens</code></td></tr>
+            <tr><td>Dimension <code>service_tier</code></td><td><code>cost_breakdown.service_tier</code> when the request asked for one (for example <code>priority</code> or <code>flex</code>), for tier prices; absent otherwise</td></tr>
             <tr><td>SKU</td><td><code>model_group</code>, else <code>model</code></td></tr>
             <tr><td>Billed</td><td>Only records with <code>status: success</code>. Failed calls are counted as <code>skipped</code>.</td></tr>
           </tbody>
@@ -495,6 +498,14 @@ callback_settings:
       </div>
       <p>Neither ID alone identifies a request. A client can set <code>litellm_call_id</code> with the <code>x-litellm-call-id</code> header, so keying on it would let a tenant make its requests look like retries of one. Response IDs repeat: every cache hit of one entry returns the cached response's ID, and some providers return the same ID for every call.</p>
       <p>Records are billed to the team of the virtual key. LiteLLM generates team IDs unless you pass <code>team_id</code> when you create a team, so either create teams with the tenant ID as their <code>team_id</code>, or list each team ID in the <code>vbilling.vcluster.com/aliases</code> of the tenant's cluster. A LiteLLM that serves one tenant can use a tenant-bound token instead.</p>
+      <h3 id="gateway-enforcement">Stopping a suspended tenant at the gateway</h3>
+      <p>A tenant that buys tokens has no cluster to stop, so a suspension for non-payment has to take effect at the gateway. With <code>enforcement.mode: enforce</code> and <code>enforcement.gateway.litellm: true</code> (<code>ENFORCEMENT_LITELLM=true</code>), vBilling blocks the LiteLLM teams of a tenant that is suspended or paused, and unblocks them when it is active again. A team is one of the tenant's identities: its tenant ID, its <code>vbilling.vcluster.com/aliases</code>, or a value the format's <code>tenantMap</code> maps to it. It uses the URL and admin key of <code>records.pullLiteLLM</code>.</p>
+      <ul>
+        <li>vBilling only lifts blocks it set. A team an administrator blocked stays blocked when the tenant is active again.</li>
+        <li>Blocking also stops a paused cluster's gateway retries, which otherwise bill requests no client received.</li>
+        <li>LiteLLM applies a block when its key cache expires, 60 seconds by default: in a live run 1,626 requests got through before the block took effect. Set <code>general_settings: {user_api_key_cache_ttl: 5}</code> in LiteLLM, and blocks and unblocks take effect within 5 seconds (measured on v1.108.11). A blocked team's keys get HTTP 401, <code>Team=&lt;id&gt; is blocked</code>.</li>
+        <li>Blocks are applied again every 2 minutes, which retries any that failed; <code>vbilling_gateway_block_errors_total</code> counts failures.</li>
+      </ul>
       <p>What LiteLLM v1.108.11 did when the post failed, measured:</p>
       <div class="config-table-wrap">
         <table class="config-table">
@@ -555,11 +566,12 @@ callback_settings:
             <tr><td><code>sku</code>, <code>region</code>, <code>project</code>, <code>tenantCluster</code></td><td>Paths for those event fields.</td></tr>
             <tr><td><code>dimensions</code></td><td>Dimension keys mapped to paths.</td></tr>
             <tr><td><code>where</code></td><td>Paths with the value they must have, for example <code>{status: success}</code>. Other records are skipped.</td></tr>
+            <tr><td><code>subtract</code></td><td>Metrics taken out of another metric, for a gateway whose total includes a part priced on its own: <code>{in_tokens: [cached_tokens]}</code> bills input minus cached. Never below zero; every name must be in <code>usage</code>.</td></tr>
             <tr><td><code>metrics</code></td><td>Metrics to declare (<code>code</code>, <code>name</code>, <code>unit</code>, <code>description</code>, <code>groupKeys</code>, <code>billable</code>), unless a metric with the same code exists.</td></tr>
           </tbody>
         </table>
       </div>
-      <p>A path is dotted, or a list of paths of which the first non-empty one wins. <code>timePrecision</code> (for example <code>1ms</code>) rounds each record's time; set it when the gateway's own log, read back by a pull, stores times less precisely than the push sends them, so both copies of a request fall in the same window. When it is enabled, the built-in <code>litellm</code> format declares <code>inference_input_tokens</code> and <code>inference_output_tokens</code> (unit tokens, priced by <code>sku</code>), so any format can use them, and billing adapters create them at startup. Declare other metrics in a format's <code>metrics</code> or in <a href="metrics.html#custom-metrics"><code>metering.customMetrics</code></a>, which wins. A format named <code>litellm</code> replaces the built-in one; <code>vbilling</code> cannot be redefined.</p>
+      <p>A path is dotted, or a list of paths of which the first non-empty one wins. <code>timePrecision</code> (for example <code>1ms</code>) rounds each record's time; set it when the gateway's own log, read back by a pull, stores times less precisely than the push sends them, so both copies of a request fall in the same window. When it is enabled, the built-in <code>litellm</code> format declares <code>inference_input_tokens</code>, <code>inference_cached_input_tokens</code> and <code>inference_output_tokens</code> (unit tokens, priced by <code>sku</code>), so any format can use them, and billing adapters create them at startup. Declare other metrics in a format's <code>metrics</code> or in <a href="metrics.html#custom-metrics"><code>metering.customMetrics</code></a>, which wins. A format named <code>litellm</code> replaces the built-in one; <code>vbilling</code> cannot be redefined.</p>
 
       <h3 id="gateway-pull">Pulling any gateway's request log</h3>
       <p>A push can lose records: a batch the gateway drops while vBilling restarts, a gateway crash before it sends. When the gateway keeps its own request log behind an HTTP API, list it under <code>records.pull</code> (or in a YAML file named by <code>RECORDS_PULL_FILE</code>). Every <code>interval</code>, vBilling reads the log from the end of the last successful pull minus <code>lookback</code>, maps each row with the same format as the push, and stores only the requests it does not have yet. Pushed and pulled copies of a request get the same record ID and count once; rows that arrive after their window settled become late adjustments.</p>
@@ -681,6 +693,10 @@ crossChecks:
     secondary: vllm_output_tokens
     tolerancePercent: 2</code></div>
       <p>Without Helm: <code>CROSS_CHECKS="inference_output_tokens=vllm_output_tokens:2%"</code>. Both metrics must be declared. The default tolerance is 1%.</p>
+      <p>Either side can be a sum, joined by <code>+</code>, when one source splits what the other counts as one. The gateway bills cached and uncached input apart, while vLLM's prompt counter counts all of it:</p>
+      <div class="code-block"><code>crossChecks:
+  - primary: inference_input_tokens+inference_cached_input_tokens
+    secondary: vllm_input_tokens              <span class="comment"># counter: vllm:prompt_tokens_total{{selector}}</span></code></div>
       <ul>
         <li>Every 5 minutes, vBilling compares each tenant's totals for the last complete hour, 10 minutes after it ends, so late records and Prometheus catch-up are in.</li>
         <li>The divergence is the difference between the two totals divided by the larger one. Above the tolerance, the source <code>crosscheck/&lt;primary&gt;~&lt;secondary&gt;/&lt;tenant&gt;</code> turns <code>diverged</code> with both totals, and <code>vbilling_crosscheck_divergence_ratio{check,tenant}</code> on <code>/metrics</code> shows the ratio.</li>
