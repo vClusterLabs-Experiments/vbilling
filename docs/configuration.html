@@ -418,7 +418,7 @@
             </tr>
             <tr>
               <td><code>CPU_MEMORY_BASIS</code></td>
-              <td><code>requests</code> (exact), <code>usage</code> (a metrics-server reading per window, an estimate), or <code>max</code> of both.</td>
+              <td><code>requests</code> (exact), <code>usage</code> (a metrics-server reading per window, an estimate), or <code>max</code> of both. Pods that request nothing bill no CPU or memory under <code>requests</code>; <code>vbilling_pods_without_requests</code> counts them. v0.2 defaulted to <code>usage</code>.</td>
               <td class="td-default">requests</td>
             </tr>
             <tr>

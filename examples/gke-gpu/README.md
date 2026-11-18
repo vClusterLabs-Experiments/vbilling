@@ -34,7 +34,7 @@ No file here contains a key, token or account ID. Keep yours out of the reposito
 
 ```bash
 export ZONE=us-central1-a CLUSTER=vbilling-demo
-git clone https://github.com/vClusterLabs-Experiments/vbilling && cd vbilling/examples/gke-gpu
+git clone --branch v0.3.0 https://github.com/vClusterLabs-Experiments/vbilling && cd vbilling/examples/gke-gpu
 ```
 
 ## 1. Control plane cluster

@@ -318,7 +318,7 @@
         <li>GPU quota in the zone for one L4 and one A100 (spot capacity is enough).</li>
       </ul>
       <div class="code-block"><code><span class="cmd">export</span> ZONE=us-central1-a CLUSTER=vbilling-demo
-<span class="cmd">git</span> clone https://github.com/vClusterLabs-Experiments/vbilling &amp;&amp; cd vbilling/examples/gke-gpu</code></div>
+<span class="cmd">git</span> clone --branch v0.3.0 https://github.com/vClusterLabs-Experiments/vbilling &amp;&amp; cd vbilling/examples/gke-gpu</code></div>
 
       <h2 id="cluster">1. Control plane cluster</h2>
       <div class="code-block"><code><span class="cmd">gcloud</span> container clusters create $CLUSTER --zone $ZONE --release-channel regular \
