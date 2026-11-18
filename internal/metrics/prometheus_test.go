@@ -40,6 +40,7 @@ func TestPlatformPresetQueriesFleetObservabilityLabels(t *testing.T) {
 }
 
 func TestPrometheusDefinedBillableMetrics(t *testing.T) {
+	t.Cleanup(func() { usage.RemoveCustom("test_output_tokens") })
 	path := filepath.Join(t.TempDir(), "metrics.yaml")
 	body := `- code: test_output_tokens
   name: Output tokens

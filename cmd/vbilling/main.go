@@ -449,10 +449,25 @@ func newGateway(cfg *config.Config, ctrl *controller.Controller, formats records
 		log.Fatalf("open gateway state: %v", err)
 	}
 	tenantMap := formats["litellm"].TenantMap
+	// A team is one of a tenant's identities only if its usage bills to that
+	// tenant, by the same rules records use: the tenant map, then aliases.
+	billsTo := func(team string) string {
+		v := team
+		if t, ok := tenantMap[team]; ok {
+			v = t
+		}
+		t, _ := ctrl.ResolveTenant(v)
+		return t
+	}
 	identities := func(tenant string) []string {
-		ids := ctrl.GatewayIdentities(tenant)
-		for raw, t := range tenantMap {
-			if t == tenant {
+		var ids []string
+		for _, id := range ctrl.GatewayIdentities(tenant) {
+			if billsTo(id) == tenant {
+				ids = append(ids, id)
+			}
+		}
+		for raw := range tenantMap {
+			if billsTo(raw) == tenant {
 				ids = append(ids, raw)
 			}
 		}
@@ -518,6 +533,7 @@ func newEnforcer(cfg *config.Config, kube kubernetes.Interface, ctrl *controller
 		Freeze:                 coll.Freeze,
 		OnPause:                ctrl.SetPaused,
 		DrainTimeout:           cfg.PauseDrainTimeout,
+		KeepNamespaces:         cfg.PauseKeepNamespaces,
 		Gateway:                gw,
 	})
 }

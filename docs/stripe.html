@@ -406,7 +406,7 @@
       <p>vBilling never deletes customers. Do not delete them in Stripe either: to move a tenant to another customer, pin it.</p>
 
       <h2 id="prices">Prices and subscriptions</h2>
-      <p>vBilling never creates prices: what a GPU-hour costs is your decision. Create a recurring, metered price on each meter you charge for. Quantities are hours (GPU-hours, node-hours, GiB-hours), so unit prices are per hour. Fractional GPUs are already counted in GPU-equivalents (a <code>1g.5gb</code> slice of an A100 is 1/7), so one per-GPU-hour price fits every variant of a SKU, or the slices can carry a premium.</p>
+      <p>What a GPU-hour costs is your decision. vBilling creates prices only from a <a href="#price-card">price card</a> you give it, and never changes or archives one. Without a price card, create a recurring, metered price on each meter you charge for. Quantities are hours (GPU-hours, node-hours, GiB-hours), so unit prices are per hour. Fractional GPUs are already counted in GPU-equivalents (a <code>1g.5gb</code> slice of an A100 is 1/7), so one per-GPU-hour price fits every variant of a SKU, or the slices can carry a premium.</p>
       <div class="code-block"><code>METER=$(<span class="cmd">curl</span> <span class="flag">-s -G</span> https://api.stripe.com/v1/billing/meters <span class="flag">-u</span> <span class="string">"$STRIPE_KEY:"</span> <span class="flag">-d</span> limit=100 \
   | jq <span class="flag">-r</span> <span class="string">'.data[] | select(.event_name=="vcluster_gpu_hours__nvidia_h100_80gb_hbm3") | .id'</span>)
 <span class="cmd">curl</span> <span class="flag">-s</span> https://api.stripe.com/v1/prices <span class="flag">-u</span> <span class="string">"$STRIPE_KEY:"</span> \
@@ -559,7 +559,7 @@ spec:
             <tr><td><code>observe</code> (default)</td><td>Record the state only.</td></tr>
             <tr><td><code>annotate</code></td><td>Also annotate the tenant cluster, label its namespace <code>vbilling.vcluster.com/billing-state</code>, and emit a Kubernetes event.</td></tr>
             <tr><td><code>enforce</code></td><td>Also label suspended namespaces <code>vbilling.vcluster.com/suspended=true</code>. With <code>enforcement.admissionPolicy.enabled=true</code> (Kubernetes 1.30+), new pods are denied there while running workloads keep running. A paid invoice lifts it.</td></tr>
-            <tr><td colspan="2">The admission policy acts in the control plane cluster, so it holds tenant clusters on shared or dedicated nodes. Tenant clusters with their own nodes (Private Nodes, Auto Nodes, Standalone) run their pods only inside the tenant cluster: act on their billing state with your own automation.</td></tr>
+            <tr><td colspan="2">The admission policy acts in the control plane cluster, so it holds tenant clusters on shared or dedicated nodes. Tenant clusters with their own nodes (Private Nodes, Auto Nodes, Standalone) run their pods only inside the tenant cluster: with <code>enforcement.inCluster=true</code>, vBilling installs the same policy inside each of them through the cluster's own API (see <a href="private-nodes.html#enforcement">Billing-state enforcement inside the cluster</a>), or act on their billing state with your own automation.</td></tr>
           </tbody>
         </table>
       </div>

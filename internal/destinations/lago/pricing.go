@@ -29,8 +29,47 @@ func (a *Adapter) PricePlan(t usage.Tenant) string {
 	return a.cfg.DefaultPlanCode
 }
 
-// PriceDims: vBilling prices SKUs through charge filters on "sku" only.
-func (a *Adapter) PriceDims(string) []string { return nil }
+// PriceDims lists the keys besides "sku" that the metric's billable metric
+// filters on (region, capacity_type, ...), as last read from Lago: charge
+// filters can price each combination of their values differently. The
+// v0.1 property "vcluster" is the tenant_cluster dimension.
+func (a *Adapter) PriceDims(metric string) []string {
+	a.dimsMu.Lock()
+	defer a.dimsMu.Unlock()
+	return a.filterDims[metric]
+}
+
+// noteFilterDims remembers a billable metric's filter keys for PriceDims.
+func (a *Adapter) noteFilterDims(bm *BillableMetric) {
+	if bm == nil {
+		return
+	}
+	var keys []string
+	seen := map[string]bool{}
+	for _, f := range bm.Filters {
+		k := dimOfFilterKey(f.Key)
+		if k != "sku" && k != "" && !seen[k] {
+			seen[k] = true
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	a.dimsMu.Lock()
+	defer a.dimsMu.Unlock()
+	if a.filterDims == nil {
+		a.filterDims = map[string][]string{}
+	}
+	a.filterDims[bm.Code] = keys
+}
+
+// dimOfFilterKey maps a Lago event property to the series dimension that
+// carries its value (ToEvent's mapping, reversed).
+func dimOfFilterKey(k string) string {
+	if k == "vcluster" {
+		return usage.DimTenantCluster
+	}
+	return k
+}
 
 // PrepareSeries adds new SKUs to their billable metric's "sku" filter
 // values. Lago only accepts a charge filter for a value its billable metric
@@ -61,6 +100,7 @@ func (a *Adapter) PrepareSeries(ctx context.Context, series []destinations.Price
 		if err != nil {
 			return fmt.Errorf("get billable metric %s: %w", metric, err)
 		}
+		a.noteFilterDims(bm)
 		filters, added := withFilterValues(bm.Filters, "sku", skus[metric])
 		if len(added) == 0 {
 			continue
@@ -91,6 +131,7 @@ func (a *Adapter) CheckPrices(ctx context.Context, series []destinations.PriceSe
 				return nil, fmt.Errorf("get billable metric %s: %w", s.Metric, err)
 			default:
 				metrics[s.Metric] = bm
+				a.noteFilterDims(bm)
 			}
 		}
 		if _, done := plans[s.Plan]; !done && s.Plan != "" {
@@ -162,17 +203,17 @@ func (a *Adapter) coverage(s destinations.PriceSeries, bm *BillableMetric, plan 
 		return destinations.PriceCoverage{Status: destinations.PriceZero, Detail: where + ": priced at 0"}
 	}
 
-	f, exact := filterFor(ch.Filters, s.SKU)
+	f, exact := filterFor(ch.Filters, s)
 	inherited := false
 	if f != nil {
-		label := "the charge filter for sku=" + s.SKU
+		label := "the charge filter for " + describeFilter(f)
 		if !exact {
-			label = "the charge filter for every sku"
+			label = "the charge filter for " + describeFilter(f) + " (matching every value)"
 		}
 		if p, found := pricesSomething(f.Properties); p || !found {
 			return destinations.PriceCoverage{Status: destinations.PriceCovered, Detail: fmt.Sprintf("%s: %s", where, label)}
 		}
-		if copied, ok := a.state.Get(inheritKey(plan.Code, bm.Code, s.SKU)); exact && ok {
+		if copied, ok := a.state.Get(inheritKey(plan.Code, bm.Code, s.SKU)); exact && len(f.Values) == 1 && ok {
 			amount, _ := amountOf(f.Properties)
 			inherited = amount == copied
 		}
@@ -186,54 +227,136 @@ func (a *Adapter) coverage(s destinations.PriceSeries, bm *BillableMetric, plan 
 		// decision to bill this SKU at 0.
 	} else if def || !defFound {
 		return destinations.PriceCoverage{Status: destinations.PriceCovered,
-			Detail: fmt.Sprintf("%s: billed at the charge's default price (no charge filter of its own for sku=%s)", where, s.SKU)}
+			Detail: fmt.Sprintf("%s: billed at the charge's default price (no charge filter matches %s)", where, describeSeries(s))}
 	}
-	if sibling := pricedSibling(ch.Filters); sibling != "" {
-		how := "no charge filter prices sku=" + s.SKU + " and the charge's default price is 0"
+	if sibling := pricedSibling(ch.Filters); sibling != nil {
+		how := "no charge filter prices " + describeSeries(s) + " and the charge's default price is 0"
 		if inherited {
 			how = "the charge filter vBilling split out for sku=" + s.SKU + " copied the default price 0"
 		}
 		return destinations.PriceCoverage{
 			Status: destinations.PriceMissing,
-			Detail: fmt.Sprintf("%s: %s, so Lago bills it at 0 while other SKUs have prices (sku=%s)", where, how, sibling),
-			Hint:   fmt.Sprintf("price sku=%s in the charge for %s on plan %q (its charge filter in Lago, or LAGO_PRICE_CARD before the SKU's first event)", s.SKU, bm.Code, plan.Code),
+			Detail: fmt.Sprintf("%s: %s, so Lago bills it at 0 while other usage has prices (%s)", where, how, describeFilter(sibling)),
+			Hint:   fmt.Sprintf("price %s in the charge for %s on plan %q (a charge filter in Lago, or LAGO_PRICE_CARD before the SKU's first event)", describeSeries(s), bm.Code, plan.Code),
 		}
 	}
 	return destinations.PriceCoverage{Status: destinations.PriceZero, Detail: fmt.Sprintf("%s: priced at 0", where)}
 }
 
-// filterFor returns the charge filter that prices sku: one listing it, else
-// one for every value of "sku".
-func filterFor(filters []ChargeFilter, sku string) (*ChargeFilter, bool) {
-	var all *ChargeFilter
+// filterFor returns the charge filter Lago applies to a series' usage, as
+// Lago matches them: every key of the filter must match (a listed value, or
+// any value for __ALL_FILTER_VALUES__), and of the filters that match, the
+// one with the most keys applies. exact is false when a key matched through
+// __ALL_FILTER_VALUES__ or a key the series does not carry. A key the
+// series does not carry at all (it was seen before the filter existed) is
+// assumed to match, as v0.3.0 assumed for every key besides sku.
+func filterFor(filters []ChargeFilter, s destinations.PriceSeries) (*ChargeFilter, bool) {
+	var best *ChargeFilter
+	bestKeys, bestExact, bestUnknown := -1, false, true
 	for i := range filters {
-		for _, v := range filters[i].Values["sku"] {
-			if v == sku {
-				return &filters[i], true
+		f := &filters[i]
+		ok, exact, unknown := true, true, false
+		for k, values := range f.Values {
+			v, known := seriesValue(s, k)
+			if !known {
+				exact, unknown = false, true
+				continue
 			}
-			if v == allFilterValues && all == nil {
-				all = &filters[i]
+			match := false
+			for _, want := range values {
+				if want == v && v != "" {
+					match = true
+					break
+				}
+				if want == allFilterValues && v != "" {
+					match, exact = true, false
+					break
+				}
+			}
+			if !match {
+				ok = false
+				break
 			}
 		}
+		if !ok {
+			continue
+		}
+		// A filter that matches on keys the series carries beats one that
+		// only matches by assumption; then the one with more keys wins.
+		n := len(f.Values)
+		better := best == nil ||
+			!unknown && bestUnknown ||
+			unknown == bestUnknown && (n > bestKeys || n == bestKeys && exact && !bestExact)
+		if better {
+			best, bestKeys, bestExact, bestUnknown = f, n, exact, unknown
+		}
 	}
-	return all, false
+	return best, bestExact
 }
 
-// pricedSibling returns a SKU whose own charge filter has a non-zero price.
-func pricedSibling(filters []ChargeFilter) string {
-	for _, f := range filters {
+// seriesValue returns a series' value of a Lago filter key, and whether the
+// series carries that key at all.
+func seriesValue(s destinations.PriceSeries, key string) (string, bool) {
+	if key == "sku" {
+		return s.SKU, true
+	}
+	v, ok := s.Dims[dimOfFilterKey(key)]
+	return v, ok
+}
+
+// describeFilter renders a charge filter's values, "sku=H100, region=us-east".
+func describeFilter(f *ChargeFilter) string {
+	keys := make([]string, 0, len(f.Values))
+	for k := range f.Values {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		vals := make([]string, 0, len(f.Values[k]))
+		for _, v := range f.Values[k] {
+			if v == allFilterValues {
+				v = "*"
+			}
+			vals = append(vals, v)
+		}
+		parts = append(parts, k+"="+strings.Join(vals, "|"))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// describeSeries renders a series' SKU and dimensions.
+func describeSeries(s destinations.PriceSeries) string {
+	parts := []string{"sku=" + s.SKU}
+	keys := make([]string, 0, len(s.Dims))
+	for k := range s.Dims {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		parts = append(parts, k+"="+s.Dims[k])
+	}
+	return strings.Join(parts, ", ")
+}
+
+// pricedSibling returns a charge filter with a non-zero price for specific
+// values (not only __ALL_FILTER_VALUES__).
+func pricedSibling(filters []ChargeFilter) *ChargeFilter {
+	for i := range filters {
+		f := &filters[i]
 		p, _ := pricesSomething(f.Properties)
 		if !p {
 			continue
 		}
-		for _, v := range f.Values["sku"] {
-			if v == allFilterValues {
-				continue
+		for _, vals := range f.Values {
+			for _, v := range vals {
+				if v != allFilterValues {
+					return f
+				}
 			}
-			return v
 		}
 	}
-	return ""
+	return nil
 }
 
 // amountOf returns a charge or filter's "amount" property.

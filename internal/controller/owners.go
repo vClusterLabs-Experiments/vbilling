@@ -30,20 +30,7 @@ type collectFunc func(ctx context.Context, targets []metrics.Target, windows []m
 // cluster's owner changed, and stamps vCluster Platform UIDs on the events.
 // Without owner history, or without a move in the range, it is one call.
 func (c *Controller) collectAttributed(ctx context.Context, targets []metrics.Target, windows []metrics.Window, collect collectFunc) (map[time.Time][]usage.Event, metrics.Stats, error) {
-	type run struct {
-		targets []metrics.Target
-		windows []metrics.Window
-		sig     string
-	}
-	var runs []run
-	for _, w := range windows {
-		ts, sig := c.targetsFor(targets, w.End)
-		if n := len(runs); n > 0 && runs[n-1].sig == sig {
-			runs[n-1].windows = append(runs[n-1].windows, w)
-			continue
-		}
-		runs = append(runs, run{targets: ts, windows: []metrics.Window{w}, sig: sig})
-	}
+	runs := c.ownerRuns(targets, windows)
 	out := map[time.Time][]usage.Event{}
 	var st metrics.Stats
 	failed := map[string]bool{}
@@ -70,6 +57,29 @@ func (c *Controller) collectAttributed(ctx context.Context, targets []metrics.Ta
 		sort.Strings(st.TenantAPIFailed)
 	}
 	return out, st, nil
+}
+
+// ownerRun is a run of consecutive windows during which every cluster had
+// the same owner, with the targets as they were billed then.
+type ownerRun struct {
+	targets []metrics.Target
+	windows []metrics.Window
+	sig     string
+}
+
+// ownerRuns splits windows into runs wherever a cluster's owner changed.
+// Without owner history, or without a move in the range, it is one run.
+func (c *Controller) ownerRuns(targets []metrics.Target, windows []metrics.Window) []ownerRun {
+	var runs []ownerRun
+	for _, w := range windows {
+		ts, sig := c.targetsFor(targets, w.End)
+		if n := len(runs); n > 0 && runs[n-1].sig == sig {
+			runs[n-1].windows = append(runs[n-1].windows, w)
+			continue
+		}
+		runs = append(runs, ownerRun{targets: ts, windows: []metrics.Window{w}, sig: sig})
+	}
+	return runs
 }
 
 // targetsFor resolves targets as they were billed during the window ending

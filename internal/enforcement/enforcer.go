@@ -166,6 +166,10 @@ type Options struct {
 	// DrainTimeout bounds the wait for workloads on a cluster's own nodes
 	// to stop before its control plane is stopped (default 2m).
 	DrainTimeout time.Duration
+	// KeepNamespaces are the namespaces whose DaemonSets (node
+	// infrastructure) keep running while a cluster is paused
+	// (default DefaultKeepNamespaces).
+	KeepNamespaces []string
 	// Gateway, in enforce mode, blocks a suspended or paused tenant's
 	// requests at its AI gateway and unblocks them when it is active again.
 	Gateway Gateway

@@ -151,6 +151,10 @@ type Config struct {
 	// PauseDrainTimeout bounds the wait for workloads on a cluster's own
 	// nodes to stop before its control plane is stopped.
 	PauseDrainTimeout time.Duration
+	// PauseKeepNamespaces are the namespaces whose DaemonSets (GPU driver,
+	// CNI) keep running on a paused cluster's own nodes; nil for the
+	// default list, empty ("none") to stop every DaemonSet.
+	PauseKeepNamespaces []string
 
 	// Lago.
 	LagoAPIURL       string
@@ -283,6 +287,7 @@ func Load() *Config {
 		EnforcementLiteLLM:   envBool("ENFORCEMENT_LITELLM", false),
 		PauseKeepBilling:     envOr("PAUSE_KEEP_BILLING", "storage,load_balancers"),
 		PauseDrainTimeout:    envDuration("PAUSE_DRAIN_TIMEOUT", 2*time.Minute),
+		PauseKeepNamespaces:  envList("PAUSE_KEEP_NAMESPACES", nil), // nil: enforcement.DefaultKeepNamespaces
 
 		LagoAPIURL:       envOr("LAGO_API_URL", "http://localhost:3000"),
 		LagoAPIKey:       secretEnv("LAGO_API_KEY"),

@@ -446,6 +446,7 @@ func TestQueryMetricsAreMarkedEstimates(t *testing.T) {
 }
 
 func TestParsePromMetricsValidation(t *testing.T) {
+	t.Cleanup(func() { usage.RemoveCustom("a4") })
 	for body, want := range map[string]string{
 		"- code: a1\n":                                              "needs a counter",
 		"- code: a2\n  counter: x\n  query: y\n":                    "pick one",
