@@ -1,11 +1,14 @@
 package metrics
 
 import (
+	"context"
 	"strconv"
 	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 
 	"github.com/vclusterlabs-experiments/vbilling/internal/usage"
 )
@@ -53,7 +56,11 @@ var gpuProductLabels = []string{
 	"accelerator",
 }
 
-func (c *Collector) parseNode(n *corev1.Node) *nodeInfo {
+func (c *Collector) parseNode(n *corev1.Node) *nodeInfo { return c.parseNodeLease(n, time.Time{}) }
+
+// parseNodeLease parses a node; renewed is its Lease's last renewal, read
+// only for a node whose kubelet went silent (kubeletSilent).
+func (c *Collector) parseNodeLease(n *corev1.Node, renewed time.Time) *nodeInfo {
 	ni := &nodeInfo{
 		name:         n.Name,
 		created:      n.CreationTimestamp.Time,
@@ -112,7 +119,11 @@ func (c *Collector) parseNode(n *corev1.Node) *nodeInfo {
 
 	for _, cond := range n.Status.Conditions {
 		if cond.Type == corev1.NodeReady && cond.Status != corev1.ConditionTrue {
-			ni.markDown(cond.LastTransitionTime.Time)
+			since := cond.LastTransitionTime.Time
+			if cond.Status == corev1.ConditionUnknown {
+				since = lastProofOfLife(cond.LastHeartbeatTime.Time, renewed, since)
+			}
+			ni.markDown(since)
 		}
 	}
 	for _, t := range n.Spec.Taints {
@@ -343,4 +354,61 @@ func nodeSKU(n *nodeInfo) string {
 	default:
 		return "cpu-node"
 	}
+}
+
+// maxSilence bounds how long before the node controller's Unknown mark a
+// proof of life may be. The controller marks a node Unknown after its grace
+// period (40s, 50s from Kubernetes 1.32) without a heartbeat, checked every
+// 5s, and kubelets renew their Lease every 10s: about a minute. An older
+// status heartbeat says nothing about when the node died, because kubelets
+// post status only on change or every 5 minutes.
+const maxSilence = 2 * time.Minute
+
+// lastProofOfLife is when a node whose kubelet went silent was last known
+// alive: its latest status heartbeat or Lease renewal. The Unknown mark
+// comes a grace period after that, so dating the outage from the mark bills
+// that long after the node died (seen live: a preempted A100 spot VM, last
+// heard from at 11:08:29, billed until the mark at 11:09:28). Without a
+// recent proof of life the mark is used.
+func lastProofOfLife(heartbeat, renewed, marked time.Time) time.Time {
+	last := heartbeat
+	if renewed.After(last) {
+		last = renewed
+	}
+	if last.IsZero() || !last.Before(marked) || marked.Sub(last) > maxSilence {
+		return marked
+	}
+	return last
+}
+
+// kubeletSilent reports whether the node controller marked the node Unknown
+// because its kubelet stopped reporting.
+func kubeletSilent(n *corev1.Node) bool {
+	for _, cond := range n.Status.Conditions {
+		if cond.Type == corev1.NodeReady {
+			return cond.Status == corev1.ConditionUnknown
+		}
+	}
+	return false
+}
+
+// leaseRenewals reads the Lease of each node whose kubelet went silent (its
+// last renewal is the last proof the node was alive). A Lease that cannot be
+// read is skipped: the node's status heartbeat is used alone.
+func leaseRenewals(ctx context.Context, kube kubernetes.Interface, nodes []corev1.Node) map[string]time.Time {
+	var out map[string]time.Time
+	for i := range nodes {
+		if !kubeletSilent(&nodes[i]) {
+			continue
+		}
+		l, err := kube.CoordinationV1().Leases(corev1.NamespaceNodeLease).Get(ctx, nodes[i].Name, metav1.GetOptions{})
+		if err != nil || l.Spec.RenewTime == nil {
+			continue
+		}
+		if out == nil {
+			out = map[string]time.Time{}
+		}
+		out[nodes[i].Name] = l.Spec.RenewTime.Time
+	}
+	return out
 }

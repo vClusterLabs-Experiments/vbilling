@@ -131,28 +131,13 @@ func (a *Adapter) EnsureTenant(ctx context.Context, t usage.Tenant) error {
 	return nil
 }
 
-// subscriptionStart is when a new subscription starts. Lago counts usage from
-// a subscription's start, and a subscription created when the first usage is
-// delivered starts after that usage's window: the first window would never
-// be billed. So it starts at the earliest of the usage being delivered and
-// the tenant's creation, both in the past. The creation time alone never
-// moves the start to an earlier UTC day than today: Lago v1.17 then skips the
-// in-advance invoice it issues when a subscription starts today, and bills
-// an arrears base fee from the earlier date, with no usage to show for it.
-// Usage from earlier days (backfill, held usage) does move it: that usage
-// must count.
+// subscriptionStart is when a new subscription starts (see
+// destinations.SubscriptionStart). Lago v1.17 also needs the creation clamp:
+// it skips the in-advance invoice it issues when a subscription starts today,
+// and bills an arrears base fee from an earlier date, with no usage to show
+// for it.
 func subscriptionStart(created, usageStart, now time.Time) time.Time {
-	var start time.Time
-	if !created.IsZero() && created.Before(now) {
-		start = created
-		if today := now.UTC().Truncate(24 * time.Hour); start.Before(today) {
-			start = today
-		}
-	}
-	if !usageStart.IsZero() && usageStart.Before(now) && (start.IsZero() || usageStart.Before(start)) {
-		start = usageStart
-	}
-	return start
+	return destinations.SubscriptionStart(created, usageStart, now)
 }
 
 // RemoveTenant terminates the subscription, which makes Lago issue the final

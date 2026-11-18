@@ -250,6 +250,7 @@
       <div class="sidebar-section">
         <div class="sidebar-label">Documentation</div>
         <a href="getting-started.html">Getting Started</a>
+        <a href="how-metering-works.html">How Metering Works</a>
         <a href="configuration.html">Configuration</a>
         <a href="metrics.html">Metrics Reference</a>
         <a href="usage-sources.html">Usage Sources</a>
@@ -421,6 +422,7 @@
         <li>The plan is the tenant's <code>vbilling.vcluster.com/plan</code>, or <code>billing.defaultPlanCode</code> (<code>vcluster-standard</code>).</li>
         <li>A plan's prices are the active metered prices on vBilling's meters tagged <code>metadata[vbilling_plan]=&lt;plan&gt;</code>, in the tenant's currency (<code>vbilling.vcluster.com/currency</code>, or <code>billing.currency</code>).</li>
         <li>A plan holds up to 20 prices, Stripe's limit per subscription. A tenant on a larger plan is logged as rejected and not subscribed, and its usage keeps reaching its meters.</li>
+        <li>A new subscription starts at the tenant's first usage being delivered, or the hour the tenant was created if that is earlier today (<code>backdate_start_date</code>). Stripe invoices a meter only from the subscription's start: usage dated earlier is accepted and shows in meter summaries, but never reaches an invoice (checked in a Stripe sandbox). The start is never a whole billing period back, because Stripe would then close the first period at once and invoice none of it. Usage dated before a subscription's start is dead-lettered as <code>dated before the tenant's Stripe subscription started</code> instead of being sent.</li>
         <li>An existing vBilling subscription gets missing prices added. Prices are never removed from it.</li>
         <li>New prices reach new tenants within five minutes. Existing tenants get a new price with their next usage once the price check (below) finds it, and otherwise when vBilling restarts or their labels and annotations change.</li>
       </ul>
@@ -459,7 +461,7 @@
       </div>
       <div class="callout callout-warn">
         <div class="callout-icon">!</div>
-        <div>Stripe enforces identifier uniqueness for at least 24 hours and accepts events up to 35 days old. vBilling never resends acknowledged events, and dead-letters events older than 35 days minus an hour of margin. Do not rewind the Stripe destination's cursor by more than 24 hours, or Stripe may count those events again; rewinding is meant for a newly added destination.</div>
+        <div>Stripe enforces identifier uniqueness for at least 24 hours and accepts events up to 35 days old. vBilling never resends acknowledged events, and dead-letters events older than 35 days minus an hour of margin. Do not rewind the Stripe destination's cursor by more than 24 hours, or Stripe may count those events again; rewinding is meant for a newly added destination, which starts at the end of the ledger: <code>POST /api/v1/destinations/stripe/cursor</code> with <code>{"seq": 0}</code> sends it the retained ledger.</div>
       </div>
       <p>After fixing what caused a rejection (often by upgrading vBilling), replay the parked events. Events Stripe still rejects stay parked (<code>still_rejected</code>). With <code>API_TOKEN</code> set, add <code>-H "Authorization: Bearer $API_TOKEN"</code>.</p>
       <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-s</span> localhost:8080/api/v1/destinations/stripe/dead-letters | jq
@@ -549,6 +551,7 @@ spec:
           <tbody>
             <tr><td>Meter events at most 35 days old</td><td>Older events are dead-lettered as <code>older than Stripe's 35-day meter event window</code>. Normal backfills (<code>billing.maxBackfill</code>, default 6h) stay far inside it.</td></tr>
             <tr><td>Identifiers unique for at least 24 hours</td><td>Acknowledged events are never resent. Keep cursor rewinds within 24 hours.</td></tr>
+            <tr><td>Meters invoiced from the subscription's start, and only until its period's invoice is finalized</td><td>Automatic subscriptions start at the tenant's first usage (above), and usage dated before the start is dead-lettered. Usage for a period whose invoice Stripe already finalized is accepted by Stripe and shows in meter summaries, but is not invoiced; vBilling does not detect that yet. It needs vBilling to be down or backlogged past the period's end plus Stripe's finalization grace period (one hour by default).</td></tr>
             <tr><td>Event names up to 100 characters</td><td>Longer split meter names end in a hash.</td></tr>
             <tr><td>20 prices per subscription</td><td>Automatic subscriptions refuse a plan with more than 20 prices and log the tenant as rejected, without holding up anyone's usage. Split the plan.</td></tr>
             <tr><td>Request rate (sandboxes share 25 requests/s)</td><td>20 requests/s for test keys and 200 for live keys, adjustable with <code>maxRPS</code>. 429s are retried.</td></tr>
@@ -568,6 +571,8 @@ spec:
       </ul>
       <h3>Deliveries stop with 401 or 403</h3>
       <p>The key is wrong or revoked, or a restricted key lacks a permission. Nothing is lost: events wait in the ledger and are retried. Fix the Secret and restart vBilling; <code>/api/v1/status</code> shows each destination's failures and its oldest pending event.</p>
+      <h3>Events dead-lettered as dated before the subscription started</h3>
+      <p>The tenant's subscription starts after that usage, so Stripe would never invoice it: the usage is older than one billing period when the subscription was created, or a subscription was created by hand (or by an earlier vBilling) after the usage. Reconciliation reports it under <code>dead_lettered</code>. Bill it with a one-off invoice item if needed.</p>
       <h3>Events dead-lettered as older than 35 days</h3>
       <p>Stripe no longer accepts them. They stay in the ledger, and reconciliation reports them under <code>dead_lettered</code>. Bill them with a one-off invoice item if needed.</p>
       <h3>Webhooks fail with 400 or 404</h3>

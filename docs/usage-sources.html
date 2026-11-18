@@ -284,6 +284,7 @@
       <div class="sidebar-section">
         <div class="sidebar-label">Documentation</div>
         <a href="getting-started.html">Getting Started</a>
+        <a href="how-metering-works.html">How Metering Works</a>
         <a href="configuration.html">Configuration</a>
         <a href="metrics.html">Metrics Reference</a>
         <a href="usage-sources.html" class="active">Usage Sources</a>
@@ -463,6 +464,7 @@
 
       <!-- Gateways -->
       <h2 id="gateways">AI gateways</h2>
+      <p>An AI Cloud that sells inference bills per token, and only the gateway in front of the inference engines knows which customer sent each request. Any gateway works: it posts one record per request, in vBilling's own format, in LiteLLM's built-in format, or in any JSON shape through a mapping. If the gateway also keeps its own log of requests (a database or a logs API), vBilling can read that log back to fill what the push lost. LiteLLM has a built-in format and a built-in pull; every other gateway uses a mapping and a <a href="#gateway-pull">pull spec</a>.</p>
       <h3 id="litellm">LiteLLM</h3>
       <p>LiteLLM's generic API logger posts a <code>StandardLoggingPayload</code> for every request. The built-in <code>litellm</code> format reads it as posted. Enable it with <code>RECORDS_LITELLM=true</code> (Helm <code>records.litellm: true</code>); it is off by default because it declares <code>inference_input_tokens</code> and <code>inference_output_tokens</code>, which every billing adapter then creates.</p>
       <div class="code-block"><code><span class="comment"># LiteLLM proxy config.yaml</span>
@@ -557,7 +559,39 @@ callback_settings:
           </tbody>
         </table>
       </div>
-      <p>A path is dotted, or a list of paths of which the first non-empty one wins. When it is enabled, the built-in <code>litellm</code> format declares <code>inference_input_tokens</code> and <code>inference_output_tokens</code> (unit tokens, priced by <code>sku</code>), so any format can use them, and billing adapters create them at startup. Declare other metrics in a format's <code>metrics</code> or in <a href="metrics.html#custom-metrics"><code>metering.customMetrics</code></a>, which wins. A format named <code>litellm</code> replaces the built-in one; <code>vbilling</code> cannot be redefined.</p>
+      <p>A path is dotted, or a list of paths of which the first non-empty one wins. <code>timePrecision</code> (for example <code>1ms</code>) rounds each record's time; set it when the gateway's own log, read back by a pull, stores times less precisely than the push sends them, so both copies of a request fall in the same window. When it is enabled, the built-in <code>litellm</code> format declares <code>inference_input_tokens</code> and <code>inference_output_tokens</code> (unit tokens, priced by <code>sku</code>), so any format can use them, and billing adapters create them at startup. Declare other metrics in a format's <code>metrics</code> or in <a href="metrics.html#custom-metrics"><code>metering.customMetrics</code></a>, which wins. A format named <code>litellm</code> replaces the built-in one; <code>vbilling</code> cannot be redefined.</p>
+
+      <h3 id="gateway-pull">Pulling any gateway's request log</h3>
+      <p>A push can lose records: a batch the gateway drops while vBilling restarts, a gateway crash before it sends. When the gateway keeps its own request log behind an HTTP API, list it under <code>records.pull</code> (or in a YAML file named by <code>RECORDS_PULL_FILE</code>). Every <code>interval</code>, vBilling reads the log from the end of the last successful pull minus <code>lookback</code>, maps each row with the same format as the push, and stores only the requests it does not have yet. Pushed and pulled copies of a request get the same record ID and count once; rows that arrive after their window settled become late adjustments.</p>
+      <div class="code-block"><code>records:
+  pull:
+    - name: kong-logs
+      format: kong                <span class="comment"># the format the push uses</span>
+      client: kong                <span class="comment"># the push's X-VBilling-Client (default: the format name)</span>
+      url: <span class="string">"https://logs.example.com/requests?from={{from}}&amp;to={{to}}&amp;page={{page}}&amp;limit={{limit}}"</span>
+      headers: {Authorization: <span class="string">"Bearer ${RECORDS_PULL_KONG_TOKEN}"</span>}
+      rows: data                  <span class="comment"># path to the array of rows in the response</span>
+      paging: {mode: page, limit: 500}
+      interval: 5m
+      lookback: 1h
+  pullEnv:
+    - {name: RECORDS_PULL_KONG_TOKEN, secret: kong-logs, key: token}</code></div>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead><tr><th>Key</th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr><td><code>name</code>, <code>format</code></td><td>Required. The name appears in source health and metrics. The format maps each row, so the log's rows must carry the same request IDs the push sends.</td></tr>
+            <tr><td><code>client</code>, <code>tenant</code></td><td>Part of every record ID, so they must match the push: <code>client</code> is the push's <code>X-VBilling-Client</code>, and <code>tenant</code> is set when the push uses a tenant-bound ingest token.</td></tr>
+            <tr><td><code>url</code>, <code>method</code>, <code>body</code></td><td>The request. Placeholders: <code>{{from}}</code> (required) and <code>{{to}}</code>, <code>{{page}}</code>, <code>{{offset}}</code>, <code>{{limit}}</code>, <code>{{cursor}}</code>. <code>method</code> is <code>GET</code> (default) or <code>POST</code> with a JSON <code>body</code>.</td></tr>
+            <tr><td><code>timeFormat</code></td><td>How <code>{{from}}</code> and <code>{{to}}</code> are written: <code>rfc3339</code> (default), <code>unix</code>, <code>unixms</code>, or a Go layout such as <code>2006-01-02 15:04:05</code>, in UTC.</td></tr>
+            <tr><td><code>headers</code></td><td>Sent with every request. <code>${RECORDS_PULL_...}</code> is replaced by that environment variable, which <code>pullEnv</code> fills from a Secret. No other variable is ever expanded, so a pull spec cannot send vBilling's own keys anywhere.</td></tr>
+            <tr><td><code>rows</code></td><td>Path to the array of rows; empty when the response is the array.</td></tr>
+            <tr><td><code>paging</code></td><td><code>mode</code>: <code>none</code> (default), <code>page</code> (from <code>start</code>, default 1), <code>offset</code>, or <code>cursor</code> with <code>next</code>, the path of the next cursor in the response. <code>limit</code> is the page size (default 500); a shorter page is the last one.</td></tr>
+            <tr><td><code>interval</code>, <code>lookback</code>, <code>chunk</code></td><td>How often to pull (default <code>5m</code>), how far back each pull starts (default <code>1h</code>, at most <code>RECORDS_RETENTION</code> minus 2 hours), and the time range read per request sequence (default <code>1h</code>).</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Each pull reports as <code>records/&lt;client&gt;/pull/&lt;name&gt;</code> in <a href="#source-health">source health</a>: <code>failing</code> with the HTTP status when the log cannot be read, or when every row is rejected by the format. Error messages never include the URL's query string. The <code>vbilling_records_pull_*</code> metrics count runs, rows read, new requests and failures per pull.</p>
 
       <!-- Prometheus -->
       <h2 id="prometheus">Prometheus counters and queries</h2>
@@ -731,6 +765,7 @@ crossChecks:
             <tr><td><code>RECORDS_ALLOW_UNKEYED</code></td><td><code>records.allowUnkeyed</code></td><td>false</td></tr>
             <tr><td><code>RECORDS_UNKNOWN_TENANTS</code></td><td><code>records.unknownTenants</code></td><td>accept</td></tr>
             <tr><td><code>RECORDS_ARCHIVE</code></td><td><code>records.archive</code></td><td>false</td></tr>
+            <tr><td><code>RECORDS_PULL_FILE</code></td><td><code>records.pull</code>, with tokens from <code>records.pullEnv</code></td><td>(none)</td></tr>
             <tr><td><code>RECORDS_PULL_LITELLM_URL</code>, <code>RECORDS_PULL_LITELLM_KEY</code></td><td><code>records.pullLiteLLM.url</code>, <code>records.pullLiteLLM.key</code> or <code>existingSecret</code></td><td>(none)</td></tr>
             <tr><td><code>RECORDS_PULL_LITELLM_CLIENT</code>, <code>RECORDS_PULL_LITELLM_TENANT</code></td><td><code>records.pullLiteLLM.client</code>, <code>records.pullLiteLLM.tenant</code></td><td>litellm, (none)</td></tr>
             <tr><td><code>RECORDS_PULL_LITELLM_INTERVAL</code>, <code>RECORDS_PULL_LITELLM_LOOKBACK</code></td><td><code>records.pullLiteLLM.interval</code>, <code>records.pullLiteLLM.lookback</code></td><td>5m, 1h</td></tr>

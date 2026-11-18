@@ -199,8 +199,13 @@ func (c *Controller) Run(ctx context.Context) error {
 	}
 }
 
-// settle gives the API server a moment to reflect state at the boundary.
-const settle = 2 * time.Second
+// settle gives the kubelet time to report state from before the boundary.
+// A container that exits shortly before a window ends shows as running
+// until the kubelet posts its status: on a DGX Spark a pod that finished at
+// 07:08:59 was still running at 07:09:02, so a 2s settle billed it a second
+// past its end. The kubelet relists every second and then writes the status,
+// so give it a few seconds; the window is committed that much later.
+const settle = 5 * time.Second
 
 func (c *Controller) untilNextWindow() time.Duration {
 	now := c.now()
@@ -461,6 +466,10 @@ func (c *Controller) CollectDue(ctx context.Context) {
 	c.tel.Set("vbilling_last_window_end_timestamp_seconds", "End of the last committed metering window.", nil, float64(latestEnd.Unix()))
 	c.tel.Set("vbilling_collection_duration_seconds", "Duration of the last metering run.", nil, time.Since(started).Seconds())
 	c.tel.Set("vbilling_nodes_down", "Nodes excluded from billing as not ready or unhealthy.", nil, float64(st.NodesDown))
+	if st.UsageUnmeasured > 0 {
+		log.Printf("[controller] CPU_MEMORY_BASIS=usage: CPU and memory of %d pod-window(s) collected late were not billed (metrics-server has no usage for past windows; requests is the exact basis)", st.UsageUnmeasured)
+		c.tel.Add("vbilling_cpu_memory_unmeasured_total", "Pod-windows whose CPU and memory were not billed: usage basis, window collected late.", nil, float64(st.UsageUnmeasured))
+	}
 }
 
 // fillTenantGaps records tenant clusters whose own API failed in this run

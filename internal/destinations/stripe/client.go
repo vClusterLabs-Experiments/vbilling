@@ -193,15 +193,20 @@ type Price struct {
 	Active    bool              `json:"active"`
 	Currency  string            `json:"currency"`
 	Metadata  map[string]string `json:"metadata"`
-	Recurring *struct {
-		UsageType string `json:"usage_type"`
-		Meter     string `json:"meter"`
-	} `json:"recurring"`
+	Recurring *PriceRecurring   `json:"recurring"`
 	// Amounts, read by the price coverage check (pricing.go).
 	BillingScheme     string      `json:"billing_scheme,omitempty"` // per_unit | tiered
 	UnitAmount        *int64      `json:"unit_amount,omitempty"`
 	UnitAmountDecimal *string     `json:"unit_amount_decimal,omitempty"`
 	Tiers             []PriceTier `json:"tiers,omitempty"` // only with expand[]=data.tiers
+}
+
+// PriceRecurring is a recurring price's usage type, meter and billing interval.
+type PriceRecurring struct {
+	UsageType     string `json:"usage_type"`
+	Meter         string `json:"meter"`
+	Interval      string `json:"interval,omitempty"` // day | week | month | year
+	IntervalCount int    `json:"interval_count,omitempty"`
 }
 
 // PriceTier is one tier of a tiered price.
@@ -217,12 +222,18 @@ type Subscription struct {
 	Status   string            `json:"status"`
 	Customer string            `json:"customer"`
 	Metadata map[string]string `json:"metadata"`
-	Items    struct {
-		Data []struct {
-			ID    string `json:"id"`
-			Price Price  `json:"price"`
-		} `json:"data"`
+	// StartDate is when Stripe starts invoicing the subscription's meters:
+	// meter events dated earlier are accepted but never invoiced.
+	StartDate int64 `json:"start_date"`
+	Items     struct {
+		Data []SubscriptionItem `json:"data"`
 	} `json:"items"`
+}
+
+// SubscriptionItem is one price on a subscription.
+type SubscriptionItem struct {
+	ID    string `json:"id"`
+	Price Price  `json:"price"`
 }
 
 type list[T any] struct {
@@ -426,9 +437,15 @@ func (c *Client) ListSubscriptions(ctx context.Context, customerID string) ([]Su
 	return listAll[Subscription](ctx, c, "/v1/subscriptions", params)
 }
 
-func (c *Client) CreateSubscription(ctx context.Context, customerID string, priceIDs []string, meta map[string]string, idemKey string) (*Subscription, error) {
+// CreateSubscription subscribes a customer to metered prices. A non-zero
+// backdate starts it in the past (backdate_start_date), so usage from then
+// on is invoiced.
+func (c *Client) CreateSubscription(ctx context.Context, customerID string, priceIDs []string, meta map[string]string, backdate time.Time, idemKey string) (*Subscription, error) {
 	f := url.Values{}
 	f.Set("customer", customerID)
+	if !backdate.IsZero() {
+		f.Set("backdate_start_date", strconv.FormatInt(backdate.Unix(), 10))
+	}
 	for i, p := range priceIDs {
 		f.Set(fmt.Sprintf("items[%d][price]", i), p)
 	}

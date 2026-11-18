@@ -9,6 +9,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
@@ -181,11 +182,20 @@ func TestPausePrivateNodesDrainsBeforeStoppingTheControlPlane(t *testing.T) {
 		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "cp-worker-1"}},
 	)
 	exists := corev1.Toleration{Operator: corev1.TolerationOpExists}
+	daemon := func(p *corev1.Pod) *corev1.Pod {
+		p.OwnerReferences = []metav1.OwnerReference{{Kind: "DaemonSet", Name: p.Name}}
+		return p
+	}
+	gpuDaemon := daemon(podOn("gpu-burner-x", "ml", "gpu-1"))
+	gpuDaemon.Spec.Containers = []corev1.Container{{Name: "burn", Resources: corev1.ResourceRequirements{
+		Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}}}}
 	inside := fake.NewSimpleClientset(
 		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "gpu-1"}},
 		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "cp-worker-1"}}, // a control plane cluster node: never tainted
 		podOn("trainer", "research", "gpu-1"),
-		podOn("kube-proxy-abc", "kube-system", "gpu-1", exists),
+		daemon(podOn("kube-proxy-abc", "kube-system", "gpu-1", exists)),
+		daemon(podOn("nvidia-driver-daemonset-x", "gpu-operator", "gpu-1")), // infrastructure: keeps running
+		gpuDaemon, // a DaemonSet that holds a GPU: stopped
 		podOn("web", "default", "cp-worker-1"),
 	)
 	cl := discovery.TenantCluster{Name: "private-a", Namespace: ns, Source: "statefulset"}
@@ -220,8 +230,14 @@ func TestPausePrivateNodesDrainsBeforeStoppingTheControlPlane(t *testing.T) {
 	if !hasTaint(gpu, TaintPaused) || hasTaint(cp, TaintPaused) {
 		t.Fatalf("taints: gpu-1 %v, cp-worker-1 %v", gpu.Spec.Taints, cp.Spec.Taints)
 	}
-	if podNames(t, inside, "research")["trainer"] || !podNames(t, inside, "kube-system")["kube-proxy-abc"] || !podNames(t, inside, "default")["web"] {
-		t.Fatal("drain deleted the wrong pods")
+	if podNames(t, inside, "research")["trainer"] || !podNames(t, inside, "kube-system")["kube-proxy-abc"] || !podNames(t, inside, "default")["web"] ||
+		!podNames(t, inside, "gpu-operator")["nvidia-driver-daemonset-x"] || podNames(t, inside, "ml")["gpu-burner-x"] {
+		t.Fatal("drain deleted the wrong pods: workloads and GPU-holding DaemonSet pods stop, node infrastructure keeps running")
+	}
+	for _, tn := range gpu.Spec.Taints {
+		if tn.Key == TaintPaused && tn.Effect != corev1.TaintEffectNoSchedule {
+			t.Fatalf("pause taint effect %s, want NoSchedule (NoExecute would evict the GPU driver too)", tn.Effect)
+		}
 	}
 	if _, err := inside.AdmissionregistrationV1().ValidatingAdmissionPolicies().Get(ctx, PolicyName, metav1.GetOptions{}); err != nil {
 		t.Fatalf("no admission policy inside the paused cluster: %v", err)

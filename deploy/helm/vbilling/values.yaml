@@ -240,6 +240,22 @@ records:
     tenant: "" # bill every pulled request to this tenant; set it when the push uses a tenant-bound token
     interval: 5m
     lookback: 1h # each pull starts this long before the end of the last one
+  # Read any other gateway's request log back as records (RECORDS_PULL_FILE),
+  # like pullLiteLLM: rows go through a format below and count once with
+  # the pushed copies. Tokens come from Secrets through pullEnv, as
+  # ${RECORDS_PULL_...} in a header.
+  pull: []
+  #  - name: kong-logs
+  #    format: kong          # a format from records.formats
+  #    client: kong          # the push's X-VBilling-Client (default: the format name)
+  #    url: "https://logs.example.com/requests?from={{from}}&to={{to}}&page={{page}}&limit={{limit}}"
+  #    headers: {Authorization: "Bearer ${RECORDS_PULL_KONG_TOKEN}"}
+  #    rows: data            # path to the array of rows in the response
+  #    paging: {mode: page, limit: 500}
+  #    interval: 5m
+  #    lookback: 1h
+  pullEnv: []
+  #  - {name: RECORDS_PULL_KONG_TOKEN, secret: kong-logs, key: token}
   # Payload formats besides vbilling and litellm, e.g. a Kong HTTP Log payload:
   formats: {}
   #  kong:
@@ -281,8 +297,9 @@ enforcement:
   # the hold resumes it. See docs/private-nodes.html#pause.
   pause:
     # What keeps billing while paused: storage, load_balancers, nodes,
-    # control_plane, or none. Workload usage always stops, because the
-    # workloads are stopped.
+    # control_plane, workloads, or none. Without workloads, the usage of a
+    # paused cluster's pods stops at the second of the pause, even while
+    # they take their termination grace period to stop.
     keepBilling: storage,load_balancers
     # How long to wait for workloads on a cluster's own nodes to stop before
     # its control plane is stopped.

@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>How Metering Works - vBilling Docs</title>
+  <meta name="description" content="Where every number vBilling bills comes from: the Kubernetes API, AI gateway records and Prometheus counters; what to install; what is exact; what was checked on real hardware.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Roboto+Mono:wght@500&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+      --primary: #FF6600; --primary-dark: #CC5100; --primary-darker: #993D00;
+      --primary-light: #FFF5EB; --primary-light-2: #FFE0CC; --accent: #FF8433;
+      --text-dark: #050B24; --text-gray: #505466; --text-light: #828592;
+      --white: #ffffff; --bg-code: #050B24; --border: #E6E7E9;
+      --shadow-sm: 0 1px 2px rgba(0,0,0,0.05);
+      --shadow-md: 0 4px 6px -1px rgba(0,0,0,0.07), 0 2px 4px -2px rgba(0,0,0,0.05);
+      --shadow-lg: 0 10px 15px -3px rgba(0,0,0,0.08), 0 4px 6px -4px rgba(0,0,0,0.04);
+      --radius: 12px; --radius-lg: 16px; --sidebar-width: 260px;
+    }
+
+    html { scroll-behavior: smooth; scroll-padding-top: 80px; }
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      color: var(--text-dark); line-height: 1.6; background: var(--white);
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .header {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 1000;
+      background: rgba(255,255,255,0.92); backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px); border-bottom: 1px solid var(--border);
+    }
+    .header.scrolled { box-shadow: var(--shadow-md); }
+    .header-inner {
+      max-width: 1400px; margin: 0 auto; padding: 0 24px;
+      display: flex; align-items: center; justify-content: space-between; height: 64px;
+    }
+    .header-logo {
+      display: flex; align-items: center; gap: 10px;
+      text-decoration: none; color: var(--text-dark);
+    }
+    .header-logo-icon {
+      width: 32px; height: 32px; border-radius: 8px;
+      background: linear-gradient(135deg, var(--primary-dark), var(--primary));
+      display: flex; align-items: center; justify-content: center;
+      color: var(--white); font-weight: 700; font-size: 0.9rem;
+    }
+    .header-logo-text { font-size: 1.15rem; font-weight: 700; letter-spacing: -0.5px; }
+    .header-logo-text span { color: var(--primary-dark); }
+    .header-nav { display: flex; align-items: center; gap: 20px; }
+    .header-nav a {
+      text-decoration: none; color: var(--text-gray); font-size: 0.88rem;
+      font-weight: 500; transition: color 0.2s;
+    }
+    .header-nav a:hover { color: var(--primary-dark); }
+    .header-nav .gh-link {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: var(--bg-code); color: var(--white); padding: 6px 14px;
+      border-radius: 8px; font-size: 0.82rem; font-weight: 600; transition: opacity 0.2s;
+    }
+    .header-nav .gh-link:hover { opacity: 0.85; color: var(--white); }
+
+    .docs-layout { display: flex; margin-top: 64px; min-height: calc(100vh - 64px); }
+
+    .sidebar {
+      width: var(--sidebar-width); flex-shrink: 0;
+      border-right: 1px solid var(--border); background: var(--primary-light);
+      padding: 32px 0; position: fixed; top: 64px; bottom: 0; overflow-y: auto;
+    }
+    .sidebar-section { margin-bottom: 28px; }
+    .sidebar-label {
+      padding: 0 24px; font-size: 0.72rem; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 1px; color: var(--primary-darker);
+      margin-bottom: 8px;
+    }
+    .sidebar a {
+      display: block; padding: 7px 24px; text-decoration: none;
+      font-size: 0.88rem; color: var(--text-gray); font-weight: 500;
+      transition: all 0.15s; border-left: 3px solid transparent;
+    }
+    .sidebar a:hover { color: var(--primary-dark); background: var(--primary-light-2); }
+    .sidebar a.active {
+      color: var(--primary-dark); background: var(--primary-light-2);
+      border-left-color: var(--primary); font-weight: 600;
+    }
+    .sidebar-back {
+      display: flex; align-items: center; gap: 6px; margin: 0 24px 24px;
+      padding: 8px 12px; border-radius: 8px; text-decoration: none;
+      font-size: 0.85rem; color: var(--text-light); font-weight: 500;
+      border: 1px solid var(--border); transition: all 0.2s;
+    }
+    .sidebar-back:hover { border-color: var(--primary); color: var(--primary-dark); }
+
+    .content {
+      flex: 1; min-width: 0; margin-left: var(--sidebar-width);
+      padding: 48px 64px 80px; max-width: 920px;
+    }
+    .content h1 {
+      font-size: 2.2rem; font-weight: 800; letter-spacing: -1px;
+      margin-bottom: 12px; color: var(--text-dark);
+    }
+    .content .subtitle {
+      font-size: 1.1rem; color: var(--text-gray); line-height: 1.7;
+      margin-bottom: 40px; max-width: 640px;
+    }
+    .content h2 {
+      font-size: 1.5rem; font-weight: 700; letter-spacing: -0.5px;
+      margin: 48px 0 16px; color: var(--text-dark);
+      padding-bottom: 8px; border-bottom: 2px solid var(--primary-light-2);
+    }
+    .content h3 {
+      font-size: 1.15rem; font-weight: 700; margin: 32px 0 12px; color: var(--text-dark);
+    }
+    .content h4 {
+      font-size: 0.95rem; font-weight: 700; margin: 20px 0 8px; color: var(--text-dark);
+    }
+    .content p {
+      font-size: 0.95rem; color: var(--text-gray); line-height: 1.7; margin-bottom: 16px;
+    }
+    .content ul, .content ol {
+      margin: 0 0 16px 24px; color: var(--text-gray); font-size: 0.95rem;
+    }
+    .content li { margin-bottom: 6px; line-height: 1.6; }
+    .content code {
+      background: var(--primary-light-2); padding: 2px 7px; border-radius: 4px;
+      font-family: 'Roboto Mono', 'SF Mono', 'Fira Code', monospace;
+      font-size: 0.85rem; color: var(--primary-darker); overflow-wrap: anywhere;
+    }
+    .content a { color: var(--primary-dark); text-decoration: none; font-weight: 500; }
+    .content a:hover { text-decoration: underline; }
+
+    .code-block {
+      background: var(--bg-code); border-radius: var(--radius);
+      padding: 20px 24px; overflow-x: auto; margin-bottom: 20px; position: relative;
+    }
+    .code-block code {
+      color: #e2e8f0; background: none; padding: 0;
+      font-family: 'Roboto Mono', 'SF Mono', 'Fira Code', monospace;
+      font-size: 0.84rem; line-height: 1.7; white-space: pre;
+    }
+    .code-block .comment { color: #64748b; }
+    .code-block .cmd { color: #FF8433; }
+    .code-block .flag { color: #a5b4fc; }
+    .code-block .string { color: #86efac; }
+    .code-block .output { color: #94a3b8; }
+
+    .callout {
+      padding: 16px 20px; border-radius: var(--radius); margin-bottom: 20px;
+      font-size: 0.9rem; line-height: 1.6; display: flex; gap: 12px;
+    }
+    .callout-icon { flex-shrink: 0; font-size: 1.1rem; margin-top: 1px; }
+    .callout-info { background: #eff6ff; border: 1px solid #bfdbfe; color: #1e40af; }
+    .callout-warn { background: var(--primary-light); border: 1px solid var(--primary-light-2); color: var(--primary-darker); }
+
+    /* ── Metric card ── */
+    .metric-card {
+      border: 1px solid var(--border); border-radius: var(--radius-lg);
+      margin-bottom: 32px; overflow: hidden; box-shadow: var(--shadow-sm);
+    }
+    .metric-card-header {
+      background: var(--primary-light); padding: 16px 24px;
+      border-bottom: 1px solid var(--primary-light-2);
+      display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;
+    }
+    .metric-card-header h3 {
+      margin: 0; font-size: 1.1rem; font-weight: 700; color: var(--text-dark);
+    }
+    .metric-card-badges { display: flex; gap: 8px; flex-wrap: wrap; }
+    .metric-badge {
+      display: inline-block; padding: 3px 10px; border-radius: 100px;
+      font-size: 0.75rem; font-weight: 600;
+    }
+    .metric-badge.shared { background: var(--primary-light-2); color: var(--primary-dark); }
+    .metric-badge.private { background: #FFE0CC; color: #993D00; }
+    .metric-badge.optional { background: #eff6ff; color: #1e40af; }
+    .metric-card-body { padding: 20px 24px; }
+    .metric-card-body p { font-size: 0.9rem; }
+
+    .metric-detail {
+      display: grid; grid-template-columns: 120px 1fr; gap: 6px 16px;
+      margin-bottom: 16px; font-size: 0.88rem;
+    }
+    .metric-detail dt {
+      font-weight: 700; color: var(--text-dark); font-size: 0.82rem;
+      text-transform: uppercase; letter-spacing: 0.3px;
+    }
+    .metric-detail dd { color: var(--text-gray); }
+
+    .props-table {
+      width: 100%; border-collapse: collapse; font-size: 0.85rem;
+      margin-top: 12px; margin-bottom: 8px;
+    }
+    .props-table thead { background: var(--primary-light); }
+    .props-table th {
+      padding: 8px 12px; text-align: left; font-weight: 700;
+      color: var(--primary-darker); font-size: 0.75rem;
+      text-transform: uppercase; letter-spacing: 0.5px;
+      border-bottom: 1px solid var(--primary-light-2);
+    }
+    .props-table td {
+      padding: 6px 12px; border-bottom: 1px solid var(--border);
+      color: var(--text-gray); vertical-align: top;
+    }
+    .props-table tr:last-child td { border-bottom: none; }
+
+    .mobile-sidebar-toggle {
+      display: none; position: fixed; bottom: 24px; right: 24px; z-index: 999;
+      width: 48px; height: 48px; border-radius: 50%;
+      background: linear-gradient(135deg, var(--primary-dark), var(--primary));
+      color: var(--white); border: none; font-size: 1.3rem; cursor: pointer;
+      box-shadow: var(--shadow-lg);
+    }
+
+    @media (max-width: 900px) {
+      .sidebar {
+        transform: translateX(-100%); transition: transform 0.3s ease;
+        z-index: 900; width: 280px;
+      }
+      .sidebar.open { transform: translateX(0); }
+      .content { margin-left: 0; padding: 32px 24px 80px; }
+      .mobile-sidebar-toggle { display: flex; align-items: center; justify-content: center; }
+      .content h1 { font-size: 1.7rem; }
+      .content h2 { font-size: 1.3rem; }
+      .metric-detail { grid-template-columns: 1fr; }
+    }
+    .lead { font-size: 1.08rem; color: var(--text-gray); }
+    .hmw-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin: 16px 0 20px; }
+    .hmw-card { border: 1px solid var(--border); border-radius: var(--radius); padding: 18px; background: var(--white); }
+    .hmw-card h3 { margin: 6px 0 8px; font-size: 1.05rem; }
+    .content .hmw-card p { font-size: 0.92rem; margin-bottom: 10px; }
+    .hmw-card-tag { display: inline-block; font-size: 0.72rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--primary-dark); background: var(--primary-light); border-radius: 999px; padding: 2px 10px; }
+    .content .hmw-card p.hmw-needs { color: var(--text-gray); border-top: 1px solid var(--border); padding-top: 10px; margin-bottom: 0; }
+    .hmw-flow { display: flex; align-items: center; gap: 10px; margin: 18px 0 20px; flex-wrap: wrap; }
+    .hmw-col { display: flex; flex-direction: column; gap: 8px; flex: 1 1 150px; min-width: 140px; }
+    .hmw-box { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; font-size: 0.88rem; font-weight: 600; background: var(--white); }
+    .hmw-box span { display: block; font-weight: 400; color: var(--text-gray); font-size: 0.8rem; margin-top: 2px; }
+    .hmw-strong { border-color: var(--primary); background: var(--primary-light); }
+    .hmw-side { font-weight: 400; color: var(--text-gray); border-style: dashed; }
+    .hmw-table-wrap { overflow-x: auto; margin: 12px 0 16px; }
+    .hmw-table-wrap .props-table { font-size: 0.86rem; }
+    .hmw-table-wrap .props-table td:first-child code { white-space: nowrap; }
+    .hmw-table-wrap .props-table td:first-child { min-width: 190px; color: var(--text-dark); }
+    .hmw-arrow { color: var(--primary); font-size: 1.4rem; flex: 0 0 auto; }
+    @media (max-width: 700px) { .hmw-flow { flex-direction: column; align-items: stretch; } .hmw-arrow { transform: rotate(90deg); align-self: center; } }
+  </style>
+</head>
+<body>
+
+  <header class="header" id="header">
+    <div class="header-inner">
+      <a href="index.html" class="header-logo">
+        <svg width="28" height="28" viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0"><path d="M4 7L14 21L24 7" stroke="#FF6600" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <div class="header-logo-text">v<span>Billing</span> Docs</div>
+      </a>
+      <nav class="header-nav">
+        <a href="index.html">Home</a>
+        <a href="getting-started.html">Guide</a>
+        <a href="https://github.com/vClusterLabs-Experiments/vbilling" class="gh-link" target="_blank">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <div class="docs-layout">
+    <nav class="sidebar" id="sidebar">
+      <a href="index.html" class="sidebar-back">&#8592; Back to main site</a>
+      <div class="sidebar-section">
+        <div class="sidebar-label">Documentation</div>
+        <a href="getting-started.html">Getting Started</a>
+        <a href="how-metering-works.html" class="active">How Metering Works</a>
+        <a href="configuration.html">Configuration</a>
+        <a href="metrics.html">Metrics Reference</a>
+        <a href="usage-sources.html">Usage Sources</a>
+        <a href="private-nodes.html">Dedicated and Private Nodes</a>
+        <a href="example-gke.html">Example: GKE with GPUs</a>
+        <a href="troubleshooting.html">Troubleshooting</a>
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-label">Billing Adapters</div>
+        <a href="stripe.html">Stripe</a>
+        <a href="metronome.html">Metronome</a>
+        <a href="lago.html">Lago</a>
+        <a href="custom-adapter.html">Custom Billing Adapter</a>
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-label">Resources</div>
+        <a href="https://github.com/vClusterLabs-Experiments/vbilling" target="_blank">GitHub Repository</a>
+        <a href="https://www.vcluster.com/docs" target="_blank">vCluster Docs</a>
+        <a href="https://docs.stripe.com/billing/subscriptions/usage-based" target="_blank">Stripe Billing Docs</a>
+        <a href="https://docs.metronome.com/" target="_blank">Metronome Docs</a>
+        <a href="https://www.getlago.com/docs" target="_blank">Lago Docs</a>
+      </div>
+    </nav>
+
+    <main class="content">
+      <h1>How Metering Works</h1>
+      <p class="lead">Every quantity vBilling bills comes from one of three places: the Kubernetes API, per-request records from an AI gateway, or Prometheus counters you choose. This page shows where each number comes from, what you install for it, which numbers are exact and which are estimates, and what has been checked on real hardware.</p>
+
+      <h2 id="sources">Three sources</h2>
+      <div class="hmw-cards">
+        <div class="hmw-card">
+          <div class="hmw-card-tag">Always on</div>
+          <h3>Kubernetes API</h3>
+          <p>Pods, nodes, volumes, LoadBalancer Services and node Leases, read from the control plane cluster and, for clusters with their own nodes, from each cluster's API. GPU-hours, node-hours, CPU, memory, storage, load balancers and control plane hours all come from here.</p>
+          <p class="hmw-needs"><strong>Install:</strong> nothing. vBilling reads the API with read-only RBAC.</p>
+        </div>
+        <div class="hmw-card">
+          <div class="hmw-card-tag">For tokens</div>
+          <h3>AI gateway records</h3>
+          <p>One record per request with its input and output tokens, pushed by the gateway (<code>POST /api/v1/records</code>) and pulled back from the gateway's own logs to fill gaps. Records are deduplicated by request ID and summed per window.</p>
+          <p class="hmw-needs"><strong>Install:</strong> a gateway in front of your models. LiteLLM works out of the box; any gateway that logs requests works through a pull mapping.</p>
+        </div>
+        <div class="hmw-card">
+          <div class="hmw-card-tag">Optional</div>
+          <h3>Prometheus</h3>
+          <p>Counters you declare, read sample by sample: network egress by default, and anything else, such as an inference engine's own token counters. Also the DCGM exporter's GPU utilization, which is informational only.</p>
+          <p class="hmw-needs"><strong>Install:</strong> a Prometheus that scrapes the exporters (cAdvisor for egress, your engine, DCGM).</p>
+        </div>
+      </div>
+      <div class="callout callout-info">
+        <span class="callout-icon">&#9432;</span>
+        <div><strong>GPU-hours are allocated time, not utilization.</strong> A GPU is billed while it is allocated to the tenant, read from Kubernetes. That is how GPU clouds and dedicated inference endpoints bill: per second or per minute while a replica runs, with autoscaling and scale to zero keeping idle replicas off the bill. Shared (serverless) inference bills tokens instead. DCGM's utilization is recorded next to GPU-hours for showback; to put energy or utilization in the price, declare it as a Prometheus metric (DCGM's energy is a counter, so exact; utilization is an estimate). A cluster with no Prometheus at all is fully billable for GPUs, nodes, CPU, memory, storage and load balancers.</div>
+      </div>
+
+      <h2 id="flow">From cluster to invoice</h2>
+      <div class="hmw-flow" role="img" aria-label="Sources feed 60-second windows, which are committed to the ledger and then delivered to billing platforms">
+        <div class="hmw-col">
+          <div class="hmw-box">Kubernetes API</div>
+          <div class="hmw-box">Gateway records</div>
+          <div class="hmw-box">Prometheus counters</div>
+        </div>
+        <div class="hmw-arrow">&#8594;</div>
+        <div class="hmw-col">
+          <div class="hmw-box hmw-strong">60-second windows<span>one event per tenant, metric, SKU and window, with a deterministic ID</span></div>
+        </div>
+        <div class="hmw-arrow">&#8594;</div>
+        <div class="hmw-col">
+          <div class="hmw-box hmw-strong">Ledger<span>hash-chained, written to disk before anything is sent</span></div>
+          <div class="hmw-box hmw-side">Cross-checks, source health, reconcile</div>
+        </div>
+        <div class="hmw-arrow">&#8594;</div>
+        <div class="hmw-col">
+          <div class="hmw-box">Stripe</div>
+          <div class="hmw-box">Metronome</div>
+          <div class="hmw-box">Lago or a webhook</div>
+        </div>
+      </div>
+      <ol>
+        <li><strong>Windows.</strong> Every <code>billing.collectionInterval</code> (60 seconds by default), vBilling measures the window that just closed. Each quantity is the overlap of a resource's lifetime with the window, to the second.</li>
+        <li><strong>Ledger.</strong> The window's events are committed to an append-only, hash-chained ledger in one write. An event's ID is derived from what it measures, so measuring the same window twice produces the same IDs, and billing platforms drop the repeat.</li>
+        <li><strong>Delivery.</strong> Each billing platform reads the ledger from its own cursor. An outage of one platform holds up nothing else, and nothing is lost while it is down.</li>
+        <li><strong>Checks.</strong> <code>GET /api/v1/reconcile</code> compares the ledger with what each platform recorded, cross-checks compare two sources of the same usage (gateway tokens against the engine's own counter), and <code>GET /api/v1/sources</code> reports any source that is failing.</li>
+      </ol>
+
+      <h2 id="numbers">Where every number comes from</h2>
+      <div class="hmw-table-wrap">
+        <table class="props-table">
+          <thead><tr><th>Metric</th><th>Measured from</th><th>How</th><th>Accuracy</th></tr></thead>
+          <tbody>
+            <tr><td><code>vcluster_gpu_hours</code></td><td>Pods and nodes</td><td>Each running container's GPU limit times its lifetime in the window, times the device's share of a physical GPU (a MIG slice, a time-slicing replica). A node rented whole (dedicated or Private Node) bills every GPU it has.</td><td>Exact</td></tr>
+            <tr><td><code>vcluster_private_node_hours</code></td><td>Nodes</td><td>Lifetime of each node rented whole, while healthy, per instance type or GPU SKU.</td><td>Exact</td></tr>
+            <tr><td><code>vcluster_gpu_downtime_hours</code></td><td>Node conditions, taints and Leases</td><td>GPU time on a node that is NotReady, carries an unhealthy taint, stopped reporting, or has GPUs installed but not allocatable (a driver rebuilding after a reboot). Recorded instead of GPU-hours, never invoiced.</td><td>Exact, informational</td></tr>
+            <tr><td><code>vcluster_cpu_core_hours</code>, <code>vcluster_memory_gb_hours</code></td><td>Pod requests, or metrics-server</td><td>With <code>cpuMemoryBasis: requests</code>, requests times lifetime. With <code>usage</code> or <code>max</code>, one metrics-server reading times the window.</td><td>Exact with <code>requests</code>, an estimate otherwise</td></tr>
+            <tr><td><code>vcluster_storage_gb_hours</code></td><td>Bound PersistentVolumeClaims</td><td>Requested capacity times the time bound, per storage class.</td><td>Exact</td></tr>
+            <tr><td><code>vcluster_instance_hours</code></td><td>Control plane workloads</td><td>Time the cluster's control plane was running and ready.</td><td>Exact</td></tr>
+            <tr><td><code>vcluster_lb_hours</code></td><td>LoadBalancer Services</td><td>Lifetime of each Service of type LoadBalancer.</td><td>Exact</td></tr>
+            <tr><td><code>vcluster_network_egress_gb</code></td><td>Prometheus</td><td>Deltas of <code>container_network_transmit_bytes_total</code> between raw samples.</td><td>Exact (an estimate with <code>EGRESS_QUERY</code>)</td></tr>
+            <tr><td><code>inference_input_tokens</code>, <code>inference_output_tokens</code></td><td>Gateway records</td><td>Tokens of each request, deduplicated by request ID, summed per window. A record that arrives after its window closed is billed as a separate adjustment.</td><td>Exact</td></tr>
+            <tr><td>Your Prometheus metrics, for example <code>vllm:generation_tokens_total</code></td><td>Prometheus</td><td><code>counter:</code> reads deltas between raw samples. <code>query:</code> runs PromQL such as <code>increase()</code>.</td><td>Exact with <code>counter:</code>, an estimate with <code>query:</code></td></tr>
+            <tr><td><code>vcluster_gpu_utilization</code></td><td>DCGM exporter, through Prometheus</td><td>Average utilization over the window times hours.</td><td>Estimate, informational</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Every metric's accuracy and source is also in <code>GET /api/v1/catalog</code>, which follows the configuration. Events built from an estimate carry <code>estimate: true</code>. Details per metric are in the <a href="metrics.html">Metrics Reference</a>, and per source in <a href="usage-sources.html">Usage Sources</a>.</p>
+
+      <h2 id="install">What to install for what you bill</h2>
+      <div class="hmw-table-wrap">
+        <table class="props-table">
+          <thead><tr><th>To bill</th><th>You need</th></tr></thead>
+          <tbody>
+            <tr><td>GPU-hours, node-hours, CPU, memory, storage, load balancers, control plane hours</td><td>vBilling only. For clusters with their own nodes, a read-only kubeconfig for vBilling, or vCluster Platform's proxy.</td></tr>
+            <tr><td>Tokens</td><td>An AI gateway that records each request: LiteLLM (built in), or any gateway through <code>records.pull</code> or <code>POST /api/v1/records</code>.</td></tr>
+            <tr><td>A second, independent count of tokens</td><td>Prometheus scraping the inference engine, and a <code>counter:</code> metric plus a cross-check against the gateway's tokens.</td></tr>
+            <tr><td>Network egress</td><td>Prometheus scraping cAdvisor (the kubelet's <code>/metrics/cadvisor</code>).</td></tr>
+            <tr><td>GPU utilization (showback, not invoiced)</td><td>The DCGM exporter and Prometheus.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h2 id="verified">Checked on real hardware</h2>
+      <p>What each environment ran, what it showed, and what it did not cover.</p>
+      <div class="hmw-table-wrap">
+        <table class="props-table">
+          <thead><tr><th>Environment</th><th>Sources used</th><th>Results</th><th>Not covered</th></tr></thead>
+          <tbody>
+            <tr><td>NVIDIA DGX Spark (GB10), k3s, vCluster, vLLM, LiteLLM</td><td>Kubernetes API; LiteLLM records (push and pull); Prometheus v2.55.1 scraping vLLM every 10 seconds, read as counters</td><td>Ledger tokens equal LiteLLM's spend logs exactly: 2,386 requests, 86,069 input and 111,216 output tokens, including 340 requests recovered after a 100-second vBilling outage. vLLM's own output counter read exactly (110,527) across a vBilling crash and a Prometheus that lost its data; <code>increase()</code> on the same counter was 6.8% low. A pause freed the GPU within a second and stopped billing at the pause.</td><td>No DCGM exporter, no billing platform (records only)</td></tr>
+            <tr><td>GKE with vCluster Platform 4.12.7 and an A100 40GB Private Node (spot)</td><td>Kubernetes API through the Platform proxy; Stripe sandbox</td><td>Stripe's invoice equals the ledger per line: 3.029915156 A100 GPU-hours, the same node-hours, 36.758981151 vCPU core-hours, 255.672301126 memory GiB-hours. Pauses billed to the second (38.034 seconds into a window). Two spot preemptions and a driver rebuild after a restart (701 seconds) recorded as downtime, not GPU-hours.</td><td>Tokens, Prometheus and DCGM on this cluster</td></tr>
+            <tr><td>GKE with L4 GPUs (time-sharing) and an A100 Private Node</td><td>Kubernetes API; GKE's managed DCGM exporter through Prometheus; Stripe sandbox</td><td>Ledger against Stripe meter totals: 12 series, no mismatch. Spot preemption billed as downtime. DCGM utilization falls back to the profiling engine-activity field under MIG.</td><td>Tokens</td></tr>
+            <tr><td>kind with vCluster (simulated GPUs)</td><td>Kubernetes API, Prometheus, records</td><td>End-to-end scripts in <code>scripts/</code>: backfill after downtime, exact counters across restarts, pause and resume, Lago, Stripe's API (stripe-mock)</td><td>Real GPUs</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h2 id="limits">Known limits</h2>
+      <ul>
+        <li><strong>CPU and memory on usage.</strong> metrics-server reports usage now, not over a window. With <code>cpuMemoryBasis: usage</code>, the chart default, a window collected late (after a restart or an outage) bills no CPU or memory; vBilling logs it and counts it in <code>vbilling_cpu_memory_unmeasured_total</code>. Use <code>requests</code> to bill exactly.</li>
+        <li><strong>A node that dies suddenly.</strong> Kubernetes marks it Unknown 40 to 50 seconds after its last heartbeat. vBilling dates the downtime from the last heartbeat or Lease renewal, but the window in which the node died is usually committed before the mark, so up to one window (60 seconds) after the death can still be billed.</li>
+        <li><strong>Late usage on Stripe.</strong> Stripe accepts usage for a period whose invoice is already finalized but does not invoice it. vBilling delivers within seconds, so this needs vBilling to be down or backlogged past a period's end plus Stripe's grace period (one hour by default).</li>
+        <li><strong>Gateway retries during a pause.</strong> A gateway that retries requests while a cluster is paused can bill requests no client received. Stop the tenant's traffic at the gateway when you pause it.</li>
+        <li><strong>Estimates are labeled, not removed.</strong> <code>query:</code> metrics, DCGM utilization and usage-based CPU and memory are estimates. Do not let an estimate be the only evidence for an amount a customer may dispute.</li>
+      </ul>
+    </main>
+  </div>
+
+  <button class="mobile-sidebar-toggle" id="mobileSidebarToggle" aria-label="Toggle sidebar">&#9776;</button>
+
+  <script>
+    const header = document.getElementById('header');
+    window.addEventListener('scroll', () => { header.classList.toggle('scrolled', window.scrollY > 10); });
+    const sidebar = document.getElementById('sidebar');
+    const toggle = document.getElementById('mobileSidebarToggle');
+    toggle.addEventListener('click', () => { sidebar.classList.toggle('open'); });
+    document.addEventListener('click', (e) => {
+      if (!sidebar.contains(e.target) && !toggle.contains(e.target)) sidebar.classList.remove('open');
+    });
+  </script>
+</body>
+</html>

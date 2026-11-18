@@ -3,8 +3,9 @@
 // clusters whose own API is down while they are paused.
 //
 // A paused cluster's control plane is scaled to zero, the way `vcluster
-// pause` does it. Its workloads are stopped, so their usage ends by itself.
-// What remains is capacity that still exists: dedicated or private nodes,
+// pause` does it. Its workloads are stopped, which can take each pod's
+// termination grace period; their usage is cut at the pause too. What
+// remains is capacity that still exists: dedicated or private nodes,
 // volumes and load balancers. Which of those keep billing while paused is
 // policy (PAUSE_KEEP_BILLING); the spans recorded here let the collector
 // cut the rest at the second the pause took effect, in backfilled windows
@@ -211,6 +212,35 @@ func Overlap(spans []Span, start, end, ws, we time.Time) time.Duration {
 	return d
 }
 
+// Outside returns the parts of [start, end) that fall outside every span,
+// in order. A zero end means "still running"; the last part is then open
+// (zero end) unless a span that is still open covers it.
+func Outside(spans []Span, start, end time.Time) [][2]time.Time {
+	sorted := append([]Span(nil), spans...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].From.Before(sorted[j].From) })
+	var out [][2]time.Time
+	from := start
+	for _, sp := range sorted {
+		if !end.IsZero() && !sp.From.Before(end) {
+			break
+		}
+		if !sp.To.IsZero() && !sp.To.After(from) {
+			continue // ended before this part begins
+		}
+		if sp.From.After(from) {
+			out = append(out, [2]time.Time{from, sp.From})
+		}
+		if sp.To.IsZero() {
+			return out // paused from here on
+		}
+		from = sp.To
+	}
+	if end.IsZero() || end.After(from) {
+		out = append(out, [2]time.Time{from, end})
+	}
+	return out
+}
+
 // Keep is the set of capacity kinds that keep billing while paused.
 type Keep map[string]bool
 
@@ -220,11 +250,17 @@ const (
 	KeepLoadBalancers = "load_balancers"
 	KeepNodes         = "nodes"
 	KeepControlPlane  = "control_plane"
+	// KeepWorkloads bills a paused cluster's pods until they actually stop.
+	// Without it, their usage stops at the second of the pause: stopping a
+	// GPU workload can take its whole termination grace period (vLLM's API
+	// server, for one, is killed only when the grace period ends), and that
+	// time is the pause's doing, not the tenant's.
+	KeepWorkloads = "workloads"
 )
 
 // DefaultKeep keeps billing what a paused cluster still occupies for the
 // operator and the customer gets back on resume: volumes and load balancer
-// addresses. Nodes and the control plane stop billing.
+// addresses. Nodes, workloads and the control plane stop billing.
 const DefaultKeep = KeepStorage + "," + KeepLoadBalancers
 
 // ParseKeep parses PAUSE_KEEP_BILLING ("storage,load_balancers", "none").
@@ -234,7 +270,7 @@ func ParseKeep(spec string) (Keep, error) {
 	if spec == "" || spec == "none" {
 		return out, nil
 	}
-	valid := []string{KeepStorage, KeepLoadBalancers, KeepNodes, KeepControlPlane}
+	valid := []string{KeepStorage, KeepLoadBalancers, KeepNodes, KeepControlPlane, KeepWorkloads}
 	for _, item := range strings.Split(spec, ",") {
 		item = strings.TrimSpace(item)
 		if item == "" {

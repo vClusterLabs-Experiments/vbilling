@@ -94,6 +94,12 @@ func main() {
 	if cfg.EgressQuery != "" && cfg.EgressQuery != "none" {
 		usage.SetAccuracy(usage.MetricNetworkEgressGB, usage.AccuracyEstimate)
 	}
+	if cfg.CPUMemoryBasis != "requests" {
+		// Usage is a metrics-server sample of the live window, not a
+		// measurement over it: requests is the exact basis.
+		usage.SetAccuracy(usage.MetricCPUCoreHours, usage.AccuracyEstimate)
+		usage.SetAccuracy(usage.MetricMemoryGBHours, usage.AccuracyEstimate)
+	}
 	promMetrics, err := metrics.LoadPromMetrics(cfg.PrometheusMetrics)
 	if err != nil {
 		log.Fatalf("PROMETHEUS_METRICS_FILE: %v", err)
@@ -293,6 +299,26 @@ func main() {
 		log.Printf("Records: pulling LiteLLM spend logs from %s every %s (lookback %s, client %q)",
 			cfg.RecordsPullLiteLLMURL, cfg.RecordsPullLiteLLMInterval, cfg.RecordsPullLiteLLMLookback, cfg.RecordsPullLiteLLMClient)
 	}
+	// Any other gateway's request log, read back the same way (RECORDS_PULL_FILE).
+	pullSpecs, err := records.LoadPullSpecs(cfg.RecordsPullFile, formats)
+	if err != nil {
+		log.Fatalf("RECORDS_PULL_FILE: %v", err)
+	}
+	var pullers []*records.Puller
+	if len(pullSpecs) > 0 {
+		state, err := kv.Open(filepath.Join(cfg.DataDir, "records-pull.json"))
+		if err != nil {
+			log.Fatalf("open records pull state: %v", err)
+		}
+		for _, spec := range pullSpecs {
+			if lb := time.Duration(spec.Lookback); lb > cfg.RecordsRetention-2*time.Hour {
+				log.Fatalf("RECORDS_PULL_FILE: pull %s: lookback %s must be at most RECORDS_RETENTION minus 2h (%s)", spec.Name, lb, cfg.RecordsRetention-2*time.Hour)
+			}
+			pullers = append(pullers, records.NewPuller(ingester, spec, state, ctrl.Ready, sources, tel))
+			log.Printf("Records: pulling %s (format %s, client %q) every %s, lookback %s", spec.Name, spec.Format, spec.Client,
+				time.Duration(spec.Interval), time.Duration(spec.Lookback))
+		}
+	}
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
@@ -377,6 +403,13 @@ func main() {
 		go func() {
 			defer wg.Done()
 			litellmPuller.Run(ctx)
+		}()
+	}
+	for _, p := range pullers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			p.Run(ctx)
 		}()
 	}
 

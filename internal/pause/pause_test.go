@@ -97,3 +97,40 @@ func must(s *Store, err error) *Store {
 	}
 	return s
 }
+
+func TestOutside(t *testing.T) {
+	at := func(s int) time.Time {
+		return time.Date(2026, 11, 18, 7, 41, 0, 0, time.UTC).Add(time.Duration(s) * time.Second)
+	}
+	var zero time.Time
+	for _, tc := range []struct {
+		name       string
+		spans      []Span
+		start, end time.Time
+		want       [][2]time.Time
+	}{
+		{"no spans", nil, at(0), at(60), [][2]time.Time{{at(0), at(60)}}},
+		{"still running, no spans", nil, at(0), zero, [][2]time.Time{{at(0), zero}}},
+		{"paused while stopping", []Span{{From: at(31)}}, at(-600), at(61), [][2]time.Time{{at(-600), at(31)}}},
+		{"paused, still running", []Span{{From: at(31)}}, at(-600), zero, [][2]time.Time{{at(-600), at(31)}}},
+		{"started after a closed pause", []Span{{From: at(-300), To: at(10)}}, at(15), zero, [][2]time.Time{{at(15), zero}}},
+		{"ran across a closed pause", []Span{{From: at(10), To: at(20)}, {From: at(-90), To: at(-80)}}, at(-100), at(30),
+			[][2]time.Time{{at(-100), at(-90)}, {at(-80), at(10)}, {at(20), at(30)}}},
+		{"paused before it started", []Span{{From: at(-10)}}, at(0), at(5), nil},
+		{"pause after it ended", []Span{{From: at(40)}}, at(0), at(30), [][2]time.Time{{at(0), at(30)}}},
+	} {
+		got := Outside(tc.spans, tc.start, tc.end)
+		if len(got) != len(tc.want) {
+			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
+			continue
+		}
+		for i := range got {
+			if !got[i][0].Equal(tc.want[i][0]) || !got[i][1].Equal(tc.want[i][1]) {
+				t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
+			}
+		}
+	}
+	if _, err := ParseKeep("storage,workloads"); err != nil {
+		t.Fatalf("workloads is a valid PAUSE_KEEP_BILLING kind: %v", err)
+	}
+}

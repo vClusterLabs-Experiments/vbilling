@@ -89,6 +89,10 @@ type Mapping struct {
 	// the same request read back from its store then fall in the same
 	// window, where their IDs deduplicate.
 	TimePrecision time.Duration `json:"-"`
+	// TimeRound is TimePrecision in YAML (timePrecision: 1ms): set it when a
+	// gateway's own log, read back by a pull, stores times less precisely
+	// than its push sends them.
+	TimeRound Duration `json:"timePrecision,omitempty"`
 }
 
 // LiteLLM maps LiteLLM's StandardLoggingPayload, as its generic API logger
@@ -171,6 +175,10 @@ func LoadFormats(path string, litellm bool) (Formats, error) {
 		if len(m.ID) == 0 || len(m.Time) == 0 || len(m.Usage) == 0 {
 			return nil, fmt.Errorf("%s: format %q needs id, time and usage", path, name)
 		}
+		if m.TimeRound < 0 {
+			return nil, fmt.Errorf("%s: format %q: timePrecision must be positive", path, name)
+		}
+		m.TimePrecision = time.Duration(m.TimeRound)
 		f[name] = m
 	}
 	return f, nil

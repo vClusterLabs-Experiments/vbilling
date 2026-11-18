@@ -95,6 +95,9 @@ type Config struct {
 	// RecordsLiteLLM enables the built-in litellm payload format.
 	RecordsLiteLLM bool
 	IngestTokens   map[string]string // token -> tenant the token is bound to
+	// RecordsPullFile lists gateway request logs to read back as records
+	// (YAML, see records.PullSpec), for any gateway with a logs API.
+	RecordsPullFile string
 	// RecordsPullLiteLLM* read LiteLLM's spend logs back as records, to fill
 	// what the generic API logger's push lost. Setting the URL enables it,
 	// and the litellm format with it.
@@ -136,7 +139,7 @@ type Config struct {
 	// and needs write access to admission policies inside them.
 	EnforcementInCluster bool
 	// PauseKeepBilling is the capacity that keeps billing while a cluster
-	// is paused: storage, load_balancers, nodes, control_plane, or none.
+	// is paused: storage, load_balancers, nodes, control_plane, workloads, or none.
 	PauseKeepBilling string
 	// PauseDrainTimeout bounds the wait for workloads on a cluster's own
 	// nodes to stop before its control plane is stopped.
@@ -244,6 +247,7 @@ func Load() *Config {
 		CrossChecks:             os.Getenv("CROSS_CHECKS"),
 
 		RecordsPullLiteLLMURL:      os.Getenv("RECORDS_PULL_LITELLM_URL"),
+		RecordsPullFile:            os.Getenv("RECORDS_PULL_FILE"),
 		RecordsPullLiteLLMKey:      secretEnv("RECORDS_PULL_LITELLM_KEY"),
 		RecordsPullLiteLLMClient:   envOr("RECORDS_PULL_LITELLM_CLIENT", "litellm"),
 		RecordsPullLiteLLMTenant:   os.Getenv("RECORDS_PULL_LITELLM_TENANT"),

@@ -238,10 +238,7 @@ func TestAutoSubscribeUsesPlanTaggedPrices(t *testing.T) {
 	}
 	price := func(id, meter, plan, currency string) Price {
 		p := Price{ID: id, Active: true, Currency: currency, Metadata: map[string]string{metaPlan: plan}}
-		p.Recurring = &struct {
-			UsageType string `json:"usage_type"`
-			Meter     string `json:"meter"`
-		}{UsageType: "metered", Meter: meter}
+		p.Recurring = &PriceRecurring{UsageType: "metered", Meter: meter, Interval: "month", IntervalCount: 1}
 		return p
 	}
 	f.prices = []Price{

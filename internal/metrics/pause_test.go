@@ -171,3 +171,48 @@ func TestControlPlaneHoursStopAtTheSecondOfThePause(t *testing.T) {
 		t.Fatalf("control plane hours while asleep = %v", got)
 	}
 }
+
+func TestPausedWorkloadsStopBillingAtTheSecondOfThePause(t *testing.T) {
+	// Found on a DGX Spark: paused at ws+20s, vLLM's GPU process exited a
+	// second later, but its API server ignored SIGTERM and was killed when
+	// the 30s grace period ended (ws+50s). The tenant pays until the pause.
+	stopping := pod("vllm", "gpu-1", withGPU("nvidia.com/gpu", 1), withRequests("2", "8Gi"), finished(ws.Add(-time.Hour), ws.Add(50*time.Second)))
+	stopping.Status.Phase = "Failed"
+	host := []runtime.Object{node("gpu-1", map[string]string{"nvidia.com/gpu.product": "NVIDIA-GB10"}, 1, true), stopping}
+	for _, tc := range []struct {
+		keep      string
+		gpu, cpus float64
+	}{
+		{pause.DefaultKeep, 20.0 / 3600, 2 * 20.0 / 3600},
+		{"workloads", 50.0 / 3600, 2 * 50.0 / 3600}, // billed until it actually stopped
+	} {
+		c := pausedCollector(t, tc.keep, host)
+		tg := target("gpu", false)
+		tg.Cluster.Paused = true
+		tg.Paused = []pause.Span{{From: ws.Add(20 * time.Second), By: "vbilling"}}
+		out, _, err := c.Collect(context.Background(), []Target{tg}, latest())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := find(out[we], usage.MetricGPUHours, "sku", "NVIDIA-GB10"); !near(got, usage.Round(tc.gpu)) {
+			t.Errorf("keep=%s: GPU hours = %v, want %v", tc.keep, got, usage.Round(tc.gpu))
+		}
+		if got, _ := find(out[we], usage.MetricCPUCoreHours); !near(got, usage.Round(tc.cpus)) {
+			t.Errorf("keep=%s: CPU core-hours = %v, want %v", tc.keep, got, usage.Round(tc.cpus))
+		}
+	}
+
+	// After a resume, the new pod bills from its own start; the earlier,
+	// closed pause takes nothing from it.
+	resumed := pod("vllm-2", "gpu-1", withGPU("nvidia.com/gpu", 1), startedAt(ws.Add(15*time.Second)))
+	c := pausedCollector(t, pause.DefaultKeep, []runtime.Object{host[0], resumed})
+	tg := target("gpu", true)
+	tg.Paused = []pause.Span{{From: ws.Add(-3 * time.Minute), To: ws.Add(10 * time.Second), By: "vbilling"}}
+	out, _, err := c.Collect(context.Background(), []Target{tg}, latest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := find(out[we], usage.MetricGPUHours); !near(got, usage.Round(45.0/3600)) {
+		t.Errorf("GPU hours after resume = %v, want 45s", got)
+	}
+}
