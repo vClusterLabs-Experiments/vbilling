@@ -31,10 +31,7 @@ func (f *fakeStripe) addPrice(t *testing.T, eventName, id string, amount *int64,
 		t.Fatalf("no meter %s", eventName)
 	}
 	p := Price{ID: id, Active: true, Currency: "usd", Metadata: meta, BillingScheme: "per_unit", UnitAmount: amount}
-	p.Recurring = &struct {
-		UsageType string `json:"usage_type"`
-		Meter     string `json:"meter"`
-	}{"metered", meterID}
+	p.Recurring = &PriceRecurring{UsageType: "metered", Meter: meterID}
 	for _, m := range mutate {
 		m(&p)
 	}

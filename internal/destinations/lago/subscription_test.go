@@ -51,7 +51,10 @@ func TestSubscriptionStart(t *testing.T) {
 		want           string
 	}{
 		{"ingest-only tenant: the first window", time.Time{}, at("2026-11-18T04:28:00Z"), "2026-11-18T04:28:00Z"},
-		{"cluster created earlier today", at("2026-11-18T01:15:00Z"), at("2026-11-18T04:28:00Z"), "2026-11-18T01:15:00Z"},
+		// The hour it was created in, so its first window (01:17:00, or
+		// 01:15:00 with 5-minute windows, for a 01:17:42 creation) is in.
+		{"cluster created earlier today", at("2026-11-18T01:15:00Z"), at("2026-11-18T04:28:00Z"), "2026-11-18T01:00:00Z"},
+		{"created mid-window", at("2026-11-18T01:17:42Z"), at("2026-11-18T04:28:00Z"), "2026-11-18T01:00:00Z"},
 		{"cluster created in August: not before today", at("2026-08-15T00:00:00Z"), at("2026-11-18T04:28:00Z"), "2026-11-18T00:00:00Z"},
 		{"backfilled usage from yesterday counts", at("2026-08-15T00:00:00Z"), at("2026-11-17T22:00:00Z"), "2026-11-17T22:00:00Z"},
 		{"nothing known: Lago's default (now)", time.Time{}, time.Time{}, ""},

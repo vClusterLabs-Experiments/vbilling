@@ -33,6 +33,7 @@ type fakeStripe struct {
 	prices     []Price
 	subs       map[string]*Subscription
 	idem       map[string]string // idempotency key -> response body
+	idemParams map[string]string // idempotency key -> request parameters
 	failNext   map[string]int    // "METHOD path" -> number of 500s to return
 	searchAll  bool              // search ignores the query (like stripe-mock fixtures)
 	noSearch   bool              // search is not offered in the account's region
@@ -53,6 +54,7 @@ func newFakeStripe(t *testing.T, now func() time.Time) *fakeStripe {
 		idents:     map[string]bool{},
 		subs:       map[string]*Subscription{},
 		idem:       map[string]string{},
+		idemParams: map[string]string{},
 		failNext:   map[string]int{},
 	}
 	f.srv = httptest.NewServer(http.HandlerFunc(f.handle))
@@ -96,6 +98,11 @@ func (f *fakeStripe) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	if ik := r.Header.Get("Idempotency-Key"); ik != "" && r.Method == http.MethodPost {
 		if body, ok := f.idem[ik]; ok {
+			// Like Stripe: a key reused with other parameters is refused.
+			if f.idemParams[ik] != r.Form.Encode() {
+				f.fail(w, 400, "", "Keys for idempotent requests can only be used with the same parameters they were first used with.")
+				return
+			}
 			w.Header().Set("Idempotent-Replayed", "true")
 			w.Write([]byte(body))
 			return
@@ -104,6 +111,7 @@ func (f *fakeStripe) handle(w http.ResponseWriter, r *http.Request) {
 		f.route(rec, r)
 		if rec.Code < 300 {
 			f.idem[ik] = rec.Body.String()
+			f.idemParams[ik] = r.Form.Encode()
 		}
 		w.WriteHeader(rec.Code)
 		w.Write(rec.Body.Bytes())
@@ -302,7 +310,15 @@ func (f *fakeStripe) route(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, page(r, out, func(s Subscription) string { return s.ID }))
 
 	case r.Method == "POST" && p == "/v1/subscriptions":
-		s := &Subscription{ID: f.id("sub"), Status: "active", Customer: r.Form.Get("customer"), Metadata: metadataOf(r)}
+		s := &Subscription{ID: f.id("sub"), Status: "active", Customer: r.Form.Get("customer"), Metadata: metadataOf(r), StartDate: f.now().Unix()}
+		if v := r.Form.Get("backdate_start_date"); v != "" {
+			at, err := strconv.ParseInt(v, 10, 64)
+			if err != nil || at >= f.now().Unix() {
+				f.fail(w, 400, "parameter_invalid", "backdate_start_date must be in the past")
+				return
+			}
+			s.StartDate = at
+		}
 		for i := 0; ; i++ {
 			pid := r.Form.Get(fmt.Sprintf("items[%d][price]", i))
 			if pid == "" {
@@ -334,10 +350,7 @@ func (f *fakeStripe) route(w http.ResponseWriter, r *http.Request) {
 func (f *fakeStripe) addItem(s *Subscription, priceID string) {
 	for _, p := range f.prices {
 		if p.ID == priceID {
-			s.Items.Data = append(s.Items.Data, struct {
-				ID    string `json:"id"`
-				Price Price  `json:"price"`
-			}{ID: f.id("si"), Price: p})
+			s.Items.Data = append(s.Items.Data, SubscriptionItem{ID: f.id("si"), Price: p})
 		}
 	}
 }

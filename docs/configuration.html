@@ -226,6 +226,7 @@
       <div class="sidebar-section">
         <div class="sidebar-label">Documentation</div>
         <a href="getting-started.html">Getting Started</a>
+        <a href="how-metering-works.html">How Metering Works</a>
         <a href="configuration.html" class="active">Configuration</a>
         <a href="metrics.html">Metrics Reference</a>
         <a href="usage-sources.html">Usage Sources</a>
@@ -536,6 +537,7 @@
             <tr><td><code>RECORDS_ALLOW_UNKEYED</code></td><td>Derive a request ID from a record's content when the emitter sends none. Identical records then count once.</td><td class="td-default">false</td></tr>
             <tr><td><code>RECORDS_UNKNOWN_TENANTS</code></td><td><code>accept</code>: bill records for a tenant vBilling does not know to that tenant ID, and report it in the response and in source health. <code>reject</code>: refuse them.</td><td class="td-default">accept</td></tr>
             <tr><td><code>RECORDS_ARCHIVE</code></td><td>Also archive raw request records to <code>ARCHIVE_DIR/records</code> before retention deletes them: request-level evidence, at a high volume. Needs <code>ARCHIVE_DIR</code>.</td><td class="td-default">false</td></tr>
+            <tr><td><code>RECORDS_PULL_FILE</code></td><td>YAML list of gateway request logs to read back as records, for any gateway with a logs API: URL with a time range, headers (<code>${RECORDS_PULL_...}</code> variables only), rows path and paging. Pushed and pulled copies count once. Helm: <code>records.pull</code> and <code>records.pullEnv</code>. See <a href="usage-sources.html#gateway-pull">Pulling any gateway's request log</a>.</td><td class="td-default">(none)</td></tr>
             <tr><td><code>RECORDS_PULL_LITELLM_URL</code></td><td>Base URL of a LiteLLM proxy (v1.103.0 or later, with a database) whose spend logs vBilling reads back as records, to fill what the generic API logger's push lost. Pushed and pulled copies of a request count once. Enables the <code>litellm</code> format. See <a href="usage-sources.html#litellm-pull">Pulling LiteLLM's spend logs</a>.</td><td class="td-default">(none)</td></tr>
             <tr><td><code>RECORDS_PULL_LITELLM_KEY</code></td><td>A LiteLLM key that can read every team's spend logs: the master key or a proxy admin key. Required with <code>RECORDS_PULL_LITELLM_URL</code>.</td><td class="td-default">(none)</td></tr>
             <tr><td><code>RECORDS_PULL_LITELLM_CLIENT</code></td><td>The client the pulled records are stored under. It is part of every record ID, so it must equal the push's client: its <code>X-VBilling-Client</code> header, which defaults to the format name.</td><td class="td-default">litellm</td></tr>
@@ -607,7 +609,7 @@
             </tr>
             <tr>
               <td><code>PAUSE_KEEP_BILLING</code></td>
-              <td>What keeps billing while a cluster is paused (state <code>paused</code>): any of <code>storage</code>, <code>load_balancers</code>, <code>nodes</code>, <code>control_plane</code>, or <code>none</code>. Workload usage always stops, because the workloads are stopped. Helm: <code>enforcement.pause.keepBilling</code>. See <a href="private-nodes.html#pause">Pausing a tenant</a>.</td>
+              <td>What keeps billing while a cluster is paused (state <code>paused</code>): any of <code>storage</code>, <code>load_balancers</code>, <code>nodes</code>, <code>control_plane</code>, <code>workloads</code>, or <code>none</code>. Without <code>workloads</code>, the usage of a paused cluster's pods stops at the second of the pause, even while they take their grace period to stop. Helm: <code>enforcement.pause.keepBilling</code>. See <a href="private-nodes.html#pause">Pausing a tenant</a>.</td>
               <td class="td-default">storage,load_balancers</td>
             </tr>
             <tr>

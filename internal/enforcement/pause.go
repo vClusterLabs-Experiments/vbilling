@@ -8,6 +8,7 @@ import (
 	"log"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -23,15 +24,17 @@ import (
 // it (see discovery.AnnotationPaused) and never lifts a pause it did not make.
 const annPaused = discovery.AnnotationPaused
 
-// TaintPaused is the NoExecute taint vBilling puts on a paused cluster's
-// own nodes: it evicts their workloads and keeps new ones off until resume.
+// TaintPaused is the NoSchedule taint vBilling puts on a paused cluster's
+// own nodes: it keeps workloads off them until resume. vBilling stops the
+// workloads itself; node infrastructure (GPU driver, device plugin, CNI)
+// keeps running, so the cluster serves again soon after it resumes.
 const TaintPaused = "vbilling.vcluster.com/paused"
 
 // labelManagedBy marks the pods a vCluster synced to the control plane
 // cluster (what `vcluster pause` deletes).
 const labelManagedBy = "vcluster.loft.sh/managed-by"
 
-var pausedTaint = corev1.Taint{Key: TaintPaused, Value: "true", Effect: corev1.TaintEffectNoExecute}
+var pausedTaint = corev1.Taint{Key: TaintPaused, Value: "true", Effect: corev1.TaintEffectNoSchedule}
 
 // pauseCluster pauses one cluster, in this order:
 //
@@ -399,11 +402,12 @@ func (e *Enforcer) Guard(ctx context.Context) {
 // Wait waits for background pauses and resumes to finish (tests, shutdown).
 func (e *Enforcer) Wait() { e.bg.Wait() }
 
-// drain taints the cluster's own nodes NoExecute and deletes the pods on
-// them that do not tolerate it, then waits up to DrainTimeout for them to
+// drain taints the cluster's own nodes NoSchedule, deletes the pods on them
+// a pause stops (stopsOnPause), and waits up to DrainTimeout for them to
 // stop. Nodes of the control plane cluster (shared nodes) are never
 // touched: their pods are the synced ones the pause deletes there. It
-// returns the pods still running that tolerate the taint.
+// returns the workload pods that tolerate the taint: their controllers can
+// put them straight back.
 func (e *Enforcer) drain(ctx context.Context, kube kubernetes.Interface, external bool) (int, error) {
 	host := map[string]bool{}
 	if !external && e.kube != nil {
@@ -455,9 +459,11 @@ func (e *Enforcer) drain(ctx context.Context, kube kubernetes.Interface, externa
 			if !own[p.Spec.NodeName] || p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
 				continue
 			}
+			if !stopsOnPause(p) {
+				continue // node infrastructure, or a static pod the kubelet runs
+			}
 			if tolerates(p, &pausedTaint) {
-				tolerating++
-				continue
+				tolerating++ // its controller would put it straight back
 			}
 			running++
 			if p.DeletionTimestamp == nil {
@@ -467,7 +473,7 @@ func (e *Enforcer) drain(ctx context.Context, kube kubernetes.Interface, externa
 				}
 			}
 		}
-		if running == 0 {
+		if running == 0 || running == tolerating {
 			return tolerating, nil
 		}
 		if time.Now().After(deadline) {
@@ -523,6 +529,39 @@ func (e *Enforcer) updateNode(ctx context.Context, kube kubernetes.Interface, na
 			return err
 		}
 	}
+}
+
+// stopsOnPause reports whether a pause stops a pod: every workload, and a
+// DaemonSet pod only when it requests an accelerator or another extended
+// resource. Other DaemonSet pods (GPU driver, toolkit, device plugin, CNI,
+// monitoring agents) and static pods keep running, so nothing has to be
+// reinstalled when the cluster resumes.
+func stopsOnPause(p *corev1.Pod) bool {
+	for _, ref := range p.OwnerReferences {
+		switch ref.Kind {
+		case "Node":
+			return false // a static pod: the kubelet would recreate it
+		case "DaemonSet":
+			return requestsExtendedResources(p)
+		}
+	}
+	return true
+}
+
+func requestsExtendedResources(p *corev1.Pod) bool {
+	for _, c := range append(append([]corev1.Container{}, p.Spec.InitContainers...), p.Spec.Containers...) {
+		for _, list := range []corev1.ResourceList{c.Resources.Limits, c.Resources.Requests} {
+			for name := range list {
+				switch {
+				case name == corev1.ResourceCPU, name == corev1.ResourceMemory, name == corev1.ResourceEphemeralStorage,
+					strings.HasPrefix(string(name), corev1.ResourceHugePagesPrefix):
+				default:
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func hasTaint(n *corev1.Node, key string) bool {

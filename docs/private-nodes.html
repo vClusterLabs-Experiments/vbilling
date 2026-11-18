@@ -250,6 +250,7 @@
       <div class="sidebar-section">
         <div class="sidebar-label">Documentation</div>
         <a href="getting-started.html">Getting Started</a>
+        <a href="how-metering-works.html">How Metering Works</a>
         <a href="configuration.html">Configuration</a>
         <a href="metrics.html">Metrics Reference</a>
         <a href="usage-sources.html">Usage Sources</a>
@@ -322,7 +323,7 @@
       <p>Pods that run on the tenant's own dedicated nodes are not metered again as shared usage: the node allocation already covers them. (v0.1 billed both the pods and the node.) A pod from a different tenant that lands on an untainted dedicated node is billed to its own tenant as shared usage.</p>
 
       <h2 id="fairness">Downtime</h2>
-      <p>If a dedicated node is NotReady, or carries a taint listed in <code>UNHEALTHY_NODE_TAINTS</code>, its node-hours stop and its GPUs are recorded as <code>vcluster_gpu_downtime_hours</code> (informational, never invoiced), from the moment the condition or taint appeared.</p>
+      <p>If a dedicated node is NotReady, or carries a taint listed in <code>UNHEALTHY_NODE_TAINTS</code>, its node-hours stop and its GPUs are recorded as <code>vcluster_gpu_downtime_hours</code> (informational, never invoiced), from the moment the condition or taint appeared. A node that stops reporting (a preempted spot VM, a host that loses power) is marked Unknown only after the node controller's grace period, 40 to 50 seconds. For such a node the downtime starts at its last proof of life instead: the later of its last status heartbeat and its last Lease renewal, which the reader role above may <code>get</code>. On GCP, a preempted A100 spot node was billed until its last heartbeat, not the 59 seconds more until the Unknown mark.</p>
 
       <h2 id="private">Private Nodes, Auto Nodes and Standalone</h2>
       <p>With Private Nodes, vCluster syncs nothing to the control plane cluster: the nodes, their pods and their volumes exist only in the tenant cluster. vBilling meters these tenant clusters through their own API. Every node the tenant cluster's API reports that the control plane cluster does not have (and that is not one of vCluster's placeholder nodes, labeled <code>vcluster.loft.sh/fake-node</code>) is a private node, billed like a dedicated node with <code>billing_mode=private_node</code>. The tenant cluster's volumes and load balancers are billed as well. Shared tenant clusters are never billed twice, even when vBilling can read their API.</p>
@@ -346,6 +347,9 @@ experimental:
           - apiGroups: [""]
             resources: [nodes, pods, persistentvolumeclaims, services]
             verbs: [get, list, watch]
+          - apiGroups: [coordination.k8s.io]
+            resources: [leases]
+            verbs: [get]
           - apiGroups: [resource.k8s.io]
             resources: [resourceclaims, resourceslices]
             verbs: [get, list]
@@ -532,6 +536,9 @@ subjects:
           - apiGroups: [<span class="string">""</span>]
             resources: [nodes, pods, persistentvolumeclaims, services]
             verbs: [get, list, watch]
+          - apiGroups: [coordination.k8s.io]
+            resources: [leases]
+            verbs: [get]
           - apiGroups: [resource.k8s.io]
             resources: [resourceclaims, resourceslices]
             verbs: [get, list]
@@ -592,7 +599,7 @@ ENFORCEMENT_RULES=<span class="string">"alerts.low_remaining_contract_credit_bal
       <p>In <code>enforce</code> mode, vBilling then pauses each of the tenant's clusters, in this order:</p>
       <ol>
         <li>It marks the cluster paused with <code>vbilling.vcluster.com/paused-by</code>, <code>vbilling.vcluster.com/paused-at</code> and <code>vbilling.vcluster.com/paused-replicas</code>. Capacity billing stops at this second.</li>
-        <li>Inside a cluster with its own nodes (with <code>ENFORCEMENT_IN_CLUSTER=true</code>), it installs the admission policy, taints each of the cluster's own nodes <code>vbilling.vcluster.com/paused=true:NoExecute</code>, deletes the pods that do not tolerate the taint, and waits up to <code>PAUSE_DRAIN_TIMEOUT</code> (2 minutes) for them to stop. Nodes of the control plane cluster are never tainted.</li>
+        <li>Inside a cluster with its own nodes (with <code>ENFORCEMENT_IN_CLUSTER=true</code>), it installs the admission policy, taints each of the cluster's own nodes <code>vbilling.vcluster.com/paused=true:NoSchedule</code>, stops the workloads on them, and waits up to <code>PAUSE_DRAIN_TIMEOUT</code> (2 minutes) for them to end. DaemonSets that run node infrastructure (the GPU driver and device plugin, the CNI, monitoring agents) keep running, so the cluster serves again soon after it resumes; a DaemonSet pod that requests a GPU or another extended resource is stopped like any workload. Nodes of the control plane cluster are never tainted.</li>
         <li>It saves the cluster's nodes, volumes and load balancers under <code>DATA_DIR/paused-inventory</code>. While the control plane is stopped its API is down and nothing in it can change, so vBilling meters the paused cluster from that copy.</li>
         <li>It scales the control plane to zero and deletes the pods the cluster synced to the control plane cluster, as <code>vcluster pause</code> does.</li>
       </ol>
@@ -604,21 +611,22 @@ ENFORCEMENT_RULES=<span class="string">"alerts.low_remaining_contract_credit_bal
       <table>
         <thead><tr><th>Usage</th><th>While paused</th></tr></thead>
         <tbody>
-          <tr><td>CPU, memory and GPUs of workloads</td><td>Stops: the workloads are stopped. They are billed until they actually stop, to the second.</td></tr>
+          <tr><td>CPU, memory and GPUs of workloads</td><td>Stop at the second of the pause, like the control plane. A workload can take its whole termination grace period to stop (on a DGX Spark, vLLM's GPU process exited one second after the pause, but its API server was killed only when the 30-second grace period ended); that time is not billed. With <code>workloads</code> in <code>PAUSE_KEEP_BILLING</code>, workloads are billed until they actually stop.</td></tr>
           <tr><td>Control plane hours</td><td>Stop at the second of the pause.</td></tr>
           <tr><td>Dedicated and private nodes</td><td>Stop at the second of the pause. The nodes stay joined and idle; returning them to a pool is the node provider's job (vMetal, Auto Nodes), and they are not billed either way.</td></tr>
           <tr><td>Volumes and load balancers</td><td>Keep billing: they still hold storage and addresses, and the tenant gets them back on resume.</td></tr>
           <tr><td>Per-request records and Prometheus counters</td><td>Billed as reported. A gateway should refuse a paused tenant's requests.</td></tr>
         </tbody>
       </table>
-      <p><code>PAUSE_KEEP_BILLING</code> (Helm <code>enforcement.pause.keepBilling</code>) lists what keeps billing: any of <code>storage</code>, <code>load_balancers</code>, <code>nodes</code>, <code>control_plane</code>, or <code>none</code>. The default is <code>storage,load_balancers</code>. A pause vBilling did not make (<code>vcluster pause</code>, an operator) is billed the same way from the time vBilling sees it, and vBilling never resumes it.</p>
+      <p><code>PAUSE_KEEP_BILLING</code> (Helm <code>enforcement.pause.keepBilling</code>) lists what keeps billing: any of <code>storage</code>, <code>load_balancers</code>, <code>nodes</code>, <code>control_plane</code>, <code>workloads</code>, or <code>none</code>. The default is <code>storage,load_balancers</code>. A pause vBilling did not make (<code>vcluster pause</code>, an operator) is billed the same way from the time vBilling sees it, and vBilling never resumes it.</p>
       <h3 id="pause-resume">Resume</h3>
       <p>Clearing the hold resumes the cluster: a <code>PUT</code> with <code>"state": "active"</code>, or a payment webhook that clears the <code>billing</code> hold. vBilling scales the control plane back to its replica count, and once the cluster's API answers it lifts the taint and removes the admission policy. Workloads come back on their own: on shared nodes the cluster still has every pod and syncs them again; on its own nodes, Deployments, StatefulSets and Jobs recreate theirs. Bare pods deleted by the drain do not come back.</p>
       <h3 id="pause-scope">Limits</h3>
       <ul>
         <li>vBilling never deletes a cluster. For a grace period followed by deletion, use the <code>since</code> of the tenant's state and <code>pause_spans</code> from <code>GET /api/v1/billing-states</code> in your own automation.</li>
         <li>A cluster vBilling reaches only through its own API (vCluster Standalone, <code>TENANT_CLUSTERS_FILE</code>) has no control plane in the control plane cluster to stop. Its pause is the admission policy plus drained nodes, applied again every two minutes; a cluster admin inside it can undo that between two passes.</li>
-        <li>Pods that tolerate every taint (often <code>kube-proxy</code> and CNI agents) keep running on paused nodes. A GPU workload with such a toleration would too; vBilling logs how many pods were left.</li>
+        <li>A workload whose pods tolerate every taint is stopped, but its controller can schedule it again before the control plane stops; vBilling logs how many such pods were left. Its usage is billed while it runs.</li>
+        <li>Resume time is the cluster's start-up time plus each workload's own. Keep model weights on a volume or a node-local cache rather than an <code>emptyDir</code>, or an inference server downloads them again on every resume.</li>
         <li>With vCluster Platform, its sleep mode and wake-up are separate from vBilling's pause. A Platform wake-up of a paused cluster is paused again within 15 seconds.</li>
       </ul>
       <p>Pausing needs more access than suspending. In the control plane cluster, the chart grants <code>delete</code> on pods in <code>enforce</code> mode. Inside clusters with their own nodes, add to <code>vbilling-enforcer</code>:</p>

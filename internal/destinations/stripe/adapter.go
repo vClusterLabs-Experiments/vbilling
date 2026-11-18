@@ -67,6 +67,9 @@ type Adapter struct {
 	prices     []Price
 	pricesTime time.Time
 
+	subMu    sync.Mutex
+	subStart map[string]time.Time // tenant -> when its subscription starts invoicing
+
 	workers int
 }
 
@@ -74,10 +77,11 @@ type Adapter struct {
 func New(c *Client, cfg *config.Config, state *kv.Store) *Adapter {
 	return &Adapter{
 		c: c, cfg: cfg, state: state,
-		sent:    destinations.NewSentCache(200_000),
-		now:     time.Now,
-		meters:  map[string]Meter{},
-		workers: 4,
+		sent:     destinations.NewSentCache(200_000),
+		now:      time.Now,
+		meters:   map[string]Meter{},
+		subStart: map[string]time.Time{},
+		workers:  4,
 	}
 }
 
@@ -361,8 +365,13 @@ func (a *Adapter) ensureSubscription(ctx context.Context, t usage.Tenant, cusID 
 	if err != nil {
 		return fmt.Errorf("list subscriptions: %w", err)
 	}
+	earlier := 0 // the tenant's ended subscriptions
 	for _, s := range subs {
-		if s.Metadata[metaTenant] != t.ID || s.Status == "canceled" || s.Status == "incomplete_expired" {
+		if s.Metadata[metaTenant] != t.ID {
+			continue
+		}
+		if s.Status == "canceled" || s.Status == "incomplete_expired" {
+			earlier++
 			continue
 		}
 		have := map[string]bool{}
@@ -378,19 +387,124 @@ func (a *Adapter) ensureSubscription(ctx context.Context, t usage.Tenant, cusID 
 			}
 		}
 		_ = a.state.Set("sub/"+t.ID, s.ID)
+		a.noteStart(t.ID, time.Unix(s.StartDate, 0))
 		return nil
 	}
 	ids := make([]string, len(prices))
 	for i, p := range prices {
 		ids[i] = p.ID
 	}
-	key := fmt.Sprintf("vbilling-sub-%s-%s", shortHash(t.ID+"|"+plan), a.now().UTC().Format("2006010215"))
-	sub, err := a.c.CreateSubscription(ctx, cusID, ids, map[string]string{metaTenant: t.ID, metaPlan: plan}, key)
+	now := a.now()
+	usageStart, _ := destinations.UsageStart(ctx)
+	start := destinations.SubscriptionStart(t.CreatedAt, usageStart, now)
+	if floor := earliestBackdate(now, shortestPeriod(prices)); !start.IsZero() && start.Before(floor) {
+		log.Printf("[stripe] tenant %s has usage from %s, more than one billing period back: its subscription starts %s, and earlier usage is dead-lettered (Stripe would accept it but never invoice it)",
+			t.ID, start.UTC().Format(time.RFC3339), floor.UTC().Format(time.RFC3339))
+		start = floor
+	}
+	// The key covers every parameter: Stripe refuses a key reused with other
+	// parameters (prices added to the plan, a new start), and replays the
+	// first response for the same ones, which after a cancel would be the
+	// canceled subscription. The ended-subscription count makes a
+	// re-subscribe a new request. A create whose response was lost is found
+	// by the list above, so a retry never makes a second subscription.
+	key := fmt.Sprintf("vbilling-sub-%s-%s", shortHash(fmt.Sprintf("%s|%s|%s|%d|%d", t.ID, plan, strings.Join(ids, ","), start.Unix(), earlier)),
+		now.UTC().Format("2006010215"))
+	sub, err := a.c.CreateSubscription(ctx, cusID, ids, map[string]string{metaTenant: t.ID, metaPlan: plan}, start, key)
 	if err != nil {
 		return fmt.Errorf("create subscription: %w", err)
 	}
-	log.Printf("[stripe] subscribed tenant %s to plan %s (%s, %d prices)", t.ID, plan, sub.ID, len(ids))
+	started := time.Unix(sub.StartDate, 0)
+	if sub.StartDate == 0 {
+		started = start
+	}
+	if !start.IsZero() {
+		log.Printf("[stripe] subscribed tenant %s to plan %s (%s, %d prices) from %s", t.ID, plan, sub.ID, len(ids), started.UTC().Format(time.RFC3339))
+	} else {
+		log.Printf("[stripe] subscribed tenant %s to plan %s (%s, %d prices)", t.ID, plan, sub.ID, len(ids))
+	}
+	a.noteStart(t.ID, started)
 	return a.state.Set("sub/"+t.ID, sub.ID)
+}
+
+// A subscription is invoiced from its start: Stripe accepts meter events
+// dated earlier (up to 35 days) and shows them in meter summaries, but never
+// puts them on an invoice. So a subscription created for a tenant's first
+// usage starts at that usage (backdate_start_date), and usage dated before a
+// subscription's start is rejected (dead-lettered) instead of silently sent.
+
+// noteStart remembers when a tenant's subscription starts invoicing.
+func (a *Adapter) noteStart(tenant string, at time.Time) {
+	if at.IsZero() || at.Unix() <= 0 {
+		return
+	}
+	a.subMu.Lock()
+	a.subStart[tenant] = at
+	a.subMu.Unlock()
+	_ = a.state.Set("substart/"+tenant, strconv.FormatInt(at.Unix(), 10))
+}
+
+// invoicedFrom is when the tenant's vBilling-managed subscription starts
+// invoicing. Without STRIPE_AUTO_SUBSCRIBE vBilling does not know the
+// tenant's subscriptions, and it reports false.
+func (a *Adapter) invoicedFrom(tenant string) (time.Time, bool) {
+	if !a.cfg.StripeAutoSubscribe {
+		return time.Time{}, false
+	}
+	a.subMu.Lock()
+	defer a.subMu.Unlock()
+	if at, ok := a.subStart[tenant]; ok {
+		return at, true
+	}
+	v, ok := a.state.Get("substart/" + tenant)
+	if !ok {
+		return time.Time{}, false
+	}
+	sec, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || sec <= 0 {
+		return time.Time{}, false
+	}
+	at := time.Unix(sec, 0)
+	a.subStart[tenant] = at
+	return at, true
+}
+
+// shortestPeriod is the shortest billing period among the prices (a month
+// counts as 28 days), a month when none says.
+func shortestPeriod(prices []Price) time.Duration {
+	shortest := 28 * 24 * time.Hour
+	for _, p := range prices {
+		if p.Recurring == nil {
+			continue
+		}
+		n := time.Duration(max(p.Recurring.IntervalCount, 1))
+		var d time.Duration
+		switch p.Recurring.Interval {
+		case "day":
+			d = 24 * time.Hour
+		case "week":
+			d = 7 * 24 * time.Hour
+		case "month":
+			d = 28 * 24 * time.Hour
+		case "year":
+			d = 365 * 24 * time.Hour
+		default:
+			continue
+		}
+		if d*n < shortest {
+			shortest = d * n
+		}
+	}
+	return shortest
+}
+
+// earliestBackdate is the earliest start a subscription created now can
+// have and still invoice all of its usage: less than one period back, or
+// Stripe closes the first period at once and invoices none of its usage
+// (seen live with a 33-day backdate on a monthly price). It moves once an
+// hour, so a retried create sends the same parameters as the first try.
+func earliestBackdate(now time.Time, period time.Duration) time.Time {
+	return now.Truncate(time.Hour).Add(time.Hour - period)
 }
 
 // RemoveTenant optionally cancels the subscription at period end so final
@@ -440,6 +554,11 @@ func (a *Adapter) SendEvents(ctx context.Context, events []usage.Event) error {
 		}
 		if a.now().Sub(ev.WindowStart) > maxEventAge {
 			rejected[ev.ID] = "older than Stripe's 35-day meter event window"
+			continue
+		}
+		if start, ok := a.invoicedFrom(ev.Tenant); ok && ev.WindowStart.Before(start) {
+			rejected[ev.ID] = fmt.Sprintf("dated before the tenant's Stripe subscription started (%s): Stripe would record it but never invoice it",
+				start.UTC().Format(time.RFC3339))
 			continue
 		}
 		cus, err := a.customerFor(ctx, usage.Tenant{ID: ev.Tenant})

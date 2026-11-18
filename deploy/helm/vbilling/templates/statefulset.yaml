@@ -1,5 +1,5 @@
 {{- $adapters := include "vbilling.adapters" . | splitList "," -}}
-{{- $files := or .Values.records.formats (and .Values.metering.customMetrics (not (kindIs "string" .Values.metering.customMetrics))) -}}
+{{- $files := or .Values.records.formats .Values.records.pull (and .Values.metering.customMetrics (not (kindIs "string" .Values.metering.customMetrics))) -}}
 {{- $lagoPriceCard := and (has "lago" $adapters) (or .Values.lago.priceCard .Values.lago.priceCardConfigMap) -}}
 apiVersion: apps/v1
 kind: StatefulSet
@@ -155,6 +155,18 @@ spec:
             {{- if .Values.records.formats }}
             - name: RECORDS_MAPPINGS_FILE
               value: /etc/vbilling/files/records-formats.yaml
+            {{- end }}
+            {{- if .Values.records.pull }}
+            - name: RECORDS_PULL_FILE
+              value: /etc/vbilling/files/records-pull.yaml
+            {{- end }}
+            {{- range .Values.records.pullEnv }}
+            {{- if not (hasPrefix "RECORDS_PULL_" .name) }}
+            {{- fail (printf "records.pullEnv: %s must start with RECORDS_PULL_" .name) }}
+            {{- end }}
+            - name: {{ .name }}
+              valueFrom:
+                secretKeyRef: {name: {{ .secret | quote }}, key: {{ .key | quote }}}
             {{- end }}
             - name: WATCH_DELETIONS
               value: {{ .Values.metering.watchDeletions | quote }}

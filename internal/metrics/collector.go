@@ -188,6 +188,15 @@ func (c *Collector) clip(t Target, kind string) pausedFn {
 	return func(start, end, ws, we time.Time) time.Duration { return c.pausedFor(t, kind, start, end, ws, we) }
 }
 
+// workloadPauses returns the pause spans that end the billing of a
+// target's pods (none when PAUSE_KEEP_BILLING keeps workloads).
+func (c *Collector) workloadPauses(t Target) []pause.Span {
+	if c.opts.PauseKeep[pause.KeepWorkloads] {
+		return nil
+	}
+	return t.Paused
+}
+
 // pausedFn returns how much of [start, end) inside [ws, we) is not billed
 // because the cluster was paused.
 type pausedFn func(start, end, ws, we time.Time) time.Duration
@@ -200,6 +209,10 @@ type Stats struct {
 	Dedicated    int
 	PromFailures int
 	PrivateNodes int
+	// UsageUnmeasured counts pod-windows whose CPU and memory were not
+	// billed: CPU_MEMORY_BASIS=usage, and the window was collected late
+	// (after a restart or outage), when metrics-server has no usage for it.
+	UsageUnmeasured int
 	// TenantAPIFailed lists tenant clusters (external IDs) whose own API
 	// could not be read; nothing from it was metered for these windows.
 	TenantAPIFailed []string
@@ -277,8 +290,9 @@ func (c *Collector) collect(ctx context.Context, targets []Target, windows []Win
 	}
 	c.graveyard.SeenNodes(nodeList.Items, c.opts.Now())
 	nodes := map[string]*nodeInfo{}
+	renewed := leaseRenewals(ctx, c.kube, nodeList.Items)
 	for i := range nodeList.Items {
-		ni := c.parseNode(&nodeList.Items[i])
+		ni := c.parseNodeLease(&nodeList.Items[i], renewed[nodeList.Items[i].Name])
 		nodes[ni.name] = ni
 		if ni.down {
 			st.NodesDown++
@@ -376,7 +390,7 @@ func (c *Collector) collectTarget(ctx context.Context, t Target, nodes map[strin
 
 	virtualNS := func(p *corev1.Pod) string { return p.Labels[LabelVirtualNamespace] }
 	c.meterPods(pods, func(p *corev1.Pod) bool { return owned(p.Labels) }, virtualNS,
-		nodes, dedicated, dra, windows, accs, st, base, usageByPod, "shared")
+		nodes, dedicated, dra, windows, accs, st, base, usageByPod, "shared", c.workloadPauses(t))
 
 	// Dedicated nodes: full capacity, per node.
 	for name, n := range dedicated {
@@ -492,7 +506,7 @@ func ownedFilter(all []map[string]string, clusterName string, includeControlPlan
 // (whole-node billed) nodes. mode is the billing_mode dimension.
 func (c *Collector) meterPods(pods []podEntry, include func(*corev1.Pod) bool, nsOf func(*corev1.Pod) string,
 	nodes, skip map[string]*nodeInfo, dra *draIndex, windows []Window, accs map[time.Time]*accumulator, st *Stats,
-	base baseFn, usageByPod map[string][2]float64, mode string) {
+	base baseFn, usageByPod map[string][2]float64, mode string, paused []pause.Span) {
 	for _, e := range pods {
 		p := e.pod
 		if !include(p) {
@@ -531,9 +545,19 @@ func (c *Collector) meterPods(pods []podEntry, include func(*corev1.Pod) bool, n
 			st.GPUPods++
 		}
 		reqCPU, reqMem := podRequests(p)
+		// A pod of a paused cluster stops billing at the second of the
+		// pause, even while it takes its grace period to stop.
+		parts := [][2]time.Time{{start, end}}
+		if len(paused) > 0 {
+			parts = pause.Outside(paused, start, end)
+		}
 		for _, w := range windows {
 			acc := accs[w.End]
-			billable, down := n.split(start, end, w.Start, w.End)
+			var billable, down time.Duration
+			for _, pt := range parts {
+				b, d := n.split(pt[0], pt[1], w.Start, w.End)
+				billable, down = billable+b, down+d
+			}
 			for _, a := range allocs {
 				sku := gpuType
 				if n != nil && n.sku != "" {
@@ -560,19 +584,26 @@ func (c *Collector) meterPods(pods []podEntry, include func(*corev1.Pod) bool, n
 			}
 
 			var cpu, mem float64
+			sampled := false // a quantity came from a metrics-server sample
 			switch c.opts.Basis {
 			case "requests":
 				cpu, mem = reqCPU, reqMem
 			case "usage", "max":
 				if !w.Latest {
+					// metrics-server only knows usage now: a window
+					// collected late has none.
 					if c.opts.Basis == "max" {
-						cpu, mem = reqCPU, reqMem // usage is unknown for past windows
+						cpu, mem = reqCPU, reqMem
+					} else if st != nil {
+						st.UsageUnmeasured++
 					}
 					break
 				}
 				u := usageByPod[p.Namespace+"/"+p.Name]
 				cpu, mem = u[0], u[1]
+				sampled = cpu > 0 || mem > 0
 				if c.opts.Basis == "max" {
+					sampled = cpu > reqCPU || mem > reqMem
 					cpu, mem = max(cpu, reqCPU), max(mem, reqMem)
 				}
 			}
@@ -586,7 +617,11 @@ func (c *Collector) meterPods(pods []podEntry, include func(*corev1.Pod) bool, n
 				ev := withNS(base(m.metric, n))
 				ev.Dimensions[usage.DimCapacityType] = capType
 				ev.Dimensions[usage.DimBillingMode] = mode
-				acc.add(ev, m.qty*billable.Hours(), map[string]any{"basis": c.opts.Basis})
+				props := map[string]any{"basis": c.opts.Basis}
+				if sampled {
+					props["estimate"] = true
+				}
+				acc.add(ev, m.qty*billable.Hours(), props)
 			}
 		}
 	}

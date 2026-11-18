@@ -143,6 +143,8 @@ type tenantInventory struct {
 	Nodes    []corev1.Node                  `json:"nodes"`
 	PVCs     []corev1.PersistentVolumeClaim `json:"pvcs"`
 	Services []corev1.Service               `json:"services"`
+	// Leases: last renewal of each node whose kubelet went silent.
+	Leases map[string]time.Time `json:"leases,omitempty"`
 }
 
 func readTenantInventory(ctx context.Context, kube kubernetes.Interface, at time.Time) (*tenantInventory, error) {
@@ -160,6 +162,7 @@ func readTenantInventory(ctx context.Context, kube kubernetes.Interface, at time
 		return nil, fmt.Errorf("list services: %w", err)
 	}
 	inv.Nodes, inv.PVCs, inv.Services = nodes.Items, pvcs.Items, svcs.Items
+	inv.Leases = leaseRenewals(ctx, kube, nodes.Items)
 	return inv, nil
 }
 
@@ -206,7 +209,7 @@ func (c *Collector) meterTenant(ctx context.Context, t Target, conn *TenantConn,
 		if n.Labels[LabelFakeNode] == "true" {
 			return
 		}
-		ni := c.parseNode(n)
+		ni := c.parseNodeLease(n, inv.Leases[n.Name])
 		ni.deletedAt = deletedAt
 		private[ni.name] = ni
 	}
@@ -251,7 +254,7 @@ func (c *Collector) meterTenant(ctx context.Context, t Target, conn *TenantConn,
 				return onPrivate && !c.excludedTenantNS[p.Namespace]
 			}
 			c.meterPods(pods, include, func(p *corev1.Pod) string { return p.Namespace },
-				private, nil, dra, windows, accs, st, base, usageByPod, "private_node")
+				private, nil, dra, windows, accs, st, base, usageByPod, "private_node", c.workloadPauses(t))
 		}
 	} else {
 		for name, n := range private {

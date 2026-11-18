@@ -346,6 +346,7 @@ func TestBackfillAndDeterminism(t *testing.T) {
 	objs := []runtime.Object{n, pod("train", "h100-1", withGPU("nvidia.com/gpu", 1), withRequests("1", "1Gi"))}
 	windows := []Window{{Start: ws.Add(-2 * time.Minute), End: ws.Add(-time.Minute)}, {Start: ws.Add(-time.Minute), End: ws}, {Start: ws, End: we, Latest: true}}
 
+	var stats Stats
 	run := func() map[time.Time][]usage.Event {
 		mc := metricsfake.NewSimpleClientset()
 		// The tracker would guess "podmetricses"; the client lists "pods".
@@ -354,13 +355,23 @@ func TestBackfillAndDeterminism(t *testing.T) {
 		}
 		c := NewCollector(fake.NewSimpleClientset(objs...), mc, Options{Region: "r", GPUResources: []string{"nvidia.com/gpu"}, Basis: "usage",
 			Now: func() time.Time { return we.Add(time.Second) }})
-		out, _, err := c.Collect(context.Background(), []Target{target("gpu", true)}, windows)
+		out, st, err := c.Collect(context.Background(), []Target{target("gpu", true)}, windows)
 		if err != nil {
 			t.Fatal(err)
 		}
+		stats = st
 		return out
 	}
 	out := run()
+	// Not invented, but not silent either: the two late windows are counted.
+	if stats.UsageUnmeasured != 2 {
+		t.Errorf("unmeasured pod-windows = %d, want 2", stats.UsageUnmeasured)
+	}
+	for _, e := range out[we] {
+		if e.Metric == usage.MetricCPUCoreHours && e.Properties["estimate"] != true {
+			t.Errorf("a metrics-server sample is an estimate: %+v", e.Properties)
+		}
+	}
 	for i, w := range windows {
 		evs := out[w.End]
 		if got, _ := find(evs, usage.MetricGPUHours); !near(got, usage.Round(1.0/60)) {

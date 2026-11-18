@@ -1,5 +1,5 @@
 {{- $custom := and .Values.metering.customMetrics (not (kindIs "string" .Values.metering.customMetrics)) -}}
-{{- if or .Values.records.formats $custom }}
+{{- if or .Values.records.formats $custom .Values.records.pull }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -15,5 +15,9 @@ data:
   {{- if .Values.records.formats }}
   records-formats.yaml: |
     {{- toYaml .Values.records.formats | nindent 4 }}
+  {{- end }}
+  {{- if .Values.records.pull }}
+  records-pull.yaml: |
+    {{- toYaml .Values.records.pull | nindent 4 }}
   {{- end }}
 {{- end }}

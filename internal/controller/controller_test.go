@@ -416,3 +416,18 @@ func TestPausesSeenInDiscoveryReachMetering(t *testing.T) {
 		}
 	}
 }
+
+func TestWindowsAreCollectedAfterTheKubeletReportedThem(t *testing.T) {
+	h := newHarness(t)
+	// Just after a boundary, the next collection is the following boundary
+	// plus the settle time, long enough for the kubelet to post the status
+	// of a container that exited in the last second of the window.
+	h.now = t0.Truncate(time.Minute).Add(500 * time.Millisecond)
+	got := h.c.untilNextWindow()
+	if want := time.Minute - 500*time.Millisecond + settle; got != want {
+		t.Fatalf("next collection in %v, want %v", got, want)
+	}
+	if settle < 5*time.Second {
+		t.Fatalf("settle = %v: a real kubelet took about 3s to report a finished container", settle)
+	}
+}
