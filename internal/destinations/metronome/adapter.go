@@ -9,6 +9,7 @@ import (
 	"log"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -32,7 +33,7 @@ func init() {
 			return nil, fmt.Errorf("open metronome state: %w", err)
 		}
 		var link *stripe.Adapter
-		if cfg.MetronomeStripeLink {
+		if cfg.MetronomeStripeLink && cfg.MetronomeProvision {
 			if cfg.StripeAPIKey == "" {
 				return nil, errors.New("METRONOME_STRIPE_LINK needs STRIPE_API_KEY to create Stripe customers")
 			}
@@ -41,6 +42,12 @@ func init() {
 				return nil, err
 			}
 			link = stripe.New(stripe.NewClient(cfg.StripeAPIBase, cfg.StripeAPIKey, cfg.StripeAPIVersion, cfg.StripeMaxRPS), cfg, sstate)
+		}
+		if cfg.MetronomeProvision {
+			log.Printf("[metronome] METRONOME_PROVISION=true: vBilling creates the billable metrics, customers, contracts and Stripe links it needs")
+		} else {
+			log.Printf("[metronome] usage is sent under each tenant's ID as ingest alias; vBilling only reads Metronome " +
+				"(customers, contracts and the catalog stay with whoever owns the account)")
 		}
 		return New(NewClient(cfg.MetronomeAPIBase, cfg.MetronomeAPIToken), cfg, state, link), nil
 	})
@@ -53,36 +60,56 @@ const maxEventAge = 34*24*time.Hour - time.Hour
 // metrics require every group-key property to exist.
 const placeholder = "none"
 
+// aliasTTL is how long CustomerAliases keeps a customer's aliases.
+const aliasTTL = time.Minute
+
 var uuidRe = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
-// Adapter ships usage to Metronome. Tenants become customers whose ingest
-// alias is the vBilling tenant ID, so events are attributed even if they
-// arrive before the customer exists.
+// Adapter ships usage to Metronome. Events carry the vBilling tenant ID as
+// customer_id, an ingest alias, so Metronome attributes them to the customer
+// that holds the alias, even when the customer is created after the usage
+// arrives. Without METRONOME_PROVISION the adapter never creates or changes
+// anything in Metronome; with it, it creates billable metrics, customers,
+// contracts and the Stripe link.
 type Adapter struct {
 	c      *Client
 	cfg    *config.Config
 	state  *kv.Store
-	stripe *stripe.Adapter // nil unless METRONOME_STRIPE_LINK
+	stripe *stripe.Adapter // nil unless provisioning with a Stripe key
 	now    func() time.Time
 
 	mu      sync.Mutex
-	metrics map[string]string // metric code -> billable metric ID
+	metrics map[string]string      // metric code -> billable metric ID vBilling created or adopted (provisioning)
+	aliases map[string]aliasEntry  // customer ID -> its ingest aliases, cached
+	plans   map[string]*tenantPlan // tenant -> rate cards of its customer's contracts (price coverage)
+	known   map[string]bool        // tenants recorded as vBilling ingest aliases
+	warned  map[string]bool        // tenants told that their pinned customer is not used
+}
+
+type aliasEntry struct {
+	aliases []string
+	at      time.Time
 }
 
 // New builds the adapter (exported for tests). link may be nil.
 func New(c *Client, cfg *config.Config, state *kv.Store, link *stripe.Adapter) *Adapter {
-	return &Adapter{c: c, cfg: cfg, state: state, stripe: link, now: time.Now, metrics: map[string]string{}}
+	return &Adapter{c: c, cfg: cfg, state: state, stripe: link, now: time.Now, metrics: map[string]string{},
+		aliases: map[string]aliasEntry{}, plans: map[string]*tenantPlan{}, known: map[string]bool{}, warned: map[string]bool{}}
 }
 
 func (a *Adapter) Name() string { return "metronome" }
 
+// provision reports whether vBilling may create objects in Metronome.
+func (a *Adapter) provision() bool { return a.cfg.MetronomeProvision }
+
 // StripeLink returns the Stripe customer manager used for invoicing (nil
-// unless METRONOME_STRIPE_LINK). It resolves Stripe webhooks to tenants.
+// unless METRONOME_PROVISION with a Stripe key). It resolves Stripe webhooks
+// to tenants.
 func (a *Adapter) StripeLink() *stripe.Adapter { return a.stripe }
 
 func (a *Adapter) Accepts(metric string) bool { return destinations.BillableOnly(metric) }
 
-// GroupKeys is the single compound group key vBilling creates per metric:
+// GroupKeys is the single compound group key of a metric's billable metric:
 // the metric's pricing dimensions plus tenant_cluster for presentation.
 // Metronome requires pricing + presentation keys to be one compound key.
 func GroupKeys(def usage.MetricDef) []string {
@@ -103,10 +130,41 @@ func GroupKeys(def usage.MetricDef) []string {
 
 func metricName(def usage.MetricDef) string { return def.Name + " [" + def.Code + "]" }
 
-// Bootstrap creates one SUM billable metric per billable metric code,
-// filtered on event_type and grouped on GroupKeys. Existing metrics are
-// matched by stored ID or by name, never duplicated.
+// BillableMetricFor is the billable metric a metric's events need: the SUM
+// of the value property, filtered on the event type (the metric code),
+// requiring value and every group-key property, with one compound group key.
+// With METRONOME_PROVISION=true vBilling creates it; otherwise
+// `vbilling metronome billable-metrics` prints it for Finance's configuration.
+func BillableMetricFor(def usage.MetricDef) BillableMetric {
+	yes := true
+	filters := []PropertyFilter{{Name: "value", Exists: &yes}}
+	keys := GroupKeys(def)
+	for _, k := range keys {
+		filters = append(filters, PropertyFilter{Name: k, Exists: &yes})
+	}
+	bm := BillableMetric{
+		Name:            metricName(def),
+		AggregationType: "SUM",
+		AggregationKey:  "value",
+		EventTypeFilter: &EventTypeFilter{InValues: []string{def.Code}},
+		PropertyFilters: filters,
+	}
+	if len(keys) > 0 {
+		bm.GroupKeys = [][]string{keys}
+	}
+	return bm
+}
+
+// Bootstrap, with METRONOME_PROVISION, creates one billable metric per
+// billable metric code (BillableMetricFor), matching existing ones by stored
+// ID or by name, never duplicating them. Without it nothing is created: it
+// logs the metrics no billable metric in Metronome counts, and never holds up
+// delivery, because Metronome keeps usage that no billable metric counts yet.
 func (a *Adapter) Bootstrap(ctx context.Context, metrics []usage.MetricDef) error {
+	if !a.provision() {
+		a.reportCatalog(ctx, metrics)
+		return nil
+	}
 	existing, err := a.c.ListBillableMetrics(ctx)
 	if err != nil {
 		return fmt.Errorf("list billable metrics: %w", err)
@@ -132,23 +190,7 @@ func (a *Adapter) Bootstrap(ctx context.Context, metrics []usage.MetricDef) erro
 			a.setMetric(def.Code, id)
 			continue
 		}
-		yes := true
-		filters := []PropertyFilter{{Name: "value", Exists: &yes}}
-		keys := GroupKeys(def)
-		for _, k := range keys {
-			filters = append(filters, PropertyFilter{Name: k, Exists: &yes})
-		}
-		bm := BillableMetric{
-			Name:            metricName(def),
-			AggregationType: "SUM",
-			AggregationKey:  "value",
-			EventTypeFilter: &EventTypeFilter{InValues: []string{def.Code}},
-			PropertyFilters: filters,
-		}
-		if len(keys) > 0 {
-			bm.GroupKeys = [][]string{keys}
-		}
-		id, err := a.c.CreateBillableMetric(ctx, bm)
+		id, err := a.c.CreateBillableMetric(ctx, BillableMetricFor(def))
 		if err != nil {
 			errs = append(errs, fmt.Errorf("create billable metric %s: %w", def.Code, err))
 			continue
@@ -159,6 +201,26 @@ func (a *Adapter) Bootstrap(ctx context.Context, metrics []usage.MetricDef) erro
 	return errors.Join(errs...)
 }
 
+// reportCatalog logs, read-only, the billable metrics of the catalog that no
+// billable metric in Metronome sums.
+func (a *Adapter) reportCatalog(ctx context.Context, defs []usage.MetricDef) {
+	bms, err := a.c.ListBillableMetrics(ctx)
+	if err != nil {
+		log.Printf("[metronome] could not list billable metrics (%v); usage is delivered anyway", err)
+		return
+	}
+	var missing []string
+	for _, def := range defs {
+		if def.Billable && len(summing(bms, def.Code)) == 0 {
+			missing = append(missing, def.Code)
+		}
+	}
+	if len(missing) > 0 {
+		log.Printf("[metronome] no billable metric sums the value of event type(s) %s: Metronome keeps that usage but bills none of it "+
+			"until one does (`vbilling metronome billable-metrics` prints the definitions vBilling expects)", strings.Join(missing, ", "))
+	}
+}
+
 func (a *Adapter) setMetric(code, id string) {
 	a.mu.Lock()
 	a.metrics[code] = id
@@ -167,9 +229,16 @@ func (a *Adapter) setMetric(code, id string) {
 	_ = a.state.Set("bmcode/"+id, code)
 }
 
-// EnsureTenant creates the Metronome customer (and the linked Stripe
-// customer when configured) and, with a rate card configured, a contract.
+// EnsureTenant, with METRONOME_PROVISION, creates the Metronome customer (and
+// the linked Stripe customer when configured) and, with a rate card, a
+// contract. Without it nothing is written to Metronome: the tenant ID is the
+// ingest alias its usage is sent under, and the portal that owns the account
+// creates the customer with that alias whenever it does.
 func (a *Adapter) EnsureTenant(ctx context.Context, t usage.Tenant) error {
+	if !a.provision() {
+		a.noteTenant(t)
+		return nil
+	}
 	cusID, err := a.ensureCustomer(ctx, t)
 	if err != nil {
 		return err
@@ -185,6 +254,51 @@ func (a *Adapter) EnsureTenant(ctx context.Context, t usage.Tenant) error {
 		return nil
 	}
 	return a.ensureContract(ctx, t, cusID, rateCard)
+}
+
+// noteTenant records a tenant ID as one of vBilling's ingest aliases, so a
+// webhook for the customer holding it resolves to the tenant.
+func (a *Adapter) noteTenant(t usage.Tenant) {
+	if id := t.ProviderIDs["metronome"]; id != "" {
+		a.mu.Lock()
+		first := !a.warned[t.ID]
+		a.warned[t.ID] = true
+		a.mu.Unlock()
+		if first {
+			log.Printf("[metronome] WARNING: tenant %s pins customer %s, which only METRONOME_PROVISION=true uses: usage is sent under the ingest alias %q, "+
+				"so add that alias to the customer", t.ID, id, t.ID)
+		}
+	}
+	a.markKnown(t.ID)
+}
+
+// markKnown remembers that vBilling sends usage under alias.
+func (a *Adapter) markKnown(alias string) {
+	a.mu.Lock()
+	seen := a.known[alias]
+	a.known[alias] = true
+	a.mu.Unlock()
+	if !seen {
+		if err := a.state.Set("alias/"+alias, "tenant"); err != nil {
+			log.Printf("[metronome] remember tenant %s: %v", alias, err)
+		}
+	}
+}
+
+// isTenant reports whether vBilling knows alias as one of its tenants: it
+// sent usage under it, or found or created the customer for it.
+func (a *Adapter) isTenant(alias string) bool {
+	a.mu.Lock()
+	known := a.known[alias]
+	a.mu.Unlock()
+	if known {
+		return true
+	}
+	if _, ok := a.state.Get("alias/" + alias); ok {
+		return true
+	}
+	_, ok := a.state.Get("cus/" + alias)
+	return ok
 }
 
 func (a *Adapter) ensureCustomer(ctx context.Context, t usage.Tenant) (string, error) {
@@ -217,10 +331,22 @@ func (a *Adapter) ensureCustomer(ctx context.Context, t usage.Tenant) (string, e
 	}
 	cus, err := a.c.CreateCustomer(ctx, req)
 	if IsConflict(err) {
-		// Alias taken: someone (or an earlier attempt) created it already.
-		if cus, ferr := a.c.FindCustomerByAlias(ctx, t.ID); ferr == nil && cus != nil {
-			a.remember(t.ID, cus.ID)
-			return cus.ID, nil
+		// The alias is taken. vBilling never creates a second customer for
+		// it: it adopts the customer that holds it (created meanwhile by the
+		// portal, an earlier attempt or another replica).
+		found, ferr := a.c.FindCustomerByAlias(ctx, t.ID)
+		if ferr != nil {
+			return "", fmt.Errorf("find customer %s after a conflict: %w", t.ID, ferr)
+		}
+		if found != nil {
+			a.remember(t.ID, found.ID)
+			return found.ID, nil
+		}
+		// Metronome lists only active customers by default; an archived one
+		// keeps its aliases until they are removed from it.
+		if archived, aerr := a.c.FindArchivedCustomerByAlias(ctx, t.ID); aerr == nil && archived != nil {
+			return "", destinations.Permanent(fmt.Errorf("ingest alias %q belongs to archived customer %s: remove the alias from it in Metronome, "+
+				"or pin the tenant to a customer with vbilling.vcluster.com/metronome-customer-id", t.ID, archived.ID))
 		}
 	}
 	if err != nil {
@@ -364,7 +490,7 @@ func (a *Adapter) ensureContract(ctx context.Context, t usage.Tenant, cusID, rat
 		}
 	}
 	if keep == nil {
-		if keep, err = a.createContract(ctx, t, cusID, rateCard, today, keys); err != nil {
+		if keep, err = a.createContract(ctx, t, cusID, rateCard, contractStart(ctx, today, ours), keys); err != nil {
 			return err
 		}
 	}
@@ -372,6 +498,29 @@ func (a *Adapter) ensureContract(ctx context.Context, t usage.Tenant, cusID, rat
 		return err
 	}
 	return a.state.Set("contract-current/"+t.ID, rateCard)
+}
+
+// contractStart is when a new contract starts: at UTC midnight of the day the
+// usage it is created for starts (destinations.UsageStart: a backlog after an
+// outage, a backfill, the last window of a day delivered after midnight), so
+// Metronome rates that usage under it. It starts today when there is no such
+// usage, or when one of the tenant's vBilling contracts is still in force at
+// that day: then the new one takes over today and no day is rated twice.
+func contractStart(ctx context.Context, today time.Time, ours []Contract) time.Time {
+	us, ok := destinations.UsageStart(ctx)
+	if !ok {
+		return today
+	}
+	day := us.UTC().Truncate(24 * time.Hour)
+	if !day.Before(today) {
+		return today
+	}
+	for _, c := range ours {
+		if openAt(c, day) {
+			return today
+		}
+	}
+	return day
 }
 
 func (a *Adapter) createContract(ctx context.Context, t usage.Tenant, cusID, rateCard string, start time.Time, used map[string]bool) (*Contract, error) {
@@ -469,17 +618,75 @@ func (a *Adapter) RemoveTenant(ctx context.Context, t usage.Tenant) error {
 	return nil
 }
 
-// TenantForCustomer resolves a webhook's customer_id to a tenant.
-func (a *Adapter) TenantForCustomer(ctx context.Context, customerID string) (string, bool) {
-	if t, ok := a.state.Get("tenant/" + customerID); ok {
-		return t, true
+// CustomerAliases returns every ingest alias of a Metronome customer, cached
+// for a minute. A customer Metronome does not know has none (nil, no error);
+// any other failure is returned, so the webhook that asked can be retried.
+func (a *Adapter) CustomerAliases(ctx context.Context, customerID string) ([]string, error) {
+	if customerID == "" {
+		return nil, nil
 	}
+	now := a.now()
+	a.mu.Lock()
+	if e, ok := a.aliases[customerID]; ok && now.Sub(e.at) < aliasTTL {
+		a.mu.Unlock()
+		return slices.Clone(e.aliases), nil
+	}
+	a.mu.Unlock()
+	var aliases []string
 	cus, err := a.c.GetCustomer(ctx, customerID)
-	if err != nil || len(cus.IngestAliases) == 0 {
-		return "", false
+	switch {
+	case IsNotFound(err):
+	case err != nil:
+		return nil, fmt.Errorf("customer %s: %w", customerID, err)
+	default:
+		aliases = slices.Clone(cus.IngestAliases)
 	}
-	a.remember(cus.IngestAliases[0], customerID)
-	return cus.IngestAliases[0], true
+	a.mu.Lock()
+	if len(a.aliases) >= 10000 {
+		for id, e := range a.aliases {
+			if now.Sub(e.at) >= aliasTTL {
+				delete(a.aliases, id)
+			}
+		}
+	}
+	a.aliases[customerID] = aliasEntry{aliases: aliases, at: now}
+	a.mu.Unlock()
+	return slices.Clone(aliases), nil
+}
+
+// TenantForCustomer resolves a webhook's customer to a tenant: the alias of
+// the customer that vBilling knows as a tenant. A customer with an identity
+// alias and a compute alias (the tenant ID) resolves to the compute alias,
+// whatever their order; a customer with none of vBilling's tenants resolves
+// to nothing. With METRONOME_PROVISION, a customer vBilling created, found or
+// was pinned to resolves to that tenant directly.
+func (a *Adapter) TenantForCustomer(ctx context.Context, customerID string) (string, bool) {
+	stored, hasStored := a.state.Get("tenant/" + customerID)
+	if hasStored && a.provision() {
+		return stored, true
+	}
+	aliases, err := a.CustomerAliases(ctx, customerID)
+	if err != nil {
+		// Metronome cannot be read now: use what vBilling mapped itself.
+		log.Printf("[metronome] resolve customer %s: %v", customerID, err)
+		return stored, hasStored
+	}
+	var mapped []string
+	for _, al := range aliases {
+		if a.isTenant(al) {
+			mapped = append(mapped, al)
+		}
+	}
+	switch {
+	case len(mapped) == 0:
+		return "", false
+	case hasStored && slices.Contains(mapped, stored):
+		return stored, true
+	case len(mapped) > 1:
+		log.Printf("[metronome] customer %s holds the aliases of several tenants (%s); its webhooks resolve to %s",
+			customerID, strings.Join(mapped, ", "), mapped[0])
+	}
+	return mapped[0], true
 }
 
 // ToIngest converts a canonical event to Metronome's wire format.
@@ -511,9 +718,14 @@ func (a *Adapter) ToIngest(e *usage.Event) IngestEvent {
 			}
 		}
 	}
-	customer := e.Tenant
-	if id, ok := a.state.Get("cus/" + e.Tenant); ok {
-		customer = id // pinned or created customer UUID
+	if e.Estimate() {
+		props["accuracy"] = usage.AccuracyEstimate
+	}
+	customer := e.Tenant // the ingest alias
+	if a.provision() {
+		if id, ok := a.state.Get("cus/" + e.Tenant); ok {
+			customer = id // the customer vBilling created, found or was pinned to
+		}
 	}
 	return IngestEvent{
 		TransactionID: e.ID,
@@ -538,6 +750,7 @@ func (a *Adapter) SendEvents(ctx context.Context, events []usage.Event) error {
 			rejected[e.ID] = "older than Metronome's 34-day ingest window"
 			continue
 		}
+		a.markKnown(e.Tenant)
 		batch = append(batch, a.ToIngest(e))
 	}
 	for i := 0; i < len(batch); i += 100 {
@@ -558,7 +771,10 @@ func (a *Adapter) SendEvents(ctx context.Context, events []usage.Event) error {
 }
 
 // RecordedTotals reads Metronome's usage API. Metronome only answers for
-// whole UTC days, so both bounds must be UTC midnights.
+// whole UTC days, so both bounds must be UTC midnights. Without
+// METRONOME_PROVISION, customers are looked up by ingest alias and each
+// metric's billable metric by event type: one that sums the value of every
+// event of the type.
 func (a *Adapter) RecordedTotals(ctx context.Context, q destinations.TotalsQuery) ([]destinations.Total, error) {
 	from, to := q.From.UTC(), q.To.UTC()
 	if !from.Equal(from.Truncate(24*time.Hour)) || !to.Equal(to.Truncate(24*time.Hour)) || !to.After(from) {
@@ -566,18 +782,22 @@ func (a *Adapter) RecordedTotals(ctx context.Context, q destinations.TotalsQuery
 	}
 	req := UsageRequest{StartingOn: rfc3339(from), EndingBefore: rfc3339(to), WindowSize: "day"}
 	tenantOf := map[string]string{}
-	for _, t := range q.Tenants {
-		if id, ok := a.state.Get("cus/" + t.ID); ok {
-			req.CustomerIDs = append(req.CustomerIDs, id)
-			tenantOf[id] = t.ID
-		}
-	}
 	codeOf := map[string]string{}
-	for _, m := range q.Metrics {
-		if id, ok := a.state.Get("bm/" + m); ok {
-			req.BillableMetrics = append(req.BillableMetrics, map[string]any{"id": id})
-			codeOf[id] = m
+	if a.provision() {
+		for _, t := range q.Tenants {
+			if id, ok := a.state.Get("cus/" + t.ID); ok {
+				req.CustomerIDs = append(req.CustomerIDs, id)
+				tenantOf[id] = t.ID
+			}
 		}
+		for _, m := range q.Metrics {
+			if id, ok := a.state.Get("bm/" + m); ok {
+				req.BillableMetrics = append(req.BillableMetrics, map[string]any{"id": id})
+				codeOf[id] = m
+			}
+		}
+	} else if err := a.totalsTargets(ctx, q, &req, tenantOf, codeOf); err != nil {
+		return nil, err
 	}
 	if len(req.CustomerIDs) == 0 || len(req.BillableMetrics) == 0 {
 		return nil, nil
@@ -608,6 +828,50 @@ func (a *Adapter) RecordedTotals(ctx context.Context, q destinations.TotalsQuery
 		return out[i].Metric < out[j].Metric
 	})
 	return out, nil
+}
+
+// totalsTargets finds, read-only, the customers (by ingest alias) and the
+// billable metrics (by event type) a reconciliation compares.
+func (a *Adapter) totalsTargets(ctx context.Context, q destinations.TotalsQuery, req *UsageRequest, tenantOf, codeOf map[string]string) error {
+	shared := map[string]bool{}
+	for _, t := range q.Tenants {
+		cus, err := a.c.FindCustomerByAlias(ctx, t.ID)
+		if err != nil {
+			return fmt.Errorf("find customer %s: %w", t.ID, err)
+		}
+		if cus == nil {
+			continue // no customer holds the alias yet: nothing is attributed
+		}
+		a.remember(t.ID, cus.ID)
+		if other, dup := tenantOf[cus.ID]; dup || shared[cus.ID] {
+			if dup {
+				log.Printf("[metronome] tenants %s and %s are aliases of one customer %s, which Metronome reports one total for: neither is reconciled", other, t.ID, cus.ID)
+			}
+			shared[cus.ID] = true
+			delete(tenantOf, cus.ID)
+			continue
+		}
+		tenantOf[cus.ID] = t.ID
+		req.CustomerIDs = append(req.CustomerIDs, cus.ID)
+	}
+	bms, err := a.c.ListBillableMetrics(ctx)
+	if err != nil {
+		return fmt.Errorf("list billable metrics: %w", err)
+	}
+	for _, m := range q.Metrics {
+		def, ok := usage.Lookup(m)
+		if !ok {
+			continue
+		}
+		bm := completeMetric(bms, def)
+		if bm == nil {
+			log.Printf("[metronome] reconcile: no billable metric sums the value of every %s event (without filters on values), so Metronome's total for it reads 0", m)
+			continue
+		}
+		req.BillableMetrics = append(req.BillableMetrics, map[string]any{"id": bm.ID})
+		codeOf[bm.ID] = m
+	}
+	return nil
 }
 
 var (

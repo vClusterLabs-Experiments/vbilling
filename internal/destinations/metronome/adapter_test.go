@@ -292,8 +292,10 @@ func (f *fakeMetronome) handle(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// newAdapter builds an adapter in provisioning mode (METRONOME_PROVISION=true),
+// which the tests in this file exercise; mutate can turn it off.
 func newAdapter(t *testing.T, f *fakeMetronome, link *stripe.Adapter, mutate ...func(*config.Config)) *Adapter {
-	cfg := &config.Config{MetronomeStripeCollect: "charge_automatically"}
+	cfg := &config.Config{MetronomeStripeCollect: "charge_automatically", MetronomeProvision: true}
 	for _, m := range mutate {
 		m(cfg)
 	}

@@ -30,6 +30,7 @@ type nodeInfo struct {
 	labels       map[string]string
 	deletedAt    time.Time // set for nodes seen deleted (Auto Nodes scale-down); zero = present
 	draGPUs      float64   // whole GPUs the node offers through DRA ResourceSlices
+	externalIP   bool      // the node has an ExternalIP address
 
 	// MIG and sharing. migProfile is set when every advertised GPU device is
 	// a MIG slice (NVIDIA "single" strategy, GKE GPU partitions). Under the
@@ -105,6 +106,11 @@ func (c *Collector) parseNodeLease(n *corev1.Node, renewed time.Time) *nodeInfo 
 	}
 	if q, ok := n.Status.Capacity[corev1.ResourceMemory]; ok {
 		ni.memCapacity = float64(q.Value())
+	}
+	for _, addr := range n.Status.Addresses {
+		if addr.Type == corev1.NodeExternalIP && addr.Address != "" {
+			ni.externalIP = true
+		}
 	}
 	if r, err := strconv.Atoi(n.Labels["nvidia.com/gpu.replicas"]); err == nil && r > 1 &&
 		n.Labels["nvidia.com/gpu.sharing-strategy"] != "none" {
@@ -193,6 +199,18 @@ func (n *nodeInfo) physicalGPUs() float64 {
 		shared = float64(n.sharedCapacity) / float64(max(n.gpuReplicas, 1))
 	}
 	return usage.Round(float64(n.gpuCapacity)*n.deviceShare() + shared + n.migMixed + n.draGPUs)
+}
+
+// instanceAttributes describe a whole node on its node-hour events, the way
+// instance-level SKUs are defined: vCPUs and memory from its capacity,
+// physical GPUs, and whether it has a public address.
+func (n *nodeInfo) instanceAttributes() map[string]string {
+	return map[string]string{
+		usage.DimVCPUs:     strconv.FormatFloat(n.cpuCapacity, 'f', -1, 64),
+		usage.DimMemoryGiB: strings.TrimSuffix(strconv.FormatFloat(n.memCapacity/gib, 'f', 1, 64), ".0"),
+		usage.DimGPUCount:  strconv.FormatFloat(n.physicalGPUs(), 'f', -1, 64),
+		usage.DimPublicIP:  strconv.FormatBool(n.externalIP),
+	}
 }
 
 // applyDRANodes adds the GPUs nodes offer through DRA, which no extended

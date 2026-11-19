@@ -1,6 +1,16 @@
-// Package metronome ships usage to Metronome for rating and invoicing, and
-// keeps Metronome customers (optionally linked to Stripe for payment, tax
-// and invoice delivery) and contracts in sync with vBilling tenants.
+// Package metronome ships usage to Metronome for rating and invoicing.
+//
+// By default the Metronome account belongs to someone else: an AI Cloud's
+// portal creates customers (each with an identity alias and a compute alias,
+// the vBilling tenant ID) and contracts, and Finance manages billable
+// metrics, products and rate cards as configuration. vBilling then only
+// ingests usage keyed on the tenant ID as ingest alias, and reads: customers
+// and contracts for price coverage, usage for reconciliation, aliases for
+// webhooks. It never creates or changes anything.
+//
+// With METRONOME_PROVISION=true vBilling creates what it needs itself:
+// billable metrics, a customer per tenant, a contract on METRONOME_RATE_CARD
+// (or the tenant's plan) and, with a Stripe key, the customer's Stripe link.
 package metronome
 
 import (
@@ -40,10 +50,15 @@ func (e *APIError) Error() string {
 }
 
 // IsConflict reports a 409 (ingest alias or uniqueness key already used).
-func IsConflict(err error) bool {
+func IsConflict(err error) bool { return hasStatus(err, http.StatusConflict) }
+
+// IsNotFound reports a 404.
+func IsNotFound(err error) bool { return hasStatus(err, http.StatusNotFound) }
+
+func hasStatus(err error, status int) bool {
 	for err != nil {
 		if e, ok := err.(*APIError); ok {
-			return e.Status == http.StatusConflict
+			return e.Status == status
 		}
 		u, ok := err.(interface{ Unwrap() error })
 		if !ok {
@@ -155,9 +170,25 @@ func (c *Client) CreateCustomer(ctx context.Context, req CreateCustomerRequest) 
 	return &resp.Data, nil
 }
 
+// FindCustomerByAlias returns the active customer that holds an ingest
+// alias, nil if none does.
 func (c *Client) FindCustomerByAlias(ctx context.Context, alias string) (*Customer, error) {
+	return c.findByAlias(ctx, alias, false)
+}
+
+// FindArchivedCustomerByAlias returns an archived customer that still holds
+// an ingest alias: Metronome lists only active customers by default, and an
+// alias stays taken until it is removed from the archived customer.
+func (c *Client) FindArchivedCustomerByAlias(ctx context.Context, alias string) (*Customer, error) {
+	return c.findByAlias(ctx, alias, true)
+}
+
+func (c *Client) findByAlias(ctx context.Context, alias string, archived bool) (*Customer, error) {
 	q := url.Values{}
 	q.Set("ingest_alias", alias)
+	if archived {
+		q.Set("only_archived", "true")
+	}
 	var resp struct {
 		Data []Customer `json:"data"`
 	}
@@ -182,13 +213,18 @@ func (c *Client) GetCustomer(ctx context.Context, id string) (*Customer, error) 
 
 // --- billable metrics ---
 
+// PropertyFilter is one rule of a billable metric on an event property.
 type PropertyFilter struct {
-	Name   string `json:"name"`
-	Exists *bool  `json:"exists,omitempty"`
+	Name        string   `json:"name"`
+	Exists      *bool    `json:"exists,omitempty"`
+	InValues    []string `json:"in_values,omitempty"`
+	NotInValues []string `json:"not_in_values,omitempty"`
 }
 
+// EventTypeFilter selects the event types a billable metric counts.
 type EventTypeFilter struct {
-	InValues []string `json:"in_values"`
+	InValues    []string `json:"in_values"`
+	NotInValues []string `json:"not_in_values,omitempty"`
 }
 
 type BillableMetric struct {
@@ -200,6 +236,9 @@ type BillableMetric struct {
 	PropertyFilters []PropertyFilter `json:"property_filters,omitempty"`
 	GroupKeys       [][]string       `json:"group_keys,omitempty"`
 	ArchivedAt      string           `json:"archived_at,omitempty"`
+	// SQL is set on SQL billable metrics, which cannot be matched to an
+	// event type.
+	SQL string `json:"sql,omitempty"`
 }
 
 func (c *Client) ListBillableMetrics(ctx context.Context) ([]BillableMetric, error) {
@@ -267,6 +306,7 @@ func (c *Client) CreateContract(ctx context.Context, req CreateContractRequest) 
 // Contract is the part of a contract vBilling reads back.
 type Contract struct {
 	ID            string `json:"id"`
+	RateCardID    string `json:"rate_card_id"`
 	UniquenessKey string `json:"uniqueness_key"`
 	StartingAt    string `json:"starting_at"`
 	EndingBefore  string `json:"ending_before"`
@@ -276,14 +316,24 @@ type Contract struct {
 type listContractsRequest struct {
 	CustomerID      string `json:"customer_id"`
 	IncludeArchived bool   `json:"include_archived"`
+	CoveringDate    string `json:"covering_date,omitempty"`
 	Limit           int    `json:"limit"`
 	Cursor          string `json:"cursor,omitempty"`
 }
 
 // ListContracts pages through a customer's contracts, archived ones included.
 func (c *Client) ListContracts(ctx context.Context, customerID string) ([]Contract, error) {
+	return c.listContracts(ctx, listContractsRequest{CustomerID: customerID, IncludeArchived: true, Limit: 20})
+}
+
+// ContractsCovering pages through a customer's contracts that are in force
+// at a time (archived ones excluded).
+func (c *Client) ContractsCovering(ctx context.Context, customerID string, at time.Time) ([]Contract, error) {
+	return c.listContracts(ctx, listContractsRequest{CustomerID: customerID, CoveringDate: rfc3339(at), Limit: 20})
+}
+
+func (c *Client) listContracts(ctx context.Context, req listContractsRequest) ([]Contract, error) {
 	var out []Contract
-	req := listContractsRequest{CustomerID: customerID, IncludeArchived: true, Limit: 20}
 	for page := 0; page < 100; page++ {
 		var resp struct {
 			Data   []Contract `json:"data"`
