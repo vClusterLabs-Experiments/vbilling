@@ -156,7 +156,14 @@ CUS=$(jq -r '.["cus/acme"]' "$WORK/data/state-stripe.json")
 send() { python3 - "$1" "$2" "$3" "$CUS" <<'EOF'
 import hmac, hashlib, json, sys, time, urllib.request
 typ, status, evid, cus = sys.argv[1:5]
-body = json.dumps({"id": evid, "type": typ, "data": {"object": {"customer": cus, "status": status}}}).encode()
+# As Stripe sends them: a subscription event names its subscription, an
+# invoice its own ID and its subscription. A payment lifts a hold only when
+# it settles what caused it.
+if typ.startswith("customer.subscription."):
+    obj = {"id": "sub_e2e", "object": "subscription", "customer": cus, "status": status}
+else:
+    obj = {"id": "in_e2e", "object": "invoice", "customer": cus, "subscription": "sub_e2e", "status": status or "paid"}
+body = json.dumps({"id": evid, "type": typ, "created": int(time.time()), "data": {"object": obj}}).encode()
 t = str(int(time.time())); sig = hmac.new(b"whsec_e2e", (t + ".").encode() + body, hashlib.sha256).hexdigest()
 urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:18080/webhooks/stripe", data=body, headers={"Stripe-Signature": f"t={t},v1={sig}"}))
 EOF
