@@ -679,6 +679,7 @@ callback_settings:
         <li><code>{{namespace}}</code> still works, but it is the cluster's namespace on the control plane cluster: it matches only series scraped there, from clusters on shared or dedicated nodes. Prefer <code>{{selector}}</code>.</li>
         <li>The built-in egress counter and the DCGM utilization queries use the same scoping.</li>
         <li>A <code>tenant-service://</code> URL needs <code>TENANT_API=true</code>, and the cluster's API credentials need <code>get</code> on <code>services/proxy</code> for that Service. A URL is sent the same <code>PROMETHEUS_HEADERS</code> and bearer token as <code>PROMETHEUS_URL</code>.</li>
+        <li>vBilling reads at most 16 MiB of one Prometheus answer, on every URL. A larger answer fails the read, and the metric's source turns <code>failing</code>: narrow the query with <code>{{selector}}</code> or matchers. A Prometheus inside a cluster is the tenant's, so its answers are never trusted to end.</li>
       </ul>
       <div class="callout callout-warn">
         <div class="callout-icon">!</div>

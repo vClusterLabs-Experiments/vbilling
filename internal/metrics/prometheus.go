@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"sigs.k8s.io/yaml"
 
 	"github.com/vclusterlabs-experiments/vbilling/internal/safehttp"
@@ -62,8 +63,29 @@ func (h *httpTransport) get(ctx context.Context, path string, params url.Values)
 		return nil, 0, fmt.Errorf("prometheus query: %w", err)
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+	body, err := readAnswer(resp.Body, h)
 	return body, resp.StatusCode, err
+}
+
+// maxPromAnswer bounds what vBilling reads of one Prometheus answer, on
+// either transport. The Prometheus can be a tenant's (a Service inside its
+// cluster, or a URL its settings name), so no answer is trusted to end:
+// an endless or huge one would exhaust vBilling's memory, and every
+// collection would ask again. 16 MiB holds the raw samples of a window for
+// tens of thousands of series; a larger answer fails the read, which the
+// source health reports.
+const maxPromAnswer = 16 << 20
+
+// readAnswer reads a Prometheus answer, failing once it passes maxPromAnswer.
+func readAnswer(r io.Reader, from fmt.Stringer) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(r, maxPromAnswer+1))
+	if err != nil {
+		return nil, fmt.Errorf("read prometheus answer from %s: %w", from, err)
+	}
+	if len(body) > maxPromAnswer {
+		return nil, fmt.Errorf("prometheus answer from %s is larger than %d MiB: not read", from, maxPromAnswer>>20)
+	}
+	return body, nil
 }
 
 // kubeProxyTransport reaches a Service inside a tenant's cluster through
@@ -80,22 +102,34 @@ func (k *kubeProxyTransport) String() string {
 	return "tenant-service://" + k.namespace + "/" + k.service + k.prefix
 }
 
+// get sends the request with the cluster API client's own HTTP client (its
+// credentials, TLS and refusal of redirects) rather than through client-go's
+// Result, which reads a whole answer into memory, with no limit, whatever
+// its status: the answer is the tenant's Service's.
 func (k *kubeProxyTransport) get(ctx context.Context, path string, params url.Values) ([]byte, int, error) {
-	req := k.kube.CoreV1().RESTClient().Get().
+	rc, ok := k.kube.CoreV1().RESTClient().(*rest.RESTClient)
+	if !ok || rc == nil || rc.Client == nil {
+		return nil, 0, fmt.Errorf("prometheus via %s: no HTTP client for the cluster's API", k)
+	}
+	req := rc.Get().
 		AbsPath("/api/v1/namespaces", k.namespace, "services", k.service, "proxy", strings.TrimPrefix(k.prefix+path, "/"))
 	for key, vals := range params {
 		for _, v := range vals {
 			req = req.Param(key, v)
 		}
 	}
-	res := req.Do(ctx)
-	var status int
-	res.StatusCode(&status)
-	body, err := res.Raw()
-	if err != nil && len(body) == 0 {
-		return nil, status, fmt.Errorf("prometheus via %s: %w", k, err)
+	hreq, err := http.NewRequestWithContext(ctx, http.MethodGet, req.URL().String(), nil)
+	if err != nil {
+		return nil, 0, fmt.Errorf("prometheus via %s: %w", k, err)
 	}
-	return body, status, nil
+	hreq.Header.Set("Accept", "application/json")
+	resp, err := rc.Client.Do(hreq)
+	if err != nil {
+		return nil, 0, fmt.Errorf("prometheus via %s: %w", k, err)
+	}
+	defer resp.Body.Close()
+	body, err := readAnswer(resp.Body, k)
+	return body, resp.StatusCode, err
 }
 
 // parseTenantService parses tenant-service://NAMESPACE/NAME:PORT[/PREFIX].
