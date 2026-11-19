@@ -879,16 +879,14 @@ func (e *Enforcer) drain(ctx context.Context, kube kubernetes.Interface, externa
 }
 
 // stopSyncedPods stops the pods a cluster synced to the control plane
-// cluster, as `vcluster pause` deletes them. They come back on resume: the
-// cluster still has them and syncs them again. With wait, it waits for
+// cluster, as `vcluster pause` deletes them: in its namespace, and in the
+// namespaces it syncs to (sync.toHost.namespaces) when its name says whose
+// they are (discovery.TenantCluster.SyncedHere). They come back on resume:
+// the cluster still has them and syncs them again. With wait, it waits for
 // them to be gone (stopPods); it returns those still there.
 func (e *Enforcer) stopSyncedPods(ctx context.Context, cl discovery.TenantCluster, wait bool) ([]corev1.Pod, error) {
 	list := func(ctx context.Context) ([]corev1.Pod, error) {
-		pods, err := e.kube.CoreV1().Pods(cl.Namespace).List(ctx, metav1.ListOptions{LabelSelector: labelManagedBy + "=" + cl.Name})
-		if err != nil {
-			return nil, fmt.Errorf("list synced pods: %w", err)
-		}
-		return pods.Items, nil
+		return syncedPods(ctx, e.kube, cl)
 	}
 	return e.stopPods(ctx, e.kube, list, wait)
 }

@@ -87,6 +87,9 @@ type Collector struct {
 	// nodeHistory is what vBilling first saw of each node of a cluster's
 	// own, and the most GPUs it had (privateNodeHistory).
 	nodeHistory *privateNodeHistory
+	// syncedReported: clusters (by ID, "" for the list itself) whose
+	// synced-namespaces source is reported (guarded by invMu).
+	syncedReported map[string]bool
 }
 
 // UseGraveyard makes the collector bill pods and nodes deleted between
@@ -153,7 +156,7 @@ func NewCollector(kube kubernetes.Interface, mc metricsclient.Interface, opts Op
 		opts.PauseKeep, _ = pause.ParseKeep(pause.DefaultKeep)
 	}
 	c := &Collector{kube: kube, metrics: mc, opts: opts, excludedTenantNS: map[string]bool{}, lastInv: map[string]*tenantInventory{},
-		ownNodes: map[string]bool{}, nodeHistory: newPrivateNodeHistory()}
+		ownNodes: map[string]bool{}, nodeHistory: newPrivateNodeHistory(), syncedReported: map[string]bool{}}
 	for _, ns := range opts.TenantExcludeNamespaces {
 		c.excludedTenantNS[ns] = true
 	}
@@ -356,11 +359,17 @@ func (c *Collector) collect(ctx context.Context, targets []Target, windows []Win
 		}
 		r.Retain(clusters)
 	}
-	for _, t := range targets {
+	var synced *syncedObjects // objects synced to other namespaces (synced.go)
+	if !onlyTenantAPI {
+		if synced, err = c.listSynced(ctx); err != nil {
+			return nil, st, err
+		}
+	}
+	for _, t := range withNamesakes(targets) {
 		// External tenant clusters have nothing on this control plane cluster.
 		var syncedOn map[string]bool
 		if !onlyTenantAPI && !t.Cluster.External {
-			on, err := c.collectTarget(ctx, t, nodes, dra, windows, accs, &st)
+			on, err := c.collectTarget(ctx, t, nodes, dra, synced.of(t.Cluster), windows, accs, &st)
 			if err != nil {
 				return nil, st, fmt.Errorf("meter %s: %w", t.Cluster.ExternalID(), err)
 			}
@@ -396,9 +405,11 @@ func (c *Collector) collect(ctx context.Context, targets []Target, windows []Win
 	return out, st, nil
 }
 
-// collectTarget meters what a cluster runs on the control plane cluster. It
+// collectTarget meters what a cluster runs on the control plane cluster: in
+// its own namespace, and what it synced to other namespaces (away). It
 // returns the control plane cluster nodes its synced pods run on (hostViews).
-func (c *Collector) collectTarget(ctx context.Context, t Target, nodes map[string]*nodeInfo, dra *draIndex, windows []Window, accs map[time.Time]*accumulator, st *Stats) (map[string]bool, error) {
+func (c *Collector) collectTarget(ctx context.Context, t Target, nodes map[string]*nodeInfo, dra *draIndex, away elsewhere,
+	windows []Window, accs map[time.Time]*accumulator, st *Stats) (map[string]bool, error) {
 	cl := t.Cluster
 	ns := cl.Namespace
 	extID := cl.ExternalID()
@@ -412,8 +423,17 @@ func (c *Collector) collectTarget(ctx context.Context, t Target, nodes map[strin
 	c.graveyard.SeenPods(podList.Items, c.opts.Now())
 	pods := withDeleted(podList.Items, c.graveyard.Pods(ns))
 	owned := ownedFilter(entryLabels(pods), cl.Name, c.opts.MeterControlPlane)
+	include := func(p *corev1.Pod) bool { return owned(p.Labels) }
 	syncedOn := map[string]bool{}
-	syncedNodes(syncedOn, pods, func(p *corev1.Pod) bool { return !isControlPlane(p.Labels, cl.Name) && owned(p.Labels) })
+	syncedNodes(syncedOn, pods, func(p *corev1.Pod) bool { return !controlPlaneObject(p.Labels, cl.Name) && owned(p.Labels) })
+	// Pods it synced to other namespaces: all of them are its workloads.
+	c.graveyard.SeenPods(away.pods, c.opts.Now())
+	if awayPods := withDeleted(away.pods, c.deletedElsewhere(cl)); len(awayPods) > 0 {
+		pods = append(pods, awayPods...)
+		include = func(p *corev1.Pod) bool { return p.Namespace != ns || owned(p.Labels) }
+		syncedNodes(syncedOn, awayPods, func(*corev1.Pod) bool { return true })
+	}
+	c.reportElsewhere(cl, away)
 
 	// Dedicated nodes: billed whole, so pods on them are not billed again.
 	dedicated := map[string]*nodeInfo{}
@@ -428,10 +448,15 @@ func (c *Collector) collectTarget(ctx context.Context, t Target, nodes map[strin
 	latest := windows[len(windows)-1]
 	if latest.Latest && c.opts.Basis != "requests" && c.metrics != nil {
 		usageByPod = podUsage(ctx, c.metrics, ns)
+		for _, other := range namespacesOf(away.pods, ns) {
+			for k, v := range podUsage(ctx, c.metrics, other) {
+				usageByPod[k] = v
+			}
+		}
 	}
 
 	virtualNS := func(p *corev1.Pod) string { return p.Labels[LabelVirtualNamespace] }
-	c.meterPods(pods, func(p *corev1.Pod) bool { return owned(p.Labels) }, virtualNS,
+	c.meterPods(pods, include, virtualNS,
 		nodes, dedicated, dra, windows, accs, st, base, usageByPod, "shared", c.workloadPauses(t))
 
 	// Dedicated nodes: full capacity, per node.
@@ -448,6 +473,7 @@ func (c *Collector) collectTarget(ctx context.Context, t Target, nodes map[strin
 		return nil, fmt.Errorf("list pvcs: %w", err)
 	}
 	meterVolumes(pvcs.Items, ownedFilter(pvcLabels(pvcs.Items), cl.Name, c.opts.MeterControlPlane), windows, accs, base, c.clip(t, pause.KeepStorage))
+	meterVolumes(away.pvcs, func(map[string]string) bool { return true }, windows, accs, base, c.clip(t, pause.KeepStorage))
 
 	// Load balancers with an assigned address.
 	svcs, err := c.kube.CoreV1().Services(ns).List(ctx, metav1.ListOptions{})
@@ -455,8 +481,9 @@ func (c *Collector) collectTarget(ctx context.Context, t Target, nodes map[strin
 		return nil, fmt.Errorf("list services: %w", err)
 	}
 	meterLoadBalancers(svcs.Items, func(svc *corev1.Service) bool {
-		return !isControlPlane(svc.Labels, cl.Name) || c.opts.MeterControlPlane
+		return !controlPlaneObject(svc.Labels, cl.Name) || c.opts.MeterControlPlane
 	}, windows, accs, base, c.clip(t, pause.KeepLoadBalancers))
+	meterLoadBalancers(away.services, func(*corev1.Service) bool { return true }, windows, accs, base, c.clip(t, pause.KeepLoadBalancers))
 
 	// Control plane hours, only while ready (no charge while provisioning,
 	// asleep or paused, including paused time in backfilled windows). A
@@ -534,7 +561,7 @@ func ownedFilter(all []map[string]string, clusterName string, includeControlPlan
 		}
 	}
 	return func(l map[string]string) bool {
-		if isControlPlane(l, clusterName) {
+		if controlPlaneObject(l, clusterName) {
 			return includeControlPlane
 		}
 		if labeled {

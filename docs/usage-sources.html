@@ -329,7 +329,7 @@
             <tr>
               <td><strong>Kubernetes objects</strong><br>Pods, nodes, volumes and load balancers, read from the control plane cluster and from each cluster's own API</td>
               <td><strong>Exact.</strong> Quantities come from object lifetimes, to the second. Windows missed while vBilling was down are backfilled from those lifetimes, up to <code>MAX_BACKFILL</code>.</td>
-              <td>CPU and memory usage from metrics-server (<code>CPU_MEMORY_BASIS=usage</code>) is a sample of the live window and is never backfilled.</td>
+              <td>CPU and memory usage from metrics-server (<code>CPU_MEMORY_BASIS=usage</code>) is a sample of the live window and is never backfilled. A cluster that syncs to namespaces of their own (<code>sync.toHost.namespaces</code>) is billed for what it synced there by its name in <code>vcluster.loft.sh/managed-by</code>, so give it a name no other vCluster on the control plane cluster has: objects of a name used twice are billed to neither, and <code>synced-namespaces/&lt;cluster&gt;</code> fails.</td>
             </tr>
             <tr>
               <td><strong>Per-request records</strong><br><code>POST /api/v1/records</code> from AI gateways, inference servers or any emitter</td>
@@ -733,6 +733,8 @@ crossChecks:
           <tbody>
             <tr><td>A Prometheus metric, per cluster</td><td><code>prometheus/&lt;metric&gt;/&lt;cluster&gt;</code></td></tr>
             <tr><td>A cluster's own API</td><td><code>tenant-api/&lt;cluster&gt;</code></td></tr>
+            <tr><td>A cluster's own nodes that changed since vBilling first saw them (<a href="private-nodes.html#private-first-seen">billed as first seen</a>)</td><td><code>private-nodes/&lt;cluster&gt;</code></td></tr>
+            <tr><td>Pods, volumes and services a cluster synced to other namespaces of the control plane cluster (<code>sync.toHost.namespaces</code>)</td><td><code>synced-namespaces/&lt;cluster&gt;</code>, and <code>synced-namespaces</code> when they cannot be listed</td></tr>
             <tr><td>A records client</td><td><code>records/&lt;client&gt;</code>, and <code>records/&lt;client&gt;/unknown-tenants</code></td></tr>
             <tr><td>The LiteLLM spend log pull</td><td><code>records/&lt;client&gt;/pull</code></td></tr>
             <tr><td>The records aggregator</td><td><code>records/aggregator</code></td></tr>
@@ -748,12 +750,12 @@ crossChecks:
             <tr><td><code>ok</code></td><td>The last attempt returned data.</td></tr>
             <tr><td><code>empty</code></td><td>The source answered with nothing. For a billed metric this is usually a selector that matches no series; <code>message</code> says how the cluster was scoped and <code>hint</code> what to change.</td></tr>
             <tr><td><code>failing</code></td><td>The last attempt failed; <code>last_error_message</code> has the error.</td></tr>
-            <tr><td><code>diverged</code></td><td>A cross-check's two sources disagree beyond the tolerance.</td></tr>
+            <tr><td><code>diverged</code></td><td>A cross-check's two sources disagree beyond the tolerance, or a cluster's own node no longer looks as it did when vBilling first saw it (it bills as first seen).</td></tr>
           </tbody>
         </table>
       </div>
       <ul>
-        <li><code>GET /api/v1/sources</code> lists every source, problems first, with <code>status</code>, <code>message</code>, <code>hint</code>, <code>since</code>, <code>last_success</code>, <code>last_error</code>, <code>last_error_message</code>, <code>series</code> and how many attempts in a row failed or were empty. <code>?kind=</code> narrows it to <code>prometheus</code>, <code>tenant-api</code>, <code>records</code> or <code>crosscheck</code>.</li>
+        <li><code>GET /api/v1/sources</code> lists every source, problems first, with <code>status</code>, <code>message</code>, <code>hint</code>, <code>since</code>, <code>last_success</code>, <code>last_error</code>, <code>last_error_message</code>, <code>series</code> and how many attempts in a row failed or were empty. <code>?kind=</code> narrows it to <code>prometheus</code>, <code>tenant-api</code>, <code>private-nodes</code>, <code>synced-namespaces</code>, <code>records</code> or <code>crosscheck</code>.</li>
         <li><code>GET /api/v1/status</code> adds <code>healthy</code> (no source needs attention), <code>sources</code> (counts by status) and <code>warnings</code> (one line per problem, with its hint).</li>
         <li><code>/metrics</code> has <code>vbilling_sources{kind,status}</code>. Alert on <code>vbilling_sources{status!="ok"} &gt; 0</code>.</li>
         <li>The log, prefixed <code>[health]</code>, records every change of state, and repeats a problem after 1, 10, 100 and more attempts in a row.</li>

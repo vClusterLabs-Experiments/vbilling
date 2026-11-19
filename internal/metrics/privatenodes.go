@@ -148,7 +148,7 @@ func (c *Collector) syncedPodNodes(ctx context.Context, cl discovery.TenantClust
 	}
 	out := map[string]bool{}
 	for _, e := range withDeleted(pods.Items, c.graveyard.Pods("")) {
-		if p := e.pod; p.Spec.NodeName != "" && p.Labels[LabelManagedBy] == cl.Name && p.Namespace == cl.Namespace {
+		if p := e.pod; p.Spec.NodeName != "" && p.Labels[LabelManagedBy] == cl.Name && cl.SyncedHere(p.Namespace) {
 			out[p.Spec.NodeName] = true
 		}
 	}
@@ -164,7 +164,7 @@ func (c *Collector) syncedPodOn(ctx context.Context, cl discovery.TenantCluster,
 		return false, fmt.Errorf("list pods synced to node %s: %w", node, err)
 	}
 	for _, e := range withDeleted(pods.Items, c.graveyard.Pods("")) {
-		if p := e.pod; p.Spec.NodeName == node && p.Labels[LabelManagedBy] == cl.Name && p.Namespace == cl.Namespace {
+		if p := e.pod; p.Spec.NodeName == node && p.Labels[LabelManagedBy] == cl.Name && cl.SyncedHere(p.Namespace) {
 			return true, nil
 		}
 	}
