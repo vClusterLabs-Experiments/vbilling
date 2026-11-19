@@ -10,7 +10,10 @@
 // rest from the second vBilling verified the cluster's workloads were
 // gone, in backfilled windows too. Billing never stops on anything less:
 // a pause vBilling could not verify records no span, and a pause it only
-// observed (ByExternal) stops only the control plane's hours.
+// observed (ByExternal) stops only the control plane's hours. A span is
+// verified only if it carries the mark BeginVerified records: v0.3.0
+// opened its spans at its mark, before its drain and whatever the drain
+// left running, so spans it wrote read back unverified.
 package pause
 
 import (
@@ -34,14 +37,22 @@ type Span struct {
 	// By is who paused the cluster: ByVBilling, or ByExternal for a pause
 	// vBilling observed but did not make (vcluster pause, an operator).
 	By string `json:"by,omitempty"`
+	// Drained marks a span vBilling opened once it had verified that the
+	// cluster's workloads were gone (BeginVerified).
+	Drained bool `json:"drained,omitempty"`
+
+	// unproven is set on a span read back from the store that is vBilling's
+	// but carries no Drained mark: v0.3.0 wrote it at its mark, before its
+	// drain, or it predates By.
+	unproven bool
 }
 
 // Who paused a cluster.
 const (
-	// ByVBilling spans are pauses vBilling made and verified: it confirmed
-	// the cluster's workloads were gone before it recorded the span, so
-	// capacity stops billing for it (PAUSE_KEEP_BILLING decides what keeps
-	// billing).
+	// ByVBilling spans are pauses vBilling made. Once verified (Drained:
+	// it confirmed the cluster's workloads were gone before it recorded the
+	// span), capacity stops billing for them (PAUSE_KEEP_BILLING decides
+	// what keeps billing).
 	ByVBilling = "vbilling"
 	// ByExternal spans are pauses vBilling only observed: the control plane
 	// is down, but nothing confirms the cluster's workloads stopped, so only
@@ -50,9 +61,27 @@ const (
 )
 
 // Verified reports whether a span stops billing more than the control
-// plane: only vBilling's own spans do (spans recorded before By existed
-// were all vBilling's).
-func (s Span) Verified() bool { return s.By != ByExternal }
+// plane. A span read from the store is verified only if vBilling marked it
+// Drained when it opened it; a vBilling span without the mark (v0.3.0
+// opened it at its mark, whatever its drain left running) is not.
+func (s Span) Verified() bool { return s.By != ByExternal && !s.unproven }
+
+// Unproven reports whether a span is vBilling's but was recorded without
+// verifying anything, by an older version.
+func (s Span) Unproven() bool { return s.unproven }
+
+// UnmarshalJSON reads a span, marking vBilling spans without the Drained
+// mark as unproven.
+func (s *Span) UnmarshalJSON(b []byte) error {
+	type plain Span // no methods: no recursion
+	var p plain
+	if err := json.Unmarshal(b, &p); err != nil {
+		return err
+	}
+	*s = Span(p)
+	s.unproven = s.By != ByExternal && !s.Drained
+	return nil
+}
 
 // Open reports whether the span has not ended.
 func (s Span) Open() bool { return s.To.IsZero() }
@@ -109,20 +138,32 @@ func (s *Store) save(id string, spans []Span) error {
 }
 
 // Begin opens a pause for a cluster at the given time. It does nothing if
-// one is already open, and reports whether it opened one.
+// one is already open, and reports whether it opened one. The span carries
+// no Drained mark, so it is never verified: vBilling's verified pauses use
+// BeginVerified.
 func (s *Store) Begin(id string, at time.Time, by string) (bool, error) {
+	return s.begin(id, Span{From: at, By: by})
+}
+
+// BeginVerified opens a pause vBilling verified (it confirmed the
+// cluster's workloads were gone), marked Drained. It does nothing if one is
+// already open, and reports whether it opened one.
+func (s *Store) BeginVerified(id string, at time.Time) (bool, error) {
+	return s.begin(id, Span{From: at, By: ByVBilling, Drained: true})
+}
+
+func (s *Store) begin(id string, sp Span) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	spans := s.load(id)
 	if n := len(spans); n > 0 && spans[n-1].Open() {
 		return false, nil
 	}
-	at = at.UTC()
-	if n := len(spans); n > 0 && at.Before(spans[n-1].To) {
-		at = spans[n-1].To // spans never overlap
+	sp.From = sp.From.UTC()
+	if n := len(spans); n > 0 && sp.From.Before(spans[n-1].To) {
+		sp.From = spans[n-1].To // spans never overlap
 	}
-	spans = append(spans, Span{From: at, By: by})
-	return true, s.save(id, spans)
+	return true, s.save(id, append(spans, sp))
 }
 
 // End closes the open pause of a cluster at the given time, and reports

@@ -172,21 +172,39 @@ func (e *Enforcer) pauseCluster(ctx context.Context, cl discovery.TenantCluster,
 // keepPaused keeps a cluster vBilling stopped down, and finishes verifying
 // its pause if an earlier pass could not (synced pods still stopping, a
 // restart in between).
+//
+// A span an older version opened (v0.3.0, at its mark, before its drain and
+// whatever the drain left running) verified nothing: it ends now, and the
+// pause is verified afresh, or keeps billing.
 func (e *Enforcer) keepPaused(ctx context.Context, cl discovery.TenantCluster, w workloadState) (pauseOutcome, error) {
 	id := cl.ExternalID()
 	left, err := e.stopSyncedPods(ctx, cl, false)
 	if err != nil {
 		return pauseOutcome{}, err
 	}
-	if sp, open := e.currentSpan(id); open && sp.Verified() {
-		return pauseOutcome{verified: true}, nil
+	if sp, open := e.currentSpan(id); open {
+		if sp.Verified() {
+			return pauseOutcome{verified: true}, nil
+		}
+		if sp.Unproven() {
+			log.Printf("[enforcement] %s: its pause span was opened by an older version without verifying the drain: it stops billing nothing from now", id)
+			e.endSpanAt(id, e.opts.Now().UTC())
+			e.noteOlder(id)
+		}
 	}
 	own, ok := e.ownChecked(id)
 	if !ok {
 		own = e.ownSinceRestart(ctx, cl)
 	}
-	return e.verdict(id, own, left, w.down()), nil
+	out := e.verdict(id, own, left, w.down())
+	if !out.verified && e.openedByOlder(id) {
+		out.why = olderPause + ": " + out.why
+	}
+	return out, nil
 }
+
+// olderPause explains the status of a pause an older version opened.
+const olderPause = "an older version opened this pause"
 
 // verdict opens the pause span when every check passed.
 func (e *Enforcer) verdict(id string, own ownCheck, synced []corev1.Pod, down bool) pauseOutcome {
@@ -366,7 +384,7 @@ func (e *Enforcer) openSpan(id string) {
 			log.Printf("[enforcement] %s: end observed pause: %v", id, err)
 		}
 	}
-	if _, err := e.opts.Pauses.Begin(id, now, pause.ByVBilling); err != nil {
+	if _, err := e.opts.Pauses.BeginVerified(id, now); err != nil {
 		log.Printf("[enforcement] %s: record pause: %v", id, err)
 	}
 }
@@ -488,6 +506,20 @@ func (e *Enforcer) lastVerified(id string) time.Time {
 	return e.verifiedAt[id]
 }
 
+// noteOlder records that a cluster's current pause was opened by an older
+// version, so its status says so.
+func (e *Enforcer) noteOlder(id string) {
+	e.wmu.Lock()
+	defer e.wmu.Unlock()
+	e.older[id] = true
+}
+
+func (e *Enforcer) openedByOlder(id string) bool {
+	e.wmu.Lock()
+	defer e.wmu.Unlock()
+	return e.older[id]
+}
+
 // forget drops a cluster's pause bookkeeping once it runs again.
 func (e *Enforcer) forget(id string) {
 	e.wmu.Lock()
@@ -496,6 +528,7 @@ func (e *Enforcer) forget(id string) {
 	delete(e.checked, id)
 	delete(e.stopped, id)
 	delete(e.verifiedAt, id)
+	delete(e.older, id)
 }
 
 // resumeCluster resumes a cluster vBilling paused. Clusters paused by
@@ -505,7 +538,7 @@ func (e *Enforcer) forget(id string) {
 func (e *Enforcer) resumeCluster(ctx context.Context, cl discovery.TenantCluster, ts TenantState) (bool, error) {
 	id := cl.ExternalID()
 	if cl.External {
-		if sp, open := e.currentSpan(id); open && sp.Verified() {
+		if sp, open := e.currentSpan(id); open && sp.By != pause.ByExternal {
 			if _, err := e.opts.Pauses.End(id, e.opts.Now().UTC()); err != nil {
 				log.Printf("[enforcement] %s: record resume: %v", id, err)
 			}
@@ -736,7 +769,7 @@ func (e *Enforcer) needsWorker(ctx context.Context, cl discovery.TenantCluster, 
 	}
 	if cl.External {
 		sp, open := e.currentSpan(id)
-		return open && sp.Verified()
+		return open && sp.By != pause.ByExternal // vBilling's, verified or opened by an older version
 	}
 	wl, err := e.workload(ctx, cl)
 	return err == nil && wl.ann[discovery.AnnotationPausedBy] == pause.ByVBilling

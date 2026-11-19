@@ -265,6 +265,7 @@ type Enforcer struct {
 	checked    map[string]ownCheck  // what the last pause pass found on its own nodes
 	stopped    map[string]time.Time // last time its control plane was seen stopped
 	verifiedAt map[string]time.Time // external clusters: last pass that found nothing running
+	older      map[string]bool      // pauses an older version opened, without verifying them
 }
 
 // Applied webhook event IDs are kept this long, and at most appliedMax of
@@ -289,7 +290,8 @@ func New(kube kubernetes.Interface, opts Options) *Enforcer {
 	e := &Enforcer{kube: kube, opts: opts, states: map[string]TenantState{}, applied: map[string]time.Time{},
 		resumeTimeout: 10 * time.Minute, resumeEvery: 5 * time.Second,
 		workers: map[string]*worker{}, status: map[string]PauseStatus{},
-		failing: map[string]time.Time{}, checked: map[string]ownCheck{}, stopped: map[string]time.Time{}, verifiedAt: map[string]time.Time{}}
+		failing: map[string]time.Time{}, checked: map[string]ownCheck{}, stopped: map[string]time.Time{}, verifiedAt: map[string]time.Time{},
+		older: map[string]bool{}}
 	for tenant, raw := range opts.State.WithPrefix("state/") {
 		var ts TenantState
 		if json.Unmarshal([]byte(raw), &ts) == nil {
