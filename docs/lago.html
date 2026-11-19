@@ -408,7 +408,7 @@
       <p>The timestamp is the window start. <code>vcluster</code> repeats <code>tenant_cluster</code> so that charge filters written for v0.1 keep working.</p>
 
       <h2 id="offboarding">Offboarding</h2>
-      <p>When a tenant has been gone for <code>billing.offboardGrace</code> (default 1h), vBilling terminates its subscription and Lago issues the final invoice.</p>
+      <p>When a tenant has had no clusters and no usage for an hour, and its last usage is delivered, vBilling terminates its subscription and Lago issues the final invoice.</p>
 
       <h2 id="limits">Good to know</h2>
       <ul>

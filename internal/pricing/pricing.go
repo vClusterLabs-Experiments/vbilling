@@ -48,7 +48,7 @@ type Options struct {
 	DecideWait time.Duration
 	// Debounce coalesces the checks new series trigger (default 2s).
 	Debounce time.Duration
-	// MaxHold is PRICE_CHECK_MAX_HOLD, for messages (the dispatcher enforces it).
+	// MaxHold is how long usage is held at most, for messages (the dispatcher enforces it).
 	MaxHold time.Duration
 	// Ready reports when tenants (and so their plans) are known; the first
 	// full check waits for it, up to ReadyWait (default 2m).
@@ -617,7 +617,7 @@ func (s *Service) report(ds *destState) {
 		if r.ReleasedUnpriced > 0 {
 			expired++
 			s.health.Fail(name, "pricing", ds.name,
-				fmt.Errorf("%d held event(s) were released WITHOUT A PRICE after PRICE_CHECK_MAX_HOLD (%s), last at %s, and %s bills them at 0: %s",
+				fmt.Errorf("%d held event(s) were released WITHOUT A PRICE after being held %s (before their invoice period can be final), last at %s, and %s bills them at 0: %s",
 					r.ReleasedUnpriced, s.opts.MaxHold, r.ReleasedUnpricedAt.Format(time.RFC3339), ds.name, msg),
 				"Finance must add the price in "+ds.name+" so it re-rates the released usage: "+r.Hint)
 			continue
@@ -640,7 +640,7 @@ func (s *Service) report(ds *destState) {
 	summary := health.Name("pricing", ds.name)
 	if expired > 0 {
 		s.health.Fail(summary, "pricing", ds.name,
-			fmt.Errorf("%d unpriced series, %d with usage released without a price after PRICE_CHECK_MAX_HOLD: %s", len(gaps), expired, strings.Join(first(gaps, 5), ", ")),
+			fmt.Errorf("%d unpriced series, %d with usage released without a price after the longest hold: %s", len(gaps), expired, strings.Join(first(gaps, 5), ", ")),
 			"Finance must add the missing prices in "+ds.name+" so it re-rates the released usage; see GET /api/v1/pricing")
 		return
 	}
