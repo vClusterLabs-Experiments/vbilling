@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -511,6 +512,61 @@ func describeRate(r Rate) string {
 	default:
 		return strings.ToLower(t)
 	}
+}
+
+// summing returns the active billable metrics that sum the value property of
+// an event type: the ones that bill vBilling's usage of a metric.
+func summing(bms []BillableMetric, code string) []BillableMetric {
+	var out []BillableMetric
+	for _, m := range bms {
+		if m.ArchivedAt == "" && m.SQL == "" && strings.EqualFold(m.AggregationType, "SUM") && m.AggregationKey == "value" && countsType(m, code) {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+func countsType(m BillableMetric, code string) bool {
+	f := m.EventTypeFilter
+	return f != nil && slices.Contains(f.InValues, code) && !slices.Contains(f.NotInValues, code)
+}
+
+// completeMetric returns a billable metric that sums the value of every
+// event of a metric and nothing else: its event type filter names only the
+// metric, and its property filters require no more than the properties every
+// such event carries. Reconciliation compares its total with the ledger.
+// vBilling's own definition (BillableMetricFor) is one, and preferred.
+func completeMetric(bms []BillableMetric, def usage.MetricDef) *BillableMetric {
+	always := map[string]bool{"value": true, "unit": true, "window_start": true, "window_end": true, "schema_version": true}
+	for _, k := range GroupKeys(def) {
+		always[k] = true
+	}
+	var found []BillableMetric
+	for _, m := range summing(bms, def.Code) {
+		if len(m.EventTypeFilter.InValues) != 1 {
+			continue
+		}
+		ok := true
+		for _, f := range m.PropertyFilters {
+			if len(f.InValues) > 0 || len(f.NotInValues) > 0 || (f.Exists != nil && !(*f.Exists && always[f.Name])) {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			found = append(found, m)
+		}
+	}
+	if len(found) == 0 {
+		return nil
+	}
+	sort.Slice(found, func(i, j int) bool {
+		if (found[i].Name == metricName(def)) != (found[j].Name == metricName(def)) {
+			return found[i].Name == metricName(def)
+		}
+		return found[i].ID < found[j].ID
+	})
+	return &found[0]
 }
 
 var (

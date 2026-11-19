@@ -84,6 +84,9 @@ func TestAliasConflicts(t *testing.T) {
 	if cus, err := client(f).FindCustomerByAlias(ctx, "tenant-old"); err != nil || cus != nil {
 		t.Fatalf("archived customers are not listed by default: %+v %v", cus, err)
 	}
+	if cus, err := client(f).FindArchivedCustomerByAlias(ctx, "tenant-old"); err != nil || cus == nil || cus.ID != old {
+		t.Fatalf("only_archived: %+v %v", cus, err)
+	}
 	if len(f.Writes()) != 0 {
 		t.Fatalf("writes %v", f.Writes())
 	}
