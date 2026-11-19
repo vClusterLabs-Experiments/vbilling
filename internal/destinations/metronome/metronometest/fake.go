@@ -8,8 +8,12 @@
 //   - customers with several ingest aliases (409 when an alias is taken,
 //     archived customers included);
 //   - billable metrics, products, rate cards and rates (Finance's catalog);
+//     a billable metric counts only the usage ingested after it was
+//     created, as Metronome's are not retroactive;
 //   - contracts listed per customer (the portal's, with prepaid commits);
 //   - usage aggregation (POST /v1/usage) per billable metric;
+//   - threshold notifications in alarm for a customer, as
+//     POST /v1/customer-alerts/get reports them;
 //   - signed webhooks, sent to any URL with Metronome's signature scheme.
 //
 // Every request body is validated against the request schemas vendored in
@@ -68,6 +72,8 @@ type Event struct {
 	// customer_id is a customer's ID or one of its aliases, or later, when a
 	// customer gets the alias. Empty while the event is unattributed.
 	Customer string `json:"-"`
+
+	seq int // when it was ingested, in the fake's order of changes
 }
 
 // EventTypeFilter selects event types.
@@ -94,6 +100,8 @@ type BillableMetric struct {
 	PropertyFilters []PropertyFilter `json:"property_filters,omitempty"`
 	GroupKeys       [][]string       `json:"group_keys,omitempty"`
 	ArchivedAt      string           `json:"archived_at,omitempty"`
+
+	seq int // when it was created, in the fake's order of changes
 }
 
 // Product is a usage product on a billable metric.
@@ -147,6 +155,7 @@ type Server struct {
 	mu        sync.Mutex
 	now       func() time.Time
 	seq       int
+	tick      int // orders ingests and billable metric creations
 	customers []*Customer
 	events    []*Event
 	txns      map[string]bool
@@ -155,9 +164,19 @@ type Server struct {
 	cards     []*RateCard
 	rates     []*Rate
 	contracts []*Contract
+	alerts    map[string]*alertState
 	writes    []string
 	calls     map[string]int
 	fail      map[string]int
+}
+
+// alertState is a threshold notification as Metronome evaluates it for one
+// customer.
+type alertState struct {
+	id, customer, typ, name string
+	threshold               float64
+	status                  string // ok, in_alarm, evaluating, or "" once archived
+	updated                 time.Time
 }
 
 // New starts a fake Metronome for the test; it stops when the test ends.
@@ -166,7 +185,7 @@ func New(t testing.TB) *Server {
 	if err := load(); err != nil {
 		t.Fatalf("metronometest: load schemas: %v", err)
 	}
-	s := &Server{t: t, now: time.Now, txns: map[string]bool{}, calls: map[string]int{}, fail: map[string]int{}}
+	s := &Server{t: t, now: time.Now, txns: map[string]bool{}, calls: map[string]int{}, fail: map[string]int{}, alerts: map[string]*alertState{}}
 	s.srv = httptest.NewServer(http.HandlerFunc(s.handle))
 	s.URL = s.srv.URL
 	t.Cleanup(s.srv.Close)
@@ -268,6 +287,8 @@ func (s *Server) AddBillableMetric(body []byte) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	m.ID = s.newID("billable-metric")
+	s.tick++
+	m.seq = s.tick
 	s.metrics = append(s.metrics, &m)
 	return m.ID
 }
@@ -455,11 +476,21 @@ func number(v any) float64 {
 	return 0
 }
 
-// aggregateLocked aggregates a billable metric over a customer's events in [from, to).
+// aggregateLocked aggregates a billable metric over a customer's events in
+// [from, to). Billable metrics are not retroactive: "When using streaming
+// billable metrics, the billable metric must be defined in Metronome before
+// any usage can be associated with it. If usage is sent before a streaming
+// metric is defined, it isn't attributed to the metric by default"
+// (docs.metronome.com, guides/implement-metronome/core-concepts/
+// create-billable-metrics), and "billable metrics only match usage events
+// sent after the billable metric is created" (guides/get-started/
+// developer-sdks). So only events ingested after the metric was created
+// count, whatever their timestamp. (An alias attaches earlier usage to a
+// customer that gets it later: that is retroactive, and stays so.)
 func (s *Server) aggregateLocked(m *BillableMetric, customer string, from, to time.Time) float64 {
 	var v float64
 	for _, e := range s.events {
-		if e.Customer != customer || !m.matches(e) {
+		if e.Customer != customer || e.seq <= m.seq || !m.matches(e) {
 			continue
 		}
 		ts, err := time.Parse(time.RFC3339Nano, e.Timestamp)
@@ -595,6 +626,8 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		var m BillableMetric
 		json.Unmarshal(body, &m)
 		m.ID = s.newID("billable-metric")
+		s.tick++
+		m.seq = s.tick
 		s.metrics = append(s.metrics, &m)
 		s.writes = append(s.writes, key)
 		s.reply(w, http.StatusOK, map[string]any{"data": map[string]string{"id": m.ID}})
@@ -608,6 +641,8 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.getRates(w, r, body)
 	case "POST /v1/usage":
 		s.usage(w, body)
+	case "POST /v1/customer-alerts/get":
+		s.customerAlert(w, r, body)
 	default:
 		s.t.Errorf("metronometest: vBilling called %s, which the fake does not implement", key)
 		s.errorf(w, http.StatusNotFound, "not implemented by the fake: %s", key)
@@ -640,6 +675,8 @@ func (s *Server) ingest(w http.ResponseWriter, body []byte) {
 		}
 		s.txns[e.TransactionID] = true
 		e.Customer = s.ownerLocked(e.CustomerID)
+		s.tick++
+		e.seq = s.tick
 		s.events = append(s.events, e)
 	}
 	w.WriteHeader(http.StatusOK)
@@ -958,6 +995,38 @@ func (s *Server) usage(w http.ResponseWriter, body []byte) {
 	s.reply(w, http.StatusOK, map[string]any{"data": data, "next_page": nil})
 }
 
+// customerAlert answers POST /v1/customer-alerts/get: "the real-time
+// evaluation status for a specific threshold notification-customer pair"
+// (docs.metronome.com, alerts/get-a-threshold-notification), with
+// customer_status null once the notification is archived, and 404 for a
+// customer or notification the account does not have.
+func (s *Server) customerAlert(w http.ResponseWriter, r *http.Request, body []byte) {
+	ep, ok := s.checkPricing(w, r, "get_customer_alert", body)
+	if !ok {
+		return
+	}
+	var req struct {
+		CustomerID string `json:"customer_id"`
+		AlertID    string `json:"alert_id"`
+	}
+	json.Unmarshal(body, &req)
+	a := s.alerts[req.AlertID]
+	if a == nil || a.customer != req.CustomerID || s.customerLocked(req.CustomerID) == nil {
+		s.errorf(w, http.StatusNotFound, "threshold notification %s not found for customer %s", req.AlertID, req.CustomerID)
+		return
+	}
+	var status any = a.status
+	state := "enabled"
+	if a.status == "" {
+		status, state = nil, "archived"
+	}
+	s.replyPricing(w, ep, "get_customer_alert", map[string]any{"data": map[string]any{
+		"customer_status": status,
+		"alert": map[string]any{"id": a.id, "name": a.name, "type": a.typ, "status": state, "threshold": a.threshold,
+			"updated_at": a.updated.UTC().Format(time.RFC3339)},
+	}})
+}
+
 // --- webhooks ---
 
 // Notification is a Metronome webhook notification.
@@ -969,15 +1038,31 @@ type Notification struct {
 
 // Alert is a threshold notification ("alerts.<type>") for a customer, such
 // as alerts.low_remaining_commit_balance_reached for a prepaid commit wallet.
+// The notification is in alarm for the customer from then on, as
+// POST /v1/customer-alerts/get reports, until SetAlertStatus says otherwise.
 func (s *Server) Alert(alertType, customerID, alertName string, remaining, threshold float64) Notification {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	id := s.newID("notification")
+	alertID := s.newID("alert")
+	s.alerts[alertID] = &alertState{id: alertID, customer: customerID, typ: strings.TrimPrefix(alertType, "alerts."), name: alertName,
+		threshold: threshold, status: "in_alarm", updated: s.now()}
 	return Notification{ID: id, Type: alertType, Properties: map[string]any{
-		"customer_id": customerID, "alert_id": s.newID("alert"), "alert_name": alertName,
+		"customer_id": customerID, "alert_id": alertID, "alert_name": alertName,
 		"timestamp": s.now().UTC().Format(time.RFC3339Nano), "threshold": threshold,
 		"remaining_balance": remaining, "triggered_by": "usage",
 	}}
+}
+
+// SetAlertStatus sets a threshold notification's evaluation for its
+// customer, as Metronome re-evaluates it after usage or a commit change:
+// "ok", "in_alarm", "evaluating", or "" to archive the notification.
+func (s *Server) SetAlertStatus(alertID, status string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if a := s.alerts[alertID]; a != nil {
+		a.status, a.updated = status, s.now()
+	}
 }
 
 // PaymentStatus is a payment_gate.payment_status notification, sent after a

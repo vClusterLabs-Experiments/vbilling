@@ -1,6 +1,7 @@
 package kv
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -69,5 +70,45 @@ func TestFailedWriteLeavesTheStoreAsItWas(t *testing.T) {
 	}
 	if v, _ := s.Get("hold"); v != "paused" {
 		t.Fatalf("hold = %q after a failed delete", v)
+	}
+}
+
+// Once the rename succeeded the file holds the change. If only the
+// directory sync fails, the change reports the error but is not rolled back
+// in memory: memory never disagrees with the file, and reopening the store
+// reads the same value.
+func TestChangeOnDiskIsKeptWhenOnlyTheDirectorySyncFails(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.json")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Set("hold", "paused"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Set("gone", "x"); err != nil {
+		t.Fatal(err)
+	}
+	defer func(f func(string) error) { syncDir = f }(syncDir)
+	syncDir = func(string) error { return errors.New("input/output error") }
+	if err := s.Set("hold", "active"); err == nil {
+		t.Fatal("a change whose directory sync failed reported success")
+	}
+	if err := s.Delete("gone"); err == nil {
+		t.Fatal("a delete whose directory sync failed reported success")
+	}
+	r, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"hold", "gone"} {
+		mem, inMem := s.Get(k)
+		disk, onDisk := r.Get(k)
+		if mem != disk || inMem != onDisk {
+			t.Errorf("%s: memory has %q (%t), the file has %q (%t)", k, mem, inMem, disk, onDisk)
+		}
+	}
+	if v, _ := s.Get("hold"); v != "active" {
+		t.Fatalf("hold = %q in memory, want the active the file holds", v)
 	}
 }

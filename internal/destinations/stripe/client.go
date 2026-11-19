@@ -222,6 +222,8 @@ type Subscription struct {
 	Status   string            `json:"status"`
 	Customer string            `json:"customer"`
 	Metadata map[string]string `json:"metadata"`
+	// LatestInvoice is the ID of the subscription's most recent invoice.
+	LatestInvoice ObjectID `json:"latest_invoice,omitempty"`
 	// StartDate is when Stripe starts invoicing the subscription's meters:
 	// meter events dated earlier are accepted but never invoiced.
 	StartDate int64 `json:"start_date"`

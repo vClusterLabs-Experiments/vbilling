@@ -48,7 +48,7 @@ func TestInClusterPolicyIsRestoredAndExemptsOnlyKubeSystem(t *testing.T) {
 	e.Resync(ctx)
 	p, _ = api.ValidatingAdmissionPolicies().Get(ctx, PolicyName, metav1.GetOptions{})
 	b, _ = api.ValidatingAdmissionPolicyBindings().Get(ctx, PolicyName, metav1.GetOptions{})
-	if p.Spec.Validations[0].Expression != "false" || len(b.Spec.ValidationActions) != 1 || b.Spec.ValidationActions[0] != admissionv1.Deny || b.Spec.MatchResources != nil {
+	if p.Spec.Validations[0].Expression != mirrorPod || len(b.Spec.ValidationActions) != 1 || b.Spec.ValidationActions[0] != admissionv1.Deny || b.Spec.MatchResources != nil {
 		t.Fatalf("after resync: policy %q, binding %+v; want vBilling's spec back", p.Spec.Validations[0].Expression, b.Spec)
 	}
 }

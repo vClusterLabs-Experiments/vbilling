@@ -697,8 +697,8 @@ func (a *Adapter) billableMetrics(v *pricingView, s destinations.PriceSeries, de
 			detail += fmt.Sprintf(" (%s aggregates it with %s of %q, but vBilling's quantities must be summed)",
 				strconv.Quote(others[0].Name), strings.ToUpper(others[0].AggregationType), others[0].AggregationKey)
 		}
-		return nil, &destinations.PriceCoverage{Status: destinations.PriceMissing, Detail: detail,
-			Hint: fmt.Sprintf("add a billable metric for %s to Metronome: `vbilling metronome billable-metrics` prints the definition vBilling expects", s.Metric)}
+		detail += ": vBilling holds this usage until one does, because Metronome never bills usage sent before its billable metric exists"
+		return nil, &destinations.PriceCoverage{Status: destinations.PriceMissing, Detail: detail, Hint: noMetricHint}
 	}
 	var ids, names []string
 	for _, m := range typed {
@@ -759,6 +759,12 @@ func (a *Adapter) coverage(v *pricingView, s destinations.PriceSeries, tg target
 	def, ok := usage.Lookup(s.Metric)
 	if !ok {
 		return destinations.PriceCoverage{Status: destinations.PriceUnknown, Detail: "metric is not in vBilling's catalog"}
+	}
+	if !a.provision() && len(v.byType[s.Metric]) == 0 {
+		// No billable metric counts the event type: its usage waits, for
+		// every tenant, customer or not.
+		_, miss := a.billableMetrics(v, s, def)
+		return *miss
 	}
 	if !a.provision() && strings.HasPrefix(s.Plan, aliasPlan) && len(tg.cards) == 0 {
 		// No customer or no contract yet: a warning, never a hold. Metronome

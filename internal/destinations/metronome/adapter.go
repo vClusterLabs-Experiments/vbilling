@@ -84,6 +84,13 @@ type Adapter struct {
 	plans   map[string]*tenantPlan // tenant -> rate cards of its customer's contracts (price coverage)
 	known   map[string]bool        // tenants recorded as vBilling ingest aliases
 	warned  map[string]bool        // tenants told that their pinned customer is not used
+
+	reservedSeen map[string]bool // dimension names logged for colliding with a reserved property
+
+	// Without METRONOME_PROVISION: usage of event types no billable metric
+	// counts yet waits (see waiting.go).
+	wait    *waitStore
+	counted countedView
 }
 
 type aliasEntry struct {
@@ -94,7 +101,8 @@ type aliasEntry struct {
 // New builds the adapter (exported for tests). link may be nil.
 func New(c *Client, cfg *config.Config, state *kv.Store, link *stripe.Adapter) *Adapter {
 	return &Adapter{c: c, cfg: cfg, state: state, stripe: link, now: time.Now, metrics: map[string]string{},
-		aliases: map[string]aliasEntry{}, plans: map[string]*tenantPlan{}, known: map[string]bool{}, warned: map[string]bool{}}
+		aliases: map[string]aliasEntry{}, plans: map[string]*tenantPlan{}, known: map[string]bool{}, warned: map[string]bool{},
+		reservedSeen: map[string]bool{}, wait: newWaitStore(cfg.DataDir)}
 }
 
 func (a *Adapter) Name() string { return "metronome" }
@@ -158,8 +166,10 @@ func BillableMetricFor(def usage.MetricDef) BillableMetric {
 // Bootstrap, with METRONOME_PROVISION, creates one billable metric per
 // billable metric code (BillableMetricFor), matching existing ones by stored
 // ID or by name, never duplicating them. Without it nothing is created: it
-// logs the metrics no billable metric in Metronome counts, and never holds up
-// delivery, because Metronome keeps usage that no billable metric counts yet.
+// logs the metrics no billable metric in Metronome counts yet, whose usage
+// waits until one does (Metronome never bills usage sent before its billable
+// metric exists, see waiting.go), and sends what waited for metrics that
+// exist now.
 func (a *Adapter) Bootstrap(ctx context.Context, metrics []usage.MetricDef) error {
 	if !a.provision() {
 		a.reportCatalog(ctx, metrics)
@@ -202,22 +212,27 @@ func (a *Adapter) Bootstrap(ctx context.Context, metrics []usage.MetricDef) erro
 }
 
 // reportCatalog logs, read-only, the billable metrics of the catalog that no
-// billable metric in Metronome sums.
+// billable metric in Metronome sums, and sends the usage that waited for
+// billable metrics that exist now.
 func (a *Adapter) reportCatalog(ctx context.Context, defs []usage.MetricDef) {
-	bms, err := a.c.ListBillableMetrics(ctx)
+	view, err := a.billableMetricsView(ctx)
 	if err != nil {
-		log.Printf("[metronome] could not list billable metrics (%v); usage is delivered anyway", err)
+		log.Printf("[metronome] could not list billable metrics (%v); usage waits until they can be read", err)
 		return
 	}
 	var missing []string
 	for _, def := range defs {
-		if def.Billable && len(summing(bms, def.Code)) == 0 {
+		if def.Billable && !view.counts(def.Code) {
 			missing = append(missing, def.Code)
 		}
 	}
 	if len(missing) > 0 {
-		log.Printf("[metronome] no billable metric sums the value of event type(s) %s: Metronome keeps that usage but bills none of it "+
-			"until one does (`vbilling metronome billable-metrics` prints the definitions vBilling expects)", strings.Join(missing, ", "))
+		log.Printf("[metronome] no billable metric sums the value of event type(s) %s yet: vBilling holds that usage until one does, "+
+			"because Metronome never bills usage sent before its billable metric exists (`vbilling metronome billable-metrics` prints the definitions vBilling expects)",
+			strings.Join(missing, ", "))
+	}
+	if err := a.releaseWaiting(ctx, view); err != nil {
+		log.Printf("[metronome] %v (retried with the next delivery)", err)
 	}
 }
 
@@ -654,12 +669,20 @@ func (a *Adapter) CustomerAliases(ctx context.Context, customerID string) ([]str
 	return slices.Clone(aliases), nil
 }
 
+// KnowsTenant reports whether vBilling knows an ingest alias as one of its
+// tenants: it sent usage under it, or found or created the customer for
+// it. The enforcer applies a customer's webhooks to every alias it knows.
+func (a *Adapter) KnowsTenant(alias string) bool { return a.isTenant(alias) }
+
 // TenantForCustomer resolves a webhook's customer to a tenant: the alias of
 // the customer that vBilling knows as a tenant. A customer with an identity
 // alias and a compute alias (the tenant ID) resolves to the compute alias,
 // whatever their order; a customer with none of vBilling's tenants resolves
 // to nothing. With METRONOME_PROVISION, a customer vBilling created, found or
-// was pinned to resolves to that tenant directly.
+// was pinned to resolves to that tenant directly. A customer that holds the
+// aliases of several tenants (one commit funding them all) resolves to the
+// first here; the enforcer reads every alias (CustomerAliases, KnowsTenant)
+// and applies the webhook to each tenant.
 func (a *Adapter) TenantForCustomer(ctx context.Context, customerID string) (string, bool) {
 	stored, hasStored := a.state.Get("tenant/" + customerID)
 	if hasStored && a.provision() {
@@ -682,35 +705,44 @@ func (a *Adapter) TenantForCustomer(ctx context.Context, customerID string) (str
 		return "", false
 	case hasStored && slices.Contains(mapped, stored):
 		return stored, true
-	case len(mapped) > 1:
-		log.Printf("[metronome] customer %s holds the aliases of several tenants (%s); its webhooks resolve to %s",
-			customerID, strings.Join(mapped, ", "), mapped[0])
 	}
 	return mapped[0], true
 }
 
-// ToIngest converts a canonical event to Metronome's wire format.
+// reservedProps are the properties ToIngest sets from the event itself.
+// Billable metrics sum value and price on sku: a dimension of the same name
+// (an emitter chooses dimension keys) must never replace one, or Metronome
+// would bill another quantity or SKU than the ledger holds.
+var reservedProps = map[string]bool{"value": true, "unit": true, "window_start": true, "window_end": true, "schema_version": true,
+	"region": true, "project": true, "sku": true, "resource_id": true, "source": true, "accuracy": true}
+
+// ToIngest converts a canonical event to Metronome's wire format. The
+// dimensions go first, then the reserved properties, which a dimension
+// never replaces (one that collides is dropped and logged).
 func (a *Adapter) ToIngest(e *usage.Event) IngestEvent {
-	props := map[string]string{
-		"value":          strconv.FormatFloat(e.Quantity, 'f', -1, 64),
-		"unit":           e.Unit,
-		"window_start":   rfc3339(e.WindowStart),
-		"window_end":     rfc3339(e.WindowEnd),
-		"schema_version": e.SchemaVersion,
-	}
+	props := map[string]string{}
 	set := func(k, v string) {
 		if v != "" {
 			props[k] = v
 		}
 	}
+	for k, v := range e.Dimensions {
+		if reservedProps[k] {
+			a.warnReserved(e.Metric, k)
+			continue
+		}
+		set(k, v)
+	}
+	props["value"] = strconv.FormatFloat(e.Quantity, 'f', -1, 64)
+	props["unit"] = e.Unit
+	props["window_start"] = rfc3339(e.WindowStart)
+	props["window_end"] = rfc3339(e.WindowEnd)
+	props["schema_version"] = e.SchemaVersion
 	set("region", e.Region)
 	set("project", e.Project)
 	set("sku", e.SKU)
 	set("resource_id", e.ResourceID)
 	set("source", e.Source)
-	for k, v := range e.Dimensions {
-		set(k, v)
-	}
 	if def, ok := usage.Lookup(e.Metric); ok {
 		for _, k := range GroupKeys(def) {
 			if props[k] == "" {
@@ -736,11 +768,39 @@ func (a *Adapter) ToIngest(e *usage.Event) IngestEvent {
 	}
 }
 
+// warnReserved logs, once per key, a dimension named like a property
+// vBilling sets itself.
+func (a *Adapter) warnReserved(metric, key string) {
+	a.mu.Lock()
+	first := !a.reservedSeen[key]
+	a.reservedSeen[key] = true
+	a.mu.Unlock()
+	if first {
+		log.Printf("[metronome] WARNING: events of %s carry a dimension %q, the name of a property vBilling sets from the event itself: "+
+			"the dimension is not sent (logged once per name)", metric, key)
+	}
+}
+
 // SendEvents ingests in batches of 100. Retrying a batch is safe: Metronome
-// ignores repeated transaction IDs for 34 days.
+// ignores repeated transaction IDs for 34 days. Without METRONOME_PROVISION,
+// the events of a type no billable metric counts yet wait instead (see
+// waiting.go), and what waited for a billable metric that exists now is
+// sent first.
 func (a *Adapter) SendEvents(ctx context.Context, events []usage.Event) error {
+	var view countedView
+	if !a.provision() {
+		var err error
+		if view, err = a.billableMetricsView(ctx); err != nil {
+			return err
+		}
+		if err := a.releaseWaiting(ctx, view); err != nil {
+			return err
+		}
+	}
 	rejected := map[string]string{}
 	var batch []IngestEvent
+	waiting := map[string][]usage.Event{}
+	var waitOrder []string
 	for i := range events {
 		e := &events[i]
 		if !a.Accepts(e.Metric) {
@@ -751,6 +811,13 @@ func (a *Adapter) SendEvents(ctx context.Context, events []usage.Event) error {
 			continue
 		}
 		a.markKnown(e.Tenant)
+		if view.ok && !view.counts(e.Metric) {
+			if _, ok := waiting[e.Metric]; !ok {
+				waitOrder = append(waitOrder, e.Metric)
+			}
+			waiting[e.Metric] = append(waiting[e.Metric], *e)
+			continue
+		}
 		batch = append(batch, a.ToIngest(e))
 	}
 	for i := 0; i < len(batch); i += 100 {
@@ -763,6 +830,13 @@ func (a *Adapter) SendEvents(ctx context.Context, events []usage.Event) error {
 		if err := a.c.Ingest(ctx, batch[i:end]); err != nil {
 			return err
 		}
+	}
+	// Kept durably before the dispatcher's cursor moves past them.
+	for _, code := range waitOrder {
+		if err := a.wait.add(code, waiting[code]); err != nil {
+			return fmt.Errorf("hold the usage of %s until a billable metric counts it: %w", code, err)
+		}
+		a.noteWaiting(code, len(waiting[code]))
 	}
 	if len(rejected) > 0 {
 		return &destinations.PartialError{Rejected: rejected}

@@ -53,8 +53,22 @@ func setup(t *testing.T, mode string, rules map[string]State) (*Enforcer, *fake.
 }
 
 func stripeEvent(t *testing.T, e *Enforcer, id, typ, status string) (Signal, error) {
-	body := []byte(fmt.Sprintf(`{"id":%q,"type":%q,"data":{"object":{"customer":"cus_acme","status":%q,"attempt_count":2}}}`, id, typ, status))
+	body := []byte(fmt.Sprintf(`{"id":%q,"type":%q,"data":{"object":{%s,"customer":"cus_acme","status":%q,"attempt_count":2}}}`, id, typ, stripeObject(typ), status))
 	return e.HandleStripe(context.Background(), body, stripe.SignatureHeader(body, "whsec_test", now))
+}
+
+// stripeObject is what a Stripe event of the given type is about: acme's
+// subscription sub_acme, its invoice in_acme, or its usage alert.
+func stripeObject(typ string) string {
+	switch {
+	case strings.HasPrefix(typ, "invoice."):
+		return `"object":"invoice","id":"in_acme","subscription":"sub_acme"`
+	case strings.HasPrefix(typ, "customer.subscription."):
+		return `"object":"subscription","id":"sub_acme"`
+	case typ == "billing.alert.triggered":
+		return `"object":"billing.alert_triggered","alert":{"id":"alrt_acme"}`
+	}
+	return `"object":"unknown"`
 }
 
 func nsLabels(t *testing.T, kube *fake.Clientset) map[string]string {
@@ -67,6 +81,7 @@ func nsLabels(t *testing.T, kube *fake.Clientset) map[string]string {
 
 func TestDunningLifecycleInEnforceMode(t *testing.T) {
 	e, kube, _ := setup(t, "enforce", nil)
+	readable(e, "stripe") // once the invoice is paid, Stripe shows nothing owed
 
 	sig, err := stripeEvent(t, e, "evt_1", "invoice.payment_failed", "")
 	if err != nil || sig.State != Delinquent || sig.Tenant != "acme" {
@@ -122,6 +137,7 @@ func TestAnnotateModeNeverSuspendsAndObserveTouchesNothing(t *testing.T) {
 
 func TestSignatureDedupeAndIrrelevantEvents(t *testing.T) {
 	e, _, _ := setup(t, "enforce", nil)
+	readable(e, "stripe") // once the invoice is paid, Stripe shows nothing owed
 	body := []byte(`{"id":"evt_x","type":"invoice.payment_failed","data":{"object":{"customer":"cus_acme"}}}`)
 	if _, err := e.HandleStripe(context.Background(), body, stripe.SignatureHeader(body, "wrong", now)); err == nil {
 		t.Fatal("bad signature accepted")
