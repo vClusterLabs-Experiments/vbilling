@@ -166,10 +166,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("open held events: %v", err)
 	}
+	// Held usage is released, unpriced, before its invoice period can be
+	// final: PRICE_CHECK_MAX_HOLD, at most pipeline.MaxUnpricedHold.
+	maxHold := min(cfg.PriceCheckMaxHold, pipeline.MaxUnpricedHold)
 	var prices *pricing.Service
 	if cfg.PriceCheck != pricing.ModeOff {
 		prices = pricing.New(sp, dests, tenants, held, sources, tel, pricing.Options{
-			Mode: cfg.PriceCheck, Interval: cfg.PriceCheckInterval, Lookback: cfg.PriceCheckLookback, MaxHold: cfg.PriceCheckMaxHold,
+			Mode: cfg.PriceCheck, Interval: cfg.PriceCheckInterval, Lookback: cfg.PriceCheckLookback, MaxHold: maxHold,
 		})
 	}
 	var gate pipeline.Gate
@@ -181,7 +184,7 @@ func main() {
 		Bootstrap: func(ctx context.Context, d destinations.Destination) error { return d.Bootstrap(ctx, usage.Catalog()) },
 		Held:      held,
 		Gate:      gate,
-		MaxHold:   cfg.PriceCheckMaxHold,
+		MaxHold:   maxHold,
 	}, tel)
 	disc := discovery.NewDiscoverer(kube, dynamicClient, cfg.WatchNamespaces, cfg.PlatformCluster)
 	owners := newPlatformResolver(cfg, sources, sp)

@@ -41,8 +41,8 @@ type Options struct {
 	Gate Gate
 	// MaxHold bounds how long usage is held: once a held event's window
 	// started longer ago than this, it is released unpriced (with every
-	// older held event of its series), so billing platforms with a
-	// backdating limit can still take it. Zero holds without a limit.
+	// older held event of its series), before its invoice period is final.
+	// It is at most MaxUnpricedHold. Zero holds without a limit.
 	MaxHold time.Duration
 }
 
