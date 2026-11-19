@@ -64,7 +64,7 @@ func TestListPagedReadsEveryPage(t *testing.T) {
 }
 
 // What ReadHostNamespaces reads: the namespaces given (one by one, or all
-// at once when there are many), and where vCluster control planes run. A
+// at once when there are many), and where clusters' control planes run. A
 // forbidden read is kept, so every namespace is then unread.
 func TestReadHostNamespaces(t *testing.T) {
 	ctx := context.Background()

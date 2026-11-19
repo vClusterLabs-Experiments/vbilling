@@ -438,7 +438,7 @@ func (c *Collector) reportElsewhere(cl discovery.TenantCluster, e *elsewhere) {
 	if unsure > 0 {
 		c.health.Fail(src, "synced-namespaces", id, fmt.Errorf("%s", e.why(cl)),
 			"vCluster labels each namespace it syncs a cluster's objects into with "+discovery.LabelSyncedName+" and "+
-				discovery.LabelSyncedNamespace+"; restore those labels, or give the cluster a name no other vCluster on the control plane cluster has")
+				discovery.LabelSyncedNamespace+"; restore those labels, or give the cluster a name no other cluster on the control plane cluster has")
 		return
 	}
 	c.health.OK(src, "synced-namespaces", id, e.count())
@@ -457,9 +457,9 @@ func (e *elsewhere) why(cl discovery.TenantCluster) string {
 		switch r {
 		case discovery.ReasonNameShared:
 			if cl.NamesakesUnknown {
-				parts = append(parts, fmt.Sprintf("%d in namespaces without vCluster's labels, and vBilling could not list every vCluster to know they are this cluster's", n))
+				parts = append(parts, fmt.Sprintf("%d in namespaces without vCluster's labels, and vBilling could not list every cluster to know they are this cluster's", n))
 			} else {
-				parts = append(parts, fmt.Sprintf("%s: %d in namespaces without vCluster's labels, and another vCluster on the control plane cluster has the name (in %s)",
+				parts = append(parts, fmt.Sprintf("%s: %d in namespaces without vCluster's labels, and another cluster on the control plane cluster has the name (in %s)",
 					r, n, strings.Join(cl.Namesakes, ", ")))
 			}
 		default:

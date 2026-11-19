@@ -89,7 +89,7 @@ func TestSuspensionAndPauseReachNamespacesAClusterSyncsTo(t *testing.T) {
 }
 
 // vCluster labels each namespace it syncs a cluster into with the
-// cluster's name and namespace: a vCluster of the same name in another
+// cluster's name and namespace: a cluster of the same name in another
 // project no longer stops a suspension or a pause from reaching them, and
 // the namesake's namespaces are left alone.
 func TestSuspensionAndPauseReachLabeledNamespacesDespiteANamesake(t *testing.T) {

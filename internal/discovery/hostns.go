@@ -62,7 +62,7 @@ const (
 
 // HostNamespaces is what vBilling read of the control plane cluster
 // namespaces that hold synced objects: their vCluster labels, and which of
-// them a vCluster control plane runs in. The zero value knows nothing.
+// them a cluster's control plane runs in. The zero value knows nothing.
 type HostNamespaces struct {
 	read   map[string]hostNamespace
 	planes map[string]bool
@@ -140,7 +140,7 @@ func (h *HostNamespaces) readNamespaces(ctx context.Context, kube kubernetes.Int
 	return nil
 }
 
-// readPlanes notes the namespaces a vCluster control plane runs in, or ran
+// readPlanes notes the namespaces a cluster's control plane runs in, or ran
 // in: vCluster's chart gives the cluster's Service the label app=vcluster,
 // and it stays while the cluster's synced pods do (they are owned by it),
 // also after its StatefulSet is deleted with --cascade=orphan for an
@@ -173,7 +173,7 @@ func (h *HostNamespaces) Note(namespace string, exists bool, labels map[string]s
 	h.read[namespace] = n
 }
 
-// NoteControlPlane records that a vCluster control plane runs, or ran, in a
+// NoteControlPlane records that a cluster's control plane runs, or ran, in a
 // namespace.
 func (h *HostNamespaces) NoteControlPlane(namespace string) {
 	if h.planes == nil {
@@ -207,7 +207,7 @@ func (h *HostNamespaces) Lookup(namespace string) (exists bool, labels map[strin
 	return n.exists, labels, true
 }
 
-// ControlPlanes returns the namespaces a vCluster control plane runs in.
+// ControlPlanes returns the namespaces a cluster's control plane runs in.
 func (h *HostNamespaces) ControlPlanes() []string {
 	if h == nil {
 		return nil
@@ -232,12 +232,12 @@ func (h *HostNamespaces) Err() error {
 // vcluster.loft.sh/managed-by is cl's:
 //   - in cl's own namespace it is;
 //   - in a namespace another cluster runs in (discovered, a namesake, or
-//     any vCluster control plane) it never is: the object is that
+//     any cluster's control plane) it never is: the object is that
 //     cluster's, or was synced where that cluster is billed;
 //   - in a namespace vCluster labeled, the labels decide: they must name
 //     cl and its namespace;
 //   - in a namespace without vCluster's labels only the object's own label
-//     names the cluster: it is cl's when no other vCluster has the name,
+//     names the cluster: it is cl's when no other cluster has the name,
 //     no cluster ran there, and the namespace exists; otherwise it is a
 //     former cluster's leftover, or nothing tells (Uncertain).
 //
@@ -345,7 +345,7 @@ func ListPaged[L runtime.Object](ctx context.Context, opts metav1.ListOptions, l
 // its namespace, and in other namespaces where Whose says they are its.
 // fieldSelector narrows the pods (for example to one node); clusters
 // reports namespaces discovered clusters run in (nil: none besides cl's
-// namesakes and vCluster control planes).
+// namesakes and clusters' control planes).
 func SyncedPodsOf(ctx context.Context, kube kubernetes.Interface, cl TenantCluster, fieldSelector string, clusters func(string) bool) ([]corev1.Pod, error) {
 	pods, err := ListPaged(ctx, metav1.ListOptions{LabelSelector: labelManagedBy + "=" + cl.Name, FieldSelector: fieldSelector},
 		kube.CoreV1().Pods("").List)

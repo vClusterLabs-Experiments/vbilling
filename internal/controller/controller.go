@@ -81,8 +81,8 @@ type Controller struct {
 	usageStarted bool
 	usageThrough bool
 
-	// gaps: tenant cluster external ID -> the windows its own API could not
-	// be read for (tenantGaps). Persisted, so a restart still fills them.
+	// gaps: a cluster's external ID -> the windows its own API could not be
+	// read for (tenantGaps). Persisted, so a restart still fills them.
 	gaps *kv.Store
 	// gapsFailing: the last write of gaps failed (reported once it works).
 	gapsFailing bool
