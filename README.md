@@ -307,9 +307,9 @@ Point Stripe webhooks at `/webhooks/stripe` (`STRIPE_WEBHOOK_SECRET`) and Metron
 | `invoice.payment_failed`, subscription `past_due`, Metronome `payment_gate.payment_status` failed | `delinquent` |
 | subscription `unpaid` / `canceled` / deleted | `suspended` |
 | `billing.alert.triggered`, Metronome `alerts.*` (spend, usage, low credit or commit balance) | `warning` |
-| `invoice.paid`, subscription `active`, Metronome `payment_gate.payment_status` paid | `active` |
+| `invoice.paid`, subscription `active`, Metronome `payment_gate.payment_status` paid | `active`, once nothing is owed |
 
-A webhook only raises the billing hold. A positive event lowers it only when it settles what caused it: an invoice paid settles that invoice, a subscription back to `active` settles that subscription, and a Metronome payment settles the alert once Metronome reports it cleared. Otherwise vBilling reads Stripe or Metronome again and lowers the hold only when nothing is still owed. Paying one invoice of a subscription that is still unpaid lifts nothing.
+A webhook only raises the billing hold. A positive event never lowers it by itself: vBilling reads the billing platforms (Stripe, Metronome) again for the tenant's customer, and clears the hold only when none shows anything owed. Stripe owes nothing when no subscription of the customer is past due, unpaid or incomplete, no open invoice is past due or has a failed payment, and no invoice is uncollectible; Metronome, when no threshold notification that a rule maps above `warning` is in alarm or still evaluating. Paying a small invoice while an older one is open lifts nothing, and a Stripe payment never resumes a tenant whose Metronome wallet is still empty. A platform that cannot be read fails the webhook, and the platform retries it.
 
 Override any mapping with `ENFORCEMENT_RULES`, for example `alerts.spend_threshold_reached=suspended` for a hard spend cap.
 
@@ -322,7 +322,7 @@ Clusters with their own nodes (Private Nodes, Auto Nodes, Standalone) run their 
 
 **Pause.** The `paused` state (`PUT /api/v1/billing-states/{tenant}` with `{"state": "paused"}`, or a rule such as `alerts.low_remaining_commit_balance_reached=paused` for a prepaid commit wallet) stops service, not only growth. In `enforce` mode vBilling marks each of the tenant's clusters paused (`vbilling.vcluster.com/paused-by`), drains the cluster's own nodes (taint `vbilling.vcluster.com/paused:NoSchedule`, workloads stopped, node infrastructure such as the GPU driver kept, with `ENFORCEMENT_IN_CLUSTER`), saves its inventory, scales its control plane to zero and deletes the pods it synced to the control plane cluster. Workload usage, control plane hours and dedicated or private node capacity stop billing once vBilling has verified that the cluster's workloads are gone; a pause it cannot verify still stops the control plane but keeps billing the cluster's own nodes; volumes and load balancers keep billing (`PAUSE_KEEP_BILLING`). A cluster brought back by anything else is paused again within 15 seconds. Clearing the hold resumes it. See [Pausing a tenant](https://vclusterlabs-experiments.github.io/vbilling/private-nodes.html#pause).
 
-**Holds.** A tenant's state is the most severe of its holds. Billing webhooks own the `billing` hold; `PUT /api/v1/billing-states/{tenant}` with `{"state": "suspended", "hold": "abuse", "reason": "..."}` sets any other, which only an operator clears by setting it `active`. A payment therefore never lifts an operator's hold. Without `hold`, the PUT sets the `billing` hold.
+**Holds.** A tenant's state is the most severe of its holds. Billing webhooks own the `billing` hold. `PUT /api/v1/billing-states/{tenant}` sets the `operator` hold, or the one it names (`{"state": "suspended", "hold": "abuse", "reason": "..."}`); no webhook touches those, and only an operator clears them by setting them `active`. A payment therefore never lifts an operator's hold. A portal that wants a payment to lift its hold passes `"hold": "billing"`: a payment then clears it once nothing is owed.
 
 Payment failures on invoices that Stripe collects arrive through Stripe's webhooks, so in Metronome + Stripe mode, send Stripe's webhooks to vBilling as well. Billing states are always available: Stripe and Metronome webhooks set them once `STRIPE_WEBHOOK_SECRET` or `METRONOME_WEBHOOK_SECRET` is set, and `PUT /api/v1/billing-states/{tenant}` sets them from anything else, such as Lago or a custom billing platform.
 
@@ -440,7 +440,7 @@ Every endpoint except `/healthz` and `/readyz` needs the API token (`Authorizati
 | `GET /api/v1/pricing?destination&status`, `POST /api/v1/pricing/check` | Price coverage per destination: each (plan, metric, SKU) `priced`, `unpriced`, `zero` or `unknown`, with a hint naming the missing product, rate, price or charge, and held events (`PRICE_CHECK=hold`) |
 | `GET /api/v1/ledger/verify` | Hash-chain verification |
 | `GET /api/v1/destinations`, `GET …/{name}/dead-letters`, `POST …/{name}/dead-letters/replay`, `POST …/{name}/cursor` | Delivery operations |
-| `GET /api/v1/tenants`, `GET /api/v1/billing-states`, `PUT /api/v1/billing-states/{tenant}` | Tenants and billing state (`{"state", "reason", "hold"}`; `hold` defaults to `billing`) |
+| `GET /api/v1/tenants`, `GET /api/v1/billing-states`, `PUT /api/v1/billing-states/{tenant}` | Tenants and billing state (`{"state", "reason", "hold"}`; `hold` defaults to `operator`) |
 | `POST /webhooks/stripe`, `POST /webhooks/metronome` | Billing signals |
 
 `API_TOKEN` protects everything under `/api` (bearer). Keep the Service internal, or put it behind your portal.

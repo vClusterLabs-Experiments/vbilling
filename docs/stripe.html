@@ -508,14 +508,20 @@
       <p>Stripe's summaries are aligned to minutes and trail ingestion by a few minutes, so reconcile closed periods rather than the current hour. Run it daily and alert when <code>ok</code> is <code>false</code>.</p>
 
       <h2 id="webhooks">Webhooks and billing states</h2>
-      <p>Stripe's payment events tell vBilling which tenants are paid up. An event only raises a tenant's billing hold; a positive one lowers it only when it settles what caused it (an invoice paid settles that invoice, a subscription back to <code>active</code> settles that subscription), or when Stripe, read again, shows nothing still owed. Paying one invoice of a subscription that is still unpaid lifts nothing: Stripe's <code>customer.subscription.updated</code> to <code>active</code> does. Add a webhook endpoint in Stripe for <code>https://&lt;your-host&gt;/webhooks/stripe</code> with the events below, then add its signing secret to the Secret and restart vBilling:</p>
+      <p>Stripe's payment events tell vBilling when to look at what a tenant owes. An event that reports a problem only raises the tenant's billing hold. A positive one (an invoice paid, a subscription back to <code>active</code>) never lowers it by itself: vBilling reads the customer's standing from Stripe again, and clears the hold only when nothing is owed:</p>
+      <ul>
+        <li>no subscription of the customer is <code>past_due</code>, <code>unpaid</code> or <code>incomplete</code>, whoever created it;</li>
+        <li>no open invoice is past its due date, or has a failed payment (<code>attempt_count</code> above zero);</li>
+        <li>no invoice is <code>uncollectible</code>.</li>
+      </ul>
+      <p>vBilling reads every subscription and every open and uncollectible invoice of the customer, page by page. Paying a small invoice while an older one is still open lifts nothing, and neither does a subscription that Stripe marks <code>active</code> again once its latest invoice is paid. If Stripe cannot be read, the webhook gets a <code>500</code> and Stripe retries it. With Metronome configured too, Metronome is read as well, for the customer that holds the tenant ID as an alias: a Stripe payment never resumes a tenant whose prepaid wallet is still empty. Add a webhook endpoint in Stripe for <code>https://&lt;your-host&gt;/webhooks/stripe</code> with the events below, then add its signing secret to the Secret and restart vBilling:</p>
       <div class="config-table-wrap">
         <table class="config-table">
           <thead><tr><th>Stripe event</th><th>Billing state</th></tr></thead>
           <tbody>
             <tr><td><code>invoice.payment_failed</code></td><td><code>delinquent</code></td></tr>
-            <tr><td><code>invoice.paid</code>, <code>invoice.payment_succeeded</code></td><td><code>active</code></td></tr>
-            <tr><td><code>customer.subscription.created</code>, <code>.updated</code>, <code>.resumed</code></td><td>By subscription status: <code>past_due</code> is <code>delinquent</code>; <code>unpaid</code>, <code>canceled</code> and <code>incomplete_expired</code> are <code>suspended</code>; <code>active</code> and <code>trialing</code> are <code>active</code></td></tr>
+            <tr><td><code>invoice.paid</code>, <code>invoice.payment_succeeded</code></td><td><code>active</code>, once Stripe shows nothing owed</td></tr>
+            <tr><td><code>customer.subscription.created</code>, <code>.updated</code>, <code>.resumed</code></td><td>By subscription status: <code>past_due</code> is <code>delinquent</code>; <code>unpaid</code>, <code>canceled</code> and <code>incomplete_expired</code> are <code>suspended</code>; <code>active</code> and <code>trialing</code> are <code>active</code>, once Stripe shows nothing owed</td></tr>
             <tr><td><code>customer.subscription.deleted</code></td><td><code>suspended</code></td></tr>
             <tr><td><code>billing.alert.triggered</code> (a usage alert on a meter)</td><td><code>warning</code></td></tr>
           </tbody>
@@ -555,14 +561,14 @@ spec:
           <tbody>
             <tr><td><code>observe</code> (default)</td><td>Record the state only.</td></tr>
             <tr><td><code>annotate</code></td><td>Also annotate the cluster, label its namespace <code>vbilling.vcluster.com/billing-state</code>, and emit a Kubernetes event.</td></tr>
-            <tr><td><code>enforce</code></td><td>Also label suspended namespaces <code>vbilling.vcluster.com/suspended=true</code>. With <code>enforcement.admissionPolicy.enabled=true</code> (Kubernetes 1.30+), new pods are denied there while running workloads keep running. A paid invoice lifts it.</td></tr>
+            <tr><td><code>enforce</code></td><td>Also label suspended namespaces <code>vbilling.vcluster.com/suspended=true</code>. With <code>enforcement.admissionPolicy.enabled=true</code> (Kubernetes 1.30+), new pods are denied there while running workloads keep running. A payment lifts it once nothing is owed.</td></tr>
             <tr><td colspan="2">The admission policy acts in the control plane cluster, so it holds clusters on shared or dedicated nodes. Clusters with their own nodes (Private Nodes, Auto Nodes, Standalone) run their pods only inside the cluster: with <code>enforcement.inCluster=true</code>, vBilling installs the same policy inside each of them through the cluster's own API (see <a href="private-nodes.html#enforcement">Billing-state enforcement inside the cluster</a>), or act on their billing state with your own automation.</td></tr>
           </tbody>
         </table>
       </div>
       <p>In <code>enforce</code> mode with <code>enforcement.gateway.litellm=true</code>, a suspended or paused tenant's LiteLLM teams are also blocked, which is how a tenant that only buys tokens is stopped. See <a href="usage-sources.html#gateway-enforcement">Stopping a suspended tenant at the gateway</a>.</p>
-      <p>Override a mapping with <code>enforcement.rules</code> (<code>ENFORCEMENT_RULES</code>), for example <code>invoice.payment_failed=suspended</code> to suspend on the first failed payment, or <code>billing.alert.triggered=suspended</code> to turn a Stripe usage alert into a hard cap. Operators can also set a state by hand:</p>
-      <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-H</span> <span class="string">"Authorization: Bearer $VBILLING_TOKEN"</span> <span class="flag">-s -X PUT</span> localhost:8080/api/v1/billing-states/acme-ai <span class="flag">-d</span> <span class="string">'{"state": "active", "reason": "paid by bank transfer"}'</span></code></div>
+      <p>Override a mapping with <code>enforcement.rules</code> (<code>ENFORCEMENT_RULES</code>), for example <code>invoice.payment_failed=suspended</code> to suspend on the first failed payment, or <code>billing.alert.triggered=suspended</code> to turn a Stripe usage alert into a hard cap, which a payment lifts once nothing is owed. Operators can also set a state by hand. Without <code>hold</code>, a <code>PUT</code> sets the <code>operator</code> hold, which no webhook touches; name the <code>billing</code> hold to clear what Stripe's webhooks raised, for a payment made outside Stripe:</p>
+      <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-H</span> <span class="string">"Authorization: Bearer $VBILLING_TOKEN"</span> <span class="flag">-s -X PUT</span> localhost:8080/api/v1/billing-states/acme-ai <span class="flag">-d</span> <span class="string">'{"state": "active", "hold": "billing", "reason": "paid by bank transfer"}'</span></code></div>
 
       <h2 id="offboarding">Offboarding</h2>
       <p>When a tenant has had no clusters and no usage for an hour, and its last usage is delivered, vBilling offboards it. The Stripe customer and its subscription stay, so final usage is still invoiced. With <code>stripe.cancelOnRemove=true</code>, the subscription is set to cancel at the end of the period.</p>
