@@ -358,6 +358,9 @@ type queryVars struct {
 	Namespace, VCluster, Instance, Project, Tenant, TenantCluster string
 	Matchers                                                      string
 	Window                                                        time.Duration
+	// synced are the other namespaces a cluster on shared nodes syncs
+	// objects to: Matchers selects them too.
+	synced []string
 }
 
 func varsFor(t Target, window time.Duration) queryVars {

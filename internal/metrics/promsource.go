@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -135,8 +136,10 @@ func (p *PromSource) specs() []promMetricSpec {
 //     - the vCluster Platform labels with PROMETHEUS_PRESET=vcluster-platform,
 //     - SOURCE_LABEL="<name>" for clusters with their own nodes, whose pods
 //     never appear in the control plane cluster,
-//     - namespace="<namespace>" for clusters on shared nodes.
-func (p *PromSource) scope(ctx context.Context, t Target, size time.Duration) (*prometheusClient, queryVars, string, error) {
+//     - namespace="<namespace>" for clusters on shared nodes, or
+//     namespace=~"<namespace>|<synced>|..." for one that syncs objects to
+//     other namespaces (synced, see readSynced).
+func (p *PromSource) scope(ctx context.Context, t Target, size time.Duration, synced []string) (*prometheusClient, queryVars, string, error) {
 	cl := t.Cluster
 	vars := varsFor(t, size)
 	esc := func(s string) string { return strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(s) }
@@ -168,11 +171,34 @@ func (p *PromSource) scope(ctx context.Context, t Target, size time.Duration) (*
 			vars.Matchers = fmt.Sprintf(`%s="%s"`, p.opts.SourceLabel, esc(name))
 			how = "own nodes, selected by " + p.opts.SourceLabel + " label"
 		default:
-			vars.Matchers = fmt.Sprintf(`namespace="%s"`, esc(cl.Namespace))
+			vars.Matchers, vars.synced = namespaceMatcher(cl.Namespace, synced), synced
 			how = "shared nodes, selected by namespace"
+			if len(synced) > 0 {
+				how = "shared nodes, selected by its namespace and the namespaces it syncs to"
+			}
 		}
 	}
 	return p.c.promDefault, vars, how, nil
+}
+
+// namespaceMatcher selects the series of a cluster on shared nodes: in its
+// namespace, and in the namespaces it syncs objects to.
+func namespaceMatcher(own string, synced []string) string {
+	esc := strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace
+	if len(synced) == 0 {
+		return fmt.Sprintf(`namespace="%s"`, esc(own))
+	}
+	return fmt.Sprintf(`namespace=~"%s"`, esc(namespaceRegexp(own, synced)))
+}
+
+// namespaceRegexp matches exactly the namespaces given.
+func namespaceRegexp(own string, synced []string) string {
+	alts := make([]string, 0, 1+len(synced))
+	alts = append(alts, regexp.QuoteMeta(own))
+	for _, ns := range synced {
+		alts = append(alts, regexp.QuoteMeta(ns))
+	}
+	return strings.Join(alts, "|")
 }
 
 var errNoPrometheus = errors.New("no Prometheus for this cluster")
@@ -229,6 +255,22 @@ func (p *PromSource) holdShared(t Target, sharers []string, windows []Window, ou
 		}
 	}
 }
+
+// holdUnscoped skips a cluster on shared nodes while the namespaces it
+// syncs objects to cannot be read: selected by its own namespace alone, its
+// usage there would go unbilled unseen. Like holdShared it is not a failed
+// read and never holds the windows back; its counters keep their last read
+// and catch up once the namespaces can be read (up to maxCounterGap back).
+func (p *PromSource) holdUnscoped(t Target, why error) {
+	id := t.Cluster.ExternalID()
+	err := fmt.Errorf("the namespaces this cluster syncs objects to cannot be determined, so its Prometheus usage is not billed until they can: %w", why)
+	for _, m := range p.specs() {
+		p.health.Fail(health.Name("prometheus", m.Code, id), "prometheus", id, err, syncedHint)
+	}
+}
+
+const syncedHint = "see the synced-namespaces source: vCluster labels the namespaces it syncs a cluster's objects into, and vBilling reads them with list on pods, " +
+	"persistentvolumeclaims and services and get on namespaces (the chart's ClusterRole)"
 
 // noteHistory reports counter series that became visible with a count from
 // before vBilling could see them, which was not billed.
@@ -330,10 +372,28 @@ func (p *PromSource) Collect(ctx context.Context, targets []Target, windows []Wi
 	}
 	size := windows[0].End.Sub(windows[0].Start)
 	sharing := p.namespaceSharers(targets)
+	// Clusters on shared nodes are selected by namespace, and so are the
+	// objects they sync to other namespaces: read which those are (the
+	// collection's own read, when it is fresh).
+	var synced *syncedView
+	for _, t := range targets {
+		if p.bareNamespace(t) {
+			v, err := p.c.syncedFor(ctx, withNamesakes(targets), windows[len(windows)-1].End)
+			if err != nil {
+				v = &syncedView{err: err}
+			}
+			synced = v
+			break
+		}
+	}
 	attempts, failures := 0, 0
 	for _, t := range targets {
 		id := t.Cluster.ExternalID()
-		client, vars, how, err := p.scope(ctx, t, size)
+		var away *elsewhere
+		if p.bareNamespace(t) {
+			away = synced.awayOf(t.Cluster)
+		}
+		client, vars, how, err := p.scope(ctx, t, size, away.syncedNamespaces())
 		if errors.Is(err, errNoPrometheus) {
 			continue
 		}
@@ -343,6 +403,10 @@ func (p *PromSource) Collect(ctx context.Context, targets []Target, windows []Wi
 			// windows back): the windows commit without this cluster's
 			// Prometheus usage, and its counters catch up once scoped.
 			p.holdShared(t, others, windows, out)
+			continue
+		}
+		if bare && synced.err != nil {
+			p.holdUnscoped(t, synced.err) // likewise, until they can be read
 			continue
 		}
 		base := p.c.baseFor(t)
@@ -372,6 +436,10 @@ func (p *PromSource) Collect(ctx context.Context, targets []Target, windows []Wi
 			case merr != nil:
 				failures++
 				p.health.Fail(name, "prometheus", id, merr, how)
+			case away.uncertainCount() > 0:
+				// Read and billed where the cluster's objects are known to be;
+				// not where nothing tells whose they are.
+				p.health.Fail(name, "prometheus", id, fmt.Errorf("read %d series (%s); %s", n, how, away.why(t.Cluster)), syncedHint)
 			case n == 0:
 				p.health.Empty(name, "prometheus", id, "no series for "+id+" ("+how+")", emptyHint(m.PromMetric, vars, p.opts.SourceLabel))
 			default:
@@ -812,6 +880,12 @@ func (p *PromSource) gpuUtil(ctx context.Context, client *prometheusClient, t Ta
 			utilQ, countQ = platformQueries.util, platformQueries.count
 		case vars.Matchers != "" && !strings.HasPrefix(vars.Matchers, "namespace="):
 			utilQ, countQ = scopedGPUUtilQuery, scopedGPUCountQuery
+		case len(vars.synced) > 0:
+			// Its namespace and those it syncs to, as DCGM's namespace label
+			// or Prometheus' renamed one.
+			re := strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(namespaceRegexp(vars.Namespace, vars.synced))
+			utilQ = dcgmUtilQuery(`namespace=~"`+re+`"`, `exported_namespace=~"`+re+`"`)
+			countQ = dcgmCountQuery(`namespace=~"`+re+`"`, `exported_namespace=~"`+re+`"`)
 		default:
 			utilQ, countQ = defaultGPUUtilQuery, defaultGPUCountQuery
 		}
