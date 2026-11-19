@@ -103,9 +103,13 @@ func (a *CardAmount) UnmarshalYAML(unmarshal func(any) error) error {
 	return nil
 }
 
-// zeroDecimal lists Stripe's currencies without minor units.
+// zeroDecimal lists Stripe's currencies without minor units. UGX and ISK
+// are not here although they have no fractions: Stripe's currencies page
+// ("Special cases", https://docs.stripe.com/currencies) says backward
+// compatibility requires them as two-decimal values ending in 00, so
+// 5 UGX is sent as 500.
 var zeroDecimal = map[string]bool{"bif": true, "clp": true, "djf": true, "gnf": true, "jpy": true, "kmf": true, "krw": true,
-	"mga": true, "pyg": true, "rwf": true, "ugx": true, "vnd": true, "vuv": true, "xaf": true, "xof": true, "xpf": true}
+	"mga": true, "pyg": true, "rwf": true, "vnd": true, "vuv": true, "xaf": true, "xof": true, "xpf": true}
 
 // threeDecimal lists Stripe's currencies with 1000 minor units per main
 // unit. Stripe's support article on the UAE says "We also support charges

@@ -27,6 +27,7 @@ import (
 	"github.com/vclusterlabs-experiments/vbilling/internal/destinations/metronome"
 	"github.com/vclusterlabs-experiments/vbilling/internal/destinations/stripe"
 	"github.com/vclusterlabs-experiments/vbilling/internal/discovery"
+	"github.com/vclusterlabs-experiments/vbilling/internal/diskspace"
 	"github.com/vclusterlabs-experiments/vbilling/internal/enforcement"
 	"github.com/vclusterlabs-experiments/vbilling/internal/gateway"
 	"github.com/vclusterlabs-experiments/vbilling/internal/health"
@@ -159,6 +160,8 @@ func main() {
 
 	tel := telemetry.Default
 	sources := health.New(tel)
+	// A full ledger volume stops every commit: report it long before.
+	go diskspace.Watch(ctx, map[string]string{"ledger-volume": cfg.DataDir, "archive-volume": cfg.ArchiveDir}, sources, tel)
 	tenants := pipeline.NewTenantRegistry()
 	// Events held until their billing platform prices them (PRICE_CHECK=hold).
 	// Always opened, so whatever an earlier run held is released.

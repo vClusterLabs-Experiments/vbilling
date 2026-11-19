@@ -246,8 +246,6 @@ var RemovedSettings = map[string]string{
 	"RECORDS_RETENTION":                  "fixed at 7 days",
 	"RECORDS_ALLOW_UNKEYED":              "removed: every record needs a request ID",
 	"RECORDS_ARCHIVE":                    "records are archived whenever ARCHIVE_DIR is on",
-	"RECORDS_PULL_LITELLM_CLIENT":        "removed",
-	"RECORDS_PULL_LITELLM_TENANT":        "removed: pulled rows bill to their LiteLLM team",
 	"RECORDS_PULL_LITELLM_INTERVAL":      "fixed at 5m",
 	"RECORDS_PULL_LITELLM_LOOKBACK":      "fixed at 1h",
 	"PAUSE_DRAIN_TIMEOUT":                "fixed at 2m",
@@ -265,8 +263,10 @@ var RemovedSettings = map[string]string{
 // renamedSettings map an old name to its replacement; the old value is used
 // when only the old name is set.
 var renamedSettings = map[string]string{
-	"RECORDS_PULL_LITELLM_URL": "LITELLM_URL",
-	"RECORDS_PULL_LITELLM_KEY": "LITELLM_API_KEY",
+	"RECORDS_PULL_LITELLM_URL":    "LITELLM_URL",
+	"RECORDS_PULL_LITELLM_KEY":    "LITELLM_API_KEY",
+	"RECORDS_PULL_LITELLM_CLIENT": "LITELLM_CLIENT",
+	"RECORDS_PULL_LITELLM_TENANT": "LITELLM_TENANT",
 }
 
 func Load() *Config {
@@ -344,7 +344,8 @@ func Load() *Config {
 		RecordsPullLiteLLMURL:      renamed("LITELLM_URL"),
 		RecordsPullFile:            os.Getenv("RECORDS_PULL_FILE"),
 		RecordsPullLiteLLMKey:      strings.TrimSpace(renamed("LITELLM_API_KEY")),
-		RecordsPullLiteLLMClient:   "litellm",
+		RecordsPullLiteLLMClient:   orDefault(renamed("LITELLM_CLIENT"), "litellm"),
+		RecordsPullLiteLLMTenant:   renamed("LITELLM_TENANT"),
 		RecordsPullLiteLLMInterval: litellmPullInterval,
 		RecordsPullLiteLLMLookback: litellmPullLookback,
 
@@ -402,10 +403,8 @@ func Load() *Config {
 	if c.MetronomeRateCard != "" && !c.MetronomeProvision {
 		warnings = append(warnings, "METRONOME_RATE_CARD only creates contracts with METRONOME_PROVISION=true; price checks read each customer's own contract")
 	}
-	if c.ArchiveDir == "" {
-		c.ArchiveDir = c.DataDir + "/archive"
-	} else if c.ArchiveDir == "off" {
-		c.ArchiveDir = ""
+	if c.ArchiveDir == "off" {
+		c.ArchiveDir = "" // v0.3.1 pre-releases documented "off"
 	}
 	c.RecordsArchive = c.ArchiveDir != ""
 	if c.IngestToken == "" {
@@ -417,6 +416,13 @@ func Load() *Config {
 	sortStrings(warnings)
 	c.Warnings = warnings
 	return c
+}
+
+func orDefault(v, fallback string) string {
+	if v == "" {
+		return fallback
+	}
+	return v
 }
 
 // renamed reads a setting, falling back to its old name.

@@ -473,6 +473,8 @@
             <tr><td><code>RECORDS_PULL_FILE</code></td><td>YAML list of gateway request logs to read back as records, for any gateway with a logs API: URL with a time range, headers (<code>${RECORDS_PULL_...}</code> variables only), rows path and paging. Pushed and pulled copies count once. Helm: <code>records.pull</code> and <code>records.pullEnv</code>. See <a href="usage-sources.html#gateway-pull">Pulling any gateway's request log</a>.</td><td class="td-default">(none)</td></tr>
             <tr><td><code>LITELLM_URL</code></td><td>Base URL of a LiteLLM proxy (v1.103.0 or later, with a database) whose spend logs vBilling reads back as records, to fill what the generic API logger's push lost. Pushed and pulled copies of a request count once. Enables the <code>litellm</code> format. See <a href="usage-sources.html#litellm-pull">Pulling LiteLLM's spend logs</a>.</td><td class="td-default">(none)</td></tr>
             <tr><td><code>LITELLM_API_KEY</code></td><td>A LiteLLM key that can read every team's spend logs: the master key or a proxy admin key. Required with <code>LITELLM_URL</code>.</td><td class="td-default">(none)</td></tr>
+            <tr><td><code>LITELLM_TENANT</code></td><td>Bill every pulled request to this tenant. Set it when LiteLLM's push uses an ingest token bound to one tenant, so pulled copies of pushed requests get the same IDs and count once.</td><td class="td-default">(none)</td></tr>
+            <tr><td><code>LITELLM_CLIENT</code></td><td>The client name the push sends (<code>X-VBilling-Client</code>), for the same reason.</td><td class="td-default">litellm</td></tr>
             <tr><td><code>CROSS_CHECKS</code></td><td>Compare two sources of the same usage per tenant and hour, <code>primary=secondary[:tolerance%],...</code>, for example <code>inference_output_tokens=vllm_output_tokens:2%</code>. Both metrics must be declared. Divergence above the tolerance shows in source health and <code>/metrics</code>.</td><td class="td-default">(none), tolerance 1%</td></tr>
           </tbody>
         </table>
@@ -775,20 +777,12 @@
               <td>Records are archived whenever ARCHIVE_DIR is on.</td>
             </tr>
             <tr>
-              <td><code>RECORDS_PULL_LITELLM_CLIENT</code></td>
-              <td>Removed.</td>
-            </tr>
-            <tr>
               <td><code>RECORDS_PULL_LITELLM_INTERVAL</code></td>
               <td>Fixed at 5m.</td>
             </tr>
             <tr>
               <td><code>RECORDS_PULL_LITELLM_LOOKBACK</code></td>
               <td>Fixed at 1h.</td>
-            </tr>
-            <tr>
-              <td><code>RECORDS_PULL_LITELLM_TENANT</code></td>
-              <td>Removed: pulled rows bill to their LiteLLM team.</td>
             </tr>
             <tr>
               <td><code>RECORDS_RETENTION</code></td>
@@ -847,8 +841,8 @@
               <td>The zone comes from each node&#x27;s topology.kubernetes.io/zone label.</td>
             </tr>
             <tr>
-              <td><code>RECORDS_PULL_LITELLM_URL</code>, <code>RECORDS_PULL_LITELLM_KEY</code></td>
-              <td>Renamed <code>LITELLM_URL</code> and <code>LITELLM_API_KEY</code>. The old names still work.</td>
+              <td><code>RECORDS_PULL_LITELLM_URL</code>, <code>_KEY</code>, <code>_TENANT</code>, <code>_CLIENT</code></td>
+              <td>Renamed <code>LITELLM_URL</code>, <code>LITELLM_API_KEY</code>, <code>LITELLM_TENANT</code> and <code>LITELLM_CLIENT</code>. The old names still work.</td>
             </tr>
           </tbody>
         </table>
@@ -924,9 +918,9 @@
               <td class="td-default">{}</td>
             </tr>
             <tr>
-              <td><code>records.pullLiteLLM.url / key / existingSecret</code></td>
-              <td>LITELLM_URL / LITELLM_API_KEY (chart Secret, or <code>existingSecret</code> key <code>litellm-key</code>), set only when <code>url</code> is</td>
-              <td class="td-default">"" / "" / ""</td>
+              <td><code>records.pullLiteLLM.url / key / existingSecret / tenant / client</code></td>
+              <td>LITELLM_URL / LITELLM_API_KEY (chart Secret, or <code>existingSecret</code> key <code>litellm-key</code>) / LITELLM_TENANT / LITELLM_CLIENT, set only when <code>url</code> is</td>
+              <td class="td-default">"" / "" / "" / "" / litellm</td>
             </tr>
             <tr>
               <td><code>crossChecks</code></td>

@@ -138,14 +138,26 @@ func TestRemovedAndRenamedSettings(t *testing.T) {
 	}
 }
 
-// The archive is on by default (inside DATA_DIR) and "off" turns it off.
-func TestArchiveDefault(t *testing.T) {
+// The archive is off unless ARCHIVE_DIR names its own volume: inside the
+// ledger volume it would grow until it stopped metering for everyone.
+func TestArchiveNeedsItsOwnVolume(t *testing.T) {
 	t.Setenv("DATA_DIR", "/data")
-	if c := Load(); c.ArchiveDir != "/data/archive" || !c.RecordsArchive {
-		t.Fatalf("default archive: %q %t", c.ArchiveDir, c.RecordsArchive)
-	}
-	t.Setenv("ARCHIVE_DIR", "off")
 	if c := Load(); c.ArchiveDir != "" || c.RecordsArchive {
-		t.Fatalf("ARCHIVE_DIR=off: %q %t", c.ArchiveDir, c.RecordsArchive)
+		t.Fatalf("archive on by default: %q %t", c.ArchiveDir, c.RecordsArchive)
+	}
+	t.Setenv("ARCHIVE_DIR", "/archive")
+	if c := Load(); c.ArchiveDir != "/archive" || !c.RecordsArchive {
+		t.Fatalf("ARCHIVE_DIR=/archive: %q %t", c.ArchiveDir, c.RecordsArchive)
+	}
+}
+
+// LiteLLM's pull can be pinned to a tenant and given the push's client name,
+// so pulled copies of pushed requests get the same IDs.
+func TestLiteLLMPinSettings(t *testing.T) {
+	t.Setenv("RECORDS_PULL_LITELLM_TENANT", "acme")
+	t.Setenv("LITELLM_CLIENT", "gw-1")
+	c := Load()
+	if c.RecordsPullLiteLLMTenant != "acme" || c.RecordsPullLiteLLMClient != "gw-1" {
+		t.Fatalf("pin settings: %q %q", c.RecordsPullLiteLLMTenant, c.RecordsPullLiteLLMClient)
 	}
 }

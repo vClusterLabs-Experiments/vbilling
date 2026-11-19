@@ -118,6 +118,12 @@ spec:
             {{- if .url }}
             - name: LITELLM_URL
               value: {{ .url | quote }}
+            - name: LITELLM_CLIENT
+              value: {{ .client | default "litellm" | quote }}
+            {{- with .tenant }}
+            - name: LITELLM_TENANT
+              value: {{ . | quote }}
+            {{- end }}
             {{- include "vbilling.secretEnv" (dict "env" "LITELLM_API_KEY" "existing" .existingSecret "key" "litellm-key" "inline" .key "chartKey" "litellm-key" "root" $) | nindent 12 }}
             {{- end }}
             {{- end }}

@@ -241,6 +241,11 @@ records:
     url: "" # LiteLLM proxy base URL, e.g. http://litellm.litellm.svc:4000
     key: "" # LiteLLM master or proxy admin key, stored in the chart's Secret
     existingSecret: "" # or a Secret with the key under litellm-key
+    # When the push uses an ingest token bound to one tenant, or names its own
+    # client (X-VBilling-Client), pin the pull the same way, so pulled copies
+    # of pushed requests count once.
+    tenant: ""
+    client: litellm
   # Read any other gateway's request log back as records (RECORDS_PULL_FILE),
   # like pullLiteLLM: rows go through a format below and count once with
   # the pushed copies. Tokens come from Secrets through pullEnv, as
@@ -326,7 +331,8 @@ persistence:
   # Long-term archive for invoice disputes (ARCHIVE_DIR). Before compaction
   # deletes a ledger segment older than 7 days, vBilling gzips it and records
   # it in archive.jsonl (about 86 bytes per usage event). Without this
-  # volume the archive lives in the data volume, under archive/.
+  # volume there is no archive: an archive inside the ledger volume would grow
+  # until it stopped metering.
   # vBilling never deletes from it: keep it as long as invoices can be disputed,
   # 13 months or more. `vbilling ledger verify` proves it unaltered and
   # `vbilling ledger export` reads usage back (docs: Retention and disputes).

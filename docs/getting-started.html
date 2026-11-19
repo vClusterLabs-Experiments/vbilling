@@ -411,7 +411,7 @@ API listening on :8080
         <li><strong>Metronome.</strong> vBilling no longer creates billable metrics, customers or contracts unless <code>metronome.provision=true</code> (<code>metronome.stripeLink=true</code> still implies it). A customer pinned with <code>metronome-customer-id</code> needs the tenant ID as an ingest alias.</li>
         <li><strong>vCluster Platform mode.</strong> <code>vbilling.vcluster.com/</code> settings on a cluster's StatefulSet, namespace or VirtualClusterInstance (<code>prometheus-url</code> and the others) are ignored: put them on the Tenant or Project. Clusters are reached only through the Platform proxy.</li>
         <li><strong>One replica.</strong> The chart refuses <code>replicaCount</code> above 1. A second instance waits on a Lease instead of metering.</li>
-        <li><strong>Removed settings.</strong> 37 settings are gone; a value still set only logs a warning. LiteLLM's URL and key are now <code>LITELLM_URL</code> and <code>LITELLM_API_KEY</code> (the old names still work). See <a href="configuration.html#removed">Removed in v0.3.1</a>.</li>
+        <li><strong>Removed settings.</strong> 35 settings are gone; a value still set only logs a warning. LiteLLM's settings are now <code>LITELLM_URL</code>, <code>LITELLM_API_KEY</code>, <code>LITELLM_TENANT</code> and <code>LITELLM_CLIENT</code> (the old names still work). See <a href="configuration.html#removed">Removed in v0.3.1</a>.</li>
       </ul>
       <p><strong>Behavior that changed:</strong></p>
       <ul>
@@ -420,7 +420,7 @@ API listening on :8080
         <li><strong>Suspension inside clusters.</strong> Only <code>kube-system</code> is exempt; the <code>enforcement-exempt</code> namespace label no longer works.</li>
         <li><strong>Ingest.</strong> SKU and dimension values with markup or control characters are refused. Per-token rate limits apply, and a tenant's 101st distinct SKU in a UTC day is billed as <code>sku-limit-exceeded</code>. LiteLLM requests bill to the key's team only; keys without a team are refused.</li>
         <li><strong>Counters.</strong> A Prometheus series that appears with history (for example, a ServiceMonitor added for a running engine) is billed from its first sample, unless its start time shows it is new.</li>
-        <li><strong>Ledger archive.</strong> It is on by default, in <code>DATA_DIR/archive</code>. Watch the volume's size.</li>
+        <li><strong>Volume health.</strong> The ledger volume, and the archive volume when set, report in source health and fail at 85% full: a full ledger volume stops every commit.</li>
         <li><strong>Node-hour events.</strong> They carry <code>vcpus</code>, <code>memory_gib</code>, <code>gpu_count</code> and <code>public_ip</code>, so their IDs differ from v0.3.0's. Committed windows are never sent again, so nothing is billed twice.</li>
       </ul>
 

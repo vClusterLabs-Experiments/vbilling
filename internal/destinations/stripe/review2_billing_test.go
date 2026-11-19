@@ -46,3 +46,20 @@ func TestReview2PriceCardKeepsUnquotedAmounts(t *testing.T) {
 		}
 	}
 }
+
+// Stripe sends UGX and ISK as two-decimal values ending in 00 (its
+// currencies page, "Special cases"), so 5 UGX per unit is 500.
+func TestPriceCardTwoDecimalForUGXAndISK(t *testing.T) {
+	for _, cur := range []string{"ugx", "isk"} {
+		got, err := unitAmountDecimal("5", 1, cur)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "500" {
+			t.Errorf("%s: 5 per unit created as unit_amount_decimal %s, want 500", cur, got)
+		}
+	}
+	if got, _ := unitAmountDecimal("5", 1, "jpy"); got != "5" {
+		t.Errorf("jpy is zero-decimal: got %s", got)
+	}
+}

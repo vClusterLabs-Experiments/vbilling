@@ -288,7 +288,7 @@ On nodes, `vbilling.vcluster.com/capacity-type` (`on-demand`, `spot`, `preemptib
 
 Run one replica. A restart loses nothing: the ledger keeps every committed window and missed windows are backfilled. A second replica would see only part of the gateway records, so the chart refuses `replicaCount` above 1, and a second vBilling instance waits on a Lease instead of metering.
 
-**Retention and disputes.** Consumed segments stay on the ledger volume for 7 days. Invoices get disputed months later, so vBilling archives by default: before compaction deletes a segment, it gzips it into `ARCHIVE_DIR` (`DATA_DIR/archive` unless you mount a separate volume or a bucket with Helm `persistence.archive.enabled`) (about 86 bytes per event, 9.5 times smaller than the ledger) and records it in `archive.jsonl`. `vbilling ledger verify` checks offline that the archive and the ledger form one intact hash chain, and `vbilling ledger export --from --to --tenant` writes the events behind an invoice as NDJSON. `GET /api/v1/ledger/verify?archive=true` runs the same check in place. See [Retention and disputes](https://vclusterlabs-experiments.github.io/vbilling/configuration.html#retention-and-disputes).
+**Retention and disputes.** Consumed segments stay on the ledger volume for 7 days. Invoices get disputed months later, so set `ARCHIVE_DIR` on its own volume (Helm `persistence.archive.enabled`, typically a bucket mounted through a CSI driver): before compaction deletes a segment, vBilling gzips it into the archive (about 86 bytes per event, 9.5 times smaller than the ledger) and records it in `archive.jsonl`. `vbilling ledger verify` checks offline that the archive and the ledger form one intact hash chain, and `vbilling ledger export --from --to --tenant` writes the events behind an invoice as NDJSON. `GET /api/v1/ledger/verify?archive=true` runs the same check in place. See [Retention and disputes](https://vclusterlabs-experiments.github.io/vbilling/configuration.html#retention-and-disputes).
 
 ## Regions and data sovereignty
 
@@ -466,7 +466,7 @@ Most installs set about ten settings: `ADAPTERS`, that billing platform's creden
 | `REGION` (`region`), `CLUSTER_NAME` (`clusterName`) | `default`, `control-plane` | Stamped on every event. Run one vBilling per region |
 | `TENANT_SOURCE` (`tenantSource`) | `cluster` | `cluster`, `project`, or `platform` (vCluster Platform Tenants and Projects; needs `PLATFORM_URL`, `PLATFORM_ACCESS_KEY`, optional `PLATFORM_CA_FILE`, `PLATFORM_CLUSTER`) |
 | `API_TOKEN`, `INGEST_TOKEN`, `INGEST_TOKENS` (`api.*`) | | Admin token, shared ingest token, tenant-bound ingest tokens `token=tenant,...` |
-| `DATA_DIR`, `ARCHIVE_DIR` (`persistence.*`) | `/var/lib/vbilling`, `DATA_DIR/archive` | Ledger and adapter state. Segments older than 7 days are gzipped into the archive (`off` disables it). Check with `vbilling ledger verify` |
+| `DATA_DIR`, `ARCHIVE_DIR` (`persistence.*`) | `/var/lib/vbilling`, off | Ledger and adapter state; the archive on its own volume or bucket, where segments older than 7 days are gzipped for disputes. Check with `vbilling ledger verify`. `ledger-volume` and `archive-volume` in source health fail at 85% full |
 | `COLLECTION_DELAY` (`billing.collectionDelay`) | `5s` | How long after a window ends it is metered; `75s` on spot or preemptible GPUs |
 | `CPU_MEMORY_BASIS`, `METER_CONTROL_PLANE`, `METER_BY_NAMESPACE` (`metering.*`) | `requests`, `false`, `false` | `requests` (exact), or `usage` or `max` (metrics-server readings: estimates) |
 | `GPU_RESOURCES`, `SKU_LABEL`, `CAPACITY_TYPE_LABEL`, `UNHEALTHY_NODE_TAINTS`, `VCLUSTER_NODE_LABEL` (`metering.*`) | | Which resources are GPUs, which node labels carry the SKU and capacity type, which taints mark a node down |
@@ -475,7 +475,7 @@ Most installs set about ten settings: `ADAPTERS`, that billing platform's creden
 | `EGRESS_QUERY`, `GPU_UTIL_QUERY`, `GPU_COUNT_QUERY` (`prometheus.*`) | | Replace the built-in egress counter (an estimate then) or the DCGM utilization queries; `none` turns one off |
 | `CUSTOM_METRICS_FILE` (`metering.customMetrics`) | | Metrics you push: `code`, `name`, `unit`, `description`, `groupKeys`, `billable` |
 | `RECORDS_LITELLM`, `RECORDS_MAPPINGS_FILE`, `RECORDS_PULL_FILE`, `RECORDS_UNKNOWN_TENANTS` (`records.*`) | `false`, , , `accept` | Per-request usage from AI gateways: the built-in LiteLLM format, other formats, gateway logs to read back |
-| `LITELLM_URL`, `LITELLM_API_KEY` (`records.pullLiteLLM.*`) | | Read LiteLLM's spend logs back, and block teams with `ENFORCEMENT_LITELLM` |
+| `LITELLM_URL`, `LITELLM_API_KEY`, `LITELLM_TENANT`, `LITELLM_CLIENT` (`records.pullLiteLLM.*`) | , , , `litellm` | Read LiteLLM's spend logs back, and block teams with `ENFORCEMENT_LITELLM`. When the push uses a token bound to one tenant, or its own client name, pin the pull the same way so pulled copies count once |
 | `CROSS_CHECKS` (`crossChecks`) | | `primary=secondary[:tolerance%],...` |
 | `DEFAULT_PLAN_CODE`, `PLAN_BY_CLASS`, `BILLING_CURRENCY` (`billing.*`) | `vcluster-standard`, , `USD` | |
 | `PRICE_CHECK` (`billing.priceCheck.mode`) | `warn` | `warn`, `hold` (hold unpriced usage, released unpriced after 28 days), or `off` |
@@ -487,7 +487,7 @@ Most installs set about ten settings: `ADAPTERS`, that billing platform's creden
 | `WEBHOOK_URL`, `WEBHOOK_SECRET`, `WEBHOOK_HEADERS` (`webhook.*`) | | |
 | `WATCH_NAMESPACES`, `LISTEN_ADDR` | , `:8080` | |
 
-v0.3.1 removed 37 settings that tuned internals with one right value (window size, lookbacks, retention, timeouts) or opened ways to get billing wrong. A removed setting that is still set only logs a warning. See [Removed in v0.3.1](https://vclusterlabs-experiments.github.io/vbilling/configuration.html#removed).
+v0.3.1 removed 35 settings that tuned internals with one right value (window size, lookbacks, retention, timeouts) or opened ways to get billing wrong. A removed setting that is still set only logs a warning. See [Removed in v0.3.1](https://vclusterlabs-experiments.github.io/vbilling/configuration.html#removed).
 
 ## Upgrading to v0.3.1
 
@@ -499,7 +499,7 @@ v0.3.1 closes the issues a second independent review found in v0.3.0: tenants ca
 - **Metronome.** vBilling no longer creates billable metrics, customers or contracts unless `metronome.provision=true` (`metronome.stripeLink=true` still implies it). A customer pinned with `metronome-customer-id` needs the tenant ID as an ingest alias.
 - **vCluster Platform mode.** `vbilling.vcluster.com/` settings on a cluster's StatefulSet, namespace or VirtualClusterInstance (`prometheus-url` and the others) are ignored: put them on the Tenant or Project. Clusters are reached only through the Platform proxy.
 - **One replica.** The chart refuses `replicaCount` above 1. A second instance waits on a Lease instead of metering.
-- **Removed settings.** 37 settings are gone; a value still set only logs a warning. LiteLLM's URL and key are now `LITELLM_URL` and `LITELLM_API_KEY` (the old names still work). See [Removed in v0.3.1](https://vclusterlabs-experiments.github.io/vbilling/configuration.html#removed).
+- **Removed settings.** 35 settings are gone; a value still set only logs a warning. LiteLLM's settings are now `LITELLM_URL`, `LITELLM_API_KEY`, `LITELLM_TENANT` and `LITELLM_CLIENT` (the old names still work). See [Removed in v0.3.1](https://vclusterlabs-experiments.github.io/vbilling/configuration.html#removed).
 
 **Behavior that changed:**
 
@@ -508,7 +508,7 @@ v0.3.1 closes the issues a second independent review found in v0.3.0: tenants ca
 - **Suspension inside clusters.** Only `kube-system` is exempt; the `enforcement-exempt` namespace label no longer works.
 - **Ingest.** SKU and dimension values with markup or control characters are refused. Per-token rate limits apply, and a tenant's 101st distinct SKU in a UTC day is billed as `sku-limit-exceeded`. LiteLLM requests bill to the key's team only; keys without a team are refused.
 - **Counters.** A Prometheus series that appears with history (for example, a ServiceMonitor added for a running engine) is billed from its first sample, unless its start time shows it is new.
-- **Ledger archive.** It is on by default, in `DATA_DIR/archive`. Watch the volume's size.
+- **Volume health.** The ledger volume, and the archive volume when set, report in source health and fail at 85% full: a full ledger volume stops every commit.
 - **Node-hour events.** They carry `vcpus`, `memory_gib`, `gpu_count` and `public_ip`, so their IDs differ from v0.3.0's. Committed windows are never sent again, so nothing is billed twice.
 
 ## Upgrading from v0.2
