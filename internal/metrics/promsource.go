@@ -438,15 +438,15 @@ func (p *PromSource) counter(ctx context.Context, client *prometheusClient, m Pr
 	// namespace again because the other clusters left it. What appeared
 	// there meanwhile may be theirs, so none of it counts from before now.
 	unsharedBare := false
-	if since, held := p.store.sharedSince(key); held {
-		out[0].unshared = append(out[0].unshared, key)
+	sharedFrom, wasShared := p.store.sharedSince(key)
+	if wasShared {
 		switch {
 		case !ownScope:
 			unsharedBare = true
 		case !observedBefore:
 			// Scoped by an operator since: its usage while the namespace was
 			// shared catches up, as after a partial outage.
-			prevObserved, observedBefore = since, true
+			prevObserved, observedBefore = sharedFrom, true
 		}
 	}
 	from := first.Start.Add(-p.opts.Lookback)
@@ -586,6 +586,11 @@ func (p *PromSource) counter(ctx context.Context, client *prometheusClient, m Pr
 	}
 	for i, w := range windows {
 		out[i].seen[key] = w.End
+	}
+	if wasShared {
+		// Read: the shared period is over (only now, so a failed read keeps
+		// the point to catch up from).
+		out[0].unshared = append(out[0].unshared, key)
 	}
 	return len(series), historic, nil
 }

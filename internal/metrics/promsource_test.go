@@ -552,6 +552,50 @@ func TestParsePromMetricsValidation(t *testing.T) {
 	}
 }
 
+// A cluster scoped by an operator after sharing its namespace catches up on
+// the shared period even when its first scoped read fails while other
+// reads succeed: the point to catch up from is kept until a read succeeds.
+func TestSharedNamespaceCatchUpSurvivesAFailedRead(t *testing.T) {
+	main := &fakeProm{series: []fakeSeries{{name: "vllm:generation_tokens_total",
+		labels:  map[string]string{"namespace": "shared", "pod": "engine-x-default-x-a", "model_name": "llama"},
+		samples: counterSamples(ws.Add(-time.Minute), ws.Add(4*time.Minute), 10, time.Time{})}}}
+	mainSrv := httptest.NewServer(main.handler(t))
+	defer mainSrv.Close()
+	other := &fakeProm{} // a third cluster's own Prometheus, always up
+	otherSrv := httptest.NewServer(other.handler(t))
+	defer otherSrv.Close()
+	_, p, _ := promSourceFor(t, mainSrv.URL, "", nil, tokens)
+	a := Target{Cluster: discovery.TenantCluster{Name: "a", Namespace: "shared"}, Tenant: "tenant-a"}
+	b := Target{Cluster: discovery.TenantCluster{Name: "b", Namespace: "shared"}, Tenant: "tenant-b"}
+	c := Target{Cluster: discovery.TenantCluster{Name: "c", Namespace: "solo",
+		Annotations: map[string]string{discovery.AnnotationPrefix + "prometheus-url": otherSrv.URL}}, Tenant: "tenant-c"}
+	var billed float64
+	run := func(w Window) {
+		res := collectOK(t, p, []Target{a, b, c}, []Window{w})
+		if err := p.Commit(res, func(Window, []usage.Event) error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range res[0].Events {
+			billed += e.Quantity
+		}
+	}
+	wins := windowsFrom(ws, 4)
+	run(wins[0]) // shared: not read
+	run(wins[1])
+	a.Cluster.Annotations = map[string]string{discovery.AnnotationPrefix + "prometheus-matchers": `pod="engine-x-default-x-a"`}
+	main.mu.Lock()
+	main.down = true // a's first scoped read fails; c's succeeds
+	main.mu.Unlock()
+	run(wins[2])
+	main.mu.Lock()
+	main.down = false
+	main.mu.Unlock()
+	run(wins[3])
+	if billed != 160 {
+		t.Fatalf("billed %v, want 160: cluster a's four windows of 4 scrapes of 10, once its read succeeds", billed)
+	}
+}
+
 // A cluster whose namespace stops being shared because the other cluster
 // left is selected by the namespace again. Its own counters catch up on
 // the shared period, but a series that appeared meanwhile may have been the
