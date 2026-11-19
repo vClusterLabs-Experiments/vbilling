@@ -12,6 +12,11 @@ import (
 )
 
 // Store is safe for concurrent use. A Store with an empty path is memory-only.
+//
+// Every change is written to disk before it is visible: the whole map goes
+// to a temporary file, which is fsynced and renamed over the store, and the
+// directory is fsynced, so a change that returned nil survives a crash and a
+// change that failed leaves the store as it was, in memory and on disk.
 type Store struct {
 	path string
 	mu   sync.Mutex
@@ -52,21 +57,35 @@ func (s *Store) Get(k string) (string, bool) {
 func (s *Store) Set(k, v string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if old, ok := s.data[k]; ok && old == v {
+	old, had := s.data[k]
+	if had && old == v {
 		return nil
 	}
 	s.data[k] = v
-	return s.flushLocked()
+	if err := s.flushLocked(); err != nil {
+		if had {
+			s.data[k] = old
+		} else {
+			delete(s.data, k)
+		}
+		return err
+	}
+	return nil
 }
 
 func (s *Store) Delete(k string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.data[k]; !ok {
+	old, ok := s.data[k]
+	if !ok {
 		return nil
 	}
 	delete(s.data, k)
-	return s.flushLocked()
+	if err := s.flushLocked(); err != nil {
+		s.data[k] = old
+		return err
+	}
+	return nil
 }
 
 // WithPrefix returns all entries whose key starts with prefix, prefix trimmed.
@@ -91,8 +110,31 @@ func (s *Store) flushLocked() error {
 		return err
 	}
 	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o640); err != nil {
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o640)
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, s.path)
+	if _, err := f.Write(b); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, s.path); err != nil {
+		return err
+	}
+	// The rename is durable once the directory entry is.
+	if d, err := os.Open(filepath.Dir(s.path)); err == nil {
+		err = d.Sync()
+		d.Close()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
