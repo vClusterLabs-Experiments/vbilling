@@ -203,10 +203,10 @@ Stripe acquired Metronome in January 2026. Both paths are supported here: Billin
 
 ## Quick start
 
-Images for `linux/amd64` and `linux/arm64` are published to `ghcr.io/vclusterlabs-experiments/vbilling`, the chart's default. Install from a release tag: `main` can be ahead of the published image. Each [release](https://github.com/vClusterLabs-Experiments/vbilling/releases) also has the packaged chart attached (`helm upgrade --install vbilling https://github.com/vClusterLabs-Experiments/vbilling/releases/download/v0.3.0/vbilling-0.3.0.tgz ...`). Keep billing keys in Secrets, never in `--set` flags or values files:
+Images for `linux/amd64` and `linux/arm64` are published to `ghcr.io/vclusterlabs-experiments/vbilling`, the chart's default. Install from a release tag: `main` can be ahead of the published image. Each [release](https://github.com/vClusterLabs-Experiments/vbilling/releases) also has the packaged chart attached (`helm upgrade --install vbilling https://github.com/vClusterLabs-Experiments/vbilling/releases/download/v0.3.1/vbilling-0.3.1.tgz ...`). Keep billing keys in Secrets, never in `--set` flags or values files:
 
 ```bash
-git clone --branch v0.3.0 https://github.com/vClusterLabs-Experiments/vbilling.git && cd vbilling
+git clone --branch v0.3.1 https://github.com/vClusterLabs-Experiments/vbilling.git && cd vbilling
 kubectl create namespace vbilling-system
 ```
 
@@ -485,7 +485,7 @@ v0.3.1 removed 37 settings that tuned internals with one right value (window siz
 
 ## Upgrading from v0.2
 
-Run `helm upgrade` with the v0.3.0 chart and keep the PVC. A ledger written by v0.2 opens, verifies and keeps its destination cursors and ingest dedupe, so nothing is billed twice or skipped. The chart adds read access to node Leases, and in `enforce` mode, delete access to pods.
+Run `helm upgrade` with the v0.3.1 chart and keep the PVC. A ledger written by v0.2 opens, verifies and keeps its destination cursors and ingest dedupe, so nothing is billed twice or skipped. The chart adds read access to node Leases, and in `enforce` mode, delete access to pods.
 
 - **CPU and memory now bill requests.** `CPU_MEMORY_BASIS` (`metering.cpuMemoryBasis`) defaults to `requests`, which is exact. v0.2 defaulted to `usage`, a metrics-server reading per window. Set `metering.cpuMemoryBasis=usage` to keep v0.2 quantities. Pods that request nothing bill no CPU or memory under `requests`; `vbilling_pods_without_requests` counts them.
 - **Egress is a counter.** Without `prometheus.egressQuery`, egress is read from `container_network_transmit_bytes_total` as an exact counter, not with `increase()` at the window end. Expect small differences from v0.2's estimate. A custom `egressQuery` stays an estimate.

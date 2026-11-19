@@ -5,7 +5,7 @@ replicaCount: 1
 
 image:
   repository: ghcr.io/vclusterlabs-experiments/vbilling
-  tag: v0.3.0
+  tag: v0.3.1
   pullPolicy: IfNotPresent
 
 # Destinations usage fans out to. Built-in: stripe, metronome, lago, webhook, noop.

@@ -995,7 +995,7 @@
           <a href="getting-started.html" class="btn-secondary">Read the docs</a>
           <a href="https://github.com/vClusterLabs-Experiments/vbilling" class="btn-secondary">View on GitHub</a>
         </div>
-        <p class="hero-new"><strong>New in v0.3:</strong> per-request usage from AI gateways, exact Prometheus counters, source health, and enforcement inside clusters with their own nodes. <a href="usage-sources.html">How vBilling keeps usage exact &#8594;</a> <a href="https://github.com/vClusterLabs-Experiments/vbilling/releases/tag/v0.3.0">Release notes &#8594;</a></p>
+        <p class="hero-new"><strong>New in v0.3:</strong> per-request usage from AI gateways, exact Prometheus counters, source health, and enforcement inside clusters with their own nodes. <a href="usage-sources.html">How vBilling keeps usage exact &#8594;</a> <a href="https://github.com/vClusterLabs-Experiments/vbilling/releases/tag/v0.3.1">Release notes &#8594;</a></p>
       </div>
 
       <div class="hero-visual">
@@ -1340,7 +1340,7 @@
               <div class="code-block">
                 <button class="copy-btn" onclick="copyCode(this)">Copy</button>
                 <pre><code><span class="comment"># Clone vBilling and start Lago</span>
-git clone --branch v0.3.0 https://github.com/vClusterLabs-Experiments/vbilling.git
+git clone --branch v0.3.1 https://github.com/vClusterLabs-Experiments/vbilling.git
 cd vbilling/deploy/lago
 openssl genrsa 2048 > lago_rsa.key
 echo <span class="string">"LAGO_RSA_PRIVATE_KEY=$(base64 -i lago_rsa.key | tr -d '\n')"</span> > .env
