@@ -124,7 +124,7 @@ python3 "$WORK/receiver.py" & PIDS+=($!)
 (cd "$ROOT" && CGO_ENABLED=0 go build -o "$WORK/vbilling" ./cmd/vbilling)
 ADAPTERS=stripe,webhook STRIPE_API_KEY=sk_test_123 STRIPE_API_BASE=http://localhost:12111 STRIPE_WEBHOOK_SECRET=$STRIPE_WHSEC \
 WEBHOOK_URL=http://127.0.0.1:19999/events WEBHOOK_SECRET=$WEBHOOK_SECRET \
-REGION=ap-southeast-2 CLUSTER_NAME=syd-cp-1 COLLECTION_INTERVAL=20s RECONCILE_INTERVAL=10s \
+REGION=ap-southeast-2 CLUSTER_NAME=syd-cp-1 \
 DATA_DIR=$WORK/data LISTEN_ADDR=$API API_TOKEN=$TOKEN CPU_MEMORY_BASIS=requests ENFORCEMENT_MODE=enforce \
   "$WORK/vbilling" > "$WORK/vbilling.log" 2>&1 & PIDS+=($!)
 # Wait until a few windows have closed after every workload was running, so

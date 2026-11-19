@@ -255,7 +255,6 @@ var RemovedSettings = map[string]string{
 	"PRICE_CHECK_LOOKBACK":               "fixed at 24h",
 	"PRICE_CHECK_MAX_HOLD":               "fixed at 28 days",
 	"STRIPE_API_VERSION":                 "pinned by vBilling",
-	"STRIPE_SPLIT_METERS_BY":             "meters are split by SKU",
 	"STRIPE_MAX_RPS":                     "vBilling paces Stripe requests itself",
 	"STRIPE_CANCEL_ON_REMOVE":            "removed: end subscriptions in Stripe",
 	"METRONOME_STRIPE_LINK":              "METRONOME_PROVISION=true links a Stripe customer when STRIPE_API_KEY is set",
@@ -378,7 +377,7 @@ func Load() *Config {
 		StripeAPIBase:       envOr("STRIPE_API_BASE", "https://api.stripe.com"), // tests: stripe-mock
 		StripeAPIVersion:    stripeAPIVersion,
 		StripeWebhookSecret: secretEnv("STRIPE_WEBHOOK_SECRET"),
-		StripeSplitMetersBy: []string{"sku"},
+		StripeSplitMetersBy: envList("STRIPE_SPLIT_METERS_BY", []string{"sku"}),
 		StripeAutoSubscribe: envBool("STRIPE_AUTO_SUBSCRIBE", false),
 		StripePriceCard:     os.Getenv("STRIPE_PRICE_CARD"),
 

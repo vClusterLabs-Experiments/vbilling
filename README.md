@@ -190,7 +190,7 @@ Select one or more with `ADAPTERS` (Helm: `adapters`). Each has a full guide on 
 
 | Adapter | What vBilling does | Pricing lives in |
 |---|---|---|
-| `stripe` | Creates [Billing Meters](https://docs.stripe.com/billing/subscriptions/usage-based) and posts meter events. Meters are split per SKU because Stripe meters cannot price on dimensions. Customers are created idempotently and never duplicated. Optionally subscribes tenants to prices tagged `metadata[vbilling_plan]`. Reconciles via meter event summaries. | Stripe prices on each meter |
+| `stripe` | Creates [Billing Meters](https://docs.stripe.com/billing/subscriptions/usage-based) and posts meter events. Meters are split per SKU (`STRIPE_SPLIT_METERS_BY`) because Stripe meters cannot price on dimensions. Customers are created idempotently and never duplicated. Optionally subscribes tenants to prices tagged `metadata[vbilling_plan]`. Reconciles via meter event summaries. | Stripe prices on each meter |
 | `metronome` | Ingests usage keyed on the tenant ID as the customer's ingest alias, and reads Metronome to check that every SKU has a rate on the customer's contract. Your customers, billable metrics and contracts stay yours: usage sent before a customer has the alias is attached when it does. Reconciles via `/v1/usage`. `vbilling metronome billable-metrics` prints the billable metrics to add to your catalog. | Metronome rate cards (pricing group keys) |
 | `metronome` + `METRONOME_PROVISION=true` | Also creates the billable metrics and each tenant's customer, a contract on `METRONOME_RATE_CARD`, and with `STRIPE_API_KEY` a linked Stripe customer, so **Metronome rates and Stripe collects payment, invoices and tax**. | Metronome |
 | `lago` | Customers, subscriptions and the default plan, plus events whose dimensions are properties for Lago charge filters. Adds a charge for metrics declared later, and a charge filter for each new SKU, without touching prices set in Lago. An optional price card (`LAGO_PRICE_CARD`) sets the amounts of what it creates. | Lago plans and charges |
@@ -475,13 +475,13 @@ Most installs set about ten settings: `ADAPTERS`, that billing platform's creden
 | `PRICE_CHECK` (`billing.priceCheck.mode`) | `warn` | `warn`, `hold` (hold unpriced usage, released unpriced after 28 days), or `off` |
 | `ENFORCEMENT_MODE`, `ENFORCEMENT_RULES`, `ENFORCEMENT_IN_CLUSTER`, `ENFORCEMENT_LITELLM` (`enforcement.*`) | `observe` | |
 | `PAUSE_KEEP_BILLING`, `PAUSE_KEEP_NAMESPACES` (`enforcement.pause.*`) | `storage,load_balancers` | What keeps billing while paused; namespaces whose infrastructure DaemonSets keep running |
-| `STRIPE_API_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_AUTO_SUBSCRIBE`, `STRIPE_PRICE_CARD` (`stripe.*`) | | |
+| `STRIPE_API_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_SPLIT_METERS_BY`, `STRIPE_AUTO_SUBSCRIBE`, `STRIPE_PRICE_CARD` (`stripe.*`) | , , `sku` | Meters are split by these event fields; add `capacity_type` to price spot differently |
 | `METRONOME_API_TOKEN`, `METRONOME_WEBHOOK_SECRET`, `METRONOME_PROVISION`, `METRONOME_RATE_CARD` (`metronome.*`) | | `METRONOME_PROVISION=false` (default): vBilling only sends usage and reads; your customers, metrics and contracts stay yours |
 | `LAGO_API_URL`, `LAGO_API_KEY`, `LAGO_PRICE_CARD`, `LAGO_MANAGED_PLANS` (`lago.*`) | | |
 | `WEBHOOK_URL`, `WEBHOOK_SECRET`, `WEBHOOK_HEADERS` (`webhook.*`) | | |
 | `WATCH_NAMESPACES`, `LISTEN_ADDR` | , `:8080` | |
 
-v0.3.1 removed 38 settings that tuned internals with one right value (window size, lookbacks, retention, timeouts) or opened ways to get billing wrong. A removed setting that is still set only logs a warning. See [Removed in v0.3.1](https://vclusterlabs-experiments.github.io/vbilling/configuration.html#removed).
+v0.3.1 removed 37 settings that tuned internals with one right value (window size, lookbacks, retention, timeouts) or opened ways to get billing wrong. A removed setting that is still set only logs a warning. See [Removed in v0.3.1](https://vclusterlabs-experiments.github.io/vbilling/configuration.html#removed).
 
 ## Upgrading from v0.2
 

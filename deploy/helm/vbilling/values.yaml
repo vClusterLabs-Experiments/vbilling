@@ -162,6 +162,10 @@ stripe:
   apiKey: "" # sk_test_... / sk_live_... / rk_... (restricted keys work)
   existingSecret: "" # keys: api-key, webhook-secret
   apiBase: https://api.stripe.com # tests only (stripe-mock)
+  # Stripe meters cannot price on dimensions, so meters are split by these
+  # event fields (H100 and L40S GPU-hours get separate meters and prices).
+  # Add capacity_type to price spot and on-demand differently.
+  splitMetersBy: [sku]
   autoSubscribe: false # subscribe tenants to metered prices tagged metadata[vbilling_plan]=<plan>
   webhookSecret: "" # whsec_... enables /webhooks/stripe (dunning, alerts)
   # Prices vBilling creates in Stripe when missing, per plan, with their

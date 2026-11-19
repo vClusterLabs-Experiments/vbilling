@@ -202,11 +202,8 @@ The application uses these measurement and delivery settings:
 | `ADAPTERS` | `stripe` | Send records to Stripe |
 | `STRIPE_API_KEY` | Loaded privately from the test key file | Authenticate; never print it |
 | `STRIPE_API_BASE` | `https://api.stripe.com` | Stripe endpoint |
-| `STRIPE_API_VERSION` | `2026-09-30.endive` | Repository's API version |
 | `STRIPE_SPLIT_METERS_BY` | `sku` | Separate L4 and A100 meters |
 | `STRIPE_AUTO_SUBSCRIBE` | `false` | The helper creates test pricing and the subscription |
-| `STRIPE_CANCEL_ON_REMOVE` | `false` | Deleting a tenant does not cancel unrelated billing setup |
-| `COLLECTION_INTERVAL` | `30s` | Collect a usage window every 30 seconds |
 | `CPU_MEMORY_BASIS` | `requests` | Requested CPU/memory, not consumption |
 | `METER_CONTROL_PLANE` | `false` | Exclude vCluster control-plane resources |
 | `PROMETHEUS_URL` | Empty | No Prometheus input for this demo |

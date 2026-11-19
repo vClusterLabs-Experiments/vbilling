@@ -212,6 +212,8 @@ spec:
             {{- if or (has "stripe" $adapters) (and $metronomeProvision (or .Values.stripe.apiKey .Values.stripe.existingSecret)) }}
             - name: STRIPE_API_BASE
               value: {{ .Values.stripe.apiBase | quote }}
+            - name: STRIPE_SPLIT_METERS_BY
+              value: {{ join "," .Values.stripe.splitMetersBy | default "none" | quote }}
             - name: STRIPE_AUTO_SUBSCRIBE
               value: {{ .Values.stripe.autoSubscribe | quote }}
             {{- if .Values.stripe.priceCard }}

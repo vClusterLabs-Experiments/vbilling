@@ -512,7 +512,7 @@ vcluster.loft.sh/cluster=<span class="string">team-gpu</span>
             <li>The query uses <code>{{namespace}}</code>. That is the cluster's namespace on the control plane cluster, and it matches only series scraped there, from clusters on shared or dedicated nodes. A cluster with its own nodes has no pods in that namespace.</li>
             <li>The cluster runs on its own nodes, but its series do not carry <code>vcluster="&lt;cluster name&gt;"</code>: the Prometheus agent that remote writes them has no such external label, or uses another name.</li>
             <li>vBilling cannot read the cluster's own API, so it does not know the cluster has its own nodes and selects it by namespace. The message then says <code>shared nodes, selected by namespace</code>.</li>
-            <li>The series has no sample in the window or in the <code>PROMETHEUS_LOOKBACK</code> (default <code>10m</code>) before it: it is scraped less often than that, or it stopped.</li>
+            <li>The series has no sample in the window or in the 10 minutes before it: it is scraped less often than that, or it stopped.</li>
           </ul>
 
           <h4><span class="fix-label">Fix</span> Read what vBilling tried</h4>
@@ -531,8 +531,8 @@ counter: vllm:generation_tokens_total{model_name=<span class="string">"llama-3.1
           <h4><span class="fix-label">Fix</span> Label the cluster's series</h4>
           <p>Give the cluster's Prometheus agent the external label <code>vcluster: &lt;cluster name&gt;</code> (see <a href="private-nodes.html#prometheus">Prometheus for clusters with their own nodes</a>). If the label value differs from the cluster's name, set <code>vbilling.vcluster.com/prometheus-source</code> on the cluster. If the series carry other labels, set <code>vbilling.vcluster.com/prometheus-matchers</code>. If the cluster has a Prometheus of its own, point <code>vbilling.vcluster.com/prometheus-url</code> at it.</p>
 
-          <h4><span class="fix-label">Fix</span> Look back further</h4>
-          <p>Set <code>PROMETHEUS_LOOKBACK</code> (Helm <code>prometheus.lookback</code>) above the scrape interval plus any remote-write delay. A counter that was out of reach keeps its last sample, so the usage is billed once a sample is found again.</p>
+          <h4><span class="fix-label">Fix</span> Scrape more often</h4>
+          <p>vBilling looks 10 minutes back for a counter's starting sample: scrape billed series more often than that, including any remote-write delay. A counter that was out of reach keeps its last sample, so the usage is billed once a sample is found again.</p>
         </div>
       </div>
 
@@ -594,7 +594,7 @@ skuLabel: model_name</code></div>
           <h4><span class="fix-label">Fix</span> Map the identity to the tenant</h4>
           <div class="code-block"><code><span class="cmd">kubectl</span> annotate namespace globex <span class="flag">--overwrite</span> \
   vbilling.vcluster.com/aliases=e2f1c0de-7b1a-4c55-9a7e-2d4f8b3c6a10</code></div>
-          <p>Set it on the tenant's cluster or its namespace in the control plane cluster; several identities are comma-separated. vBilling reads it at the next discovery (<code>RECONCILE_INTERVAL</code>, 30s by default). A custom format can map identities with <code>tenantMap</code> instead. A gateway that serves one tenant can use a token bound to it in <code>INGEST_TOKENS</code>, which wins over the payload.</p>
+          <p>Set it on the tenant's cluster or its namespace in the control plane cluster; several identities are comma-separated. vBilling reads it at the next discovery, within 30 seconds. A custom format can map identities with <code>tenantMap</code> instead. A gateway that serves one tenant can use a token bound to it in <code>INGEST_TOKENS</code>, which wins over the payload.</p>
 
           <h4><span class="fix-label">Fix</span> Refuse instead of accept</h4>
           <p>With <code>RECORDS_UNKNOWN_TENANTS=reject</code> (Helm <code>records.unknownTenants=reject</code>), such records are refused and listed in the response's <code>rejected</code>, and <code>vbilling_records_rejected_total</code> counts them. An emitter that does not read the response loses them, so map identities first.</p>
@@ -652,7 +652,7 @@ skuLabel: model_name</code></div>
           <p>The status API warns about <code>pricing/&lt;destination&gt;/...: unpriced</code> sources, the dashboard's Price coverage tile shows unpriced series, or <code>vbilling_unpriced_series</code> is above 0.</p>
 
           <h4>Cause</h4>
-          <p>A billing platform has no price for usage vBilling sends it: a new SKU, region, metric or plan reached vBilling before Finance priced it. Billing platforms bill such usage at $0 without an error, so invoices, prepaid balances and spend alerts undercount. vBilling reads each platform's pricing (Metronome rate cards, Stripe prices, Lago charges) at startup, every <code>PRICE_CHECK_INTERVAL</code>, and within seconds of a new series. It never writes a price.</p>
+          <p>A billing platform has no price for usage vBilling sends it: a new SKU, region, metric or plan reached vBilling before Finance priced it. Billing platforms bill such usage at $0 without an error, so invoices, prepaid balances and spend alerts undercount. vBilling reads each platform's pricing (Metronome rate cards, Stripe prices, Lago charges) at startup, every 10 minutes, and within seconds of a new series. It never writes a price.</p>
 
           <h4><span class="fix-label">Fix</span> Add the missing price</h4>
           <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-s</span> <span class="string">'localhost:8080/api/v1/pricing?status=unpriced'</span> | jq <span class="string">'.destinations[] | {destination, series: [.series[] | {plan, metric, sku, hint, held_events}]}'</span></code></div>
@@ -670,7 +670,7 @@ skuLabel: model_name</code></div>
             <li>Setting <code>PRICE_CHECK</code> back to <code>warn</code> or <code>off</code> releases everything held at the next start.</li>
           </ul>
           <p>Held counts: <code>held_events</code> in <code>GET /api/v1/pricing</code> (per series, with <code>held_since</code>), in <code>GET /api/v1/destinations</code>, in the dashboard, and <code>vbilling_held_events{destination}</code>. The source warns once the oldest held usage is a week old.</p>
-          <p>Metronome accepts usage up to 34 days old and Stripe up to 35 days. So that held usage is never lost, events whose window started more than <code>PRICE_CHECK_MAX_HOLD</code> (default 28 days, at most 32) ago are released <strong>without a price</strong>, oldest first, together with any older held events of their series; younger usage stays held. The log says <code>WARNING: ... released N held event(s) of ... WITHOUT A PRICE</code>, the series' source turns <code>failing</code> with <code>Finance must add the price ... so it re-rates the released usage</code>, its row in <code>GET /api/v1/pricing</code> shows <code>released_unpriced_events</code>, and <code>vbilling_events_released_unpriced_total{destination}</code> counts them. Add the price so the billing platform can re-rate the released usage (Lago applies a new price to the usage of the open billing period when it computes it; with Metronome and Stripe, check that the period's draft invoice picks it up), and the source recovers. Alert on:</p>
+          <p>Metronome accepts usage up to 34 days old and Stripe up to 35 days. So that held usage is never lost, events whose window started more than 28 days ago are released <strong>without a price</strong>, oldest first, together with any older held events of their series; younger usage stays held. The log says <code>WARNING: ... released N held event(s) of ... WITHOUT A PRICE</code>, the series' source turns <code>failing</code> with <code>Finance must add the price ... so it re-rates the released usage</code>, its row in <code>GET /api/v1/pricing</code> shows <code>released_unpriced_events</code>, and <code>vbilling_events_released_unpriced_total{destination}</code> counts them. Add the price so the billing platform can re-rate the released usage (Lago applies a new price to the usage of the open billing period when it computes it; with Metronome and Stripe, check that the period's draft invoice picks it up), and the source recovers. Alert on:</p>
           <div class="code-block"><code>vbilling_unpriced_series &gt; 0
 vbilling_held_events &gt; 0
 increase(vbilling_events_released_unpriced_total[1h]) &gt; 0</code></div>

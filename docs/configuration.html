@@ -569,6 +569,11 @@
               <td class="td-default">(none)</td>
             </tr>
             <tr>
+              <td><code>STRIPE_SPLIT_METERS_BY</code></td>
+              <td>Event fields that get their own meter, because Stripe meters cannot price on dimensions. Add <code>capacity_type</code> to price spot and on-demand differently.</td>
+              <td class="td-default">sku</td>
+            </tr>
+            <tr>
               <td><code>STRIPE_AUTO_SUBSCRIBE</code></td>
               <td>Subscribe tenants to active metered prices tagged <code>metadata[vbilling_plan]=&lt;plan&gt;</code>.</td>
               <td class="td-default">false</td>
@@ -814,11 +819,7 @@
             </tr>
             <tr>
               <td><code>STRIPE_MAX_RPS</code></td>
-              <td>VBilling paces Stripe requests itself.</td>
-            </tr>
-            <tr>
-              <td><code>STRIPE_SPLIT_METERS_BY</code></td>
-              <td>Meters are split by SKU.</td>
+              <td>vBilling paces Stripe requests itself.</td>
             </tr>
             <tr>
               <td><code>TENANT_ADMIN_FALLBACK</code></td>
@@ -962,9 +963,9 @@
               <td class="td-default">(none)</td>
             </tr>
             <tr>
-              <td><code>stripe.autoSubscribe / priceCard</code></td>
-              <td>STRIPE_AUTO_SUBSCRIBE / STRIPE_PRICE_CARD</td>
-              <td class="td-default">false / {}</td>
+              <td><code>stripe.splitMetersBy / autoSubscribe / priceCard</code></td>
+              <td>STRIPE_SPLIT_METERS_BY / STRIPE_AUTO_SUBSCRIBE / STRIPE_PRICE_CARD</td>
+              <td class="td-default">[sku] / false / {}</td>
             </tr>
             <tr>
               <td><code>metronome.apiToken / webhookSecret / existingSecret (keys api-token, webhook-secret)</code></td>
