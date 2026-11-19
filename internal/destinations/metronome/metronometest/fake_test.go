@@ -67,6 +67,32 @@ func TestIngestDedupeAndLateAttachment(t *testing.T) {
 	}
 }
 
+// Billable metrics are not retroactive: usage ingested before a billable
+// metric was created never counts toward it, whatever its timestamp; usage
+// ingested afterwards does.
+func TestBillableMetricsCountOnlyLaterUsage(t *testing.T) {
+	f := metronometest.New(t)
+	c := client(f)
+	ctx := context.Background()
+	cus, _ := f.CreateCustomer("Acme", "org_1", "tenant-a")
+	if err := c.Ingest(ctx, []metronome.IngestEvent{event("before", "tenant-a", day.Add(time.Hour), "0.5")}); err != nil {
+		t.Fatal(err)
+	}
+	bm := f.AddBillableMetric([]byte(`{"name":"GPU","aggregation_type":"SUM","aggregation_key":"value",
+		"event_type_filter":{"in_values":["vcluster_gpu_hours"]},"property_filters":[{"name":"value","exists":true}]}`))
+	if err := c.Ingest(ctx, []metronome.IngestEvent{event("after", "tenant-a", day.Add(time.Hour), "0.25")}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := c.Usage(ctx, metronome.UsageRequest{StartingOn: day.Format(time.RFC3339), EndingBefore: day.Add(24 * time.Hour).Format(time.RFC3339),
+		WindowSize: "day", CustomerIDs: []string{cus}, BillableMetrics: []map[string]any{{"id": bm}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Value.String() != "0.25" {
+		t.Fatalf("usage rows %+v: want only the usage ingested after the billable metric existed", rows)
+	}
+}
+
 // An ingest alias belongs to one customer, archived ones included: creating
 // another customer with it answers 409.
 func TestAliasConflicts(t *testing.T) {

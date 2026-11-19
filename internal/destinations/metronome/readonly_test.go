@@ -75,6 +75,7 @@ func coverageOf(t *testing.T, a *Adapter, series ...destinations.PriceSeries) []
 // a read.
 func TestDefaultModeNeverWritesToMetronome(t *testing.T) {
 	f := newFake(t)
+	financeMetric(t, f, usage.MetricGPUHours, "GPU hours") // Finance applies the billable metrics before vBilling starts
 	a := newReadOnly(t, f, func(c *config.Config) { c.MetronomeRateCard = "payg"; c.StripeAPIKey = "sk_test_x" })
 	ctx := context.Background()
 	if err := a.Bootstrap(ctx, usage.Catalog()); err != nil {

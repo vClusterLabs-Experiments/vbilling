@@ -86,6 +86,11 @@ type Adapter struct {
 	warned  map[string]bool        // tenants told that their pinned customer is not used
 
 	reservedSeen map[string]bool // dimension names logged for colliding with a reserved property
+
+	// Without METRONOME_PROVISION: usage of event types no billable metric
+	// counts yet waits (see waiting.go).
+	wait    *waitStore
+	counted countedView
 }
 
 type aliasEntry struct {
@@ -97,7 +102,7 @@ type aliasEntry struct {
 func New(c *Client, cfg *config.Config, state *kv.Store, link *stripe.Adapter) *Adapter {
 	return &Adapter{c: c, cfg: cfg, state: state, stripe: link, now: time.Now, metrics: map[string]string{},
 		aliases: map[string]aliasEntry{}, plans: map[string]*tenantPlan{}, known: map[string]bool{}, warned: map[string]bool{},
-		reservedSeen: map[string]bool{}}
+		reservedSeen: map[string]bool{}, wait: newWaitStore(cfg.DataDir)}
 }
 
 func (a *Adapter) Name() string { return "metronome" }
@@ -161,8 +166,10 @@ func BillableMetricFor(def usage.MetricDef) BillableMetric {
 // Bootstrap, with METRONOME_PROVISION, creates one billable metric per
 // billable metric code (BillableMetricFor), matching existing ones by stored
 // ID or by name, never duplicating them. Without it nothing is created: it
-// logs the metrics no billable metric in Metronome counts, and never holds up
-// delivery, because Metronome keeps usage that no billable metric counts yet.
+// logs the metrics no billable metric in Metronome counts yet, whose usage
+// waits until one does (Metronome never bills usage sent before its billable
+// metric exists, see waiting.go), and sends what waited for metrics that
+// exist now.
 func (a *Adapter) Bootstrap(ctx context.Context, metrics []usage.MetricDef) error {
 	if !a.provision() {
 		a.reportCatalog(ctx, metrics)
@@ -205,22 +212,27 @@ func (a *Adapter) Bootstrap(ctx context.Context, metrics []usage.MetricDef) erro
 }
 
 // reportCatalog logs, read-only, the billable metrics of the catalog that no
-// billable metric in Metronome sums.
+// billable metric in Metronome sums, and sends the usage that waited for
+// billable metrics that exist now.
 func (a *Adapter) reportCatalog(ctx context.Context, defs []usage.MetricDef) {
-	bms, err := a.c.ListBillableMetrics(ctx)
+	view, err := a.billableMetricsView(ctx)
 	if err != nil {
-		log.Printf("[metronome] could not list billable metrics (%v); usage is delivered anyway", err)
+		log.Printf("[metronome] could not list billable metrics (%v); usage waits until they can be read", err)
 		return
 	}
 	var missing []string
 	for _, def := range defs {
-		if def.Billable && len(summing(bms, def.Code)) == 0 {
+		if def.Billable && !view.counts(def.Code) {
 			missing = append(missing, def.Code)
 		}
 	}
 	if len(missing) > 0 {
-		log.Printf("[metronome] no billable metric sums the value of event type(s) %s: Metronome keeps that usage but bills none of it "+
-			"until one does (`vbilling metronome billable-metrics` prints the definitions vBilling expects)", strings.Join(missing, ", "))
+		log.Printf("[metronome] no billable metric sums the value of event type(s) %s yet: vBilling holds that usage until one does, "+
+			"because Metronome never bills usage sent before its billable metric exists (`vbilling metronome billable-metrics` prints the definitions vBilling expects)",
+			strings.Join(missing, ", "))
+	}
+	if err := a.releaseWaiting(ctx, view); err != nil {
+		log.Printf("[metronome] %v (retried with the next delivery)", err)
 	}
 }
 
@@ -770,10 +782,25 @@ func (a *Adapter) warnReserved(metric, key string) {
 }
 
 // SendEvents ingests in batches of 100. Retrying a batch is safe: Metronome
-// ignores repeated transaction IDs for 34 days.
+// ignores repeated transaction IDs for 34 days. Without METRONOME_PROVISION,
+// the events of a type no billable metric counts yet wait instead (see
+// waiting.go), and what waited for a billable metric that exists now is
+// sent first.
 func (a *Adapter) SendEvents(ctx context.Context, events []usage.Event) error {
+	var view countedView
+	if !a.provision() {
+		var err error
+		if view, err = a.billableMetricsView(ctx); err != nil {
+			return err
+		}
+		if err := a.releaseWaiting(ctx, view); err != nil {
+			return err
+		}
+	}
 	rejected := map[string]string{}
 	var batch []IngestEvent
+	waiting := map[string][]usage.Event{}
+	var waitOrder []string
 	for i := range events {
 		e := &events[i]
 		if !a.Accepts(e.Metric) {
@@ -784,6 +811,13 @@ func (a *Adapter) SendEvents(ctx context.Context, events []usage.Event) error {
 			continue
 		}
 		a.markKnown(e.Tenant)
+		if view.ok && !view.counts(e.Metric) {
+			if _, ok := waiting[e.Metric]; !ok {
+				waitOrder = append(waitOrder, e.Metric)
+			}
+			waiting[e.Metric] = append(waiting[e.Metric], *e)
+			continue
+		}
 		batch = append(batch, a.ToIngest(e))
 	}
 	for i := 0; i < len(batch); i += 100 {
@@ -796,6 +830,13 @@ func (a *Adapter) SendEvents(ctx context.Context, events []usage.Event) error {
 		if err := a.c.Ingest(ctx, batch[i:end]); err != nil {
 			return err
 		}
+	}
+	// Kept durably before the dispatcher's cursor moves past them.
+	for _, code := range waitOrder {
+		if err := a.wait.add(code, waiting[code]); err != nil {
+			return fmt.Errorf("hold the usage of %s until a billable metric counts it: %w", code, err)
+		}
+		a.noteWaiting(code, len(waiting[code]))
 	}
 	if len(rejected) > 0 {
 		return &destinations.PartialError{Rejected: rejected}

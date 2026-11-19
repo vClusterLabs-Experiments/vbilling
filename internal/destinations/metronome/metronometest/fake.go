@@ -8,6 +8,8 @@
 //   - customers with several ingest aliases (409 when an alias is taken,
 //     archived customers included);
 //   - billable metrics, products, rate cards and rates (Finance's catalog);
+//     a billable metric counts only the usage ingested after it was
+//     created, as Metronome's are not retroactive;
 //   - contracts listed per customer (the portal's, with prepaid commits);
 //   - usage aggregation (POST /v1/usage) per billable metric;
 //   - threshold notifications in alarm for a customer, as
@@ -70,6 +72,8 @@ type Event struct {
 	// customer_id is a customer's ID or one of its aliases, or later, when a
 	// customer gets the alias. Empty while the event is unattributed.
 	Customer string `json:"-"`
+
+	seq int // when it was ingested, in the fake's order of changes
 }
 
 // EventTypeFilter selects event types.
@@ -96,6 +100,8 @@ type BillableMetric struct {
 	PropertyFilters []PropertyFilter `json:"property_filters,omitempty"`
 	GroupKeys       [][]string       `json:"group_keys,omitempty"`
 	ArchivedAt      string           `json:"archived_at,omitempty"`
+
+	seq int // when it was created, in the fake's order of changes
 }
 
 // Product is a usage product on a billable metric.
@@ -149,6 +155,7 @@ type Server struct {
 	mu        sync.Mutex
 	now       func() time.Time
 	seq       int
+	tick      int // orders ingests and billable metric creations
 	customers []*Customer
 	events    []*Event
 	txns      map[string]bool
@@ -280,6 +287,8 @@ func (s *Server) AddBillableMetric(body []byte) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	m.ID = s.newID("billable-metric")
+	s.tick++
+	m.seq = s.tick
 	s.metrics = append(s.metrics, &m)
 	return m.ID
 }
@@ -467,11 +476,21 @@ func number(v any) float64 {
 	return 0
 }
 
-// aggregateLocked aggregates a billable metric over a customer's events in [from, to).
+// aggregateLocked aggregates a billable metric over a customer's events in
+// [from, to). Billable metrics are not retroactive: "When using streaming
+// billable metrics, the billable metric must be defined in Metronome before
+// any usage can be associated with it. If usage is sent before a streaming
+// metric is defined, it isn't attributed to the metric by default"
+// (docs.metronome.com, guides/implement-metronome/core-concepts/
+// create-billable-metrics), and "billable metrics only match usage events
+// sent after the billable metric is created" (guides/get-started/
+// developer-sdks). So only events ingested after the metric was created
+// count, whatever their timestamp. (An alias attaches earlier usage to a
+// customer that gets it later: that is retroactive, and stays so.)
 func (s *Server) aggregateLocked(m *BillableMetric, customer string, from, to time.Time) float64 {
 	var v float64
 	for _, e := range s.events {
-		if e.Customer != customer || !m.matches(e) {
+		if e.Customer != customer || e.seq <= m.seq || !m.matches(e) {
 			continue
 		}
 		ts, err := time.Parse(time.RFC3339Nano, e.Timestamp)
@@ -607,6 +626,8 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		var m BillableMetric
 		json.Unmarshal(body, &m)
 		m.ID = s.newID("billable-metric")
+		s.tick++
+		m.seq = s.tick
 		s.metrics = append(s.metrics, &m)
 		s.writes = append(s.writes, key)
 		s.reply(w, http.StatusOK, map[string]any{"data": map[string]string{"id": m.ID}})
@@ -654,6 +675,8 @@ func (s *Server) ingest(w http.ResponseWriter, body []byte) {
 		}
 		s.txns[e.TransactionID] = true
 		e.Customer = s.ownerLocked(e.CustomerID)
+		s.tick++
+		e.seq = s.tick
 		s.events = append(s.events, e)
 	}
 	w.WriteHeader(http.StatusOK)
