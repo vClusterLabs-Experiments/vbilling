@@ -364,7 +364,7 @@ func (a *Adapter) ensureContract(ctx context.Context, t usage.Tenant, cusID, rat
 		}
 	}
 	if keep == nil {
-		if keep, err = a.createContract(ctx, t, cusID, rateCard, today, keys); err != nil {
+		if keep, err = a.createContract(ctx, t, cusID, rateCard, contractStart(ctx, today, ours), keys); err != nil {
 			return err
 		}
 	}
@@ -372,6 +372,29 @@ func (a *Adapter) ensureContract(ctx context.Context, t usage.Tenant, cusID, rat
 		return err
 	}
 	return a.state.Set("contract-current/"+t.ID, rateCard)
+}
+
+// contractStart is when a new contract starts: at UTC midnight of the day the
+// usage it is created for starts (destinations.UsageStart: a backlog after an
+// outage, a backfill, the last window of a day delivered after midnight), so
+// Metronome rates that usage under it. It starts today when there is no such
+// usage, or when one of the tenant's vBilling contracts is still in force at
+// that day: then the new one takes over today and no day is rated twice.
+func contractStart(ctx context.Context, today time.Time, ours []Contract) time.Time {
+	us, ok := destinations.UsageStart(ctx)
+	if !ok {
+		return today
+	}
+	day := us.UTC().Truncate(24 * time.Hour)
+	if !day.Before(today) {
+		return today
+	}
+	for _, c := range ours {
+		if openAt(c, day) {
+			return today
+		}
+	}
+	return day
 }
 
 func (a *Adapter) createContract(ctx context.Context, t usage.Tenant, cusID, rateCard string, start time.Time, used map[string]bool) (*Contract, error) {
