@@ -81,6 +81,10 @@ type Controller struct {
 
 	pauses *pause.Store // pause spans; nil = pauses are not tracked
 
+	// bound are the tenants INGEST_TOKENS are bound to; known reports
+	// tenants vBilling knows from elsewhere (UseKnownTenants).
+	bound map[string]bool
+	known func(id string) bool
 	// shared are external IDs that more than one discovered cluster maps
 	// to (see sharedIDs); sharedWarned is what was last logged about them.
 	shared       map[string]bool
@@ -90,6 +94,32 @@ type Controller struct {
 // UsePauses tracks when clusters are paused, so capacity is not billed for
 // that time (PAUSE_KEEP_BILLING decides what keeps billing).
 func (c *Controller) UsePauses(p *pause.Store) { c.pauses = p }
+
+// UseKnownTenants adds tenants vBilling knows without a cluster: those its
+// records configuration names (tenant maps, tenant-bound pulls) and those
+// holding a billing state. No alias can capture them. Call it before Run.
+func (c *Controller) UseKnownTenants(known func(id string) bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.known = known
+}
+
+// KnownTenant reports whether id is a tenant vBilling knows: discovered
+// from a cluster, bound to an ingest token, or named by the records
+// configuration or a billing state (UseKnownTenants). Such an ID always
+// bills to itself: an alias that equals it is ignored.
+func (c *Controller) KnownTenant(id string) bool {
+	if id == "" {
+		return false
+	}
+	if _, ok := c.tenants.Get(id); ok || c.bound[id] {
+		return true
+	}
+	c.mu.Lock()
+	known := c.known
+	c.mu.Unlock()
+	return known != nil && known(id)
+}
 
 // SetPaused updates the known state of a cluster right after vBilling
 // paused or resumed it, ahead of the next discovery.
@@ -199,9 +229,11 @@ func (c *Controller) UsePrometheus(p PromCollector) { c.prom = p }
 
 // ResolveTenant maps a value an emitter sends (a tenant ID, or an alias
 // from the vbilling.vcluster.com/aliases setting of a cluster) to a known
-// tenant. Unknown values are returned as they are, with known=false.
+// tenant. A tenant vBilling knows (KnownTenant) always resolves to itself,
+// whatever aliases claim. Unknown values are returned as they are, with
+// known=false.
 func (c *Controller) ResolveTenant(v string) (string, bool) {
-	if _, ok := c.tenants.Get(v); ok {
+	if c.KnownTenant(v) {
 		return v, true
 	}
 	c.mu.Lock()
@@ -214,37 +246,37 @@ func (c *Controller) ResolveTenant(v string) (string, bool) {
 
 // GatewayIdentities lists a tenant's gateway identities: its ID and every
 // alias (vbilling.vcluster.com/aliases) that ResolveTenant maps to it. An
-// alias that is another tenant's ID bills to that tenant, so it is not one
-// of this tenant's identities; neither is an alias two tenants claim.
+// alias that is a tenant vBilling knows bills to that tenant, so it is not
+// one of this tenant's identities; neither is an alias two tenants claim.
 func (c *Controller) GatewayIdentities(tenant string) []string {
-	out := []string{tenant}
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	var claimed []string
 	for alias, t := range c.aliases {
-		if t != tenant || c.ambiguous[alias] {
-			continue
+		if t == tenant && !c.ambiguous[alias] {
+			claimed = append(claimed, alias)
 		}
-		if _, other := c.tenants.Get(alias); other {
-			continue
+	}
+	c.mu.Unlock()
+	out := []string{tenant}
+	for _, alias := range claimed {
+		if !c.KnownTenant(alias) {
+			out = append(out, alias)
 		}
-		out = append(out, alias)
 	}
 	sort.Strings(out[1:])
 	return out
 }
 
-// warnAliasConflicts logs, once per change, aliases that are another
-// tenant's ID or that two tenants claim.
+// warnAliasConflicts logs, once per change, aliases that are a tenant
+// vBilling knows or that two tenants claim.
 func (c *Controller) warnAliasConflicts(aliases map[string]string, ambiguous map[string]bool) {
 	warn := map[string]string{}
 	for a, t := range aliases {
 		switch {
 		case ambiguous[a]:
 			warn[a] = "is claimed by more than one tenant; usage bills to " + t + " and the gateway never blocks it"
-		default:
-			if _, ok := c.tenants.Get(a); ok {
-				warn[a] = "is tenant " + a + "'s own ID; usage sent as " + a + " bills to " + a + ", not to " + t
-			}
+		case c.KnownTenant(a):
+			warn[a] = "is tenant " + a + "'s own ID; usage sent as " + a + " bills to " + a + ", not to " + t
 		}
 	}
 	c.mu.Lock()
@@ -271,8 +303,14 @@ func New(cfg *config.Config, disc Discoverer, coll Collector, sp *spool.Spool, t
 			gaps = s
 		}
 	}
+	bound := map[string]bool{}
+	for _, t := range cfg.IngestTokens {
+		if t != "" {
+			bound[t] = true
+		}
+	}
 	return &Controller{cfg: cfg, disc: disc, coll: coll, spool: sp, tenants: tenants, dests: dests, tel: tel,
-		now: time.Now, lastSeen: map[string]time.Time{}, offboarded: map[string]map[string]bool{}, gaps: gaps}
+		now: time.Now, lastSeen: map[string]time.Time{}, offboarded: map[string]map[string]bool{}, gaps: gaps, bound: bound}
 }
 
 // Run reconciles tenants every ReconcileInterval and closes a metering

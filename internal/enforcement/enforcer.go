@@ -670,6 +670,14 @@ func (e *Enforcer) reflect(ctx context.Context, cl discovery.TenantCluster, ts T
 	return nil
 }
 
+// HasState reports whether a tenant has a recorded billing state.
+func (e *Enforcer) HasState(tenant string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	_, ok := e.states[tenant]
+	return ok
+}
+
 // States returns all recorded tenant states.
 func (e *Enforcer) States() []TenantState {
 	e.mu.Lock()

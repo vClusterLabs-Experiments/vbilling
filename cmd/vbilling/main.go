@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -319,6 +320,11 @@ func main() {
 				time.Duration(spec.Interval), time.Duration(spec.Lookback))
 		}
 	}
+	// Tenants that exist without a cluster: those the records configuration
+	// bills to (tenant maps, tenant-bound pulls) and those holding a billing
+	// state. No cluster's alias can capture them.
+	recordsTenants := recordsConfigTenants(cfg, formats, pullSpecs)
+	ctrl.UseKnownTenants(func(id string) bool { return recordsTenants[id] || enf.HasState(id) })
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
@@ -530,6 +536,29 @@ func newEnforcer(cfg *config.Config, kube kubernetes.Interface, ctrl *controller
 		opts.Freeze, opts.OwnNodes = coll.Freeze, coll.OwnNodes
 	}
 	return enforcement.New(kube, opts)
+}
+
+// recordsConfigTenants returns the tenants the records configuration bills
+// to by name: tenant-bound pulls and the targets of formats' tenant maps.
+// (Tenants bound to ingest tokens the controller reads from the
+// configuration itself.)
+func recordsConfigTenants(cfg *config.Config, formats records.Formats, pulls []records.PullSpec) map[string]bool {
+	out := map[string]bool{}
+	add := func(t string) {
+		if t = strings.TrimSpace(t); t != "" {
+			out[t] = true
+		}
+	}
+	add(cfg.RecordsPullLiteLLMTenant)
+	for _, p := range pulls {
+		add(p.Tenant)
+	}
+	for _, f := range formats {
+		for _, t := range f.TenantMap {
+			add(t)
+		}
+	}
+	return out
 }
 
 // every runs f every interval until ctx ends.
