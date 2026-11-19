@@ -103,6 +103,9 @@ func NewLiteLLMPuller(in *Ingester, opts LiteLLMPullOptions, h *health.Registry,
 	if tel == nil {
 		tel = telemetry.New()
 	}
+	// A push of the same LiteLLM under another client or tenant would be
+	// stored twice: the ingester flags such pushes.
+	in.expectPull("litellm", opts.Client, opts.Tenant)
 	return &LiteLLMPuller{opts: opts, in: in, health: h, tel: tel, name: health.Name("records", opts.Client, "pull")}
 }
 
@@ -154,7 +157,7 @@ func (p *LiteLLMPuller) Pull(ctx context.Context) (PullResult, error) {
 	}
 	p.tel.Add("vbilling_records_pull_failures_total", "Failed pulls of a gateway's own request logs.", labels, failed)
 	if err != nil {
-		p.health.Fail(p.name, "records", p.opts.Client, err, "check RECORDS_PULL_LITELLM_URL and that RECORDS_PULL_LITELLM_KEY is a LiteLLM master or proxy admin key")
+		p.health.Fail(p.name, "records", p.opts.Client, err, "check LITELLM_URL and that LITELLM_API_KEY is a LiteLLM master or proxy admin key")
 		return res, err
 	}
 	p.tel.Set("vbilling_records_pull_last_success_timestamp_seconds", "When the last pull of a gateway's own request logs succeeded.", labels, float64(p.opts.Now().Unix()))

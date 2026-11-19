@@ -98,6 +98,9 @@ type Ingester struct {
 	skuGate  SKUGate
 	arrivals *arrivals
 	before   *storedBefore
+
+	mu    sync.Mutex
+	pulls map[string]pullIdentity // format -> what its pull stores rows under
 }
 
 // SKUGate bounds the new SKUs usage brings in, per source (SKUSource...)
@@ -325,6 +328,51 @@ func (in *Ingester) loadRecent(sp *spool.Spool, now time.Time) {
 		return nil
 	})
 	in.arrivals.add(found)
+}
+
+// pullIdentity is the client and tenant a pull stores a gateway's rows
+// under. A push of the same gateway must use the same, or each request is
+// stored under two record IDs and billed twice.
+type pullIdentity struct{ client, tenant string }
+
+// expectPull records the identity LiteLLM's pull stores rows under, so
+// pushes in the litellm format that differ are flagged in health.
+func (in *Ingester) expectPull(format, client, tenant string) {
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	if in.pulls == nil {
+		in.pulls = map[string]pullIdentity{}
+	}
+	in.pulls[format] = pullIdentity{client, tenant}
+}
+
+// checkPull marks a push source failing when vBilling also pulls the
+// gateway's log under another identity: client and bound must be the
+// pull's client and tenant.
+func (in *Ingester) checkPull(format, client, bound string) {
+	in.mu.Lock()
+	p, ok := in.pulls[format]
+	in.mu.Unlock()
+	if !ok || (client == p.client && bound == p.tenant) {
+		return
+	}
+	const twice = "every request the pull reads back is stored a second time under another record ID and billed twice"
+	name := health.Name("records", client, bound, "litellm-pull")
+	switch {
+	case bound != p.tenant && bound != "":
+		pull := "not pinned to a tenant"
+		if p.tenant != "" {
+			pull = "pinned to tenant " + p.tenant
+		}
+		in.health.Fail(name, "records", client, fmt.Errorf("LiteLLM pushes with the ingest token bound to %s, but the LiteLLM pull is %s: %s", bound, pull, twice),
+			"if vBilling pulls this LiteLLM's spend logs (LITELLM_URL), set LITELLM_TENANT="+bound)
+	case bound != p.tenant:
+		in.health.Fail(name, "records", client, fmt.Errorf("LiteLLM pushes with the shared ingest token, but the LiteLLM pull bills every request to tenant %s (LITELLM_TENANT): %s", p.tenant, twice),
+			"unset LITELLM_TENANT, or push with the token INGEST_TOKENS binds to "+p.tenant)
+	default:
+		in.health.Fail(name, "records", client, fmt.Errorf("LiteLLM pushes as client %s, but the LiteLLM pull reads its spend logs as client %s (LITELLM_CLIENT): %s", client, p.client, twice),
+			"set LITELLM_CLIENT="+client+", or have LiteLLM send X-VBilling-Client: "+p.client)
+	}
 }
 
 // Rejection explains why one record was refused.
@@ -653,6 +701,7 @@ func (in *Ingester) ingest(c ingestCall, objs []map[string]any) (Result, error) 
 	}
 	if res.Accepted > 0 || res.AlreadyStored > 0 {
 		in.health.OK(health.Name("records", client), "records", client, res.Accepted)
+		in.checkPull(c.format, client, boundTenant)
 	}
 	in.tel.Add("vbilling_records_received_total", "Per-request usage records received.", map[string]string{"client": client}, float64(res.Received))
 	in.tel.Add("vbilling_records_accepted_total", "Per-request usage records durably stored.", map[string]string{"client": client}, float64(res.Accepted))
