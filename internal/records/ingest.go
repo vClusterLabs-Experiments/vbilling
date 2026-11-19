@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/vclusterlabs-experiments/vbilling/internal/health"
@@ -64,12 +65,13 @@ type TenantResolver func(value string) (tenant string, known bool)
 
 // Ingester validates records and writes them to the records ledger.
 type Ingester struct {
-	spool   *spool.Spool
-	formats Formats
-	opts    Options
-	resolve TenantResolver
-	health  *health.Registry
-	tel     *telemetry.Registry
+	spool    *spool.Spool
+	formats  Formats
+	opts     Options
+	resolve  TenantResolver
+	health   *health.Registry
+	tel      *telemetry.Registry
+	arrivals *arrivals
 }
 
 // NewIngester returns an ingester writing to sp, the records ledger.
@@ -84,7 +86,90 @@ func NewIngester(sp *spool.Spool, formats Formats, opts Options, resolve TenantR
 	if tel == nil {
 		tel = telemetry.New()
 	}
-	return &Ingester{spool: sp, formats: formats, opts: opts, resolve: resolve, health: h, tel: tel}
+	in := &Ingester{spool: sp, formats: formats, opts: opts, resolve: resolve, health: h, tel: tel, arrivals: newArrivals()}
+	in.arrivals.load(sp, opts.Now().UTC())
+	return in
+}
+
+// arrivalMemory is how long vBilling remembers when a record without a
+// time first arrived. Gateways retry within seconds to minutes; send a time
+// with every record to be safe from retries any later than this.
+const arrivalMemory = time.Hour
+
+// arrivals dates records without a time. Such a record is dated when it
+// first arrives, and a retry of it gets that same time: dated on arrival,
+// a retry that crossed a window boundary would land in another window,
+// where its request ID is no duplicate, and be billed twice. Keyed by row
+// ID (request and metric); rebuilt from the records ledger on start.
+type arrivals struct {
+	mu    sync.Mutex
+	first map[string]time.Time
+	order []arrival // by arrival, to forget the oldest
+}
+
+type arrival struct {
+	id string
+	at time.Time
+}
+
+func newArrivals() *arrivals { return &arrivals{first: map[string]time.Time{}} }
+
+// date returns the time a record whose rows have these IDs first arrived,
+// remembering now when none of them is known.
+func (a *arrivals) date(ids []string, now time.Time) time.Time {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.forget(now)
+	for _, id := range ids {
+		if at, ok := a.first[id]; ok {
+			return at
+		}
+	}
+	for _, id := range ids {
+		a.first[id] = now
+		a.order = append(a.order, arrival{id, now})
+	}
+	return now
+}
+
+// forget drops arrivals older than arrivalMemory. a.mu held.
+func (a *arrivals) forget(now time.Time) {
+	n := 0
+	for n < len(a.order) && now.Sub(a.order[n].at) > arrivalMemory {
+		if a.first[a.order[n].id].Equal(a.order[n].at) {
+			delete(a.first, a.order[n].id)
+		}
+		n++
+	}
+	a.order = a.order[n:]
+}
+
+// load remembers the records without a time stored in the last
+// arrivalMemory, so a retry after a restart is recognized too.
+func (a *arrivals) load(sp *spool.Spool, now time.Time) {
+	if sp == nil {
+		return
+	}
+	var found []arrival
+	_ = sp.ScanAppended(now.Add(-arrivalMemory), now.Add(24*time.Hour), func(ev *usage.Event, _ time.Time) error {
+		if ev.Properties["arrival_time"] != true {
+			return nil
+		}
+		s, _ := ev.Properties["at"].(string)
+		if at, err := time.Parse(time.RFC3339Nano, s); err == nil {
+			found = append(found, arrival{ev.ID, at})
+		}
+		return nil
+	})
+	sort.SliceStable(found, func(i, j int) bool { return found[i].at.Before(found[j].at) })
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, f := range found {
+		if _, ok := a.first[f.id]; !ok {
+			a.first[f.id] = f.at
+			a.order = append(a.order, f)
+		}
+	}
 }
 
 // Rejection explains why one record was refused.
@@ -197,8 +282,15 @@ func (in *Ingester) ingest(format, client, boundTenant string, objs []map[string
 			}
 			rec.Tenant = t
 		}
-		if rec.Time.IsZero() {
-			rec.Time = now
+		dated := rec.Time.IsZero()
+		if dated {
+			var ids []string
+			for metric, q := range rec.Usage {
+				if q != 0 {
+					ids = append(ids, RecordID(client, rec.TenantKey, rec.ID, metric))
+				}
+			}
+			rec.Time = in.arrivals.date(ids, now)
 			noTime++
 		}
 		if rec.Time.After(now.Add(in.opts.MaxFuture)) {
@@ -243,6 +335,9 @@ func (in *Ingester) ingest(format, client, boundTenant string, objs []map[string
 			}
 			if pulled {
 				ev.Properties["via"] = "pull"
+			}
+			if dated {
+				ev.Properties["arrival_time"] = true // "at" is when it first arrived
 			}
 			if ev.Region == "" {
 				ev.Region = in.opts.Region
@@ -303,7 +398,7 @@ func (in *Ingester) ingest(format, client, boundTenant string, objs []map[string
 			"records for unknown tenants: "+strings.Join(res.UnknownTenants, ", "), "map them with the vbilling.vcluster.com/aliases annotation or tenantMap")
 	}
 	if noTime > 0 {
-		res.Warnings = append(res.Warnings, fmt.Sprintf("%d record(s) had no time; the arrival time was used", noTime))
+		res.Warnings = append(res.Warnings, fmt.Sprintf("%d record(s) had no time; the time each first arrived was used (a retry within an hour keeps it; send a time to be safe from later retries)", noTime))
 	}
 	if pulled {
 		return res, nil // the puller reports its own health and counters
