@@ -593,7 +593,7 @@ subjects:
       <h2 id="pause">Pausing a tenant</h2>
       <p>Suspension stops growth: running workloads keep running and keep billing. A prepaid wallet that reaches zero needs more: a hard stop the tenant cannot undo, and a state in which usage stops accruing. That is the <code>paused</code> state. Set it through the API, or map a billing event to it with <code>ENFORCEMENT_RULES</code>:</p>
       <div class="code-block"><code><span class="comment"># a Metronome low-balance alert pauses the tenant; a successful top-up resumes it</span>
-ENFORCEMENT_RULES=<span class="string">"alerts.low_remaining_contract_credit_balance_reached=paused"</span>
+ENFORCEMENT_RULES=<span class="string">"alerts.low_remaining_commit_balance_reached=paused"</span>
 
 <span class="cmd">curl</span> <span class="flag">-X</span> PUT localhost:8080/api/v1/billing-states/acme <span class="flag">-H</span> <span class="string">"Authorization: Bearer $API_TOKEN"</span> \
   <span class="flag">-d</span> <span class="string">'{"state": "paused", "reason": "prepaid balance reached zero"}'</span></code></div>

@@ -397,7 +397,7 @@ enforcement:
         <table class="props-table">
           <thead><tr><th>Need</th><th>Where</th></tr></thead>
           <tbody>
-            <tr><td>Prepaid credit that stops the customer when it runs out</td><td>Metronome contracts with prepaid commits. Its balance alert becomes a billing state: <code>enforcement.rules: "alerts.low_remaining_contract_credit_balance_reached=paused"</code> pauses clusters and blocks gateway teams.</td></tr>
+            <tr><td>Prepaid credit that stops the customer when it runs out</td><td>Metronome contracts with prepaid commits. Its commit balance alert becomes a billing state: <code>enforcement.rules: "alerts.low_remaining_commit_balance_reached=paused"</code> pauses clusters and blocks gateway teams (see <a href="metronome.html#prepaid-loop">the prepaid wallet loop</a>).</td></tr>
             <tr><td>Committed spend, reserved capacity, volume tiers</td><td>Metronome rate cards and contracts, Stripe tiered prices, Lago graduated charges.</td></tr>
             <tr><td>Included allowances (for example, the first 32 GiB of storage)</td><td>Metronome or Lago free units, or a Stripe tiered price with a free first tier.</td></tr>
             <tr><td>Payment, tax, dunning</td><td>Stripe, directly or linked from Metronome. Failed payments become billing states through the webhooks.</td></tr>
