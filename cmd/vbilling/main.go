@@ -51,7 +51,7 @@ import (
 	_ "github.com/vclusterlabs-experiments/vbilling/internal/destinations/webhook"
 )
 
-var version = "0.3.0"
+var version = "0.3.1"
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "ledger" {
