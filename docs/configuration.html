@@ -512,8 +512,8 @@
             </tr>
             <tr>
               <td><code>INGEST_TOKEN</code></td>
-              <td>Bearer token for <code>POST /api/v1/events</code> and <code>POST /api/v1/records</code>; defaults to <code>API_TOKEN</code>. Give gateways this token, never the API token.</td>
-              <td class="td-default">(none)</td>
+              <td>Shared bearer token for <code>POST /api/v1/events</code> and <code>POST /api/v1/records</code>, for the operator's gateways. It is never the API token: vBilling refuses to start when the two are equal, and answers ingest sent with the API token with 401. Without it, vBilling generates one into <code>DATA_DIR/ingest-token</code> (mode 0600) and logs the file's path. The chart generates one into its Secret (key <code>ingest-token</code>, kept across upgrades) unless <code>api.ingestToken</code> or <code>api.existingSecret</code> is set. Before v0.3.1 it defaulted to <code>API_TOKEN</code>: gateways that still send the API token must switch to this one. See <a href="security.html#ingest-tokens">Security</a>.</td>
+              <td class="td-default">(generated)</td>
             </tr>
             <tr>
               <td><code>INGEST_TOKENS</code></td>

@@ -342,7 +342,8 @@
         <li>The API is never open. Without <code>API_TOKEN</code>, vBilling generates a random token at startup, writes it to <code>DATA_DIR/api-token</code> with mode 0600, reuses that file on later starts and logs the file's path, never the token.</li>
         <li>The Helm chart puts a random token in its Secret when neither <code>api.token</code> nor <code>api.existingSecret</code> is set, and keeps it across upgrades. The ServiceMonitor sends it to <code>/metrics</code>. Tools that render the chart without access to the cluster (<code>helm template</code>) cannot keep a generated token: set <code>api.token</code> or <code>api.existingSecret</code> with them.</li>
         <li>The dashboard's page loads without the token and asks for it. The page shows every value as text, never as HTML, and is served with a Content-Security-Policy that allows only its own script and style, by their hash.</li>
-        <li>vBilling refuses to start when a tenant's ingest token equals the API token or the shared ingest token.</li>
+        <li>vBilling refuses to start when a tenant's ingest token equals the API token or the shared ingest token, when <code>INGEST_TOKENS</code> gives one token to two tenants, and when <code>INGEST_TOKEN</code> is the API token.</li>
+        <li>CSV exports (<code>GET /api/v1/usage</code> and <code>GET /api/v1/events</code> with <code>format=csv</code>) put a <code>'</code> before every cell that starts with <code>=</code>, <code>+</code>, <code>-</code> or <code>@</code>, so a spreadsheet shows tenants, IDs, SKUs and dimensions as text and never runs them as formulas.</li>
       </ul>
       <div class="code-block">
         <div class="code-label">Read the token the chart generated</div>
@@ -351,11 +352,16 @@
 
       <h3 id="ingest-tokens">Ingest tokens</h3>
       <ul>
-        <li><code>INGEST_TOKEN</code> (by default the API token) is the shared ingest token. It is for the operator's gateways and emitters, which report usage for many tenants. Never hand it to a tenant.</li>
+        <li><code>INGEST_TOKEN</code> is the shared ingest token. It is for the operator's gateways and emitters, which report usage for many tenants, and it is never the API token: gateways keep it in their configuration, so whoever can read that configuration can send usage, but cannot change billing states or read usage. Without it, vBilling generates one into <code>DATA_DIR/ingest-token</code> (mode 0600), and the chart generates one into its Secret (key <code>ingest-token</code>) and keeps it across upgrades. Ingest refuses the API token with 401. Never hand the shared ingest token to a tenant.</li>
         <li>A token in <code>INGEST_TOKENS</code> is bound to one tenant. Everything sent with it is billed to that tenant, whatever the payload says. It can ingest and nothing else. Give each tenant's own gateway its own token.</li>
-        <li>SKUs and dimension values sent to <code>POST /api/v1/events</code> and <code>POST /api/v1/records</code> must not contain control characters or any of <code>&lt; &gt; " ' ` &amp;</code>, and must be at most 256 bytes. Events and records that break this are refused, and a request with nothing valid gets 400. Values vBilling reads itself (Prometheus labels, gateway logs it pulls, labels of nodes) are made safe instead, so their usage is still billed.</li>
+        <li><code>X-VBilling-Client</code> names the emitter. It must be 1 to 64 letters, digits, dots, dashes or underscores, starting with a letter or digit; anything else gets 400. Each tenant-bound token may use 16 client names while vBilling runs, the shared token 64, and a name gets metric series and health sources only once a request under it stored usage. Request headers are limited to 64 KB.</li>
+        <li>SKUs, regions, projects, resource IDs and dimension values sent to <code>POST /api/v1/events</code> and <code>POST /api/v1/records</code> must not contain control characters or any of <code>&lt; &gt; " ' ` &amp;</code>, and must be at most 256 bytes. An event or record carries at most 32 dimensions, and no dimension may take the name of a property of the usage itself (<code>value</code>, <code>unit</code>, <code>sku</code>, <code>region</code>, <code>project</code>, <code>resource_id</code>, <code>source</code>, <code>window_start</code>, <code>window_end</code>, <code>schema_version</code>, <code>accuracy</code>, <code>estimate</code>), which billing platforms receive next to the dimensions. A record's request ID is at most 256 bytes. Events and records that break this are refused, and a request with nothing valid gets 400. Values vBilling reads itself (Prometheus labels, gateway logs it pulls, labels of nodes) are made safe instead, so their usage is still billed.</li>
         <li>The built-in <code>litellm</code> format bills a request to its virtual key's team only. Fields the client sends, such as <code>end_user</code>, never decide who pays. Give every virtual key a team: a request whose key has none is refused.</li>
       </ul>
+      <div class="code-block">
+        <div class="code-label">Read the ingest token the chart generated</div>
+        <code><span class="cmd">kubectl</span> <span class="flag">-n</span> vbilling-system get secret vbilling <span class="flag">-o</span> jsonpath=<span class="string">'{.data.ingest-token}'</span> | <span class="cmd">base64</span> <span class="flag">-d</span></code>
+      </div>
 
       <h3 id="event-ids">Event ID namespaces</h3>
       <p>Billing platforms deduplicate on event IDs and keep the first event with an ID. vBilling gives each source its own namespace, so an event sent through ingest can never take the ID of usage vBilling measured:</p>
@@ -370,7 +376,7 @@
           </tbody>
         </table>
       </div>
-      <p>A retry gets the same ID, so it is counted once. Per-request records get IDs scoped to their client and tenant, and are summed into vBilling's own events.</p>
+      <p>A retry gets the same ID, so it is counted once. Per-request records get IDs scoped to their client and tenant, and are summed into vBilling's own events. Records sent with a tenant-bound token, and rows a pull pins to a tenant, get IDs of their own, so a tenant's copy of a request never takes the ID of the gateway's. Rows that an earlier version stored under its IDs are still recognized: a pinned pull checks those IDs too, and so does a push in the hour after a start.</p>
 
       <h3 id="quotas">Quotas</h3>
       <p>Ingest limits are constants, far above what real emitters need. They stop one token or one tenant from taking vBilling from the others.</p>
@@ -381,11 +387,14 @@
             <tr><td>Requests, shared ingest token</td><td>5,000 per second, bursts of 10,000</td><td>The operator's gateways post for every tenant.</td></tr>
             <tr><td>Requests, each tenant-bound token</td><td>500 per second, bursts of 1,000</td><td>One tenant cannot take the API from the others. A batching gateway reports far more requests than that.</td></tr>
             <tr><td>Request body</td><td>10 MB and 5,000 events per <code>POST /api/v1/events</code>, 16 MB per <code>POST /api/v1/records</code></td><td>Bodies are read into memory.</td></tr>
-            <tr><td>Distinct SKUs per tenant</td><td>100 per UTC day</td><td>Each new SKU can create a meter in the billing platform. Usage past the cap is billed under SKU <code>sku-limit-exceeded</code>, never dropped.</td></tr>
+            <tr><td>Request headers</td><td>64 KB</td><td>No header is needed beyond a token and a few short names.</td></tr>
+            <tr><td>Records ledger, per request</td><td>64 MB per <code>POST /api/v1/records</code>, estimated before anything is written (413 above it)</td><td>Each usage row repeats its record's request ID and dimensions, so one request cannot fill the volume.</td></tr>
+            <tr><td>Client names per token</td><td>16 per tenant-bound token, 64 for the shared token, while vBilling runs</td><td>Each name has its own metric series and health sources.</td></tr>
+            <tr><td>New SKUs per tenant</td><td>100 per UTC day for each source: the shared ingest token, the tenant's bound tokens, each pull</td><td>Each new SKU can create a meter in the billing platform. A SKU the tenant used in the last two days, or one a billing platform prices, is never new, and a tenant's own token never uses up what the operator's gateways report for it. Usage past the cap is billed under SKU <code>sku-limit-exceeded</code>, never dropped, and the tenant's source <code>records/&lt;tenant&gt;/sku-limit</code> turns failing.</td></tr>
           </tbody>
         </table>
       </div>
-      <p>Over a request rate, vBilling answers 429 with <code>Retry-After</code>. The SKU count is kept in memory and starts again after a restart.</p>
+      <p>Over a request rate, vBilling answers 429 with <code>Retry-After</code>. The day's count of new SKUs is kept in memory; after a restart, the SKUs of the ledger's last two days are still known. The safeguard that checks every window for nodes billed more than they exist reads only usage vBilling measured itself, so ingested windows (up to 34 days long, of any alignment) never widen what it reads, and names that emitters report never raise findings.</p>
 
       <h3 id="redirects">Redirects</h3>
       <p>A tenant controls what its cluster's API, its Services and its own Prometheus answer. vBilling never follows a redirect from them, from the vCluster Platform API or proxy, or from a URL a cluster's settings name: the redirect comes back as an error, so no credential is sent to a host the answer names. Pulls of a gateway's own request log (<code>RECORDS_PULL_FILE</code>) follow redirects, but send their headers only to the origin of the configured URL.</p>
@@ -403,7 +412,8 @@
         <li><strong>Keep the dashboard and the API on an operator network.</strong> The chart's Service is ClusterIP; do not expose it to tenants' networks or workloads. If a tenant's gateway must reach vBilling, expose only <code>POST /api/v1/events</code> and <code>POST /api/v1/records</code> to it, and give it a tenant-bound token. Never give a tenant the API token or the shared ingest token.</li>
         <li><strong>Use <code>TENANT_SOURCE=platform</code> when tenants write their own <code>vcluster.yaml</code>.</strong> In the other modes, per-cluster settings and <code>vbilling-kubeconfig</code> Secrets decide how a cluster is metered, and whoever writes <code>vcluster.yaml</code> writes them.</li>
         <li><strong>Run one replica.</strong> Each replica keeps its own ledger, billing state and quotas, so replicas would split usage and state between them. The chart's default <code>replicaCount</code> is 1.</li>
-        <li><strong>Keep <code>DATA_DIR</code> on a persistent volume.</strong> It holds the ledger, and the generated API token when <code>API_TOKEN</code> is not set.</li>
+        <li><strong>Keep <code>DATA_DIR</code> on a persistent volume.</strong> It holds the ledger, and the generated API and ingest tokens when <code>API_TOKEN</code> or <code>INGEST_TOKEN</code> is not set.</li>
+        <li><strong>Give gateways the ingest token, never the API token.</strong> Before v0.3.1 the shared ingest token defaulted to the API token; gateways that still send it get 401 and must switch to the ingest token.</li>
         <li><strong>Watch the ledger's disk.</strong> Rates and body sizes bound each token, not the total a tenant-bound token can send over time. Alert on <code>vbilling_ledger_bytes</code> against the volume's size.</li>
       </ol>
 
