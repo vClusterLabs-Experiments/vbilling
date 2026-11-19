@@ -18,6 +18,7 @@ import (
 
 	"github.com/vclusterlabs-experiments/vbilling/internal/discovery"
 	"github.com/vclusterlabs-experiments/vbilling/internal/health"
+	"github.com/vclusterlabs-experiments/vbilling/internal/usage"
 )
 
 // A cluster's own nodes (Private Nodes, Auto Nodes, Standalone) are read
@@ -179,9 +180,21 @@ func syncedNodes(on map[string]bool, pods []podEntry, include func(*corev1.Pod) 
 }
 
 const (
-	// gpuStableAfter: the high-water mark of a node's GPUs rises to a count
-	// that two reads at least this far apart both saw.
+	// gpuStableAfter: without GPU Feature Discovery's count, a node's first
+	// GPU floor is a count two reads at least this far apart both saw.
 	gpuStableAfter = 30 * time.Second
+	// gpuRaiseAfter: without GPU Feature Discovery's count, a count above a
+	// node's floor raises it once it held this long. When MIG or
+	// time-slicing is turned on, the device plugin advertises the new
+	// devices at once, while the labels that convert them back to physical
+	// GPUs follow a minute or two later (Node Feature Discovery relabels
+	// every 60 seconds by default).
+	gpuRaiseAfter = 10 * time.Minute
+	// attributeFillAfterCreation: a node's zone, capacity type, SKU and
+	// instance type first seen empty are filled from labels set this long
+	// after its creation: the cloud controller manager and Karpenter label
+	// a node seconds after its kubelet registers it.
+	attributeFillAfterCreation = 10 * time.Minute
 	// nodeHistoryRetention: a node not seen for this long is forgotten.
 	nodeHistoryRetention = 60 * 24 * time.Hour
 	// nodeHistorySeenEvery bounds how stale a saved last-seen time gets, so
@@ -189,18 +202,23 @@ const (
 	nodeHistorySeenEvery = time.Hour
 )
 
-// privateNodeHistory remembers, for each node of a cluster's own (by node
-// UID), what vBilling first saw of it and the most GPUs it had, so that
+// privateNodeHistory remembers, for each node of a cluster's own (by
+// cluster and node name: the kubelet reads its node by name, so a cluster
+// admin who deletes the node object and creates it again gets the same
+// record), what vBilling first saw of it and the most GPUs it had, so that
 // nothing written later inside the cluster lowers what it bills:
 //   - Its GPU model, instance type, SKU (SKU_LABEL), capacity type and zone
 //     stay as first seen. A GPU model first seen unknown (before GPU Feature
 //     Discovery labeled the node) is taken from the first label that names
-//     one.
-//   - It is billed for no fewer GPUs than it had while it lived: a
-//     high-water mark that rises to a count two reads at least
-//     gpuStableAfter apart both saw, so a moment in which a device plugin
-//     advertises time-sliced devices before GPU Feature Discovery labels
-//     them does not stick.
+//     one; the others, first seen empty, from labels set within
+//     attributeFillAfterCreation of the node's creation.
+//   - It is billed for no fewer GPUs than it had while it lived (its GPU
+//     floor). With GPU Feature Discovery's physical count
+//     (nvidia.com/gpu.count), the floor rises to what the node advertises,
+//     up to that count. Without it, two reads at least gpuStableAfter apart
+//     set the first floor, and a higher count raises it only once it held
+//     for gpuRaiseAfter: devices advertised before the labels that convert
+//     them to physical GPUs (MIG, time-slicing) never stick.
 //
 // A change is logged and reported as diverged in source health. Kept in
 // DATA_DIR/private-nodes.json (UsePrivateNodeHistory); nodes not seen for
@@ -218,20 +236,28 @@ type privateNodeHistory struct {
 }
 
 type nodeRecord struct {
-	Cluster      string    `json:"cluster"`
-	Node         string    `json:"node"`
-	GPUs         float64   `json:"gpus,omitempty"` // high-water mark of physical GPUs
-	GPUType      string    `json:"gpu_type,omitempty"`
-	InstanceType string    `json:"instance_type,omitempty"`
-	SKU          string    `json:"sku,omitempty"`
+	Cluster      string  `json:"cluster"`
+	Node         string  `json:"node"`
+	GPUs         float64 `json:"gpus,omitempty"` // high-water mark of physical GPUs
+	GPUType      string  `json:"gpu_type,omitempty"`
+	InstanceType string  `json:"instance_type,omitempty"`
+	SKU          string  `json:"sku,omitempty"`
+	// CapacityType is empty for a node first seen without a capacity type
+	// label: it bills as on-demand.
 	CapacityType string    `json:"capacity_type,omitempty"`
 	Zone         string    `json:"zone,omitempty"`
 	FirstSeen    time.Time `json:"first_seen"`
 	LastSeen     time.Time `json:"last_seen"`
+	// Created is the creation time of the node object vBilling first saw
+	// (zero in records of earlier versions: nothing is filled then).
+	Created time.Time `json:"created,omitempty"`
 
-	// The count of an earlier read and when, for the high-water mark.
-	readGPUs float64
-	readAt   time.Time
+	// The count of an earlier read and when, for the first floor; and since
+	// when, and at least how many, GPUs above the floor were advertised.
+	readGPUs   float64
+	readAt     time.Time
+	raiseGPUs  float64
+	raiseSince time.Time
 }
 
 func newPrivateNodeHistory() *privateNodeHistory {
@@ -240,7 +266,9 @@ func newPrivateNodeHistory() *privateNodeHistory {
 
 // UsePrivateNodeHistory keeps what vBilling first saw of each node of a
 // cluster's own, and the most GPUs it had, in the file at path (in
-// DATA_DIR), so a restart does not forget them.
+// DATA_DIR), so a restart does not forget them. Records of earlier versions,
+// kept by node UID, are moved to their cluster and node name; two records
+// of one node (its object was created again) become one, as first seen.
 func (c *Collector) UsePrivateNodeHistory(path string) error {
 	h := newPrivateNodeHistory()
 	h.path = path
@@ -253,12 +281,53 @@ func (c *Collector) UsePrivateNodeHistory(path string) error {
 	case err != nil:
 		return err
 	case len(b) > 0:
-		if err := json.Unmarshal(b, &h.nodes); err != nil {
+		var stored map[string]*nodeRecord
+		if err := json.Unmarshal(b, &stored); err != nil {
 			return fmt.Errorf("%s: %w", path, err)
+		}
+		keys := make([]string, 0, len(stored))
+		for k := range stored {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			r := stored[k]
+			if r == nil {
+				continue
+			}
+			key := k
+			if r.Cluster != "" && r.Node != "" {
+				key = r.Cluster + "/" + r.Node
+			}
+			if prev := h.nodes[key]; prev != nil {
+				r = mergeRecords(prev, r)
+			}
+			if key != k {
+				h.dirty = true
+			}
+			h.nodes[key] = r
 		}
 	}
 	c.nodeHistory = h
 	return nil
+}
+
+// mergeRecords makes one record of two of the same node: what the earlier
+// one first saw, and the most GPUs either had.
+func mergeRecords(a, b *nodeRecord) *nodeRecord {
+	first, other := a, b
+	if b.FirstSeen.Before(a.FirstSeen) || b.FirstSeen.Equal(a.FirstSeen) && b.GPUs > a.GPUs {
+		first, other = b, a
+	}
+	out := *first
+	out.GPUs = max(a.GPUs, b.GPUs)
+	if other.LastSeen.After(out.LastSeen) {
+		out.LastSeen = other.LastSeen
+	}
+	if out.GPUType == "" {
+		out.GPUType = other.GPUType
+	}
+	return &out
 }
 
 // apply sets a node's GPU floor and its first-seen attributes from its
@@ -269,7 +338,10 @@ func (h *privateNodeHistory) apply(cluster string, n *nodeInfo, now time.Time) [
 	r := h.nodes[nodeKey(cluster, n)]
 	if r == nil {
 		r = &nodeRecord{Cluster: cluster, Node: n.name, InstanceType: n.instanceType, SKU: n.sku,
-			CapacityType: n.capacityType, Zone: n.zone, FirstSeen: now, LastSeen: now}
+			Zone: n.zone, FirstSeen: now, LastSeen: now, Created: n.created}
+		if n.capacityLabeled {
+			r.CapacityType = n.capacityType
+		}
 		h.nodes[nodeKey(cluster, n)] = r
 		h.dirty = true
 	}
@@ -278,6 +350,19 @@ func (h *privateNodeHistory) apply(cluster string, n *nodeInfo, now time.Time) [
 	}
 	if r.GPUType == "" && n.gpuType != "unknown" && n.gpuType != "" {
 		r.GPUType, h.dirty = n.gpuType, true
+	}
+	if !r.Created.IsZero() && now.Before(r.Created.Add(attributeFillAfterCreation)) {
+		fill := func(first *string, cur string) {
+			if *first == "" && cur != "" {
+				*first, h.dirty = cur, true
+			}
+		}
+		fill(&r.InstanceType, n.instanceType)
+		fill(&r.SKU, n.sku)
+		fill(&r.Zone, n.zone)
+		if n.capacityLabeled {
+			fill(&r.CapacityType, n.capacityType)
+		}
 	}
 	var notes []string
 	keep := func(what, first string, cur *string) {
@@ -291,19 +376,48 @@ func (h *privateNodeHistory) apply(cluster string, n *nodeInfo, now time.Time) [
 	}
 	keep("instance type", r.InstanceType, &n.instanceType)
 	keep("SKU", r.SKU, &n.sku)
-	keep("capacity type", r.CapacityType, &n.capacityType)
+	firstCapacity := r.CapacityType
+	if firstCapacity == "" {
+		firstCapacity = usage.CapacityOnDemand
+	}
+	keep("capacity type", firstCapacity, &n.capacityType)
 	keep("zone", r.Zone, &n.zone)
 
 	cur := n.advertisedGPUs()
-	if r.readAt.IsZero() || now.Sub(r.readAt) >= gpuStableAfter {
-		if !r.readAt.IsZero() {
-			if stable := min(r.readGPUs, cur); stable > r.GPUs {
-				r.GPUs, h.dirty = stable, true
-			}
+	switch counted := n.expectedGPUs(); {
+	case counted > 0:
+		// GPU Feature Discovery counts the node's physical GPUs: the floor
+		// rises to what the node advertises, as far as that count goes.
+		if v := min(cur, counted); v > r.GPUs {
+			r.GPUs, h.dirty = v, true
 		}
-		r.readGPUs, r.readAt = cur, now
-	} else {
-		r.readGPUs = min(r.readGPUs, cur) // read again moments later: the lower one counts
+		r.raiseSince = time.Time{}
+	case r.GPUs == 0:
+		// The first floor: a count two reads gpuStableAfter apart both saw.
+		if r.readAt.IsZero() || now.Sub(r.readAt) >= gpuStableAfter {
+			if !r.readAt.IsZero() {
+				if stable := min(r.readGPUs, cur); stable > r.GPUs {
+					r.GPUs, h.dirty = stable, true
+				}
+			}
+			r.readGPUs, r.readAt = cur, now
+		} else {
+			r.readGPUs = min(r.readGPUs, cur) // read again moments later: the lower one counts
+		}
+	case cur > r.GPUs:
+		// More than the floor, with nothing that counts physical GPUs: it
+		// raises the floor once it held for gpuRaiseAfter.
+		if r.raiseSince.IsZero() {
+			r.raiseSince, r.raiseGPUs = now, cur
+		} else {
+			r.raiseGPUs = min(r.raiseGPUs, cur)
+		}
+		if now.Sub(r.raiseSince) >= gpuRaiseAfter {
+			r.GPUs, h.dirty = r.raiseGPUs, true
+			r.raiseSince = time.Time{}
+		}
+	default:
+		r.raiseSince = time.Time{}
 	}
 	n.gpuFloor = r.GPUs
 	if cur < r.GPUs {
@@ -312,10 +426,9 @@ func (h *privateNodeHistory) apply(cluster string, n *nodeInfo, now time.Time) [
 	return notes
 }
 
+// nodeKey is a node's record: by cluster and node name, never by the node
+// object's UID, which a cluster admin renews by creating the object again.
 func nodeKey(cluster string, n *nodeInfo) string {
-	if n.uid != "" {
-		return n.uid
-	}
 	return cluster + "/" + n.name
 }
 

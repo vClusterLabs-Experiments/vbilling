@@ -122,6 +122,7 @@ func TestReview4LabelsSetRightAfterRegistrationNeverCount(t *testing.T) {
 		delete(n.Labels, "node.kubernetes.io/instance-type")
 		delete(n.Labels, "topology.kubernetes.io/zone")
 		delete(n.Labels, "karpenter.sh/capacity-type")
+		n.CreationTimestamp = metav1.NewTime(we.Add(-20 * time.Second)) // the kubelet registered it just before the first read
 	})
 	conn := tenantConn(registering)
 	c := NewCollector(fake.NewSimpleClientset(), nil, Options{Region: "r", GPUResources: []string{"nvidia.com/gpu"}, Basis: "requests",
