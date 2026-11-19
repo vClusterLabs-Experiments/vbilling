@@ -72,7 +72,7 @@ func TestLiteLLMPullSettings(t *testing.T) {
 	if !c.RecordsLiteLLM || c.RecordsPullLiteLLMClient != "litellm" || c.RecordsPullLiteLLMInterval != 5*time.Minute || c.RecordsPullLiteLLMLookback != time.Hour {
 		t.Fatalf("pull defaults: %+v", c)
 	}
-	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "RECORDS_PULL_LITELLM_KEY") {
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "LITELLM_API_KEY") {
 		t.Errorf("a pull without a key must be refused: %v", err)
 	}
 	t.Setenv("RECORDS_PULL_LITELLM_KEY", "sk-admin\n")
@@ -88,26 +88,11 @@ func TestLiteLLMPullSettings(t *testing.T) {
 
 func TestPriceCheckSettings(t *testing.T) {
 	c := Load()
-	if c.PriceCheck != "warn" || c.PriceCheckInterval != 10*time.Minute || c.PriceCheckLookback != 24*time.Hour {
-		t.Fatalf("price check defaults: %q %s %s", c.PriceCheck, c.PriceCheckInterval, c.PriceCheckLookback)
+	if c.PriceCheck != "warn" || c.PriceCheckInterval != 10*time.Minute || c.PriceCheckLookback != 24*time.Hour || c.PriceCheckMaxHold != 28*24*time.Hour {
+		t.Fatalf("price check defaults: %q %s %s %s", c.PriceCheck, c.PriceCheckInterval, c.PriceCheckLookback, c.PriceCheckMaxHold)
 	}
-	if c.PriceCheckMaxHold != 28*24*time.Hour {
-		t.Fatalf("max hold default %s", c.PriceCheckMaxHold)
-	}
-	for v, want := range map[string]time.Duration{"20d": 20 * 24 * time.Hour, "100h": 100 * time.Hour, "32d": MaxPriceHold, "33d": 33 * 24 * time.Hour, "soon": -1} {
-		t.Setenv("PRICE_CHECK_MAX_HOLD", v)
-		c := Load()
-		if c.PriceCheckMaxHold != want {
-			t.Errorf("PRICE_CHECK_MAX_HOLD=%s: %s", v, c.PriceCheckMaxHold)
-		}
-		if ok := c.Validate() == nil; ok != (want > 0 && want <= MaxPriceHold) {
-			t.Errorf("PRICE_CHECK_MAX_HOLD=%s: valid %t", v, ok)
-		}
-	}
-	t.Setenv("PRICE_CHECK_MAX_HOLD", "")
 	t.Setenv("PRICE_CHECK", "hold")
-	t.Setenv("PRICE_CHECK_INTERVAL", "5m")
-	if c = Load(); c.PriceCheck != "hold" || c.PriceCheckInterval != 5*time.Minute || c.Validate() != nil {
+	if c = Load(); c.PriceCheck != "hold" || c.Validate() != nil {
 		t.Fatalf("hold: %+v", c)
 	}
 	for name, mutate := range map[string]func(*Config){
@@ -120,5 +105,47 @@ func TestPriceCheckSettings(t *testing.T) {
 		if c.Validate() == nil {
 			t.Errorf("%s: accepted", name)
 		}
+	}
+}
+
+// Removed settings are ignored with a warning, never an error, so old Helm
+// values and manifests keep starting; renamed ones keep their value.
+func TestRemovedAndRenamedSettings(t *testing.T) {
+	t.Setenv("COLLECTION_INTERVAL", "5m")
+	t.Setenv("PRICE_CHECK_MAX_HOLD", "3d")
+	t.Setenv("RECORDS_PULL_LITELLM_URL", "http://litellm:4000")
+	t.Setenv("RECORDS_PULL_LITELLM_KEY", "sk-admin")
+	t.Setenv("METRONOME_STRIPE_LINK", "true")
+	t.Setenv("STRIPE_API_KEY", "sk_test_x")
+	c := Load()
+	if c.CollectionInterval != time.Minute || c.PriceCheckMaxHold != 28*24*time.Hour {
+		t.Fatalf("removed settings must not change behavior: %s %s", c.CollectionInterval, c.PriceCheckMaxHold)
+	}
+	if c.RecordsPullLiteLLMURL != "http://litellm:4000" || c.RecordsPullLiteLLMKey != "sk-admin" {
+		t.Fatalf("renamed settings lost their value: %q %q", c.RecordsPullLiteLLMURL, c.RecordsPullLiteLLMKey)
+	}
+	if !c.MetronomeProvision || !c.MetronomeStripeLink {
+		t.Fatalf("METRONOME_STRIPE_LINK=true implied provisioning in v0.3.0: %+v", c)
+	}
+	joined := strings.Join(c.Warnings, "\n")
+	for _, k := range []string{"COLLECTION_INTERVAL", "PRICE_CHECK_MAX_HOLD", "RECORDS_PULL_LITELLM_URL is now LITELLM_URL", "METRONOME_STRIPE_LINK"} {
+		if !strings.Contains(joined, k) {
+			t.Errorf("no warning for %s in %q", k, joined)
+		}
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("old settings must still start: %v", err)
+	}
+}
+
+// The archive is on by default (inside DATA_DIR) and "off" turns it off.
+func TestArchiveDefault(t *testing.T) {
+	t.Setenv("DATA_DIR", "/data")
+	if c := Load(); c.ArchiveDir != "/data/archive" || !c.RecordsArchive {
+		t.Fatalf("default archive: %q %t", c.ArchiveDir, c.RecordsArchive)
+	}
+	t.Setenv("ARCHIVE_DIR", "off")
+	if c := Load(); c.ArchiveDir != "" || c.RecordsArchive {
+		t.Fatalf("ARCHIVE_DIR=off: %q %t", c.ArchiveDir, c.RecordsArchive)
 	}
 }

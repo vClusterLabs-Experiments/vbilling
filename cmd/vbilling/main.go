@@ -60,9 +60,8 @@ func main() {
 	if err := cfg.Validate(); err != nil {
 		log.Fatalf("invalid configuration: %v", err)
 	}
-	if cfg.SpotDiscountPercent > 0 {
-		log.Printf("WARNING: SPOT_DISCOUNT_PERCENT is deprecated and ignored. Quantities are no longer discounted; " +
-			"price spot and preemptible capacity in your billing backend using the capacity_type dimension.")
+	for _, w := range cfg.Warnings {
+		log.Printf("WARNING: setting %s", w)
 	}
 	customs, err := usage.ParseCustomMetrics(cfg.CustomMetrics)
 	if err != nil {
