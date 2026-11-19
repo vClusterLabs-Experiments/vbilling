@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -30,6 +31,7 @@ import (
 	"github.com/vclusterlabs-experiments/vbilling/internal/gateway"
 	"github.com/vclusterlabs-experiments/vbilling/internal/health"
 	"github.com/vclusterlabs-experiments/vbilling/internal/kv"
+	"github.com/vclusterlabs-experiments/vbilling/internal/lease"
 	"github.com/vclusterlabs-experiments/vbilling/internal/metrics"
 	"github.com/vclusterlabs-experiments/vbilling/internal/pause"
 	"github.com/vclusterlabs-experiments/vbilling/internal/pipeline"
@@ -107,6 +109,21 @@ func main() {
 	log.Printf("Adapters: %v | Region: %s | Window: %s | CPU/memory basis: %s | Data: %s",
 		cfg.Adapters, cfg.Region, cfg.CollectionInterval, cfg.CPUMemoryBasis, cfg.DataDir)
 
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+	kubeConfig, namespace, err := getKubeConfig()
+	if err != nil {
+		log.Fatalf("kubernetes config: %v", err)
+	}
+	kube, err := kubernetes.NewForConfig(kubeConfig)
+	if err != nil {
+		log.Fatalf("kubernetes client: %v", err)
+	}
+	// One instance at a time: nothing is opened, metered, taken in or
+	// delivered before this process holds the Lease.
+	guard := holdLease(ctx, kube, namespace, cfg.ListenAddr)
+	defer guard.Release()
+
 	sp, err := spool.Open(filepath.Join(cfg.DataDir, "ledger"), spool.Options{Retention: cfg.Retention, ArchiveDir: cfg.ArchiveDir})
 	if err != nil {
 		log.Fatalf("open ledger: %v", err)
@@ -127,14 +144,6 @@ func main() {
 		log.Fatalf("initialize adapters: %v", err)
 	}
 
-	kubeConfig, err := getKubeConfig()
-	if err != nil {
-		log.Fatalf("kubernetes config: %v", err)
-	}
-	kube, err := kubernetes.NewForConfig(kubeConfig)
-	if err != nil {
-		log.Fatalf("kubernetes client: %v", err)
-	}
 	metricsClient, err := metricsclient.NewForConfig(kubeConfig)
 	if err != nil {
 		log.Fatalf("metrics client: %v", err)
@@ -170,9 +179,6 @@ func main() {
 		Gate:      gate,
 		MaxHold:   cfg.PriceCheckMaxHold,
 	}, tel)
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
-
 	disc := discovery.NewDiscoverer(kube, dynamicClient, cfg.WatchNamespaces, cfg.PlatformCluster)
 	owners := newPlatformResolver(cfg, sources, sp)
 	if owners != nil {
@@ -589,18 +595,55 @@ func compactLoop(ctx context.Context, sp *spool.Spool, consumers []string) {
 	}
 }
 
-func getKubeConfig() (*rest.Config, error) {
+// getKubeConfig returns the Kubernetes config and the namespace vBilling
+// runs in: the pod's own, or the kubeconfig context's ("" when it names none).
+func getKubeConfig() (*rest.Config, string, error) {
 	if cfg, err := rest.InClusterConfig(); err == nil {
 		log.Println("Using in-cluster Kubernetes config")
-		return cfg, nil
+		ns, _ := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
+		return cfg, strings.TrimSpace(string(ns)), nil
 	}
 	rules := clientcmd.NewDefaultClientConfigLoadingRules()
-	cfg, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, &clientcmd.ConfigOverrides{}).ClientConfig()
+	cc := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, &clientcmd.ConfigOverrides{})
+	cfg, err := cc.ClientConfig()
 	if err != nil {
-		return nil, err
+		return nil, "", err
+	}
+	ns := ""
+	if raw, err := cc.RawConfig(); err == nil {
+		if c := raw.Contexts[raw.CurrentContext]; c != nil {
+			ns = c.Namespace
+		}
 	}
 	log.Printf("Using kubeconfig (%s)", os.Getenv("KUBECONFIG"))
-	return cfg, nil
+	return cfg, ns, nil
+}
+
+// holdLease takes the vbilling Lease in namespace (see internal/lease) and
+// stops the process if it is ever lost. A second instance waits here, alive
+// but not Ready. Without a namespace, or without RBAC for Leases, vBilling
+// runs without the guard and says so.
+func holdLease(ctx context.Context, kube kubernetes.Interface, namespace, listen string) *lease.Held {
+	if namespace == "" {
+		log.Printf("WARNING: vBilling does not know its namespace (outside a cluster, set one on the kubeconfig context), so it cannot take its Lease and runs without the single-instance guard: never run two vBilling instances against the same clusters")
+		return nil
+	}
+	held, err := lease.Acquire(ctx, kube, lease.Options{Namespace: namespace, Listen: listen})
+	switch {
+	case errors.Is(err, lease.ErrForbidden):
+		log.Printf("WARNING: %v: running without the single-instance guard. Grant get, create and update on leases in namespace %s (the chart's Role does)", err, namespace)
+		return nil
+	case ctx.Err() != nil:
+		log.Println("vBilling stopped while waiting for its Lease")
+		os.Exit(0)
+	case err != nil:
+		log.Fatalf("Lease %s/%s: %v", namespace, lease.Name, err)
+	}
+	go func() {
+		<-held.Lost()
+		log.Fatalf("[lease] lost Lease %s/%s: stopping now so another instance can take over; the ledger and backfill resume where this one stopped", namespace, lease.Name)
+	}()
+	return held
 }
 
 func onOff(b bool) string {
