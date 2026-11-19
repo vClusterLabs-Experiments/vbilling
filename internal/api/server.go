@@ -67,6 +67,9 @@ type Server struct {
 	started time.Time         // records wait for the first discovery after this
 	checks  []crosscheck.Check
 	pricing *pricing.Service // nil: PRICE_CHECK=off
+
+	limiter *rateLimiter // requests per ingest token
+	skus    *skuQuota    // distinct SKUs per tenant and day
 }
 
 // WithCrossChecks enables GET /api/v1/crosscheck.
@@ -78,15 +81,23 @@ func (s *Server) WithHealth(h *health.Registry) *Server { s.health = h; return s
 // WithPauses exposes when clusters were paused in GET /api/v1/billing-states.
 func (s *Server) WithPauses(p *pause.Store) *Server { s.pauses = p; return s }
 
-// WithRecords enables POST /api/v1/records.
-func (s *Server) WithRecords(in *records.Ingester) *Server { s.records = in; return s }
+// WithRecords enables POST /api/v1/records. Records (pushed or pulled)
+// count towards the same per-tenant SKU cap as ingested events.
+func (s *Server) WithRecords(in *records.Ingester) *Server {
+	s.records = in
+	in.UseSKUGate(s.skus.admit)
+	return s
+}
 
 // WithPricing enables GET /api/v1/pricing and POST /api/v1/pricing/check.
 func (s *Server) WithPricing(p *pricing.Service) *Server { s.pricing = p; return s }
 
 func New(cfg *config.Config, sp *spool.Spool, disp *pipeline.Dispatcher, tenants *pipeline.TenantRegistry,
 	ctrl Controller, enf *enforcement.Enforcer, tel *telemetry.Registry, version string) *Server {
-	return &Server{cfg: cfg, spool: sp, disp: disp, tenants: tenants, ctrl: ctrl, enf: enf, tel: tel, version: version, now: time.Now, started: time.Now()}
+	s := &Server{cfg: cfg, spool: sp, disp: disp, tenants: tenants, ctrl: ctrl, enf: enf, tel: tel, version: version, now: time.Now, started: time.Now(),
+		limiter: newRateLimiter(time.Now)}
+	s.skus = newSKUQuota(func() time.Time { return s.now() })
+	return s
 }
 
 // Handler returns the routed handler. Everything but /healthz, /readyz,
@@ -442,8 +453,9 @@ func (s *Server) pricingReport(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, rep)
 }
 
-// ingestAuth checks an ingest token. A token from INGEST_TOKENS is bound to
-// a tenant: everything sent with it is billed to that tenant.
+// ingestAuth checks an ingest token and its request rate. A token from
+// INGEST_TOKENS is bound to a tenant: everything sent with it is billed to
+// that tenant.
 func (s *Server) ingestAuth(w http.ResponseWriter, r *http.Request) (boundTenant string, ok bool) {
 	if s.cfg.IngestToken == "" && len(s.cfg.IngestTokens) == 0 {
 		writeErr(w, http.StatusForbidden, "ingest is disabled: set INGEST_TOKEN (or API_TOKEN), or INGEST_TOKENS for tokens bound to a tenant")
@@ -451,11 +463,11 @@ func (s *Server) ingestAuth(w http.ResponseWriter, r *http.Request) (boundTenant
 	}
 	got := bearer(r)
 	if s.cfg.IngestToken != "" && tokenOK(got, s.cfg.IngestToken) {
-		return "", true
+		return "", s.limitIngest(w, got, false)
 	}
 	for tok, tenant := range s.cfg.IngestTokens {
 		if tokenOK(got, tok) {
-			return tenant, true
+			return tenant, s.limitIngest(w, tok, true)
 		}
 	}
 	writeErr(w, http.StatusUnauthorized, "missing or invalid bearer token")
@@ -685,11 +697,8 @@ func (s *Server) exportEvents(w http.ResponseWriter, r *http.Request) {
 // --- ingest ---
 
 const (
-	maxIngestBody   = 10 << 20
-	maxIngestEvents = 5000
-	ingestMaxAge    = 34 * 24 * time.Hour // the strictest backend window (Metronome)
-	ingestMaxSkew   = 5 * time.Minute
-	maxRecordsBody  = 16 << 20
+	ingestMaxAge  = 34 * 24 * time.Hour // the strictest backend window (Metronome)
+	ingestMaxSkew = 5 * time.Minute
 )
 
 // reservedIDPrefixes are the ID namespaces vBilling derives itself:
@@ -779,9 +788,11 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 	}
 	var valid []usage.Event
 	var rejected []rejection
+	var warnings []string
 	derived := map[string]bool{}  // IDs vBilling derived because the event had none
 	legacy := map[string]string{} // derived ID -> the ID v0.3.0 gave the same event
 	firstAt := map[string]int{}
+	overflow := 0
 	for i := range events {
 		e := events[i]
 		e.Source = source
@@ -847,6 +858,10 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 			rejected = append(rejected, rejection{Index: i, ID: e.ID, Error: strings.Join(problems, "; ")})
 			continue
 		}
+		var over bool
+		if e.SKU, over = s.skus.admit(e.Tenant, e.SKU); over {
+			overflow++
+		}
 		valid = append(valid, e)
 	}
 	// An event without an id that v0.3.0 stored (under its derived ID) is a
@@ -881,8 +896,15 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if silent > 0 {
-		out["warnings"] = []string{fmt.Sprintf("%d event(s) without an id matched usage already in the ledger and were not counted again. "+
-			"If they are separate requests rather than retries, give each one an id, or send per-request usage to POST /api/v1/records", silent)}
+		warnings = append(warnings, fmt.Sprintf("%d event(s) without an id matched usage already in the ledger and were not counted again. "+
+			"If they are separate requests rather than retries, give each one an id, or send per-request usage to POST /api/v1/records", silent))
+	}
+	if overflow > 0 {
+		warnings = append(warnings, fmt.Sprintf("%d event(s) are billed under SKU %q: their tenant sent more than %d distinct SKUs today",
+			overflow, OverflowSKU, maxSKUsPerTenantPerDay))
+	}
+	if len(warnings) > 0 {
+		out["warnings"] = warnings
 	}
 	writeJSON(w, status, out)
 }

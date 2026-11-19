@@ -70,7 +70,17 @@ type Ingester struct {
 	resolve TenantResolver
 	health  *health.Registry
 	tel     *telemetry.Registry
+	skuGate SKUGate
 }
+
+// SKUGate returns the SKU a tenant's usage is stored under: sku itself, or
+// a replacement (overflow true) once the tenant brought in too many
+// distinct SKUs.
+type SKUGate func(tenant, sku string) (stored string, overflow bool)
+
+// UseSKUGate applies g to every usage row stored, pushed or pulled. Set it
+// before records are ingested.
+func (in *Ingester) UseSKUGate(g SKUGate) { in.skuGate = g }
 
 // recordValues checks a pushed record's SKU and dimension values, which
 // reach dashboards, exports and billing platforms.
@@ -316,6 +326,18 @@ func (in *Ingester) ingest(format, client, boundTenant string, objs []map[string
 	var rows []usage.Event
 	for _, r := range recs {
 		rows = append(rows, r...)
+	}
+	overflow := 0
+	if in.skuGate != nil {
+		for i := range rows {
+			var over bool
+			if rows[i].SKU, over = in.skuGate(rows[i].Tenant, rows[i].SKU); over {
+				overflow++
+			}
+		}
+	}
+	if overflow > 0 {
+		res.Warnings = append(res.Warnings, fmt.Sprintf("%d usage row(s) are billed under another SKU: their tenant sent too many distinct SKUs today", overflow))
 	}
 	if len(rows) > 0 {
 		if _, err := in.spool.AppendBatch(source, rows); err != nil {
