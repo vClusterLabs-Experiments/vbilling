@@ -365,3 +365,27 @@ func TestReview2LaterAlertMustNotResumeAnEmptyWallet(t *testing.T) {
 		t.Fatalf("a later warning-level alert resumed a tenant paused for an empty wallet: state %s (%s)", st.State, st.Reason)
 	}
 }
+
+// A payment stamped in whole seconds (the signed Date header) right after
+// an alert stamped with milliseconds in the same second is newer, not
+// stale: it must resume the tenant.
+func TestSameSecondEventsApplyInArrivalOrder(t *testing.T) {
+	rules, _ := ParseRules("alerts.low_remaining_commit_balance_reached=paused")
+	m, _, _ := setup(t, "observe", rules)
+	date := now.Truncate(time.Second).Format(http.TimeFormat)
+	send := func(body string) {
+		t.Helper()
+		if _, err := m.HandleMetronome(context.Background(), []byte(body), date, metronome.Sign([]byte(body), date, "mtr_secret")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	alertAt := now.Truncate(time.Second).Add(500 * time.Millisecond).Format(time.RFC3339Nano)
+	send(fmt.Sprintf(`{"id":"b1","type":"alerts.low_remaining_commit_balance_reached","timestamp":%q,"properties":{"customer_id":"5f794d50-085a-4db6-8d15-286e518b7225"}}`, alertAt))
+	if st := m.StateOf("acme"); st.State != Paused {
+		t.Fatalf("the commit alert did not pause: %s (%s)", st.State, st.Reason)
+	}
+	send(`{"id":"b2","type":"payment_gate.payment_status","properties":{"customer_id":"5f794d50-085a-4db6-8d15-286e518b7225","payment_status":"paid"}}`)
+	if st := m.StateOf("acme"); st.State != Active {
+		t.Fatalf("a payment in the same second as the alert must resume: %s (%s)", st.State, st.Reason)
+	}
+}

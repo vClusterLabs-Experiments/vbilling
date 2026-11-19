@@ -18,14 +18,14 @@ import (
 // usageServer is an API over a ledger with an archive and a held store.
 func usageServer(t *testing.T, sp *spool.Spool, held *pipeline.HeldStore) *env {
 	t.Helper()
-	cfg := &config.Config{Region: "ap-southeast-2", Adapters: []string{"fakebill"}, CollectionInterval: time.Minute, EnforcementMode: "observe"}
+	cfg := &config.Config{Region: "ap-southeast-2", Adapters: []string{"fakebill"}, CollectionInterval: time.Minute, EnforcementMode: "observe", APIToken: adminToken}
 	dest := &recDest{recorded: map[string]float64{}, reject: map[string]bool{}}
 	disp := pipeline.New(sp, []destinations.Destination{dest}, pipeline.Options{Held: held}, nil)
 	s := New(cfg, sp, disp, pipeline.NewTenantRegistry(), nil, nil, telemetry.New(), "test")
 	s.now = func() time.Time { return now }
 	srv := httptest.NewServer(s.Handler())
 	t.Cleanup(srv.Close)
-	return &env{srv: srv, sp: sp, dest: dest, disp: disp}
+	return &env{srv: srv, sp: sp, dest: dest, disp: disp, token: adminToken}
 }
 
 func gpuHour(tenant, sku string, ws time.Time, q float64) usage.Event {

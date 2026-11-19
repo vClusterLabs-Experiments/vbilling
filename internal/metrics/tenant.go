@@ -57,9 +57,19 @@ func (c *Collector) UseTenantAPI(t TenantAPI) { c.tenants = t }
 
 // CollectTenantAPI meters only what tenant APIs see, for windows whose
 // collection could not reach a tenant API. Its events go to the ledger as
-// late events, deduplicated by ID.
+// late events, deduplicated by ID. Their IDs are salted: a cluster's own
+// volumes and load balancers have the same identity as events the control
+// plane cluster side may already have committed for that window, and a fill
+// must never be dropped as their duplicate. The salt derives from the
+// event's identity, so a refilled window still deduplicates against itself.
 func (c *Collector) CollectTenantAPI(ctx context.Context, targets []Target, windows []Window) (map[time.Time][]usage.Event, Stats, error) {
-	return c.collect(ctx, targets, windows, true)
+	out, st, err := c.collect(ctx, targets, windows, true)
+	for _, evs := range out {
+		for i := range evs {
+			evs[i].ID = usage.DeriveIDWith(&evs[i], "fill")
+		}
+	}
+	return out, st, err
 }
 
 // collectTenant runs the tenant-API part for one target. All-or-nothing: on

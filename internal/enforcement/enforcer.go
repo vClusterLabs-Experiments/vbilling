@@ -649,7 +649,12 @@ func (e *Enforcer) store(tenant string, u update) (ts, prev TenantState, res sto
 		if !u.at.IsZero() {
 			at = u.at.UTC()
 		}
-		if last := prev.EventTimes[u.hold]; at.Before(last) {
+		// Providers stamp events at different precisions (a payload
+		// timestamp with milliseconds, a signed Date header in whole
+		// seconds), so events are ordered by the second, and events in the
+		// same second apply in arrival order: a payment right after an
+		// alert must never look older than it.
+		if last := prev.EventTimes[u.hold]; at.Truncate(time.Second).Before(last.Truncate(time.Second)) {
 			return prev, prev, storeResult{outStale, fmt.Sprintf("the event happened at %s, before the newest one applied to the %s hold (%s)",
 				at.Format(time.RFC3339), u.hold, last.Format(time.RFC3339))}, nil
 		}
