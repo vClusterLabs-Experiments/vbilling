@@ -633,6 +633,7 @@ func holdLease(ctx context.Context, kube kubernetes.Interface, namespace, listen
 	}
 	held, err := lease.Acquire(ctx, kube, lease.Options{Namespace: namespace, Listen: listen})
 	switch {
+	case err == nil:
 	case errors.Is(err, lease.ErrForbidden):
 		log.Printf("WARNING: %v: running without the single-instance guard. Grant get, create and update on leases in namespace %s (the chart's Role does)", err, namespace)
 		return nil
