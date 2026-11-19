@@ -88,7 +88,7 @@ func TestLiteLLMPullSettings(t *testing.T) {
 
 func TestPriceCheckSettings(t *testing.T) {
 	c := Load()
-	if c.PriceCheck != "warn" || c.PriceCheckInterval != 10*time.Minute || c.PriceCheckLookback != 24*time.Hour || c.PriceCheckMaxHold != 28*24*time.Hour {
+	if c.PriceCheck != "warn" || c.PriceCheckInterval != 10*time.Minute || c.PriceCheckLookback != 24*time.Hour || c.PriceCheckMaxHold != 23*time.Hour {
 		t.Fatalf("price check defaults: %q %s %s %s", c.PriceCheck, c.PriceCheckInterval, c.PriceCheckLookback, c.PriceCheckMaxHold)
 	}
 	t.Setenv("PRICE_CHECK", "hold")
@@ -96,9 +96,7 @@ func TestPriceCheckSettings(t *testing.T) {
 		t.Fatalf("hold: %+v", c)
 	}
 	for name, mutate := range map[string]func(*Config){
-		"bad mode":      func(c *Config) { c.PriceCheck = "block" },
-		"tiny period":   func(c *Config) { c.PriceCheckInterval = time.Second },
-		"tiny lookback": func(c *Config) { c.PriceCheckLookback = time.Minute },
+		"bad mode": func(c *Config) { c.PriceCheck = "block" },
 	} {
 		c := Load()
 		mutate(c)
@@ -118,7 +116,7 @@ func TestRemovedAndRenamedSettings(t *testing.T) {
 	t.Setenv("METRONOME_STRIPE_LINK", "true")
 	t.Setenv("STRIPE_API_KEY", "sk_test_x")
 	c := Load()
-	if c.CollectionInterval != time.Minute || c.PriceCheckMaxHold != 28*24*time.Hour {
+	if c.CollectionInterval != time.Minute || c.PriceCheckMaxHold != 23*time.Hour {
 		t.Fatalf("removed settings must not change behavior: %s %s", c.CollectionInterval, c.PriceCheckMaxHold)
 	}
 	if c.RecordsPullLiteLLMURL != "http://litellm:4000" || c.RecordsPullLiteLLMKey != "sk-admin" {

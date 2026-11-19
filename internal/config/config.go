@@ -126,7 +126,8 @@ type Config struct {
 	PriceCheckInterval time.Duration
 	PriceCheckLookback time.Duration
 	// PriceCheckMaxHold releases held usage without a price once its window
-	// started this long ago, before billing platforms refuse it as too old.
+	// started this long ago, before its invoice period can be final (tests
+	// shorten it; vBilling uses pipeline.MaxUnpricedHold).
 	PriceCheckMaxHold time.Duration
 
 	// HTTP API.
@@ -213,7 +214,7 @@ const (
 	pauseDrainTimeout   = 2 * time.Minute
 	priceCheckInterval  = 10 * time.Minute
 	priceCheckLookback  = 24 * time.Hour
-	priceCheckMaxHold   = 28 * 24 * time.Hour
+	priceCheckMaxHold   = 23 * time.Hour // pipeline.MaxUnpricedHold
 	stripeAPIVersion    = "2026-09-30.endive"
 	tenantSecret        = "vbilling-kubeconfig"
 	platformRefresh     = time.Minute
@@ -578,16 +579,6 @@ func (c *Config) Validate() error {
 	default:
 		return fmt.Errorf("PRICE_CHECK %q must be warn, hold or off", c.PriceCheck)
 	}
-	if c.PriceCheckInterval < time.Minute {
-		return fmt.Errorf("PRICE_CHECK_INTERVAL %s must be at least 1m", c.PriceCheckInterval)
-	}
-	if c.PriceCheckLookback < time.Hour {
-		return fmt.Errorf("PRICE_CHECK_LOOKBACK %s must be at least 1h", c.PriceCheckLookback)
-	}
-	if c.PriceCheckMaxHold < time.Hour || c.PriceCheckMaxHold > MaxPriceHold {
-		return fmt.Errorf("PRICE_CHECK_MAX_HOLD %s must be between 1h and %s: Metronome refuses usage older than 34 days, "+
-			"and vBilling keeps a 2-day margin to deliver what it releases", c.PriceCheckMaxHold, MaxPriceHold)
-	}
 	switch c.PrometheusPreset {
 	case "", "default", "vcluster-platform":
 	default:
@@ -615,10 +606,6 @@ func envDuration(key string, fallback time.Duration) time.Duration {
 	}
 	return fallback
 }
-
-// MaxPriceHold is the longest PRICE_CHECK_MAX_HOLD: the smallest backdating
-// limit of a billing platform (Metronome, 34 days) minus a 2-day margin.
-const MaxPriceHold = 32 * 24 * time.Hour
 
 func envBool(key string, fallback bool) bool {
 	if v := os.Getenv(key); v != "" {

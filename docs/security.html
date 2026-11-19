@@ -372,8 +372,8 @@
           <thead><tr><th>Events</th><th>ID</th></tr></thead>
           <tbody>
             <tr><td>Measured by vBilling: the collector, Prometheus, the records aggregator, fills after an outage of a cluster's API</td><td>Derived from the usage's identity, prefix <code>vb1_</code></td></tr>
-            <tr><td>Ingested without an id</td><td>Derived from the identity, the ingest source, the bound tenant and the client, prefix <code>ie1_</code></td></tr>
-            <tr><td>Ingested with an id, tenant-bound token</td><td>The id scoped to the tenant and the client, prefix <code>te1_</code></td></tr>
+            <tr><td>Ingested without an id</td><td>Derived from the identity, the ingest source, the bound tenant and token, and the client, prefix <code>ie1_</code></td></tr>
+            <tr><td>Ingested with an id, tenant-bound token</td><td>The id scoped to the token, its tenant and the client, prefix <code>te1_</code></td></tr>
             <tr><td>Ingested with an id, shared ingest token</td><td>The id as sent. It may not start with <code>vb1_</code>, <code>te1_</code> or <code>ie1_</code>.</td></tr>
           </tbody>
         </table>

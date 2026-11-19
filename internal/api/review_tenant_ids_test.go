@@ -41,7 +41,7 @@ func TestTenantBoundEventIDRetryDeduplicates(t *testing.T) {
 		t.Fatalf("first send: %d %v", code, out)
 	}
 	ids, _ := out["ids"].([]any)
-	if len(ids) != 1 || ids[0] != TenantEventID("tenant-a", "api", "request-1") {
+	if len(ids) != 1 || ids[0] != TenantEventID("tenant-a", limitKey("token-a"), "api", "request-1") {
 		t.Fatalf("ids = %v, want the tenant-scoped ID", out["ids"])
 	}
 	code, out = postJSON(t, e.srv.URL+"/api/v1/events", "token-a", body)

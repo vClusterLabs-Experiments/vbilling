@@ -172,7 +172,7 @@ func main() {
 		log.Fatalf("open held events: %v", err)
 	}
 	// Held usage is released, unpriced, before its invoice period can be
-	// final: PRICE_CHECK_MAX_HOLD, at most pipeline.MaxUnpricedHold.
+	// final, after pipeline.MaxUnpricedHold.
 	maxHold := min(cfg.PriceCheckMaxHold, pipeline.MaxUnpricedHold)
 	var prices *pricing.Service
 	if cfg.PriceCheck != pricing.ModeOff {

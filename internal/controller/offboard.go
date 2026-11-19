@@ -174,7 +174,7 @@ func (c *Controller) delivered(tenant, dest string) (bool, string) {
 			return false, "reading held events: " + err.Error()
 		}
 		if held {
-			return false, "some of its usage is held until priced (PRICE_CHECK=hold)"
+			return false, "some of its usage is held at the pricing gate (no price yet, or not counted by the billing platform yet)"
 		}
 	}
 	return true, ""

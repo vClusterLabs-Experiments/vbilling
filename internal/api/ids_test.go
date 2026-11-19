@@ -59,7 +59,7 @@ func TestIngestIDsWithoutAnIDAreNamespaced(t *testing.T) {
 	if ids["ingest-secret"] == ids["tok-acme"] {
 		t.Fatal("the shared and the bound token produced the same ID")
 	}
-	if want := IngestEventID("ingest:api", "acme", "api", collectorID); ids["tok-acme"] != want {
+	if want := IngestEventID("ingest:api", "acme", limitKey("tok-acme"), "api", collectorID); ids["tok-acme"] != want {
 		t.Fatalf("bound ID %s, want %s", ids["tok-acme"], want)
 	}
 

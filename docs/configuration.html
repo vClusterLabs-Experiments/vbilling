@@ -489,7 +489,7 @@
         <table class="config-table">
           <thead><tr><th>Variable</th><th>Description</th><th>Default</th></tr></thead>
           <tbody>
-            <tr><td><code>PRICE_CHECK</code></td><td><code>warn</code>: report usage a billing platform has no price for. <code>hold</code>: also keep the events of an unpriced series (metric, SKU, plan) out of that destination. They stay in the ledger and in <code>DATA_DIR/held</code>, and ship in ledger order once the price exists; other series and destinations are not delayed. <code>off</code>: no checks. Switching from <code>hold</code> back to <code>warn</code> or <code>off</code> releases everything held.</td><td class="td-default">warn</td></tr>
+            <tr><td><code>PRICE_CHECK</code></td><td><code>warn</code>: report usage a billing platform has no price for, and hold Metronome usage no billable metric counts yet, which Metronome would never bill. <code>hold</code>: also keep the events of an unpriced series (metric, SKU, plan) out of that destination. They stay in the ledger and in <code>DATA_DIR/held</code>, and ship in ledger order once the price exists, or without a price after 23 hours, before their invoice period can be final; other series and destinations are not delayed. <code>off</code>: no checks, and nothing held. Switching from <code>hold</code> back to <code>warn</code> releases what is held for a price; <code>off</code> releases everything held.</td><td class="td-default">warn</td></tr>
           </tbody>
         </table>
       </div>

@@ -877,9 +877,9 @@ const maxRejections = records.MaxRejections
 // derived from the event identity, so resends deduplicate.
 //
 // Ingested events never take an ID vBilling's own sources use: an event's
-// own id is scoped to the tenant (TenantEventID) when its token is bound to
-// one, and must not use a reserved prefix otherwise; an event without an id
-// gets IngestEventID.
+// own id is scoped to the token (TenantEventID) when the token is bound to a
+// tenant, and must not use a reserved prefix otherwise; an event without an
+// id gets IngestEventID.
 func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 	caller, ok := s.ingestAuth(w, r)
 	if !ok {
@@ -917,6 +917,10 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	source := "ingest:" + client
+	boundToken := "" // the bound token's ID (records.TokenID); "" for the shared token
+	if bound != "" {
+		boundToken = caller.key
+	}
 	now := s.now().UTC()
 	type rejection struct {
 		Index int    `json:"index"`
@@ -950,9 +954,11 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case noID:
 		case bound != "":
-			// A tenant chooses its own IDs, so two tenants may pick the same
-			// one: scope it to the tenant and client, as record IDs are. The
-			// id as sent is kept, so it is checked like any value.
+			// A tenant chooses its own IDs, and so does every other token
+			// bound to it, such as the operator's gateway: scope the id to the
+			// token and client, as record IDs are, so no other tenant or token
+			// can produce it. The id as sent is kept, so it is checked like
+			// any value.
 			if err := usage.CheckValue(e.ID); err != nil {
 				problems = append(problems, "id "+err.Error())
 			} else {
@@ -961,7 +967,9 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 				}
 				e.Properties["client_event_id"] = e.ID
 			}
-			e.ID = TenantEventID(bound, client, e.ID)
+			id := TenantEventID(bound, caller.key, client, e.ID)
+			legacy[id] = v030TenantEventID(bound, client, e.ID)
+			e.ID = id
 		case reservedID(e.ID):
 			problems = append(problems, fmt.Sprintf("id %q starts with a prefix vBilling reserves for the IDs it derives (%s)",
 				e.ID, strings.Join(reservedIDPrefixes, ", ")))
@@ -971,7 +979,7 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 		if noID {
 			// e.ID is now usage.DeriveID: the ID of the same usage measured by
 			// vBilling itself. Move it into the ingest namespace.
-			id := IngestEventID(source, bound, client, e.ID)
+			id := IngestEventID(source, bound, boundToken, client, e.ID)
 			legacy[id] = e.ID
 			e.ID = id
 		}
@@ -1006,8 +1014,9 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 		}
 		valid = append(valid, e)
 	}
-	// An event without an id that v0.3.0 stored (under its derived ID) is a
-	// retry across the upgrade: count it once.
+	// An event v0.3.0 stored under another ID (one without an id under its
+	// derived ID, one a tenant-bound token sent with an id under the ID
+	// scoped to its tenant) is a retry across the upgrade: count it once.
 	fresh := valid[:0:0]
 	var retried []string
 	for _, e := range valid {
@@ -1075,9 +1084,20 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 }
 
 // TenantEventID is the ledger ID of an event a tenant-bound token sent with
-// its own id: the same tenant, client and id always give the same ID, so
-// retries deduplicate, and no other tenant or collector can produce it.
-func TenantEventID(tenant, client, id string) string {
+// its own id. token is the token's ID (records.TokenID): the same token,
+// client and id always give the same ID, so retries deduplicate, while no
+// other tenant, collector or token bound to the same tenant can produce it.
+// A tenant chooses its client names and can learn the IDs of the events a
+// gateway that serves it sends, and billing keeps the first copy of an ID.
+func TenantEventID(tenant, token, client, id string) string {
+	sum := sha256.Sum256([]byte("token\x00" + token + "\x00" + tenant + "\x00" + client + "\x00" + id))
+	return "te1_" + hex.EncodeToString(sum[:16])
+}
+
+// v030TenantEventID is the ID v0.3.0 gave an event a tenant-bound token
+// sent with its own id, scoped to the tenant and client only. A retry of
+// such an event after the upgrade is recognized by it.
+func v030TenantEventID(tenant, client, id string) string {
 	sum := sha256.Sum256([]byte(tenant + "\x00" + client + "\x00" + id))
 	return "te1_" + hex.EncodeToString(sum[:16])
 }
@@ -1085,12 +1105,12 @@ func TenantEventID(tenant, client, id string) string {
 // IngestEventID is the ledger ID of an event sent without an id. derived is
 // the event's usage.DeriveID, which every event vBilling measures itself
 // (collector, Prometheus, records aggregator, fills) uses as its ID. The ingest
-// source, the tenant the token is bound to ("" for the shared ingest token)
-// and the client are hashed with it, so a retry gets the same ID while an
-// ingested event can never take the ID of vBilling's own usage, nor of
-// another tenant's or client's.
-func IngestEventID(source, bound, client, derived string) string {
-	sum := sha256.Sum256([]byte("ingest\x00" + source + "\x00" + bound + "\x00" + client + "\x00" + derived))
+// source, the tenant the token is bound to and the token's ID ("" and "" for
+// the shared ingest token) and the client are hashed with it, so a retry gets
+// the same ID while an ingested event can never take the ID of vBilling's
+// own usage, nor of another tenant's, token's or client's.
+func IngestEventID(source, bound, token, client, derived string) string {
+	sum := sha256.Sum256([]byte("ingest\x00" + source + "\x00" + bound + "\x00" + token + "\x00" + client + "\x00" + derived))
 	return "ie1_" + hex.EncodeToString(sum[:16])
 }
 

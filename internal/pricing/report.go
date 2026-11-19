@@ -52,7 +52,7 @@ type Row struct {
 	CheckedAt    time.Time           `json:"checked_at,omitempty"`
 	HeldEvents   int                 `json:"held_events,omitempty"`
 	// ReleasedUnpriced counts held events released without a price after
-	// PRICE_CHECK_MAX_HOLD since vBilling started.
+	// MaxHold (23 hours) since vBilling started.
 	ReleasedUnpriced   int       `json:"released_unpriced_events,omitempty"`
 	ReleasedUnpricedAt time.Time `json:"released_unpriced_at,omitempty"`
 	HeldSince          time.Time `json:"held_since,omitempty"`

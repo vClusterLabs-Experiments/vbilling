@@ -156,7 +156,7 @@ th .est { color: var(--warning); }
   <section class="card">
     <h2>Usage by tenant</h2>
     <p class="desc">Every metric in the catalog that has usage, unrated, from the vBilling ledger and its archive, each event counted once. Expand a tenant for its SKUs.
-      "Of which" rows are the part of a tenant's usage a billing platform refused for good (dead letters) or that is held until priced: not billed there (yet).
+      "Of which" rows are the part of a tenant's usage a billing platform refused for good (dead letters) or that is held until priced or counted: not billed there (yet).
       <span class="est">&#8776;</span> marks estimates (PromQL queries); everything else is measured exactly. Prices and invoices come from your billing platform.</p>
     <div class="scroll"><table id="usage"><thead></thead><tbody></tbody></table></div>
   </section>
@@ -483,7 +483,7 @@ async function loadPricing() {
   }
   const gaps = p.unpriced || 0, held = p.held_events || 0;
   $("#t-price").replaceChildren(gaps ? badge("serious", gaps + " unpriced") : badge("good", "All priced"));
-  $("#t-price-sub").textContent = held ? fmt(held, 0) + " events held until priced" : "PRICE_CHECK=" + p.mode;
+  $("#t-price-sub").textContent = held ? fmt(held, 0) + " events held" : "PRICE_CHECK=" + p.mode;
   $("#t-price").title = gaps ? "See GET /api/v1/pricing and the pricing sources below" : "";
 }
 async function loadSources() {

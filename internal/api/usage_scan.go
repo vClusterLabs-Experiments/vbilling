@@ -136,7 +136,7 @@ func (s *Server) scanUsageStats(from, to time.Time, fn func(*usage.Event) error)
 }
 
 // undelivered is usage in the ledger that a destination does not bill (yet):
-// dead-lettered (refused for good) or held until priced.
+// dead-lettered (refused for good) or held at the pricing gate.
 type undelivered struct {
 	dead map[string]map[string]float64 // group key -> destination -> quantity
 	held map[string]map[string]float64

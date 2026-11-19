@@ -152,7 +152,7 @@ const MaxUnpricedHold = 23 * time.Hour
 
 // maxHold is how long a held event may wait for its price: Options.MaxHold,
 // at most MaxUnpricedHold. Zero holds without a limit (tests only: vBilling
-// always sets PRICE_CHECK_MAX_HOLD).
+// always sets one).
 func (d *Dispatcher) maxHold() time.Duration {
 	return min(d.opts.MaxHold, MaxUnpricedHold)
 }

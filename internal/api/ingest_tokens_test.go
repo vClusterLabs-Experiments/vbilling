@@ -83,3 +83,59 @@ func TestIngestedEventPropertiesAndRejectionCount(t *testing.T) {
 		t.Fatalf("250 refused events: %d, %d listed, count %v", code, len(out["rejected"].([]any)), out["rejected_count"])
 	}
 }
+
+// Events sent with two tokens bound to the same tenant, under the same
+// client and the same id, or without an id and with the same identity, get
+// IDs of each token's own: a tenant's own token can never take the ID of an
+// event the operator's gateway sends for it, so both copies are stored.
+func TestEventsOfEachBoundTokenGetIDsOfTheirOwn(t *testing.T) {
+	e := setup(t, func(c *config.Config) {
+		c.IngestTokens = map[string]string{"tok-acme-gw": "acme", "tok-acme-own": "acme"}
+	})
+	ws := now.Add(-5 * time.Minute)
+	for _, id := range []string{`"id":"evt-1",`, ""} {
+		for _, tok := range []string{"tok-acme-own", "tok-acme-gw"} {
+			q := map[string]string{"tok-acme-own": "0.000001", "tok-acme-gw": "8"}[tok]
+			body := fmt.Sprintf(`[{%s"metric":%q,"quantity":%s,"sku":"NVIDIA-H100","window_start":%q,"window_end":%q}]`,
+				id, usage.MetricGPUHours, q, ws.Format(time.RFC3339), ws.Add(time.Minute).Format(time.RFC3339))
+			code, out := postClientJSON(t, e.srv.URL+"/api/v1/events", tok, "gateway", body)
+			if code != http.StatusOK || out["accepted"] != float64(1) {
+				t.Fatalf("%s %s: %d %v: the copy sent with another token bound to the tenant took this event's ID", tok, id, code, out)
+			}
+		}
+	}
+}
+
+// An event a tenant-bound token sent with an id to v0.3.0, which scoped
+// the id to the tenant and client only, counts once when retried after the
+// upgrade.
+func TestBoundEventRetriedAcrossTheUpgradeCountsOnce(t *testing.T) {
+	e := setup(t, func(c *config.Config) { c.IngestTokens = map[string]string{"tok-acme": "acme"} })
+	ws := now.Add(-5 * time.Minute)
+	old := usage.Event{ID: v030TenantEventID("acme", "api", "evt-1"), Tenant: "acme", Metric: usage.MetricGPUHours, Quantity: 1,
+		SKU: "NVIDIA-H100", Region: "ap-southeast-2", WindowStart: ws, WindowEnd: ws.Add(time.Minute), Source: "ingest:api", RecordedAt: now}
+	if _, _, err := e.sp.AppendIngest(old.Source, []usage.Event{old}); err != nil {
+		t.Fatal(err)
+	}
+	body := fmt.Sprintf(`[{"id":"evt-1","metric":%q,"quantity":1,"sku":"NVIDIA-H100","window_start":%q,"window_end":%q}]`,
+		usage.MetricGPUHours, ws.Format(time.RFC3339), ws.Add(time.Minute).Format(time.RFC3339))
+	if code, out := postJSON(t, e.srv.URL+"/api/v1/events", "tok-acme", body); code != http.StatusOK || out["accepted"] != float64(0) || out["duplicates"] != float64(1) {
+		t.Fatalf("retry across the upgrade: %d %v, want a duplicate", code, out)
+	}
+}
+
+func postClientJSON(t *testing.T, url, token, client, body string) (int, map[string]any) {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodPost, url, strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-VBilling-Client", client)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var out map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	return resp.StatusCode, out
+}
