@@ -26,6 +26,11 @@ func TestUnitAmountDecimal(t *testing.T) {
 		{"0.014", 1, "usd", "1.4"},
 		{"300", 1, "jpy", "300"},
 		{"0", 1, "usd", "0"},
+		// Three-decimal currencies: 1000 fils (or baisa, millimes) per unit.
+		{"1.234", 1, "kwd", "1234"},
+		{"2.20", 1, "BHD", "2200"},
+		{"0.6", 1_000_000, "omr", "0.0006"},
+		{"1.235", 1, "jod", "1235"}, // a rate, never rounded to a multiple of 10
 	} {
 		got, err := unitAmountDecimal(tc.amount, tc.per, tc.currency)
 		if err != nil || got != tc.want {
@@ -61,6 +66,38 @@ func TestLoadPriceCardChecks(t *testing.T) {
 	pc, err := LoadPriceCard(writeCard(t, "plans: {p: {vcluster_lb_hours: {amount: 0.025}}}\n"), "USD")
 	if err != nil || pc.Currency != "usd" || pc.Interval != "month" || pc.Plans["p"]["vcluster_lb_hours"].Amount != "0.025" {
 		t.Fatalf("defaults: %+v %v", pc, err)
+	}
+}
+
+// Amounts keep every digit they were written with, quoted or not: more
+// digits than a float64 holds, small amounts, and SKU amounts. Exponents,
+// signs and digit separators are refused instead of being reinterpreted.
+func TestPriceCardAmountsAreExact(t *testing.T) {
+	pc, err := LoadPriceCard(writeCard(t, `currency: usd
+plans:
+  p:
+    vcluster_gpu_hours:
+      sku: {NVIDIA-H100: 98765432.123456789, NVIDIA-L4: "0.70"}
+    vcluster_lb_hours: {amount: 0.00001}
+    vcluster_instance_hours: {amount: 100}
+`), "usd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for got, want := range map[CardAmount]CardAmount{
+		pc.Plans["p"]["vcluster_gpu_hours"].SKU["NVIDIA-H100"]: "98765432.123456789",
+		pc.Plans["p"]["vcluster_gpu_hours"].SKU["NVIDIA-L4"]:   "0.70",
+		pc.Plans["p"]["vcluster_lb_hours"].Amount:              "0.00001",
+		pc.Plans["p"]["vcluster_instance_hours"].Amount:        "100",
+	} {
+		if got != want {
+			t.Errorf("amount %s loaded as %s", want, got)
+		}
+	}
+	for _, amount := range []string{"1e-5", "-1", "1_000", ".5", "0x10", ".inf"} {
+		if _, err := LoadPriceCard(writeCard(t, "plans: {p: {vcluster_lb_hours: {amount: "+amount+"}}}\n"), "usd"); err == nil {
+			t.Errorf("amount %s accepted", amount)
+		}
 	}
 }
 
