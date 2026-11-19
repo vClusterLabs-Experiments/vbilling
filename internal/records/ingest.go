@@ -278,6 +278,15 @@ func (in *Ingester) ingestPulled(format, client, boundTenant string, objs []map[
 
 // ingest stores records; stored is non-nil for pulled records.
 func (in *Ingester) ingest(format, client, boundTenant string, objs []map[string]any, stored *storedIndex) (Result, error) {
+	// Records sent with a token bound to a tenant (and rows a pull pins to
+	// one) get IDs in their own namespace. The tenant chooses the client
+	// name and can learn the gateway's request IDs from its own requests,
+	// so without it a bound copy sent first could take the ID of the
+	// gateway's own record, and billing keeps only the first copy of an ID.
+	idClient := client
+	if boundTenant != "" {
+		idClient = "bound\x00" + client
+	}
 	pulled := stored != nil
 	res := Result{Format: format}
 	mapping := in.formats[format]
@@ -301,7 +310,7 @@ func (in *Ingester) ingest(format, client, boundTenant string, objs []map[string
 		}
 		if rec.ID == "" {
 			if !in.opts.AllowUnkeyed {
-				reject("no request ID: every record needs a unique, stable ID so retries are not billed twice (set RECORDS_ALLOW_UNKEYED=true to derive one from the record's content)")
+				reject("no request ID: every record needs a unique, stable ID so retries are not billed twice")
 				continue
 			}
 			rec.ID = ContentID(obj)
@@ -335,7 +344,7 @@ func (in *Ingester) ingest(format, client, boundTenant string, objs []map[string
 			var ids []string
 			for metric, q := range rec.Usage {
 				if q != 0 {
-					ids = append(ids, RecordID(client, rec.TenantKey, rec.ID, metric))
+					ids = append(ids, RecordID(idClient, rec.TenantKey, rec.ID, metric))
 				}
 			}
 			rec.Time = in.arrivals.date(ids, now)
@@ -367,7 +376,7 @@ func (in *Ingester) ingest(format, client, boundTenant string, objs []map[string
 			if q == 0 {
 				continue
 			}
-			id := RecordID(client, rec.TenantKey, rec.ID, metric)
+			id := RecordID(idClient, rec.TenantKey, rec.ID, metric)
 			if seen[id] {
 				res.DuplicatesInBatch++
 				continue
