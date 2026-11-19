@@ -242,3 +242,46 @@ func TestPullFailureIsVisible(t *testing.T) {
 		t.Fatalf("health = %+v", probs)
 	}
 }
+
+// A log that redirects to another origin is still read, but the pull's
+// headers (its tokens) and the referring URL stay with the configured origin.
+func TestPullHeadersStayOnTheConfiguredOrigin(t *testing.T) {
+	r := kongRig(t)
+	defer r.close()
+	t.Setenv("RECORDS_PULL_KONG_TOKEN", "kong-secret")
+	var mu sync.Mutex
+	var elsewhere []http.Header
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		mu.Lock()
+		elsewhere = append(elsewhere, req.Header.Clone())
+		mu.Unlock()
+		_, _ = w.Write([]byte("[]"))
+	}))
+	defer other.Close()
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		http.Redirect(w, req, other.URL+req.URL.Path+"?"+req.URL.RawQuery, http.StatusFound)
+	}))
+	defer origin.Close()
+	spec := PullSpec{Name: "kong-logs", Format: "kong", URL: origin.URL + "/logs?from={{from}}&to={{to}}&key=q-secret",
+		Headers: map[string]string{"X-Api-Key": "${RECORDS_PULL_KONG_TOKEN}", "Authorization": "Bearer ${RECORDS_PULL_KONG_TOKEN}"}}
+	if err := spec.normalize(Formats{"kong": kong}); err != nil {
+		t.Fatal(err)
+	}
+	p := NewPuller(r.in, spec, nil, nil, nil, nil)
+	p.now = r.clk.now
+	if _, err := p.Pull(context.Background()); err != nil {
+		t.Fatalf("a redirected log must still be read: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(elsewhere) == 0 {
+		t.Fatal("the redirect was not followed")
+	}
+	for _, hdr := range elsewhere {
+		for _, k := range []string{"X-Api-Key", "Authorization", "Referer"} {
+			if v := hdr.Get(k); v != "" {
+				t.Fatalf("%s was sent to another origin: %q", k, v)
+			}
+		}
+	}
+}

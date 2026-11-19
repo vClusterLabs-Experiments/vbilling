@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Stripe - vBilling Docs</title>
-  <meta name="description" content="Bill tenant clusters with Stripe Billing Meters: meters per metric and SKU, customers, prices and automatic subscriptions, exactly-once delivery, reconciliation, and billing states from Stripe webhooks.">
+  <meta name="description" content="Bill clusters with Stripe Billing Meters: meters per metric and SKU, customers, prices and automatic subscriptions, exactly-once delivery, reconciliation, and billing states from Stripe webhooks.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Roboto+Mono:wght@500&display=swap" rel="stylesheet">
@@ -257,6 +257,7 @@
         <a href="usage-sources.html">Usage Sources</a>
         <a href="private-nodes.html">Dedicated and Private Nodes</a>
         <a href="example-gke.html">Example: GKE with GPUs</a>
+        <a href="security.html">Security</a>
         <a href="troubleshooting.html">Troubleshooting</a>
       </div>
       <div class="sidebar-section">
@@ -278,7 +279,7 @@
 
     <main class="content">
       <h1>Stripe</h1>
-      <p class="subtitle">Bill tenant clusters with Stripe Billing Meters. vBilling creates the meters and customers, sends every usage window exactly once, keeps subscriptions in step with the prices you tag, and turns Stripe's payment events into billing states for your tenant clusters.</p>
+      <p class="subtitle">Bill clusters with Stripe Billing Meters. vBilling creates the meters and customers, sends every usage window exactly once, keeps subscriptions in step with the prices you tag, and turns Stripe's payment events into billing states for your clusters.</p>
 
       <h2 id="how-it-works">How it works</h2>
       <div class="flow-diagram"><pre>tenant clusters <span class="flow-arrow">──►</span> <span class="flow-highlight">vBilling</span> <span class="flow-arrow">──►</span> ledger <span class="flow-dim">(fsynced, hash-chained)</span>
@@ -322,7 +323,7 @@
 <span class="output">[stripe] created meter vcluster_gpu_hours (mtr_...)</span>
 <span class="output">[stripe] created customer cus_... for tenant vcluster-team-a-team-a</span>
 <span class="cmd">kubectl</span> <span class="flag">-n</span> vbilling-system port-forward svc/vbilling 8080 &amp;
-<span class="cmd">curl</span> <span class="flag">-s</span> localhost:8080/api/v1/status | jq <span class="string">'.destinations'</span></code></div>
+<span class="cmd">curl</span> <span class="flag">-H</span> <span class="string">"Authorization: Bearer $VBILLING_TOKEN"</span> <span class="flag">-s</span> localhost:8080/api/v1/status | jq <span class="string">'.destinations'</span></code></div>
       <p>For CI, run <a href="https://github.com/stripe/stripe-mock" target="_blank">stripe-mock</a> and set <code>stripe.apiBase</code> to it: every request is validated against Stripe's OpenAPI spec, as in <code>scripts/e2e-kind.sh</code>.</p>
 
       <h3 id="settings">Settings</h3>
@@ -335,10 +336,6 @@
             <tr><td><code>stripe.webhookSecret</code></td><td><code>STRIPE_WEBHOOK_SECRET</code></td><td></td><td>Signing secret (<code>whsec_...</code>). Enables <code>/webhooks/stripe</code>.</td></tr>
             <tr><td><code>stripe.splitMetersBy</code></td><td><code>STRIPE_SPLIT_METERS_BY</code></td><td><code>[sku]</code></td><td>Event fields that get their own meter. See <a href="#meters">Meters</a>.</td></tr>
             <tr><td><code>stripe.autoSubscribe</code></td><td><code>STRIPE_AUTO_SUBSCRIBE</code></td><td><code>false</code></td><td>Subscribe each tenant to the prices tagged with its plan.</td></tr>
-            <tr><td><code>stripe.cancelOnRemove</code></td><td><code>STRIPE_CANCEL_ON_REMOVE</code></td><td><code>false</code></td><td>Cancel an offboarded tenant's subscription at the end of the period.</td></tr>
-            <tr><td><code>stripe.maxRPS</code></td><td><code>STRIPE_MAX_RPS</code></td><td><code>0</code></td><td>Request rate cap. <code>0</code> picks 20 requests/s for test keys and 200 for live keys.</td></tr>
-            <tr><td><code>stripe.apiVersion</code></td><td><code>STRIPE_API_VERSION</code></td><td><code>2026-09-30.endive</code></td><td>Stripe API version sent on every request.</td></tr>
-            <tr><td><code>stripe.apiBase</code></td><td><code>STRIPE_API_BASE</code></td><td><code>https://api.stripe.com</code></td><td>API base URL, for stripe-mock or a proxy.</td></tr>
             <tr><td><code>billing.defaultPlanCode</code></td><td><code>DEFAULT_PLAN_CODE</code></td><td><code>vcluster-standard</code></td><td>Plan of tenants without a <code>plan</code> annotation.</td></tr>
             <tr><td><code>billing.currency</code></td><td><code>BILLING_CURRENCY</code></td><td><code>USD</code></td><td>Currency of tenants without a <code>currency</code> annotation.</td></tr>
           </tbody>
@@ -356,7 +353,7 @@
             <tr><td>GPU hours</td><td><code>vcluster_gpu_hours__nvidia_h100_80gb_hbm3</code><br><code>vcluster_gpu_hours__nvidia_a100_sxm4_40gb_mig_1g_5gb</code><br><code>vcluster_gpu_hours__nvidia_l4_timeslice_4</code></td><td>The GPU model or the node's SKU label, plus the MIG profile or time-slicing replicas for fractional GPUs</td></tr>
             <tr><td>Dedicated node hours</td><td><code>vcluster_private_node_hours__bm_gpu_h100_8</code></td><td>The SKU label, the instance type, or <code>&lt;n&gt;x&lt;GPU model&gt;</code></td></tr>
             <tr><td>Storage GiB-hours</td><td><code>vcluster_storage_gb_hours__standard_rwo</code></td><td>The storage class</td></tr>
-            <tr><td>CPU core-hours, memory GiB-hours, tenant cluster hours, LoadBalancer hours, network egress</td><td><code>vcluster_cpu_core_hours</code>, <code>vcluster_memory_gb_hours</code>, and so on</td><td>No SKU: the base meter</td></tr>
+            <tr><td>CPU core-hours, memory GiB-hours, cluster hours, LoadBalancer hours, network egress</td><td><code>vcluster_cpu_core_hours</code>, <code>vcluster_memory_gb_hours</code>, and so on</td><td>No SKU: the base meter</td></tr>
           </tbody>
         </table>
       </div>
@@ -375,14 +372,14 @@
       <p>Every field multiplies the meters and prices you manage. Settle the split before you go live: a new split sends new usage to new meters, and earlier usage stays on the old ones.</p>
 
       <h2 id="customers">Customers</h2>
-      <p>Each vBilling tenant gets one Stripe customer. By default a tenant is one tenant cluster, with the ID <code>vcluster-&lt;namespace&gt;-&lt;name&gt;</code>; the <code>vbilling.vcluster.com/tenant</code> key groups several tenant clusters under one customer, and <code>TENANT_SOURCE=project</code> gives each vCluster Platform project one. vBilling finds the customer in this order:</p>
+      <p>Each vBilling tenant gets one Stripe customer. By default a tenant is one cluster, with the ID <code>vcluster-&lt;namespace&gt;-&lt;name&gt;</code>; the <code>vbilling.vcluster.com/tenant</code> key groups several clusters under one customer, and <code>TENANT_SOURCE=project</code> gives each vCluster Platform project one. vBilling finds the customer in this order:</p>
       <ol>
         <li>A customer ID pinned with <code>vbilling.vcluster.com/stripe-customer-id</code>.</li>
         <li>The customer vBilling recorded earlier in <code>state-stripe.json</code> on its volume.</li>
         <li>A Stripe customer whose <code>metadata[vbilling_tenant_id]</code> is exactly the tenant ID. vBilling uses customer search, and lists customers instead (by email first) for accounts without search.</li>
         <li>A new customer, created with an idempotency key so that a retry never creates a second one.</li>
       </ol>
-      <p>Customer details come from labels or annotations on the tenant cluster's StatefulSet, its namespace, or its vCluster Platform <code>VirtualClusterInstance</code>, and are updated when they change:</p>
+      <p>Customer details come from labels or annotations on the cluster's StatefulSet, its namespace, or its vCluster Platform <code>VirtualClusterInstance</code>, and are updated when they change:</p>
       <div class="code-block"><code><span class="cmd">kubectl</span> annotate namespace team-a \
   vbilling.vcluster.com/tenant=acme-ai \
   vbilling.vcluster.com/display-name=<span class="string">"Acme AI"</span> \
@@ -399,7 +396,7 @@
             <tr><td><code>metadata[vbilling_tenant_id]</code></td><td>The tenant ID. vBilling only uses a customer whose value matches exactly.</td></tr>
             <tr><td><code>metadata[vbilling_plan]</code></td><td>The tenant's plan</td></tr>
             <tr><td><code>metadata[vbilling_region]</code>, <code>[vbilling_project]</code>, <code>[vbilling_tenant_class]</code></td><td>The region, vCluster Platform project and tenant class</td></tr>
-            <tr><td><code>metadata[vbilling_clusters]</code></td><td>The tenant clusters billed to this customer</td></tr>
+            <tr><td><code>metadata[vbilling_clusters]</code></td><td>The clusters billed to this customer</td></tr>
           </tbody>
         </table>
       </div>
@@ -460,14 +457,14 @@
       <p>Stripe processes meter events asynchronously, so new usage can take a few minutes to show up.</p>
 
       <h2 id="price-coverage">Price coverage</h2>
-      <p>Stripe bills nothing for a meter without a price, and accepts its events without an error. vBilling checks, read-only, that every billable metric and every series seen in the ledger within <code>PRICE_CHECK_LOOKBACK</code> has a price. It never creates or changes a price. A series is one meter: with the default <code>STRIPE_SPLIT_METERS_BY=sku</code>, a metric and SKU, and with more split keys, each combination of their values.</p>
+      <p>Stripe bills nothing for a meter without a price, and accepts its events without an error. vBilling checks, read-only, that every billable metric and every series seen in the ledger in the last 24 hours has a price. It never creates or changes a price. A series is one meter: with the default <code>STRIPE_SPLIT_METERS_BY=sku</code>, a metric and SKU, and with more split keys, each combination of their values.</p>
       <ul>
         <li><strong>priced:</strong> the series' meter exists, is active, and has an active, recurring, metered price that is not 0. With <code>autoSubscribe</code>, the price must also carry <code>metadata[vbilling_plan]</code> of the tenant's plan, or subscriptions on that plan do not include it.</li>
         <li><strong>unpriced:</strong> no meter yet, a deactivated meter, no active metered price, or (with <code>autoSubscribe</code>) no price tagged with the plan. The hint names the meter, for example <code>create a metered price on meter "vcluster_gpu_hours__nvidia_b200" (mtr_...)</code>.</li>
         <li><strong>zero:</strong> every price on the meter is 0 (<code>unit_amount_decimal</code> 0, or tiers whose unit and flat amounts are all 0). Information, not a gap.</li>
       </ul>
       <p>Without <code>autoSubscribe</code>, a priced series still needs its customers subscribed to the price: vBilling cannot see that, and the detail says so. When a series appears, vBilling creates its meter right away (never a price), so Finance can price it before its first event is delivered. With <code>autoSubscribe</code>, a series that becomes priced makes vBilling add the new price to existing subscriptions with each tenant's next usage.</p>
-      <p>Checks run at startup, every <code>PRICE_CHECK_INTERVAL</code>, within seconds of a new SKU and on <code>POST /api/v1/pricing/check</code>. Read gaps from <code>GET /api/v1/pricing?destination=stripe&amp;status=unpriced</code>, <code>GET /api/v1/sources?kind=pricing</code> or <code>vbilling_unpriced_series{destination="stripe"}</code>. With <code>PRICE_CHECK=hold</code>, events of an unpriced meter wait in vBilling until the price exists. Stripe accepts usage up to 35 days old, so usage held longer than <code>PRICE_CHECK_MAX_HOLD</code> (28 days) is released without a price and its source turns <code>failing</code>. The check reads <code>GET /v1/billing/meters</code> and <code>GET /v1/prices?active=true&amp;type=recurring&amp;expand[]=data.tiers</code>; the adapter's tests run both, and the meter creation, against stripe-mock.</p>
+      <p>Checks run at startup, every 10 minutes, within seconds of a new SKU and on <code>POST /api/v1/pricing/check</code>. Read gaps from <code>GET /api/v1/pricing?destination=stripe&amp;status=unpriced</code>, <code>GET /api/v1/sources?kind=pricing</code> or <code>vbilling_unpriced_series{destination="stripe"}</code>. With <code>PRICE_CHECK=hold</code>, events of an unpriced meter wait in vBilling until the price exists. Usage held for 23 hours is released without a price and its source turns <code>failing</code>. Stripe finalizes an invoice one hour after its period by default and does not invoice usage that arrives later, so usage from the last day of a period can miss its invoice: price new SKUs promptly. The check reads <code>GET /v1/billing/meters</code> and <code>GET /v1/prices?active=true&amp;type=recurring&amp;expand[]=data.tiers</code>; the adapter's tests run both, and the meter creation, against stripe-mock.</p>
 
       <h2 id="delivery">Delivery and idempotency</h2>
       <p>Every closed window is committed to the ledger first. The Stripe destination sends it from its own cursor, so a Stripe outage never loses usage and never holds up other destinations.</p>
@@ -489,13 +486,13 @@
         <div>Stripe enforces identifier uniqueness for at least 24 hours and accepts events up to 35 days old. vBilling never resends acknowledged events, and dead-letters events older than 35 days minus an hour of margin. Do not rewind the Stripe destination's cursor by more than 24 hours, or Stripe may count those events again; rewinding is meant for a newly added destination, which starts at the end of the ledger: <code>POST /api/v1/destinations/stripe/cursor</code> with <code>{"seq": 0}</code> sends it the retained ledger.</div>
       </div>
       <p>After fixing what caused a rejection (often by upgrading vBilling), replay the parked events. Events Stripe still rejects stay parked (<code>still_rejected</code>). With <code>API_TOKEN</code> set, add <code>-H "Authorization: Bearer $API_TOKEN"</code>.</p>
-      <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-s</span> localhost:8080/api/v1/destinations/stripe/dead-letters | jq
-<span class="cmd">curl</span> <span class="flag">-s -X POST</span> localhost:8080/api/v1/destinations/stripe/dead-letters/replay
+      <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-H</span> <span class="string">"Authorization: Bearer $VBILLING_TOKEN"</span> <span class="flag">-s</span> localhost:8080/api/v1/destinations/stripe/dead-letters | jq
+<span class="cmd">curl</span> <span class="flag">-H</span> <span class="string">"Authorization: Bearer $VBILLING_TOKEN"</span> <span class="flag">-s -X POST</span> localhost:8080/api/v1/destinations/stripe/dead-letters/replay
 <span class="output">{"replayed":12}</span></code></div>
 
       <h2 id="reconcile">Reconciliation</h2>
       <p><code>GET /api/v1/reconcile</code> recomputes each tenant's usage per metric from the ledger, subtracts what was dead-lettered, and compares it with Stripe's meter event summaries for the tenant's customer, summed over every split meter of the metric. A row matches within 0.1%. The default range is the previous full UTC day; <code>from</code> and <code>to</code> take RFC 3339 times or dates. <code>tenant</code> and <code>metric</code> narrow it down; <code>sku</code>, <code>region</code>, <code>project</code> and <code>cluster</code> pick the tenants and metrics with such usage, and each row still compares all of that tenant's usage of the metric, because Stripe reports totals per customer.</p>
-      <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-s</span> <span class="string">'localhost:8080/api/v1/reconcile?destination=stripe&amp;from=2026-10-05&amp;to=2026-10-06'</span> | jq
+      <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-H</span> <span class="string">"Authorization: Bearer $VBILLING_TOKEN"</span> <span class="flag">-s</span> <span class="string">'localhost:8080/api/v1/reconcile?destination=stripe&amp;from=2026-10-05&amp;to=2026-10-06'</span> | jq
 <span class="output">{
   "from": "2026-10-05T00:00:00Z",
   "to": "2026-10-06T00:00:00Z",
@@ -511,14 +508,20 @@
       <p>Stripe's summaries are aligned to minutes and trail ingestion by a few minutes, so reconcile closed periods rather than the current hour. Run it daily and alert when <code>ok</code> is <code>false</code>.</p>
 
       <h2 id="webhooks">Webhooks and billing states</h2>
-      <p>Stripe's payment events tell vBilling which tenants are paid up. Add a webhook endpoint in Stripe for <code>https://&lt;your-host&gt;/webhooks/stripe</code> with the events below, then add its signing secret to the Secret and restart vBilling:</p>
+      <p>Stripe's payment events tell vBilling when to look at what a tenant owes. An event that reports a problem only raises the tenant's billing hold. A positive one (an invoice paid, a subscription back to <code>active</code>) never lowers it by itself: vBilling reads the customer's standing from Stripe again, and clears the hold only when nothing is owed:</p>
+      <ul>
+        <li>no subscription of the customer is <code>past_due</code>, <code>unpaid</code> or <code>incomplete</code>, whoever created it;</li>
+        <li>no open invoice is past its due date, or has a failed payment (<code>attempt_count</code> above zero);</li>
+        <li>no invoice is <code>uncollectible</code>.</li>
+      </ul>
+      <p>vBilling reads every subscription and every open and uncollectible invoice of the customer, page by page. Paying a small invoice while an older one is still open lifts nothing, and neither does a subscription that Stripe marks <code>active</code> again once its latest invoice is paid. If Stripe cannot be read, the webhook gets a <code>500</code> and Stripe retries it. With Metronome configured too, Metronome is read as well, for the customer that holds the tenant ID as an alias: a Stripe payment never resumes a tenant whose prepaid wallet is still empty. Add a webhook endpoint in Stripe for <code>https://&lt;your-host&gt;/webhooks/stripe</code> with the events below, then add its signing secret to the Secret and restart vBilling:</p>
       <div class="config-table-wrap">
         <table class="config-table">
           <thead><tr><th>Stripe event</th><th>Billing state</th></tr></thead>
           <tbody>
             <tr><td><code>invoice.payment_failed</code></td><td><code>delinquent</code></td></tr>
-            <tr><td><code>invoice.paid</code>, <code>invoice.payment_succeeded</code></td><td><code>active</code></td></tr>
-            <tr><td><code>customer.subscription.created</code>, <code>.updated</code>, <code>.resumed</code></td><td>By subscription status: <code>past_due</code> is <code>delinquent</code>; <code>unpaid</code>, <code>canceled</code> and <code>incomplete_expired</code> are <code>suspended</code>; <code>active</code> and <code>trialing</code> are <code>active</code></td></tr>
+            <tr><td><code>invoice.paid</code>, <code>invoice.payment_succeeded</code></td><td><code>active</code>, once Stripe shows nothing owed</td></tr>
+            <tr><td><code>customer.subscription.created</code>, <code>.updated</code>, <code>.resumed</code></td><td>By subscription status: <code>past_due</code> is <code>delinquent</code>; <code>unpaid</code>, <code>canceled</code> and <code>incomplete_expired</code> are <code>suspended</code>; <code>active</code> and <code>trialing</code> are <code>active</code>, once Stripe shows nothing owed</td></tr>
             <tr><td><code>customer.subscription.deleted</code></td><td><code>suspended</code></td></tr>
             <tr><td><code>billing.alert.triggered</code> (a usage alert on a meter)</td><td><code>warning</code></td></tr>
           </tbody>
@@ -557,18 +560,18 @@ spec:
           <thead><tr><th>Mode</th><th>Effect</th></tr></thead>
           <tbody>
             <tr><td><code>observe</code> (default)</td><td>Record the state only.</td></tr>
-            <tr><td><code>annotate</code></td><td>Also annotate the tenant cluster, label its namespace <code>vbilling.vcluster.com/billing-state</code>, and emit a Kubernetes event.</td></tr>
-            <tr><td><code>enforce</code></td><td>Also label suspended namespaces <code>vbilling.vcluster.com/suspended=true</code>. With <code>enforcement.admissionPolicy.enabled=true</code> (Kubernetes 1.30+), new pods are denied there while running workloads keep running. A paid invoice lifts it.</td></tr>
-            <tr><td colspan="2">The admission policy acts in the control plane cluster, so it holds tenant clusters on shared or dedicated nodes. Tenant clusters with their own nodes (Private Nodes, Auto Nodes, Standalone) run their pods only inside the tenant cluster: with <code>enforcement.inCluster=true</code>, vBilling installs the same policy inside each of them through the cluster's own API (see <a href="private-nodes.html#enforcement">Billing-state enforcement inside the cluster</a>), or act on their billing state with your own automation.</td></tr>
+            <tr><td><code>annotate</code></td><td>Also annotate the cluster, label its namespace <code>vbilling.vcluster.com/billing-state</code>, and emit a Kubernetes event.</td></tr>
+            <tr><td><code>enforce</code></td><td>Also label suspended namespaces <code>vbilling.vcluster.com/suspended=true</code>. With <code>enforcement.admissionPolicy.enabled=true</code> (Kubernetes 1.30+), new pods are denied there while running workloads keep running. A payment lifts it once nothing is owed.</td></tr>
+            <tr><td colspan="2">The admission policy acts in the control plane cluster, so it holds clusters on shared or dedicated nodes. Clusters with their own nodes (Private Nodes, Auto Nodes, Standalone) run their pods only inside the cluster: with <code>enforcement.inCluster=true</code>, vBilling installs the same policy inside each of them through the cluster's own API (see <a href="private-nodes.html#enforcement">Billing-state enforcement inside the cluster</a>), or act on their billing state with your own automation.</td></tr>
           </tbody>
         </table>
       </div>
       <p>In <code>enforce</code> mode with <code>enforcement.gateway.litellm=true</code>, a suspended or paused tenant's LiteLLM teams are also blocked, which is how a tenant that only buys tokens is stopped. See <a href="usage-sources.html#gateway-enforcement">Stopping a suspended tenant at the gateway</a>.</p>
-      <p>Override a mapping with <code>enforcement.rules</code> (<code>ENFORCEMENT_RULES</code>), for example <code>invoice.payment_failed=suspended</code> to suspend on the first failed payment, or <code>billing.alert.triggered=suspended</code> to turn a Stripe usage alert into a hard cap. Operators can also set a state by hand:</p>
-      <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-s -X PUT</span> localhost:8080/api/v1/billing-states/acme-ai <span class="flag">-d</span> <span class="string">'{"state": "active", "reason": "paid by bank transfer"}'</span></code></div>
+      <p>Override a mapping with <code>enforcement.rules</code> (<code>ENFORCEMENT_RULES</code>), for example <code>invoice.payment_failed=suspended</code> to suspend on the first failed payment, or <code>billing.alert.triggered=suspended</code> to turn a Stripe usage alert into a hard cap, which a payment lifts once nothing is owed. Operators can also set a state by hand. Without <code>hold</code>, a <code>PUT</code> sets the <code>operator</code> hold, which no webhook touches; name the <code>billing</code> hold to clear what Stripe's webhooks raised, for a payment made outside Stripe:</p>
+      <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-H</span> <span class="string">"Authorization: Bearer $VBILLING_TOKEN"</span> <span class="flag">-s -X PUT</span> localhost:8080/api/v1/billing-states/acme-ai <span class="flag">-d</span> <span class="string">'{"state": "active", "hold": "billing", "reason": "paid by bank transfer"}'</span></code></div>
 
       <h2 id="offboarding">Offboarding</h2>
-      <p>When a tenant has been gone for <code>billing.offboardGrace</code> (default 1h), vBilling offboards it. The Stripe customer and its subscription stay, so final usage is still invoiced. With <code>stripe.cancelOnRemove=true</code>, the subscription is set to cancel at the end of the period.</p>
+      <p>When a tenant has had no clusters and no usage for an hour, and its last usage is delivered, vBilling offboards it. The Stripe customer and its subscription stay, so final usage is still invoiced. With <code>stripe.cancelOnRemove=true</code>, the subscription is set to cancel at the end of the period.</p>
 
       <h2 id="limits">Stripe limits</h2>
       <div class="config-table-wrap">

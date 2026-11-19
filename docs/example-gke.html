@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Example: GKE with GPUs - vBilling Docs</title>
-  <meta name="description" content="A complete example: GKE as the control plane cluster, a shared-nodes tenant cluster on a time-sliced L4, a private-nodes tenant cluster with an A100, DCGM through Prometheus, and vBilling billing both in Stripe test mode.">
+  <meta name="description" content="A complete example: GKE as the control plane cluster, a shared-nodes cluster on a time-sliced L4, a private-nodes cluster with an A100, DCGM through Prometheus, and vBilling billing both in Stripe test mode.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Roboto+Mono:wght@500&display=swap" rel="stylesheet">
@@ -257,6 +257,7 @@
         <a href="usage-sources.html">Usage Sources</a>
         <a href="private-nodes.html">Dedicated and Private Nodes</a>
         <a href="example-gke.html" class="active">Example: GKE with GPUs</a>
+        <a href="security.html">Security</a>
         <a href="troubleshooting.html">Troubleshooting</a>
       </div>
       <div class="sidebar-section">
@@ -285,8 +286,8 @@
       <h2 id="what">What you build</h2>
       <ul>
         <li><strong>GKE</strong> as the control plane cluster, with a spot L4 node pool time-shared four ways.</li>
-        <li><strong><code>shared-l4</code></strong>, a tenant cluster on shared nodes: its pods run on the L4 and are billed per pod, a quarter GPU each.</li>
-        <li><strong><code>private-a100</code></strong>, a tenant cluster with private nodes: an A100 VM joins it directly and is billed whole, read through the tenant cluster's own API with a read-only kubeconfig.</li>
+        <li><strong><code>shared-l4</code></strong>, a cluster on shared nodes: its pods run on the L4 and are billed per pod, a quarter GPU each.</li>
+        <li><strong><code>private-a100</code></strong>, a cluster with private nodes: an A100 VM joins it directly and is billed whole, read through the cluster's own API with a read-only kubeconfig.</li>
         <li><strong>Prometheus</strong> reading DCGM: GKE's exporter on shared nodes, and a Prometheus agent that remote-writes from the private node.</li>
         <li><strong>vBilling</strong> sending usage to Stripe: customers, one meter per metric and SKU, subscriptions, invoices.</li>
       </ul>
@@ -295,13 +296,13 @@
           <thead><tr><th>File (<a href="https://github.com/vClusterLabs-Experiments/vbilling/tree/main/examples/gke-gpu/">examples/gke-gpu</a>)</th><th>What it is</th></tr></thead>
           <tbody>
             <tr><td><a href="https://github.com/vClusterLabs-Experiments/vbilling/blob/main/examples/gke-gpu/01-prometheus.yaml"><code>01-prometheus.yaml</code></a></td><td>Central Prometheus: scrapes GKE's DCGM exporter, accepts remote writes</td></tr>
-            <tr><td><a href="https://github.com/vClusterLabs-Experiments/vbilling/blob/main/examples/gke-gpu/02-tenant-shared.yaml"><code>02-tenant-shared.yaml</code></a></td><td><code>vcluster.yaml</code> for the shared-nodes tenant cluster</td></tr>
+            <tr><td><a href="https://github.com/vClusterLabs-Experiments/vbilling/blob/main/examples/gke-gpu/02-tenant-shared.yaml"><code>02-tenant-shared.yaml</code></a></td><td><code>vcluster.yaml</code> for the shared-nodes cluster</td></tr>
             <tr><td><a href="https://github.com/vClusterLabs-Experiments/vbilling/blob/main/examples/gke-gpu/03-tenant-private.yaml"><code>03-tenant-private.yaml</code></a></td><td><code>vcluster.yaml</code> with Private Nodes and the read-only <code>vbilling-kubeconfig</code> export</td></tr>
             <tr><td><a href="https://github.com/vClusterLabs-Experiments/vbilling/blob/main/examples/gke-gpu/04-node-startup.sh"><code>04-node-startup.sh</code></a></td><td>VM startup script that joins the GPU machine as a private node</td></tr>
-            <tr><td><a href="https://github.com/vClusterLabs-Experiments/vbilling/blob/main/examples/gke-gpu/05-gpu-operator-values.yaml"><code>05-gpu-operator-values.yaml</code></a></td><td>NVIDIA GPU Operator inside the private tenant cluster</td></tr>
-            <tr><td><a href="https://github.com/vClusterLabs-Experiments/vbilling/blob/main/examples/gke-gpu/06-prometheus-agent.yaml"><code>06-prometheus-agent.yaml</code></a></td><td>Prometheus agent in the private tenant cluster, remote-writing DCGM</td></tr>
+            <tr><td><a href="https://github.com/vClusterLabs-Experiments/vbilling/blob/main/examples/gke-gpu/05-gpu-operator-values.yaml"><code>05-gpu-operator-values.yaml</code></a></td><td>NVIDIA GPU Operator inside the private cluster</td></tr>
+            <tr><td><a href="https://github.com/vClusterLabs-Experiments/vbilling/blob/main/examples/gke-gpu/06-prometheus-agent.yaml"><code>06-prometheus-agent.yaml</code></a></td><td>Prometheus agent in the private cluster, remote-writing DCGM</td></tr>
             <tr><td><a href="https://github.com/vClusterLabs-Experiments/vbilling/blob/main/examples/gke-gpu/07-vbilling-values.yaml"><code>07-vbilling-values.yaml</code></a></td><td>vBilling Helm values: Stripe, DCGM queries, a PromQL billable metric</td></tr>
-            <tr><td><a href="https://github.com/vClusterLabs-Experiments/vbilling/blob/main/examples/gke-gpu/workloads/"><code>workloads/</code></a></td><td>Sample GPU workloads for each tenant cluster</td></tr>
+            <tr><td><a href="https://github.com/vClusterLabs-Experiments/vbilling/blob/main/examples/gke-gpu/workloads/"><code>workloads/</code></a></td><td>Sample GPU workloads for each cluster</td></tr>
           </tbody>
         </table>
       </div>
@@ -313,12 +314,12 @@
       <h2 id="prerequisites">Prerequisites</h2>
       <ul>
         <li><code>gcloud</code> with a project selected, <code>kubectl</code>, <code>helm</code>, and the <code>vcluster</code> CLI (0.36 or later).</li>
-        <li><strong>vCluster Platform</strong> for the Private Nodes license. The CLI must be logged in with a key that can register tenant clusters (a scoped key fails with <code>denied by loft access key scope</code>). vCluster 0.36.2 and later need Platform 4.11.3 or later.</li>
+        <li><strong>vCluster Platform</strong> for the Private Nodes license. The CLI must be logged in with a key that can register clusters (a scoped key fails with <code>denied by loft access key scope</code>). vCluster 0.36.2 and later need Platform 4.11.3 or later.</li>
         <li>A <strong>Stripe test-mode</strong> secret key saved in a local file, for example <code>~/.stripe-test-key</code>.</li>
         <li>GPU quota in the zone for one L4 and one A100 (spot capacity is enough).</li>
       </ul>
       <div class="code-block"><code><span class="cmd">export</span> ZONE=us-central1-a CLUSTER=vbilling-demo
-<span class="cmd">git</span> clone --branch v0.3.0 https://github.com/vClusterLabs-Experiments/vbilling &amp;&amp; cd vbilling/examples/gke-gpu</code></div>
+<span class="cmd">git</span> clone --branch v0.3.1 https://github.com/vClusterLabs-Experiments/vbilling &amp;&amp; cd vbilling/examples/gke-gpu</code></div>
 
       <h2 id="cluster">1. Control plane cluster</h2>
       <div class="code-block"><code><span class="cmd">gcloud</span> container clusters create $CLUSTER --zone $ZONE --release-channel regular \
@@ -334,19 +335,19 @@
       <div class="code-block"><code><span class="cmd">kubectl</span> apply -f 01-prometheus.yaml
 <span class="cmd">INGEST_IP=</span>$(kubectl -n monitoring get svc prometheus-ingest -o jsonpath='{.status.loadBalancer.ingress[0].ip}')</code></div>
 
-      <h2 id="tenants">3. Tenant clusters</h2>
+      <h2 id="tenants">3. Clusters</h2>
       <div class="code-block"><code><span class="cmd">vcluster</span> platform login https://your-platform.example   <span class="comment">  # browser login, no key on the command line</span>
 <span class="cmd">vcluster</span> create shared-l4 -n shared-l4 -f 02-tenant-shared.yaml --connect=false
 <span class="cmd">vcluster</span> create private-a100 -n private-a100 -f 03-tenant-private.yaml --connect=false</code></div>
-      <p>When the CLI is logged in, <code>vcluster create</code> registers each tenant cluster with the Platform, which is what licenses Private Nodes. A tenant cluster created before logging in is registered with <code>vcluster platform add vcluster private-a100 -n private-a100 --project default</code>. The private tenant cluster's <code>exportKubeConfig.additionalSecrets</code> writes the read-only Secret <code>vbilling-kubeconfig</code> that vBilling reads (see <a href="private-nodes.html#private">Private Nodes</a>).</p>
-      <p>Optionally set stable customer IDs and display names. Without these annotations, vBilling derives an identity per tenant cluster. The emails below use the reserved <code>.example</code> domain:</p>
+      <p>When the CLI is logged in, <code>vcluster create</code> registers each cluster with the Platform, which is what licenses Private Nodes. A cluster created before logging in is registered with <code>vcluster platform add vcluster private-a100 -n private-a100 --project default</code>. The private cluster's <code>exportKubeConfig.additionalSecrets</code> writes the read-only Secret <code>vbilling-kubeconfig</code> that vBilling reads (see <a href="private-nodes.html#private">Private Nodes</a>).</p>
+      <p>Optionally set stable customer IDs and display names. Without these annotations, vBilling derives an identity per cluster. The emails below use the reserved <code>.example</code> domain:</p>
       <div class="code-block"><code><span class="cmd">kubectl</span> annotate ns shared-l4 vbilling.vcluster.com/tenant=acme-ai "vbilling.vcluster.com/display-name=Acme AI" \
   vbilling.vcluster.com/email=billing@acme-ai.example vbilling.vcluster.com/plan=gpu-cloud
 <span class="cmd">kubectl</span> annotate ns private-a100 vbilling.vcluster.com/tenant=initech "vbilling.vcluster.com/display-name=Initech" \
   vbilling.vcluster.com/email=billing@initech.example vbilling.vcluster.com/plan=gpu-cloud</code></div>
 
       <h2 id="node">4. A private GPU node</h2>
-      <p>Create a join token, put the join command it prints into the startup script, and boot the machine. The VM must reach the tenant cluster's internal load balancer, so keep it in the same VPC and region.</p>
+      <p>Create a join token, put the join command it prints into the startup script, and boot the machine. The VM must reach the cluster's internal load balancer, so keep it in the same VPC and region.</p>
       <div class="code-block"><code>set -euo pipefail
 set +x  # do not trace commands while handling credentials
 umask 077
@@ -360,7 +361,7 @@ gcloud compute instances create gpu-node-1 --zone $ZONE --machine-type a2-highgp
   --provisioning-model SPOT --instance-termination-action STOP --maintenance-policy TERMINATE \
   --image-family ubuntu-2204-lts --image-project ubuntu-os-cloud --boot-disk-size 150GB \
   --no-service-account --no-scopes --metadata-from-file "startup-script=$JOIN_DIR/startup.sh"</code></div>
-      <p>Once <code>gpu-node-1</code> is Ready in the tenant cluster, remove the token from the instance and from disk, and label the node so it gets an SKU:</p>
+      <p>Once <code>gpu-node-1</code> is Ready in the cluster, remove the token from the instance and from disk, and label the node so it gets an SKU:</p>
       <div class="code-block"><code><span class="cmd">gcloud</span> compute instances remove-metadata gpu-node-1 --zone $ZONE --keys startup-script
 <span class="cmd">rm</span> -f "$JOIN_DIR/join.txt" "$JOIN_DIR/startup.sh"
 <span class="cmd">rmdir</span> "$JOIN_DIR"
@@ -368,7 +369,7 @@ unset JOIN_DIR
 <span class="cmd">vcluster</span> connect private-a100 -n private-a100 -- kubectl label node gpu-node-1 \
   node.kubernetes.io/instance-type=a2-highgpu-1g vbilling.vcluster.com/capacity-type=spot</code></div>
 
-      <h2 id="gpu-operator">5. GPU Operator and DCGM in the private tenant cluster</h2>
+      <h2 id="gpu-operator">5. GPU Operator and DCGM in the private cluster</h2>
       <div class="code-block"><code><span class="cmd">helm</span> repo add nvidia https://helm.ngc.nvidia.com/nvidia &amp;&amp; helm repo update
 <span class="cmd">vcluster</span> connect private-a100 -n private-a100 -- \
   <span class="cmd">helm</span> install gpu-operator nvidia/gpu-operator -n gpu-operator --create-namespace -f 05-gpu-operator-values.yaml
@@ -407,10 +408,11 @@ unset -f stripe_test
 kubectl -n vbilling rollout restart statefulset/vbilling</code></div>
 
       <h2 id="check">7. Check it</h2>
-      <div class="code-block"><code><span class="cmd">kubectl</span> -n vbilling port-forward svc/vbilling 8080:8080 &amp;
-<span class="comment"># dashboard: http://localhost:8080/</span>
-<span class="cmd">curl</span> -s "localhost:8080/api/v1/events?from=$(date -u +%Y-%m-%dT%H:00:00Z)" | head
-<span class="cmd">curl</span> -s "localhost:8080/api/v1/reconcile?from=&lt;start&gt;&amp;to=&lt;end&gt;"   <span class="comment">  # ledger vs Stripe, per tenant and metric</span></code></div>
+      <div class="code-block"><code><span class="cmd">export</span> VBILLING_TOKEN=$(<span class="cmd">kubectl</span> <span class="flag">-n</span> vbilling get secret vbilling <span class="flag">-o</span> jsonpath=<span class="string">'{.data.api-token}'</span> | base64 <span class="flag">-d</span>)  <span class="comment"># the API token the chart generated</span>
+<span class="cmd">kubectl</span> -n vbilling port-forward svc/vbilling 8080:8080 &amp;
+<span class="comment"># dashboard: http://localhost:8080/ (it asks for the token)</span>
+<span class="cmd">curl</span> <span class="flag">-H</span> <span class="string">"Authorization: Bearer $VBILLING_TOKEN"</span> -s "localhost:8080/api/v1/events?from=$(date -u +%Y-%m-%dT%H:00:00Z)" | head
+<span class="cmd">curl</span> <span class="flag">-H</span> <span class="string">"Authorization: Bearer $VBILLING_TOKEN"</span> -s "localhost:8080/api/v1/reconcile?from=&lt;start&gt;&amp;to=&lt;end&gt;"   <span class="comment">  # ledger vs Stripe, per tenant and metric</span></code></div>
       <p>One 30 second window:</p>
       <div class="config-table-wrap">
         <table class="config-table">

@@ -32,6 +32,7 @@ type fakeStripe struct {
 	idents     map[string]bool
 	prices     []Price
 	subs       map[string]*Subscription
+	invoices   map[string]*Invoice
 	idem       map[string]string // idempotency key -> response body
 	idemParams map[string]string // idempotency key -> request parameters
 	failNext   map[string]int    // "METHOD path" -> number of 500s to return
@@ -53,6 +54,7 @@ func newFakeStripe(t *testing.T, now func() time.Time) *fakeStripe {
 		searchable: map[string]bool{},
 		idents:     map[string]bool{},
 		subs:       map[string]*Subscription{},
+		invoices:   map[string]*Invoice{},
 		idem:       map[string]string{},
 		idemParams: map[string]string{},
 		failNext:   map[string]int{},
@@ -75,6 +77,7 @@ func (f *fakeStripe) fail(w http.ResponseWriter, status int, code, msg string) {
 var (
 	reMeterAction = regexp.MustCompile(`^/v1/billing/meters/([^/]+)/(reactivate|event_summaries)$`)
 	reCustomer    = regexp.MustCompile(`^/v1/customers/(cus_[^/]+)$`)
+	reInvoice     = regexp.MustCompile(`^/v1/invoices/(in_[^/]+)$`)
 	reSearch      = regexp.MustCompile(`^metadata\['([^']+)'\]:'(.*)'$`)
 )
 
@@ -343,6 +346,24 @@ func (f *fakeStripe) route(w http.ResponseWriter, r *http.Request) {
 		}
 		f.subs[s.ID] = s
 		writeJSON(w, s)
+
+	case r.Method == "GET" && p == "/v1/invoices":
+		var out []Invoice
+		for _, inv := range f.invoices {
+			if (r.Form.Get("customer") == "" || inv.Customer == r.Form.Get("customer")) && (r.Form.Get("status") == "" || inv.Status == r.Form.Get("status")) {
+				out = append(out, *inv)
+			}
+		}
+		sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+		writeJSON(w, page(r, out, func(inv Invoice) string { return inv.ID }))
+
+	case r.Method == "GET" && reInvoice.MatchString(p):
+		inv, ok := f.invoices[reInvoice.FindStringSubmatch(p)[1]]
+		if !ok {
+			f.fail(w, 404, "resource_missing", "No such invoice")
+			return
+		}
+		writeJSON(w, inv)
 
 	case r.Method == "POST" && p == "/v1/subscription_items":
 		s, ok := f.subs[r.Form.Get("subscription")]

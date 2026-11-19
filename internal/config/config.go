@@ -1,6 +1,6 @@
 // Package config loads vBilling settings from environment variables.
-// Every v0.1 variable keeps working; ADAPTER is still accepted as a single
-// entry of ADAPTERS.
+// Settings an earlier version read and v0.3.1 removed are listed in
+// RemovedSettings: they are ignored with a warning.
 package config
 
 import (
@@ -126,7 +126,8 @@ type Config struct {
 	PriceCheckInterval time.Duration
 	PriceCheckLookback time.Duration
 	// PriceCheckMaxHold releases held usage without a price once its window
-	// started this long ago, before billing platforms refuse it as too old.
+	// started this long ago, before its invoice period can be final (tests
+	// shorten it; vBilling uses pipeline.MaxUnpricedHold).
 	PriceCheckMaxHold time.Duration
 
 	// HTTP API.
@@ -143,7 +144,7 @@ type Config struct {
 	// and needs write access to admission policies inside them.
 	EnforcementInCluster bool
 	// EnforcementLiteLLM blocks a suspended or paused tenant's LiteLLM teams
-	// (its tenant ID and aliases), using RECORDS_PULL_LITELLM_URL and _KEY.
+	// (its tenant ID and aliases), using LITELLM_URL and LITELLM_API_KEY.
 	EnforcementLiteLLM bool
 	// PauseKeepBilling is the capacity that keeps billing while a cluster
 	// is paused: storage, load_balancers, nodes, control_plane, workloads, or none.
@@ -180,7 +181,12 @@ type Config struct {
 	MetronomeAPIBase       string
 	MetronomeWebhookSecret string
 	MetronomeRateCard      string // rate card ID or alias for automatic contracts
-	MetronomeStripeLink    bool   // create the Stripe customer and link it for invoicing
+	MetronomeStripeLink    bool   // create the Stripe customer and link it for invoicing (provision mode with STRIPE_API_KEY)
+	// MetronomeProvision lets vBilling create billable metrics, customers and,
+	// with METRONOME_RATE_CARD, contracts. Off (the default), vBilling only
+	// sends usage keyed on the ingest alias and reads Metronome to check prices:
+	// customers, metrics and contracts stay with whoever owns the account.
+	MetronomeProvision     bool
 	MetronomeStripeCollect string // charge_automatically | send_invoice
 
 	// Webhook (CloudEvents).
@@ -188,26 +194,106 @@ type Config struct {
 	WebhookSecret  string
 	WebhookHeaders map[string]string
 
-	// Deprecated: discounts belong in the rating engine, keyed on the
-	// capacity_type dimension. Kept so v0.1 Helm values still parse.
-	SpotDiscountPercent float64
+	// Warnings name removed or renamed settings that are still set.
+	Warnings []string
+}
+
+// Fixed values of settings v0.3.1 removed. Each one tuned an internal that
+// has one right value, so a setting only added a way to get billing wrong.
+const (
+	windowSize          = 60 * time.Second
+	maxBackfill         = 6 * time.Hour
+	offboardGrace       = time.Hour
+	reconcileInterval   = 30 * time.Second
+	ledgerRetention     = 7 * 24 * time.Hour // live segments; the archive keeps compressed copies
+	promLookback        = 10 * time.Minute
+	recordsSettle       = 30 * time.Second
+	recordsRetention    = 7 * 24 * time.Hour
+	litellmPullInterval = 5 * time.Minute
+	litellmPullLookback = time.Hour
+	pauseDrainTimeout   = 2 * time.Minute
+	priceCheckInterval  = 10 * time.Minute
+	priceCheckLookback  = 24 * time.Hour
+	priceCheckMaxHold   = 23 * time.Hour // pipeline.MaxUnpricedHold
+	stripeAPIVersion    = "2026-09-30.endive"
+	tenantSecret        = "vbilling-kubeconfig"
+	platformRefresh     = time.Minute
+)
+
+// RemovedSettings are the environment variables earlier versions read. A
+// value still set only logs a warning naming what replaced it, so an
+// upgrade never fails on old Helm values or manifests.
+var RemovedSettings = map[string]string{
+	"ADAPTER":                            "use ADAPTERS",
+	"COLLECTION_INTERVAL":                "windows are always 60s",
+	"RECONCILE_INTERVAL":                 "fixed at 30s",
+	"MAX_BACKFILL":                       "fixed at 6h",
+	"OFFBOARD_GRACE":                     "fixed at 1h",
+	"RETENTION":                          "live segments are kept 7 days; ARCHIVE_DIR keeps compressed copies",
+	"ZONE":                               "the zone comes from each node's topology.kubernetes.io/zone label",
+	"DEFAULT_TENANT_CLASS":               "set vbilling.vcluster.com/tenant-class on the tenant",
+	"REGION_FROM_NODE":                   "REGION is stamped on every event; run one vBilling per region",
+	"WATCH_DELETIONS":                    "deleted pods and nodes are always billed to the second",
+	"DRA_GPU_DRIVERS":                    "gpu.nvidia.com, gpu.amd.com and gpu.intel.com are GPUs",
+	"TENANT_API":                         "clusters with their own nodes are always metered through their API",
+	"TENANT_KUBECONFIG_SECRET":           "the Secret is always vbilling-kubeconfig",
+	"TENANT_ADMIN_FALLBACK":              "removed: vBilling never uses a cluster's admin kubeconfig",
+	"TENANT_EXCLUDE_NAMESPACES":          "label a namespace inside the cluster vbilling.vcluster.com/exclude=true (usage mode)",
+	"PLATFORM_PROXY":                     "with TENANT_SOURCE=platform, clusters are always reached through the Platform proxy",
+	"PLATFORM_REFRESH":                   "fixed at 1m",
+	"PLATFORM_ORPHAN_GRACE":              "removed",
+	"PROMETHEUS_LOOKBACK":                "fixed at 10m",
+	"RECORDS_SETTLE":                     "fixed at 30s",
+	"RECORDS_RETENTION":                  "fixed at 7 days",
+	"RECORDS_ALLOW_UNKEYED":              "removed: every record needs a request ID",
+	"RECORDS_ARCHIVE":                    "records are archived whenever ARCHIVE_DIR is on",
+	"RECORDS_PULL_LITELLM_INTERVAL":      "fixed at 5m",
+	"RECORDS_PULL_LITELLM_LOOKBACK":      "fixed at 1h",
+	"PAUSE_DRAIN_TIMEOUT":                "fixed at 2m",
+	"PRICE_CHECK_INTERVAL":               "fixed at 10m",
+	"PRICE_CHECK_LOOKBACK":               "fixed at 24h",
+	"PRICE_CHECK_MAX_HOLD":               "unpriced usage is released after 23 hours, before its invoice period can be final",
+	"STRIPE_API_VERSION":                 "pinned by vBilling",
+	"STRIPE_MAX_RPS":                     "vBilling paces Stripe requests itself",
+	"STRIPE_CANCEL_ON_REMOVE":            "removed: end subscriptions in Stripe",
+	"METRONOME_STRIPE_LINK":              "METRONOME_PROVISION=true links a Stripe customer when STRIPE_API_KEY is set",
+	"METRONOME_STRIPE_COLLECTION_METHOD": "fixed at charge_automatically",
+	"SPOT_DISCOUNT_PERCENT":              "removed in v0.2: price capacity_type in your billing platform",
+}
+
+// renamedSettings map an old name to its replacement; the old value is used
+// when only the old name is set.
+var renamedSettings = map[string]string{
+	"RECORDS_PULL_LITELLM_URL":    "LITELLM_URL",
+	"RECORDS_PULL_LITELLM_KEY":    "LITELLM_API_KEY",
+	"RECORDS_PULL_LITELLM_CLIENT": "LITELLM_CLIENT",
+	"RECORDS_PULL_LITELLM_TENANT": "LITELLM_TENANT",
 }
 
 func Load() *Config {
+	var warnings []string
+	for old, repl := range renamedSettings {
+		if os.Getenv(old) != "" {
+			warnings = append(warnings, fmt.Sprintf("%s is now %s", old, repl))
+		}
+	}
+	for k, why := range RemovedSettings {
+		if os.Getenv(k) != "" {
+			warnings = append(warnings, fmt.Sprintf("%s is no longer read: %s", k, why))
+		}
+	}
 	c := &Config{
 		Adapters:    envList("ADAPTERS", nil),
 		Region:      envOr("REGION", "default"),
-		Zone:        os.Getenv("ZONE"),
 		ClusterName: envOr("CLUSTER_NAME", "control-plane"),
-		TenantClass: os.Getenv("DEFAULT_TENANT_CLASS"),
 
 		DataDir:    envOr("DATA_DIR", "/var/lib/vbilling"),
-		Retention:  envDuration("RETENTION", 7*24*time.Hour),
+		Retention:  ledgerRetention,
 		ArchiveDir: os.Getenv("ARCHIVE_DIR"),
 
-		CollectionInterval: envDuration("COLLECTION_INTERVAL", 60*time.Second),
-		ReconcileInterval:  envDuration("RECONCILE_INTERVAL", 30*time.Second),
-		MaxBackfill:        envDuration("MAX_BACKFILL", 6*time.Hour),
+		CollectionInterval: windowSize,
+		ReconcileInterval:  reconcileInterval,
+		MaxBackfill:        maxBackfill,
 		CPUMemoryBasis:     envOr("CPU_MEMORY_BASIS", "requests"),
 		MeterControlPlane:  envBool("METER_CONTROL_PLANE", false),
 		MeterByNamespace:   envBool("METER_BY_NAMESPACE", false),
@@ -223,59 +309,54 @@ func Load() *Config {
 		GPUCountQuery:      os.Getenv("GPU_COUNT_QUERY"),
 		PrometheusPreset:   os.Getenv("PROMETHEUS_PRESET"),
 		PrometheusMetrics:  os.Getenv("PROMETHEUS_METRICS_FILE"),
-		DRAGPUDrivers:      envList("DRA_GPU_DRIVERS", []string{"gpu.nvidia.com", "gpu.amd.com"}),
-		WatchDeletions:     envBool("WATCH_DELETIONS", true),
+		DRAGPUDrivers:      []string{"gpu.nvidia.com", "gpu.amd.com", "gpu.intel.com"},
+		WatchDeletions:     true,
 		PromSourceLabel:    envOr("PROMETHEUS_SOURCE_LABEL", "vcluster"),
-		PromLookback:       envDuration("PROMETHEUS_LOOKBACK", 10*time.Minute),
+		PromLookback:       promLookback,
 
-		TenantAPI:               envBool("TENANT_API", true),
-		TenantKubeconfigSecret:  envOr("TENANT_KUBECONFIG_SECRET", "vbilling-kubeconfig"),
-		TenantAdminFallback:     envBool("TENANT_ADMIN_FALLBACK", false),
+		TenantAPI:               true,
+		TenantKubeconfigSecret:  tenantSecret,
 		TenantClustersFile:      os.Getenv("TENANT_CLUSTERS_FILE"),
 		PrivateNodeBilling:      envOr("PRIVATE_NODE_BILLING", "node"),
-		TenantExcludeNamespaces: envList("TENANT_EXCLUDE_NAMESPACES", []string{"kube-system"}),
+		TenantExcludeNamespaces: []string{"kube-system"},
 		WatchNamespaces:         envList("WATCH_NAMESPACES", nil),
 		DedicatedNodeLabel:      os.Getenv("VCLUSTER_NODE_LABEL"),
-		RegionFromNode:          envBool("REGION_FROM_NODE", false),
 		TenantSource:            envOr("TENANT_SOURCE", "cluster"),
 		PlatformCluster:         os.Getenv("PLATFORM_CLUSTER"),
 		PlatformURL:             os.Getenv("PLATFORM_URL"),
 		PlatformAccessKey:       secretEnv("PLATFORM_ACCESS_KEY"),
 		PlatformCAFile:          os.Getenv("PLATFORM_CA_FILE"),
 		PlatformInsecure:        envBool("PLATFORM_INSECURE", false),
-		PlatformRefresh:         envDuration("PLATFORM_REFRESH", time.Minute),
-		PlatformOrphanGrace:     envDuration("PLATFORM_ORPHAN_GRACE", 0),
-		PlatformProxy:           envBool("PLATFORM_PROXY", true),
-		OffboardGrace:           envDuration("OFFBOARD_GRACE", time.Hour),
-		CustomMetrics:           os.Getenv("CUSTOM_METRICS"),
+		PlatformRefresh:         platformRefresh,
+		PlatformProxy:           true,
+		OffboardGrace:           offboardGrace,
+		CustomMetrics:           os.Getenv("CUSTOM_METRICS"), // v0.2 string form, still accepted
 		CustomMetricsFile:       os.Getenv("CUSTOM_METRICS_FILE"),
 		PlanByClass:             envMap("PLAN_BY_CLASS"),
 		CollectionDelay:         envDuration("COLLECTION_DELAY", 5*time.Second),
-		RecordsSettle:           envDuration("RECORDS_SETTLE", 30*time.Second),
-		RecordsRetention:        envDuration("RECORDS_RETENTION", 7*24*time.Hour),
+		RecordsSettle:           recordsSettle,
+		RecordsRetention:        recordsRetention,
 		RecordsMappingsFile:     os.Getenv("RECORDS_MAPPINGS_FILE"),
-		RecordsAllowUnkeyed:     envBool("RECORDS_ALLOW_UNKEYED", false),
 		RecordsRejectUnknown:    os.Getenv("RECORDS_UNKNOWN_TENANTS") == "reject",
-		RecordsArchive:          envBool("RECORDS_ARCHIVE", false),
 		RecordsLiteLLM:          envBool("RECORDS_LITELLM", false),
 		IngestTokens:            secretMap("INGEST_TOKENS"),
 		CrossChecks:             os.Getenv("CROSS_CHECKS"),
 
-		RecordsPullLiteLLMURL:      os.Getenv("RECORDS_PULL_LITELLM_URL"),
+		RecordsPullLiteLLMURL:      renamed("LITELLM_URL"),
 		RecordsPullFile:            os.Getenv("RECORDS_PULL_FILE"),
-		RecordsPullLiteLLMKey:      secretEnv("RECORDS_PULL_LITELLM_KEY"),
-		RecordsPullLiteLLMClient:   envOr("RECORDS_PULL_LITELLM_CLIENT", "litellm"),
-		RecordsPullLiteLLMTenant:   os.Getenv("RECORDS_PULL_LITELLM_TENANT"),
-		RecordsPullLiteLLMInterval: envDuration("RECORDS_PULL_LITELLM_INTERVAL", 5*time.Minute),
-		RecordsPullLiteLLMLookback: envDuration("RECORDS_PULL_LITELLM_LOOKBACK", time.Hour),
+		RecordsPullLiteLLMKey:      strings.TrimSpace(renamed("LITELLM_API_KEY")),
+		RecordsPullLiteLLMClient:   orDefault(renamed("LITELLM_CLIENT"), "litellm"),
+		RecordsPullLiteLLMTenant:   renamed("LITELLM_TENANT"),
+		RecordsPullLiteLLMInterval: litellmPullInterval,
+		RecordsPullLiteLLMLookback: litellmPullLookback,
 
 		DefaultPlanCode: envOr("DEFAULT_PLAN_CODE", "vcluster-standard"),
 		BillingCurrency: envOr("BILLING_CURRENCY", "USD"),
 
 		PriceCheck:         envOr("PRICE_CHECK", "warn"),
-		PriceCheckInterval: envDuration("PRICE_CHECK_INTERVAL", 10*time.Minute),
-		PriceCheckLookback: envDuration("PRICE_CHECK_LOOKBACK", 24*time.Hour),
-		PriceCheckMaxHold:  envDays("PRICE_CHECK_MAX_HOLD", 28*24*time.Hour),
+		PriceCheckInterval: priceCheckInterval,
+		PriceCheckLookback: priceCheckLookback,
+		PriceCheckMaxHold:  priceCheckMaxHold,
 
 		ListenAddr:  envOr("LISTEN_ADDR", ":8080"),
 		APIToken:    secretEnv("API_TOKEN"),
@@ -286,7 +367,7 @@ func Load() *Config {
 		EnforcementInCluster: envBool("ENFORCEMENT_IN_CLUSTER", false),
 		EnforcementLiteLLM:   envBool("ENFORCEMENT_LITELLM", false),
 		PauseKeepBilling:     envOr("PAUSE_KEEP_BILLING", "storage,load_balancers"),
-		PauseDrainTimeout:    envDuration("PAUSE_DRAIN_TIMEOUT", 2*time.Minute),
+		PauseDrainTimeout:    pauseDrainTimeout,
 		PauseKeepNamespaces:  envList("PAUSE_KEEP_NAMESPACES", nil), // nil: enforcement.DefaultKeepNamespaces
 
 		LagoAPIURL:       envOr("LAGO_API_URL", "http://localhost:3000"),
@@ -294,44 +375,76 @@ func Load() *Config {
 		LagoPriceCard:    os.Getenv("LAGO_PRICE_CARD"),
 		LagoManagedPlans: envList("LAGO_MANAGED_PLANS", nil),
 
-		StripeAPIKey:         secretEnv("STRIPE_API_KEY"),
-		StripeAPIBase:        envOr("STRIPE_API_BASE", "https://api.stripe.com"),
-		StripeAPIVersion:     envOr("STRIPE_API_VERSION", "2026-09-30.endive"),
-		StripeWebhookSecret:  secretEnv("STRIPE_WEBHOOK_SECRET"),
-		StripeSplitMetersBy:  envList("STRIPE_SPLIT_METERS_BY", []string{"sku"}),
-		StripeAutoSubscribe:  envBool("STRIPE_AUTO_SUBSCRIBE", false),
-		StripeMaxRPS:         envFloat("STRIPE_MAX_RPS", 0),
-		StripeCancelOnRemove: envBool("STRIPE_CANCEL_ON_REMOVE", false),
-		StripePriceCard:      os.Getenv("STRIPE_PRICE_CARD"),
+		StripeAPIKey:        secretEnv("STRIPE_API_KEY"),
+		StripeAPIBase:       envOr("STRIPE_API_BASE", "https://api.stripe.com"), // tests: stripe-mock
+		StripeAPIVersion:    stripeAPIVersion,
+		StripeWebhookSecret: secretEnv("STRIPE_WEBHOOK_SECRET"),
+		StripeSplitMetersBy: envList("STRIPE_SPLIT_METERS_BY", []string{"sku"}),
+		StripeAutoSubscribe: envBool("STRIPE_AUTO_SUBSCRIBE", false),
+		StripePriceCard:     os.Getenv("STRIPE_PRICE_CARD"),
 
 		MetronomeAPIToken:      secretEnv("METRONOME_API_TOKEN"),
-		MetronomeAPIBase:       envOr("METRONOME_API_BASE", "https://api.metronome.com"),
+		MetronomeAPIBase:       envOr("METRONOME_API_BASE", "https://api.metronome.com"), // tests: a fake server
 		MetronomeWebhookSecret: secretEnv("METRONOME_WEBHOOK_SECRET"),
 		MetronomeRateCard:      os.Getenv("METRONOME_RATE_CARD"),
-		MetronomeStripeLink:    envBool("METRONOME_STRIPE_LINK", false),
-		MetronomeStripeCollect: envOr("METRONOME_STRIPE_COLLECTION_METHOD", "charge_automatically"),
+		MetronomeProvision:     envBool("METRONOME_PROVISION", false),
+		MetronomeStripeCollect: "charge_automatically",
 
 		WebhookURL:     os.Getenv("WEBHOOK_URL"),
 		WebhookSecret:  secretEnv("WEBHOOK_SECRET"),
 		WebhookHeaders: envMap("WEBHOOK_HEADERS"),
-
-		SpotDiscountPercent: envFloat("SPOT_DISCOUNT_PERCENT", 0),
 	}
 	if len(c.Adapters) == 0 {
 		c.Adapters = []string{envOr("ADAPTER", "lago")}
 	}
+	if envBool("METRONOME_STRIPE_LINK", false) {
+		c.MetronomeProvision = true // v0.3.0: the link implied creating customers
+	}
+	c.MetronomeStripeLink = c.MetronomeProvision && c.StripeAPIKey != ""
+	if c.MetronomeRateCard != "" && !c.MetronomeProvision {
+		warnings = append(warnings, "METRONOME_RATE_CARD only creates contracts with METRONOME_PROVISION=true; price checks read each customer's own contract")
+	}
+	if c.ArchiveDir == "off" {
+		c.ArchiveDir = "" // v0.3.1 pre-releases documented "off"
+	}
+	c.RecordsArchive = c.ArchiveDir != ""
 	if c.IngestToken == "" {
 		c.IngestToken = c.APIToken
 	}
 	if c.RecordsPullLiteLLMURL != "" {
 		c.RecordsLiteLLM = true // pulled rows are read with the litellm format
 	}
-	// Records are on time until Settle after their window; it must be
-	// shorter than the window, so short windows get half the window.
-	if c.RecordsSettle >= c.CollectionInterval {
-		c.RecordsSettle = c.CollectionInterval / 2
-	}
+	sortStrings(warnings)
+	c.Warnings = warnings
 	return c
+}
+
+func orDefault(v, fallback string) string {
+	if v == "" {
+		return fallback
+	}
+	return v
+}
+
+// renamed reads a setting, falling back to its old name.
+func renamed(key string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	for old, repl := range renamedSettings {
+		if repl == key {
+			return os.Getenv(old)
+		}
+	}
+	return ""
+}
+
+func sortStrings(s []string) {
+	for i := 1; i < len(s); i++ {
+		for j := i; j > 0 && s[j] < s[j-1]; j-- {
+			s[j], s[j-1] = s[j-1], s[j]
+		}
+	}
 }
 
 // Validate rejects settings that would silently produce wrong bills.
@@ -343,7 +456,7 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("COLLECTION_INTERVAL %s must divide an hour evenly so windows align with billing hours", c.CollectionInterval)
 	}
 	if c.EnforcementLiteLLM && (c.RecordsPullLiteLLMURL == "" || c.RecordsPullLiteLLMKey == "") {
-		return fmt.Errorf("ENFORCEMENT_LITELLM needs RECORDS_PULL_LITELLM_URL and RECORDS_PULL_LITELLM_KEY (a LiteLLM admin key)")
+		return fmt.Errorf("ENFORCEMENT_LITELLM needs LITELLM_URL and LITELLM_API_KEY (a LiteLLM admin key)")
 	}
 	if c.CollectionDelay < 0 || c.CollectionDelay > 10*time.Minute {
 		return fmt.Errorf("COLLECTION_DELAY %s must be between 0 and 10m", c.CollectionDelay)
@@ -402,10 +515,54 @@ func (c *Config) Validate() error {
 		if tok == "" || tenant == "" {
 			return fmt.Errorf("INGEST_TOKENS entries must be token=tenant")
 		}
+		// INGEST_TOKEN is unset here only when API_TOKEN is too; Load
+		// fills it with API_TOKEN otherwise, so this also covers that one.
+		if c.IngestToken != "" && tok == c.IngestToken {
+			return fmt.Errorf("the INGEST_TOKENS token of tenant %s is also the shared ingest token (INGEST_TOKEN, or API_TOKEN when it is unset): "+
+				"give each tenant its own token", tenant)
+		}
+	}
+	// The token map keeps the last tenant of a token listed twice, so read
+	// the list as written: one token for two tenants would bill everything
+	// the first tenant's gateway sends to the second.
+	owner := map[string]string{}
+	for _, kv := range envList("INGEST_TOKENS", nil) {
+		tok, tenant, _ := strings.Cut(kv, "=")
+		tok, tenant = strings.TrimSpace(tok), strings.TrimSpace(tenant)
+		if prev, dup := owner[tok]; dup && tok != "" {
+			if prev == tenant {
+				return fmt.Errorf("INGEST_TOKENS lists the token of tenant %s twice", tenant)
+			}
+			return fmt.Errorf("INGEST_TOKENS gives one token to tenants %s and %s: give each tenant its own token", prev, tenant)
+		}
+		owner[tok] = tenant
+	}
+	// Gateways hold the shared ingest token in their configuration; the API
+	// token pauses tenants and exports everyone's usage. Without
+	// INGEST_TOKEN, vBilling generates a separate one (DATA_DIR/ingest-token).
+	if ing := secretEnv("INGEST_TOKEN"); ing != "" && ing == c.APIToken {
+		return fmt.Errorf("INGEST_TOKEN must not be the API token: gateways hold the ingest token, and the API token pauses tenants and exports all usage. " +
+			"Unset INGEST_TOKEN to have vBilling generate one in DATA_DIR/ingest-token")
 	}
 	if c.RecordsPullLiteLLMURL != "" {
 		if c.RecordsPullLiteLLMKey == "" {
-			return fmt.Errorf("RECORDS_PULL_LITELLM_URL needs RECORDS_PULL_LITELLM_KEY, a LiteLLM master or proxy admin key")
+			return fmt.Errorf("LITELLM_URL needs LITELLM_API_KEY, a LiteLLM master or proxy admin key")
+		}
+		// A pinned pull stores its rows under the record IDs of the tenant's
+		// bound token, so that what the LiteLLM pushed with that token counts
+		// once. It cannot tell which of two tokens the LiteLLM uses, and a
+		// copy sent with the other would replace the LiteLLM's records.
+		if pin := c.RecordsPullLiteLLMTenant; pin != "" {
+			n := 0
+			for _, tenant := range c.IngestTokens {
+				if tenant == pin {
+					n++
+				}
+			}
+			if n > 1 {
+				return fmt.Errorf("LITELLM_TENANT=%s, but INGEST_TOKENS binds %d tokens to %s: the pinned pull stores its rows under the record IDs of the tenant's bound token "+
+					"and cannot tell which one this LiteLLM pushes with. Bind only the LiteLLM's token to %s, or unset LITELLM_TENANT", pin, n, pin, pin)
+			}
 		}
 		if c.RecordsPullLiteLLMInterval < 10*time.Second {
 			return fmt.Errorf("RECORDS_PULL_LITELLM_INTERVAL %s must be at least 10s", c.RecordsPullLiteLLMInterval)
@@ -421,16 +578,6 @@ func (c *Config) Validate() error {
 	case "warn", "hold", "off":
 	default:
 		return fmt.Errorf("PRICE_CHECK %q must be warn, hold or off", c.PriceCheck)
-	}
-	if c.PriceCheckInterval < time.Minute {
-		return fmt.Errorf("PRICE_CHECK_INTERVAL %s must be at least 1m", c.PriceCheckInterval)
-	}
-	if c.PriceCheckLookback < time.Hour {
-		return fmt.Errorf("PRICE_CHECK_LOOKBACK %s must be at least 1h", c.PriceCheckLookback)
-	}
-	if c.PriceCheckMaxHold < time.Hour || c.PriceCheckMaxHold > MaxPriceHold {
-		return fmt.Errorf("PRICE_CHECK_MAX_HOLD %s must be between 1h and %s: Metronome refuses usage older than 34 days, "+
-			"and vBilling keeps a 2-day margin to deliver what it releases", c.PriceCheckMaxHold, MaxPriceHold)
 	}
 	switch c.PrometheusPreset {
 	case "", "default", "vcluster-platform":
@@ -455,39 +602,6 @@ func envDuration(key string, fallback time.Duration) time.Duration {
 	if v := os.Getenv(key); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			return d
-		}
-	}
-	return fallback
-}
-
-// MaxPriceHold is the longest PRICE_CHECK_MAX_HOLD: the smallest backdating
-// limit of a billing platform (Metronome, 34 days) minus a 2-day margin.
-const MaxPriceHold = 32 * 24 * time.Hour
-
-// envDays is envDuration that also accepts whole days ("28d"). An invalid
-// value yields -1, which Validate rejects, instead of the default.
-func envDays(key string, fallback time.Duration) time.Duration {
-	v := strings.TrimSpace(os.Getenv(key))
-	if v == "" {
-		return fallback
-	}
-	if n, ok := strings.CutSuffix(v, "d"); ok {
-		if d, err := strconv.Atoi(n); err == nil {
-			return time.Duration(d) * 24 * time.Hour
-		}
-		return -1
-	}
-	d, err := time.ParseDuration(v)
-	if err != nil {
-		return -1
-	}
-	return d
-}
-
-func envFloat(key string, fallback float64) float64 {
-	if v := os.Getenv(key); v != "" {
-		if f, err := strconv.ParseFloat(v, 64); err == nil {
-			return f
 		}
 	}
 	return fallback

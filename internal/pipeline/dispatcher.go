@@ -34,15 +34,15 @@ type Options struct {
 	// Tenants, when set, is used to create each tenant in a destination
 	// before its first event reaches it.
 	Tenants *TenantRegistry
-	// Held, when set, parks events the Gate holds (PRICE_CHECK=hold) and
+	// Held, when set, parks events the Gate holds (unpriced or uncounted) and
 	// releases them in order once the Gate allows. Without a Gate, anything
 	// left held (from an earlier run in hold mode) is released at once.
 	Held *HeldStore
 	Gate Gate
 	// MaxHold bounds how long usage is held: once a held event's window
 	// started longer ago than this, it is released unpriced (with every
-	// older held event of its series), so billing platforms with a
-	// backdating limit can still take it. Zero holds without a limit.
+	// older held event of its series), before its invoice period is final.
+	// It is at most MaxUnpricedHold. Zero holds without a limit.
 	MaxHold time.Duration
 }
 
@@ -76,8 +76,8 @@ type Status struct {
 	LastErrorAt         time.Time `json:"last_error_at,omitempty"`
 	ConsecutiveFailures int       `json:"consecutive_failures"`
 	OldestPending       time.Time `json:"oldest_pending,omitempty"`
-	// Held events wait for a price (PRICE_CHECK=hold); Released counts the
-	// held events delivered since the start.
+	// Held events wait for a price or for the billing platform to count
+	// them; Released counts the held events delivered since the start.
 	Held     uint64 `json:"held_events"`
 	Released uint64 `json:"released_events,omitempty"`
 	// ReleasedUnpriced counts held events released after MaxHold without a price.
@@ -142,6 +142,9 @@ func (d *Dispatcher) Statuses() []Status {
 
 // Destinations returns the configured destinations.
 func (d *Dispatcher) Destinations() []destinations.Destination { return d.dests }
+
+// Held returns the store of events held from destinations, or nil.
+func (d *Dispatcher) Held() *HeldStore { return d.opts.Held }
 
 func (d *Dispatcher) update(name string, fn func(*Status)) {
 	d.mu.Lock()

@@ -19,10 +19,10 @@ import (
 	"github.com/vclusterlabs-experiments/vbilling/internal/usage"
 )
 
-// HeldStore parks events a destination must not receive yet (PRICE_CHECK=hold:
-// the billing platform has no price for their series), durably, until they
-// are released. Each destination and series has its own append-only file,
-// in ledger order:
+// HeldStore parks events a destination must not receive yet (the billing
+// platform would not count them yet, or with PRICE_CHECK=hold has no price
+// for their series), durably, until they are released. Each destination and
+// series has its own append-only file, in ledger order:
 //
 //	<dir>/<destination>/<sha256(series)[:16]>.jsonl
 //
@@ -68,6 +68,41 @@ type heldSeries struct {
 	path     string
 	offset   int64  // file offset of the first entry not yet released
 	released uint64 // highest released sequence number
+	// windows counts the unreleased entries per window start (Unix
+	// seconds), so Oldest stays exact without rereading the file when
+	// entries are released: ledger order is not window order.
+	windows map[int64]int
+}
+
+func (s *heldSeries) addWindow(ws time.Time) {
+	if s.windows == nil {
+		s.windows = map[int64]int{}
+	}
+	s.windows[ws.Unix()]++
+}
+
+func (s *heldSeries) dropWindow(ws time.Time) {
+	k := ws.Unix()
+	if s.windows[k] <= 1 {
+		delete(s.windows, k)
+		return
+	}
+	s.windows[k]--
+}
+
+// oldestWindow is the earliest window start of the unreleased entries.
+func (s *heldSeries) oldestWindow() time.Time {
+	first := true
+	var min int64
+	for k := range s.windows {
+		if first || k < min {
+			min, first = k, false
+		}
+	}
+	if first {
+		return time.Time{}
+	}
+	return time.Unix(min, 0).UTC()
 }
 
 type heldLine struct {
@@ -115,48 +150,27 @@ func OpenHeld(dir string, noSync bool) (*HeldStore, error) {
 	return h, nil
 }
 
-// load indexes one series file, cutting off a torn last line.
+// load indexes one series file, cutting off a torn last line. It streams
+// the file twice and keeps no entry in memory: the first pass finds the
+// valid end and the highest released sequence, the second indexes what is
+// still held, so a large backlog never has to fit in memory at startup.
 func (h *HeldStore) load(path string) (*heldSeries, error) {
 	f, err := os.OpenFile(path, os.O_RDWR, 0)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	r := bufio.NewReaderSize(f, 1<<16)
-	var (
-		s     heldSeries
-		off   int64
-		good  int64
-		lines []struct {
-			seq uint64
-			off int64
-			e   HeldEntry
-		}
-	)
+	var s heldSeries
 	s.path = path
-	for {
-		line, err := r.ReadBytes('\n')
-		if len(line) == 0 || err != nil && !errors.Is(err, io.EOF) {
-			break
-		}
-		if line[len(line)-1] != '\n' {
-			break // torn write: never acknowledged, the dispatcher holds it again
-		}
-		var l heldLine
-		if json.Unmarshal(line, &l) != nil {
-			break
-		}
+	var good int64
+	if err := eachLine(f, 0, -1, func(l heldLine, _, end int64) bool {
 		if l.ReleasedThrough > 0 {
 			s.released = max(s.released, l.ReleasedThrough)
-		} else {
-			lines = append(lines, struct {
-				seq uint64
-				off int64
-				e   HeldEntry
-			}{l.Seq, off, l.HeldEntry})
 		}
-		off += int64(len(line))
-		good = off
+		good = end
+		return true
+	}); err != nil {
+		return nil, err
 	}
 	if st, err := f.Stat(); err == nil && st.Size() > good {
 		if err := f.Truncate(good); err != nil {
@@ -164,25 +178,57 @@ func (h *HeldStore) load(path string) (*heldSeries, error) {
 		}
 	}
 	s.offset = good
-	for _, l := range lines {
-		if l.seq <= s.released {
-			continue
+	if err := eachLine(f, 0, good, func(l heldLine, off, _ int64) bool {
+		if l.ReleasedThrough > 0 || l.Seq <= s.released {
+			return true
 		}
 		if s.Count == 0 {
-			s.offset = l.off
-			s.Series, s.Sample, s.FirstSeq = l.e.Series, l.e.Event, l.seq
-			s.Since, s.Oldest, s.Reason = l.e.At, l.e.Event.WindowStart, l.e.Reason
+			s.offset = off
+			s.Series, s.Sample, s.FirstSeq = l.Series, l.Event, l.Seq
+			s.Since, s.Reason = l.At, l.Reason
 		}
 		s.Count++
-		s.LastSeq = max(s.LastSeq, l.seq)
-		if l.e.Event.WindowStart.Before(s.Oldest) {
-			s.Oldest = l.e.Event.WindowStart
-		}
+		s.LastSeq = max(s.LastSeq, l.Seq)
+		s.addWindow(l.Event.WindowStart)
+		return true
+	}); err != nil {
+		return nil, err
 	}
 	if s.Count == 0 {
 		return nil, nil
 	}
+	s.Oldest = s.oldestWindow()
 	return &s, nil
+}
+
+// eachLine calls fn with every complete, valid line of f from offset from
+// up to offset to (-1: the end), with the line's start and end offsets. It
+// stops at a torn or unreadable line, which only the last write can leave.
+func eachLine(f *os.File, from, to int64, fn func(l heldLine, off, end int64) bool) error {
+	if _, err := f.Seek(from, io.SeekStart); err != nil {
+		return err
+	}
+	r := bufio.NewReaderSize(f, 1<<16)
+	off := from
+	for to < 0 || off < to {
+		line, err := r.ReadBytes('\n')
+		if len(line) == 0 || err != nil && !errors.Is(err, io.EOF) {
+			return nil
+		}
+		if line[len(line)-1] != '\n' {
+			return nil // torn write: never acknowledged, the dispatcher holds it again
+		}
+		var l heldLine
+		if json.Unmarshal(line, &l) != nil {
+			return nil
+		}
+		end := off + int64(len(line))
+		if !fn(l, off, end) {
+			return nil
+		}
+		off = end
+	}
+	return nil
 }
 
 func seriesFile(series string) string {
@@ -281,7 +327,7 @@ func (h *HeldStore) Add(dest string, entries []HeldEntry) (added int, err error)
 			}
 			s = &heldSeries{path: filepath.Join(dir, seriesFile(key))}
 			s.Series, s.Sample, s.FirstSeq = key, keep[0].Event, keep[0].Seq
-			s.Since, s.Oldest, s.Reason = keep[0].At, keep[0].Event.WindowStart, keep[0].Reason
+			s.Since, s.Reason = keep[0].At, keep[0].Reason
 		}
 		if err := h.appendSync(s.path, buf.Bytes(), created); err != nil {
 			return added, err
@@ -289,10 +335,9 @@ func (h *HeldStore) Add(dest string, entries []HeldEntry) (added int, err error)
 		for _, e := range keep {
 			s.Count++
 			s.LastSeq = e.Seq
-			if e.Event.WindowStart.Before(s.Oldest) {
-				s.Oldest = e.Event.WindowStart
-			}
+			s.addWindow(e.Event.WindowStart)
 		}
+		s.Oldest = s.oldestWindow()
 		s.Reason = keep[len(keep)-1].Reason
 		h.dests[dest][key] = s
 		added += len(keep)
@@ -335,6 +380,32 @@ func syncDir(dir string) error {
 	}
 	defer d.Close()
 	return d.Sync()
+}
+
+// Each calls fn with every event held for dest, series by series and in
+// ledger order within a series, until fn returns false.
+func (h *HeldStore) Each(dest string, fn func(HeldEntry) bool) error {
+	h.mu.Lock()
+	series := make([]string, 0, len(h.dests[dest]))
+	for k := range h.dests[dest] {
+		series = append(series, k)
+	}
+	h.mu.Unlock()
+	sort.Strings(series)
+	for _, s := range series {
+		stop := false
+		_, err := h.scan(dest, s, func(e HeldEntry) bool {
+			stop = !fn(e)
+			return !stop
+		})
+		if err != nil {
+			return err
+		}
+		if stop {
+			return nil
+		}
+	}
+	return nil
 }
 
 // Peek returns up to max of a series' held events, oldest first, and the
@@ -435,26 +506,31 @@ func (h *HeldStore) Release(dest, series string, seq uint64, n int, next int64) 
 	if err := h.appendSync(s.path, append(b, '\n'), false); err != nil {
 		return err
 	}
+	// Only the released range and the next entry are read: the window
+	// counts keep Oldest exact, so a large backlog is never reread per
+	// released batch.
+	prev, from := s.released, s.offset
 	s.released, s.offset = seq, next
 	s.Count -= n
-	// The next entry becomes the first; the oldest window may be any of
-	// the rest (ledger order is not window order).
-	h.mu.Unlock()
-	first := true
-	var oldest time.Time
-	var head HeldEntry
-	_, err := h.scan(dest, series, func(e HeldEntry) bool {
-		if first {
-			head, oldest, first = e, e.Event.WindowStart, false
-		} else if e.Event.WindowStart.Before(oldest) {
-			oldest = e.Event.WindowStart
+	f, err := os.Open(s.path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if err := eachLine(f, from, next, func(l heldLine, _, _ int64) bool {
+		if l.ReleasedThrough == 0 && l.Seq > prev && l.Seq <= seq {
+			s.dropWindow(l.Event.WindowStart)
 		}
 		return true
-	})
-	h.mu.Lock()
-	if err == nil && !first {
-		s.FirstSeq, s.Sample, s.Since = head.Seq, head.Event, head.At
-		s.Oldest = oldest
+	}); err != nil {
+		return err
 	}
-	return nil
+	s.Oldest = s.oldestWindow()
+	return eachLine(f, next, -1, func(l heldLine, _, _ int64) bool {
+		if l.ReleasedThrough > 0 || l.Seq <= seq {
+			return true
+		}
+		s.FirstSeq, s.Sample, s.Since = l.Seq, l.Event, l.At
+		return false
+	})
 }

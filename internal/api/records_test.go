@@ -30,7 +30,7 @@ type recEnv struct {
 
 func setupRecords(t *testing.T) *recEnv {
 	t.Helper()
-	cfg := &config.Config{Region: "eu-west-1", CollectionInterval: time.Minute, IngestToken: "ingest-secret",
+	cfg := &config.Config{Region: "eu-west-1", CollectionInterval: time.Minute, APIToken: adminToken, IngestToken: "ingest-secret",
 		IngestTokens: map[string]string{"gw-globex": "globex"}}
 	dir := t.TempDir()
 	clock := func() time.Time { return now }
@@ -58,8 +58,9 @@ func setupRecords(t *testing.T) *recEnv {
 		_, ok := reg.Get(v)
 		return v, ok
 	}
-	in := records.NewIngester(rs, formats, records.Options{Window: time.Minute, Region: cfg.Region, Now: clock}, resolve, h, nil)
-	s := New(cfg, sp, nil, reg, nil, nil, telemetry.New(), "test").WithHealth(h).WithRecords(in)
+	tel := telemetry.New()
+	in := records.NewIngester(rs, formats, records.Options{Window: time.Minute, Region: cfg.Region, Now: clock}, resolve, h, tel)
+	s := New(cfg, sp, nil, reg, nil, nil, tel, "test").WithHealth(h).WithRecords(in)
 	s.now = clock
 	srv := httptest.NewServer(s.Handler())
 	t.Cleanup(srv.Close)
@@ -155,10 +156,7 @@ func TestStatusShowsSourceProblems(t *testing.T) {
 	e.health.Empty("prometheus/tokens/vcluster-a-b", "prometheus", "vcluster-a-b", "no series", "use {{selector}}")
 	e.health.Fail("tenant-api/vcluster-a-c", "tenant-api", "vcluster-a-c", errors.New("forbidden"), "")
 	e.health.OK("records/litellm", "records", "litellm", 3)
-	resp, err := http.Get(e.srv.URL + "/api/v1/status")
-	if err != nil {
-		t.Fatal(err)
-	}
+	resp := do(t, http.MethodGet, e.srv.URL+"/api/v1/status", adminToken, nil)
 	var st map[string]any
 	json.NewDecoder(resp.Body).Decode(&st)
 	resp.Body.Close()
@@ -166,7 +164,7 @@ func TestStatusShowsSourceProblems(t *testing.T) {
 	if st["healthy"] != false || len(warnings) != 2 || !strings.Contains(fmt.Sprint(warnings), "use {{selector}}") {
 		t.Fatalf("status = %+v", st)
 	}
-	resp, _ = http.Get(e.srv.URL + "/api/v1/sources?kind=prometheus")
+	resp = do(t, http.MethodGet, e.srv.URL+"/api/v1/sources?kind=prometheus", adminToken, nil)
 	var src struct {
 		Sources []health.Source `json:"sources"`
 	}

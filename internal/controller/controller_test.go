@@ -11,6 +11,7 @@ import (
 	"github.com/vclusterlabs-experiments/vbilling/internal/config"
 	"github.com/vclusterlabs-experiments/vbilling/internal/destinations"
 	"github.com/vclusterlabs-experiments/vbilling/internal/discovery"
+	"github.com/vclusterlabs-experiments/vbilling/internal/kv"
 	"github.com/vclusterlabs-experiments/vbilling/internal/metrics"
 	"github.com/vclusterlabs-experiments/vbilling/internal/pause"
 	"github.com/vclusterlabs-experiments/vbilling/internal/pipeline"
@@ -98,12 +99,15 @@ func newHarness(t *testing.T, mutate ...func(*config.Config)) *harness {
 	for _, m := range mutate {
 		m(cfg)
 	}
-	sp, err := spool.Open(t.TempDir(), spool.Options{NoSync: true})
+	h := &harness{disc: &fakeDisc{}, coll: &fakeColl{}, dest: &fakeDest{}, reg: pipeline.NewTenantRegistry(), now: t0}
+	// The ledger stamps records with the harness's time too: a tenant's
+	// usage was last seen when it was appended.
+	sp, err := spool.Open(t.TempDir(), spool.Options{NoSync: true, Now: func() time.Time { return h.now }})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { sp.Close() })
-	h := &harness{disc: &fakeDisc{}, coll: &fakeColl{}, dest: &fakeDest{}, sp: sp, reg: pipeline.NewTenantRegistry(), now: t0}
+	h.sp = sp
 	h.c = New(cfg, h.disc, h.coll, sp, h.reg, []destinations.Destination{h.dest}, nil)
 	h.c.now = func() time.Time { return h.now }
 	return h
@@ -276,7 +280,7 @@ func TestTenantAPIOutageWindowsAreFilledExactlyOnce(t *testing.T) {
 	h.now = h.now.Add(2 * time.Minute)
 	h.c.CollectDue(ctx) // W2, W3: still down
 	w1, w3 := t0.Truncate(time.Minute), t0.Truncate(time.Minute).Add(2*time.Minute)
-	if span, ok := h.c.gaps.Get(id); !ok || span != w1.Format(time.RFC3339)+"|"+w3.Format(time.RFC3339) {
+	if span, ok := h.c.gaps.Get(id); !ok || span != w1.Add(-time.Minute).Format(time.RFC3339)+"/"+w3.Format(time.RFC3339) {
 		t.Fatalf("gap = %q, %v; want the failed windows W1..W3", span, ok)
 	}
 	if len(gc.fills) != 0 {
@@ -309,7 +313,7 @@ func TestTenantAPIOutageWindowsAreFilledExactlyOnce(t *testing.T) {
 		t.Fatalf("ledger has %d filled private-node events, want 3", n)
 	}
 	// A repeated fill (for example after a crash between append and clearing
-	// the gap) must not bill twice.
+	// the gap, here as v0.3.0 stored it) must not bill twice.
 	_ = h.c.gaps.Set(id, w1.Format(time.RFC3339)+"|"+w3.Format(time.RFC3339))
 	h.now = h.now.Add(time.Minute)
 	h.c.CollectDue(ctx)
@@ -326,8 +330,41 @@ func TestTenantAPIGapsSurviveRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	b := New(cfg, &fakeDisc{}, &fakeColl{}, nil, pipeline.NewTenantRegistry(), nil, nil)
-	if g, ok := parseGap(b.gaps, "vcluster-team-p-private"); !ok || !g[1].Equal(time.Date(2026, 10, 5, 10, 2, 0, 0, time.UTC)) {
+	if g, ok := parseGaps(b.gaps, "vcluster-team-p-private", time.Minute); !ok || len(g) != 1 || !g[0].end.Equal(time.Date(2026, 10, 5, 10, 2, 0, 0, time.UTC)) ||
+		!g[0].start.Equal(time.Date(2026, 10, 5, 9, 59, 0, 0, time.UTC)) {
 		t.Fatalf("gap after restart = %v, %v", g, ok)
+	}
+}
+
+// A gap holds the windows whose read failed, not the span from the first
+// failure to the last: a window committed in between, with the cluster's
+// own API read, is never filled again. Runs of windows merge.
+func TestTenantGapsHoldOnlyTheFailedWindows(t *testing.T) {
+	at := func(m int) time.Time { return t0.Truncate(time.Minute).Add(time.Duration(m) * time.Minute) }
+	w := func(m int) metrics.Window { return metrics.Window{Start: at(m - 1), End: at(m)} }
+	g := tenantGaps(nil).add([]metrics.Window{w(1)}).add([]metrics.Window{w(3), w(4)}).add([]metrics.Window{w(2)}).add([]metrics.Window{w(7)})
+	if len(g) != 2 || !g[0].start.Equal(at(0)) || !g[0].end.Equal(at(4)) || !g[1].start.Equal(at(6)) || !g[1].end.Equal(at(7)) {
+		t.Fatalf("merged gaps = %v, want 10:00-10:04 and 10:06-10:07", g)
+	}
+	g = tenantGaps(nil).add([]metrics.Window{w(1)}).add([]metrics.Window{w(3)})
+	store := kv.Memory()
+	_ = store.Set("c", g.String())
+	got, ok := parseGaps(store, "c", time.Minute)
+	if !ok || len(got) != 2 {
+		t.Fatalf("gaps %q read back as %v", g.String(), got)
+	}
+	missed := got.windows(time.Minute, at(-60))
+	if len(missed) != 2 || !missed[0].End.Equal(at(1)) || !missed[1].End.Equal(at(3)) {
+		t.Fatalf("windows to fill = %+v, want the two that failed, not the one between", missed)
+	}
+	if after := got.after(at(1)); len(after) != 1 || !after[0].end.Equal(at(3)) {
+		t.Fatalf("gaps after 10:01 = %v", after)
+	}
+	for _, bad := range []string{"", "nonsense", "2026-10-05T10:01:00Z/2026-10-05T10:00:00Z"} {
+		_ = store.Set("bad", bad)
+		if _, ok := parseGaps(store, "bad", time.Minute); ok {
+			t.Errorf("gap %q parsed", bad)
+		}
 	}
 }
 
@@ -369,6 +406,12 @@ func TestOffboardingIsFinalPerDestination(t *testing.T) {
 	}
 }
 
+// Discovery reports a cluster paused only while its control plane is down.
+// A pause vBilling did not make is recorded from when it is seen; one
+// vBilling marked is left to its enforcer, which records it once it
+// verified the cluster's workloads are gone, never from the paused-at
+// annotation (anyone who writes vcluster.yaml can back-date it). Any pause
+// ends when the cluster runs again.
 func TestPausesSeenInDiscoveryReachMetering(t *testing.T) {
 	h := newHarness(t)
 	spans := pause.Memory()
@@ -385,17 +428,21 @@ func TestPausesSeenInDiscoveryReachMetering(t *testing.T) {
 	h.c.Reconcile(ctx)
 
 	a, b := paused.ExternalID(), external.ExternalID()
-	if sp, open := spans.Current(a); !open || !sp.From.Equal(t0.Add(-90*time.Second)) || sp.By != "vbilling" {
-		t.Fatalf("vBilling pause span = %+v %t, want it from its paused-at annotation", sp, open)
+	if sp, open := spans.Current(a); open {
+		t.Fatalf("the controller recorded vBilling's pause itself: %+v (the enforcer records it once verified, never from paused-at)", sp)
 	}
-	if sp, open := spans.Current(b); !open || !sp.From.Equal(t0) || sp.By != "external" {
+	if sp, open := spans.Current(b); !open || !sp.From.Equal(t0) || sp.By != pause.ByExternal {
 		t.Fatalf("external pause span = %+v %t, want it from when it was seen", sp, open)
 	}
 	h.now = t0.Add(time.Minute)
 	h.c.CollectDue(ctx)
 	for _, tg := range h.coll.targets {
-		if len(tg.Paused) != 1 {
-			t.Fatalf("target %s carries %d pause spans", tg.Cluster.ExternalID(), len(tg.Paused))
+		want := 0
+		if tg.Cluster.ExternalID() == b {
+			want = 1
+		}
+		if len(tg.Paused) != want {
+			t.Fatalf("target %s carries %d pause spans, want %d", tg.Cluster.ExternalID(), len(tg.Paused), want)
 		}
 	}
 
@@ -408,12 +455,65 @@ func TestPausesSeenInDiscoveryReachMetering(t *testing.T) {
 	if len(got) != 1 || !got[0].To.Equal(h.now) {
 		t.Fatalf("external spans after resume = %+v", got)
 	}
+	// vBilling's own pause, once verified, also ends when discovery sees the
+	// cluster run again (scaled up by hand, woken by the Platform).
+	if _, err := spans.Begin(a, t0.Add(2*time.Minute), pause.ByVBilling); err != nil {
+		t.Fatal(err)
+	}
+	h.now = t0.Add(6 * time.Minute)
+	paused.Paused = false
+	h.disc.clusters = []discovery.TenantCluster{paused, external}
+	h.c.Reconcile(ctx)
+	if got := spans.Spans(a); len(got) != 1 || !got[0].To.Equal(h.now) {
+		t.Fatalf("vBilling's span of a cluster that runs again = %+v, want it ended when seen running", got)
+	}
 	// vBilling's own pause and resume are reflected at once.
-	h.c.SetPaused(a, false)
+	h.c.SetPaused(a, true)
 	for _, cl := range h.c.Clusters() {
-		if cl.ExternalID() == a && cl.Paused {
+		if cl.ExternalID() == a && !cl.Paused {
 			t.Fatal("SetPaused did not update the cluster")
 		}
+	}
+}
+
+// Two clusters whose namespace and name join to the same ID share pause
+// spans, saved inventories and gaps: their pauses never clip either one.
+func TestSharedClusterIDsAreNeverClipped(t *testing.T) {
+	h := newHarness(t)
+	spans := pause.Memory()
+	h.c.UsePauses(spans)
+	ctx := context.Background()
+	one, other := cluster("a-b", "c", nil), cluster("a", "b-c", nil)
+	if one.ExternalID() != other.ExternalID() {
+		t.Fatalf("test setup: %s and %s differ", one.ExternalID(), other.ExternalID())
+	}
+	one.Paused = true // one of them is down: no span may clip the other
+	h.disc.clusters = []discovery.TenantCluster{one, other}
+	h.c.Reconcile(ctx)
+	id := one.ExternalID()
+	if sp, open := spans.Current(id); open {
+		t.Fatalf("pause span %+v recorded for an ID two clusters share", sp)
+	}
+	// A span recorded before the second cluster appeared clips neither.
+	if _, err := spans.Begin(id, t0.Add(-time.Hour), pause.ByVBilling); err != nil {
+		t.Fatal(err)
+	}
+	h.now = t0.Add(time.Minute)
+	h.c.CollectDue(ctx)
+	for _, tg := range h.coll.targets {
+		if len(tg.Paused) != 0 {
+			t.Fatalf("target %s carries pause spans %+v of a shared ID", tg.Cluster.ExternalID(), tg.Paused)
+		}
+	}
+	h.c.SetPaused(id, false)
+	paused := 0
+	for _, cl := range h.c.Clusters() {
+		if cl.Paused {
+			paused++
+		}
+	}
+	if paused != 1 {
+		t.Fatalf("SetPaused on a shared ID changed what discovery saw: %d paused, want 1", paused)
 	}
 }
 

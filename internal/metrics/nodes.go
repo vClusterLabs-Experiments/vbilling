@@ -16,20 +16,27 @@ import (
 // nodeInfo is everything metering needs to know about a node.
 type nodeInfo struct {
 	name         string
+	uid          string
 	created      time.Time
+	systemUUID   string // status.nodeInfo: which machine the node reports it is
+	machineID    string
 	gpuType      string
 	zone         string
 	region       string
 	capacityType string
-	instanceType string
-	sku          string // value of SKU_LABEL, if configured and present
-	gpuCapacity  int64  // devices of GPU_RESOURCES (nvidia.com/gpu, amd.com/gpu)
-	cpuCapacity  float64
-	memCapacity  float64 // bytes
-	gpuReplicas  int     // time-slicing replicas per physical GPU (1 = not shared)
-	labels       map[string]string
-	deletedAt    time.Time // set for nodes seen deleted (Auto Nodes scale-down); zero = present
-	draGPUs      float64   // whole GPUs the node offers through DRA ResourceSlices
+	// capacityLabeled: a label gave the capacity type (without one it is
+	// on-demand).
+	capacityLabeled bool
+	instanceType    string
+	sku             string // value of SKU_LABEL, if configured and present
+	gpuCapacity     int64  // devices of GPU_RESOURCES (nvidia.com/gpu, amd.com/gpu)
+	cpuCapacity     float64
+	memCapacity     float64 // bytes
+	gpuReplicas     int     // time-slicing replicas per physical GPU (1 = not shared)
+	labels          map[string]string
+	deletedAt       time.Time // set for nodes seen deleted (Auto Nodes scale-down); zero = present
+	draGPUs         float64   // whole GPUs the node offers through DRA ResourceSlices
+	externalIP      bool      // the node has an ExternalIP address
 
 	// MIG and sharing. migProfile is set when every advertised GPU device is
 	// a MIG slice (NVIDIA "single" strategy, GKE GPU partitions). Under the
@@ -39,6 +46,10 @@ type nodeInfo struct {
 	migMixed       float64
 	migDevices     int64
 	sharedCapacity int64
+
+	// gpuFloor is the fewest physical GPUs the node is billed for: for a
+	// cluster's own node, the most it had while it lived (privateNodeHistory).
+	gpuFloor float64
 
 	// Fair metering: a node that is not Ready, or carries an unhealthy
 	// taint, is down. downSince is when that started (zero = unknown, so the
@@ -58,20 +69,45 @@ var gpuProductLabels = []string{
 
 func (c *Collector) parseNode(n *corev1.Node) *nodeInfo { return c.parseNodeLease(n, time.Time{}) }
 
-// parseNodeLease parses a node; renewed is its Lease's last renewal, read
-// only for a node whose kubelet went silent (kubeletSilent).
+// parseNodeLease parses a node of the control plane cluster; renewed is its
+// Lease's last renewal, read only for a node whose kubelet went silent
+// (kubeletSilent).
 func (c *Collector) parseNodeLease(n *corev1.Node, renewed time.Time) *nodeInfo {
+	return c.parseNodeAs(n, renewed, false)
+}
+
+// parsePrivateNode parses a node read through a cluster's own API. Its
+// labels, taints and status are written from inside the cluster, so they
+// are trusted less than on the operator's control plane cluster:
+//   - Only its Ready condition marks it down. Taints never do: anyone who
+//     can write the node can add one with an effect the node controller
+//     never reconciles, which evicts nothing.
+//   - Time-slicing replicas divide its advertised GPUs only when GPU Feature
+//     Discovery's count corroborates them (advertised devices = physical
+//     GPUs x replicas). GKE's time-sharing labels never do: GKE does not
+//     manage a cluster's own nodes.
+//
+// What it had when vBilling first saw it and the most GPUs it had are kept
+// separately (privateNodeHistory): what changes later never lowers its bill.
+func (c *Collector) parsePrivateNode(n *corev1.Node, renewed time.Time) *nodeInfo {
+	return c.parseNodeAs(n, renewed, true)
+}
+
+func (c *Collector) parseNodeAs(n *corev1.Node, renewed time.Time, private bool) *nodeInfo {
 	ni := &nodeInfo{
 		name:         n.Name,
+		uid:          string(n.UID),
+		systemUUID:   strings.TrimSpace(n.Status.NodeInfo.SystemUUID),
+		machineID:    strings.TrimSpace(n.Status.NodeInfo.MachineID),
 		created:      n.CreationTimestamp.Time,
 		gpuType:      "unknown",
 		zone:         firstLabel(n.Labels, "topology.kubernetes.io/zone", "failure-domain.beta.kubernetes.io/zone"),
 		region:       firstLabel(n.Labels, "topology.kubernetes.io/region", "failure-domain.beta.kubernetes.io/region"),
 		instanceType: firstLabel(n.Labels, "node.kubernetes.io/instance-type", "beta.kubernetes.io/instance-type"),
-		capacityType: capacityType(n.Labels, c.opts.CapacityTypeLabel),
 		gpuReplicas:  1,
 		labels:       n.Labels,
 	}
+	ni.capacityType, ni.capacityLabeled = capacityTypeOf(n.Labels, c.opts.CapacityTypeLabel)
 	if v := firstLabel(n.Labels, gpuProductLabels...); v != "" {
 		ni.gpuType = normalizeGPUType(v)
 	}
@@ -81,10 +117,10 @@ func (c *Collector) parseNodeLease(n *corev1.Node, renewed time.Time) *nodeInfo 
 	if gpu, profile, ok := strings.Cut(ni.gpuType, "-MIG-"); ok && gpu != "" && profile != "" {
 		ni.gpuType, ni.migProfile = gpu, profile
 	} else if p := n.Labels["cloud.google.com/gke-gpu-partition-size"]; p != "" {
-		ni.migProfile = p
+		ni.migProfile = usage.SafeValue(p)
 	}
 	if c.opts.SKULabel != "" {
-		ni.sku = n.Labels[c.opts.SKULabel]
+		ni.sku = usage.SafeValue(n.Labels[c.opts.SKULabel])
 	}
 	for _, res := range c.opts.GPUResources {
 		if q, ok := n.Status.Capacity[corev1.ResourceName(res)]; ok {
@@ -106,12 +142,17 @@ func (c *Collector) parseNodeLease(n *corev1.Node, renewed time.Time) *nodeInfo 
 	if q, ok := n.Status.Capacity[corev1.ResourceMemory]; ok {
 		ni.memCapacity = float64(q.Value())
 	}
+	for _, addr := range n.Status.Addresses {
+		if addr.Type == corev1.NodeExternalIP && addr.Address != "" {
+			ni.externalIP = true
+		}
+	}
 	if r, err := strconv.Atoi(n.Labels["nvidia.com/gpu.replicas"]); err == nil && r > 1 &&
-		n.Labels["nvidia.com/gpu.sharing-strategy"] != "none" {
+		n.Labels["nvidia.com/gpu.sharing-strategy"] != "none" && (!private || ni.replicasCorroborated(n.Labels, r)) {
 		ni.gpuReplicas = r
 	}
 	// GKE shares GPUs natively (time-sharing or MPS) and labels the node itself.
-	if s := n.Labels["cloud.google.com/gke-gpu-sharing-strategy"]; s == "time-sharing" || s == "mps" {
+	if s := n.Labels["cloud.google.com/gke-gpu-sharing-strategy"]; !private && (s == "time-sharing" || s == "mps") {
 		if r, err := strconv.Atoi(n.Labels["cloud.google.com/gke-max-shared-clients-per-gpu"]); err == nil && r > 1 {
 			ni.gpuReplicas = r
 		}
@@ -126,6 +167,9 @@ func (c *Collector) parseNodeLease(n *corev1.Node, renewed time.Time) *nodeInfo 
 			ni.markDown(since)
 		}
 	}
+	if private {
+		return ni
+	}
 	for _, t := range n.Spec.Taints {
 		for _, key := range c.opts.UnhealthyTaints {
 			if t.Key == key {
@@ -138,6 +182,20 @@ func (c *Collector) parseNodeLease(n *corev1.Node, renewed time.Time) *nodeInfo 
 		}
 	}
 	return ni
+}
+
+// replicasCorroborated reports whether GPU Feature Discovery's physical GPU
+// count agrees with time-slicing replicas: a time-sliced node advertises
+// every physical GPU replicas times (as nvidia.com/gpu, or renamed to
+// nvidia.com/gpu.shared). Replicas a label claims on a node whose devices
+// do not add up are not believed.
+func (n *nodeInfo) replicasCorroborated(labels map[string]string, replicas int) bool {
+	count, err := strconv.ParseInt(labels["nvidia.com/gpu.count"], 10, 64)
+	if err != nil || count <= 0 {
+		return false
+	}
+	want := count * int64(replicas)
+	return n.gpuCapacity == want || n.sharedCapacity == want
 }
 
 // deviceShare is the part of a physical GPU that one advertised GPU device
@@ -186,13 +244,31 @@ func (n *nodeInfo) deviceProfile() string {
 // physicalGPUs converts everything the node advertises (whole GPUs, MIG
 // slices, time-slicing replicas) to whole-GPU equivalents, the quantity a
 // dedicated node is billed for. Slices that are not partitioned out are not
-// advertised, so a partly carved GPU never counts as more than one.
+// advertised, so a partly carved GPU never counts as more than one. It is
+// never below gpuFloor.
 func (n *nodeInfo) physicalGPUs() float64 {
+	return max(n.advertisedGPUs(), n.gpuFloor)
+}
+
+// advertisedGPUs is physicalGPUs from what the node advertises now alone.
+func (n *nodeInfo) advertisedGPUs() float64 {
 	shared := 0.0
 	if n.sharedCapacity > 0 {
 		shared = float64(n.sharedCapacity) / float64(max(n.gpuReplicas, 1))
 	}
 	return usage.Round(float64(n.gpuCapacity)*n.deviceShare() + shared + n.migMixed + n.draGPUs)
+}
+
+// instanceAttributes describe a whole node on its node-hour events, the way
+// instance-level SKUs are defined: vCPUs and memory from its capacity,
+// physical GPUs, and whether it has a public address.
+func (n *nodeInfo) instanceAttributes() map[string]string {
+	return map[string]string{
+		usage.DimVCPUs:     strconv.FormatFloat(n.cpuCapacity, 'f', -1, 64),
+		usage.DimMemoryGiB: strings.TrimSuffix(strconv.FormatFloat(n.memCapacity/gib, 'f', 1, 64), ".0"),
+		usage.DimGPUCount:  strconv.FormatFloat(n.physicalGPUs(), 'f', -1, 64),
+		usage.DimPublicIP:  strconv.FormatBool(n.externalIP),
+	}
 }
 
 // applyDRANodes adds the GPUs nodes offer through DRA, which no extended
@@ -257,10 +333,11 @@ func (n *nodeInfo) regionOr(fallback string, fromNode bool) string {
 	return fallback
 }
 
-// capacityType normalizes the many spot/preemptible label conventions.
-func capacityType(labels map[string]string, customKey string) string {
+// capacityTypeOf normalizes the many spot/preemptible label conventions,
+// and says whether a label gave the capacity type (on-demand without one).
+func capacityTypeOf(labels map[string]string, customKey string) (string, bool) {
 	if v := labels[customKey]; v != "" && customKey != "" {
-		return normalizeCapacity(v)
+		return normalizeCapacity(v), true
 	}
 	for _, key := range []string{
 		"karpenter.sh/capacity-type",
@@ -269,16 +346,16 @@ func capacityType(labels map[string]string, customKey string) string {
 		"node.kubernetes.io/lifecycle",
 	} {
 		if v := labels[key]; v != "" {
-			return normalizeCapacity(v)
+			return normalizeCapacity(v), true
 		}
 	}
 	if labels["cloud.google.com/gke-spot"] == "true" {
-		return usage.CapacitySpot
+		return usage.CapacitySpot, true
 	}
 	if labels["cloud.google.com/gke-preemptible"] == "true" {
-		return usage.CapacityPreemptible
+		return usage.CapacityPreemptible, true
 	}
-	return usage.CapacityOnDemand
+	return usage.CapacityOnDemand, false
 }
 
 func normalizeCapacity(v string) string {
@@ -295,13 +372,16 @@ func normalizeCapacity(v string) string {
 }
 
 func normalizeGPUType(raw string) string {
-	return strings.ReplaceAll(strings.TrimSpace(raw), " ", "-")
+	return usage.SafeValue(strings.ReplaceAll(strings.TrimSpace(raw), " ", "-"))
 }
 
+// firstLabel returns the first label set, made safe to use as a SKU or
+// dimension value (usage.SafeValue): a cluster with its own nodes labels
+// them itself.
 func firstLabel(labels map[string]string, keys ...string) string {
 	for _, k := range keys {
 		if v := labels[k]; v != "" {
-			return v
+			return usage.SafeValue(v)
 		}
 	}
 	return ""

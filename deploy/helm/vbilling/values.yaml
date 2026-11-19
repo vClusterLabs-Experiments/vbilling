@@ -1,11 +1,15 @@
 # vBilling Helm values. Every value maps to an environment variable; see
 # docs/configuration.html for the full reference.
 
+# Always 1 (0 stops vBilling). vBilling runs as one instance: it holds the
+# Lease "vbilling" in its namespace while it meters, and a second instance
+# would wait, not Ready. Restarts are safe: the ledger and backfill resume
+# where it stopped.
 replicaCount: 1
 
 image:
   repository: ghcr.io/vclusterlabs-experiments/vbilling
-  tag: v0.3.0
+  tag: v0.3.1
   pullPolicy: IfNotPresent
 
 # Destinations usage fans out to. Built-in: stripe, metronome, lago, webhook, noop.
@@ -20,8 +24,6 @@ adapter: ""
 # cluster (region): usage, ledger and billing state stay in that region.
 region: default
 clusterName: control-plane
-# Default tenant class stamped on events (public, enterprise, government, dev, ...).
-tenantClass: ""
 # How tenant clusters map to billing customers: "cluster" (one customer per
 # tenant cluster) or "project" (one per vCluster Platform project), where the
 # vbilling.vcluster.com/tenant label always wins; or "platform": the vCluster
@@ -32,15 +34,11 @@ tenantSource: cluster
 billing:
   defaultPlanCode: vcluster-standard # Lago plan code / Stripe plan tag
   currency: USD
-  collectionInterval: 60s # metering window; must divide an hour
   # How long after a window ends it is metered (at least 5s). On spot or
   # preemptible GPUs use 75s: Kubernetes marks a node that died without
   # warning 40 to 50s after its last heartbeat, and the window it died in is
   # then billed only up to that heartbeat. Usage reaches billing that much later.
   collectionDelay: 5s
-  reconcileInterval: 30s
-  maxBackfill: 6h # windows missed during downtime are backfilled up to this age
-  offboardGrace: 1h # a tenant must be gone this long before RemoveTenant runs
   # Plan for tenants without a vbilling.vcluster.com/plan setting, by tenant
   # class (Lago plan code, Stripe plan tag or Metronome rate card).
   planByClass: {}
@@ -51,14 +49,10 @@ billing:
   # for (GET /api/v1/pricing). warn: report only. hold: also keep that usage
   # out of the billing platform until the price exists, then ship it in
   # order. off: no checks.
+  # hold releases usage still unpriced after 28 days, so the billing
+  # platform accepts it and can re-rate it once priced.
   priceCheck:
     mode: warn # warn | hold | off
-    interval: 10m # every destination is checked this often (and when a new series appears)
-    lookback: 24h # series seen in the ledger this recently are checked
-    # hold only: usage held this long (by window start) is released without a
-    # price, so the billing platform still accepts it and can re-rate it once
-    # priced. At most 32d (Metronome refuses usage older than 34 days).
-    maxHold: 28d
 
 metering:
   # requests (exact): requests times lifetime. usage or max: a metrics-server
@@ -71,7 +65,6 @@ metering:
   capacityTypeLabel: vbilling.vcluster.com/capacity-type # on-demand | spot | preemptible | reserved
   unhealthyNodeTaints: [node.kubernetes.io/not-ready, node.kubernetes.io/unreachable]
   dedicatedNodeLabel: "" # extra dedicated-node selector, "key=%s" (%s = tenant cluster name)
-  regionFromNode: false # use topology.kubernetes.io/region from nodes instead of `region`
   # Metrics you push through POST /api/v1/events or /api/v1/records. A list
   # (or the v0.2 string "code:unit[:key|key],...").
   customMetrics: []
@@ -82,20 +75,15 @@ metering:
   # - code: vllm_output_tokens   # a second source, compared with crossChecks
   #   unit: tokens
   #   billable: false
-  watchDeletions: true # bill pods and nodes deleted between windows (short jobs, Auto Nodes scale-down)
-  draGPUDrivers: [gpu.nvidia.com, gpu.amd.com] # DRA drivers whose devices are GPUs
 
-# Tenant clusters with their own nodes (vCluster Private Nodes, Auto Nodes,
+# Clusters with their own nodes (vCluster Private Nodes, Auto Nodes,
 # Standalone) run workloads the control plane cluster never sees. vBilling
-# meters them through their own API, using a read-only kubeconfig that vCluster
-# exports into secretName (exportKubeConfig.additionalSecrets, see README).
+# meters them through their own API: through the vCluster Platform proxy with
+# tenantSource: platform, otherwise with the read-only kubeconfig vCluster
+# exports into the Secret vbilling-kubeconfig (exportKubeConfig.additionalSecrets).
 # Nodes that also exist in the control plane cluster are never billed twice.
 tenantAPI:
-  enabled: true
-  secretName: vbilling-kubeconfig
-  adminFallback: false # also use vc-<name> admin kubeconfigs (grants vBilling read access to Secrets)
   privateNodeBilling: node # node: bill private nodes whole | usage: bill the pods running on them
-  excludeNamespaces: [kube-system] # usage mode: namespaces never billed
   # Tenant clusters outside this control plane cluster (vCluster Standalone):
   # a Secret holding clusters.yaml plus the kubeconfig files it lists, mounted
   # at /etc/vbilling/tenants.
@@ -126,8 +114,6 @@ prometheus:
   # vbilling.vcluster.com/prometheus-url annotation (https://... or
   # tenant-service://NAMESPACE/NAME:PORT through its API server).
   sourceLabel: vcluster
-  # How far before a window a counter's starting sample may be.
-  lookback: 10m
   # Metrics read from Prometheus for every cluster and window. Use counter:
   # (a plain series selector) for anything you bill: vBilling reads the raw
   # samples and bills the exact increase per window, and a Prometheus outage
@@ -145,18 +131,16 @@ prometheus:
 
 platform:
   cluster: "" # vCluster Platform cluster name of this control plane cluster (multi-cluster setups)
-  # tenantSource: platform. Owners come from Platform Tenants, Projects and
-  # VirtualClusterInstances; clusters with their own nodes are reached through
-  # the Platform proxy with the same access key (a vbilling-kubeconfig Secret
-  # still overrides it per cluster). See docs/private-nodes.html#platform.
+  # tenantSource: platform. Owners and vbilling.vcluster.com/ settings come
+  # from Platform Tenants and Projects only (settings on a cluster's workload,
+  # namespace or instance are ignored); clusters with their own nodes are
+  # reached only through the Platform proxy with the same access key
+  # (vbilling-kubeconfig Secrets are not read). See docs/security.html.
   url: "" # e.g. https://platform.example.com
   accessKey: "" # prefer existingSecret
   existingSecret: "" # Secret with key access-key
   caSecret: "" # Secret with key ca.crt that signed the Platform's certificate
   insecure: false # skip TLS verification (self-signed test installs only)
-  refresh: 1m
-  orphanGrace: 0s # 0: a cluster whose instance disappeared keeps its last owner
-  proxy: true # reach clusters with their own nodes through the Platform proxy
 
 watchNamespaces: []
 
@@ -183,14 +167,12 @@ lago:
 stripe:
   apiKey: "" # sk_test_... / sk_live_... / rk_... (restricted keys work)
   existingSecret: "" # keys: api-key, webhook-secret
-  apiBase: https://api.stripe.com
-  apiVersion: "2026-09-30.endive"
+  apiBase: https://api.stripe.com # tests only (stripe-mock)
   # Stripe meters cannot price on dimensions, so meters are split by these
   # event fields (H100 and L40S GPU-hours get separate meters and prices).
+  # Add capacity_type to price spot and on-demand differently.
   splitMetersBy: [sku]
   autoSubscribe: false # subscribe tenants to metered prices tagged metadata[vbilling_plan]=<plan>
-  maxRPS: 0 # 0 = 20 in test mode, 200 in live mode
-  cancelOnRemove: false
   webhookSecret: "" # whsec_... enables /webhooks/stripe (dunning, alerts)
   # Prices vBilling creates in Stripe when missing, per plan, with their
   # meters. Existing prices are never changed. Amounts are in the currency's
@@ -210,12 +192,14 @@ stripe:
 metronome:
   apiToken: ""
   existingSecret: "" # keys: api-token, webhook-secret
-  apiBase: https://api.metronome.com
-  rateCard: "" # rate card alias or ID: creates a contract per tenant
-  # Create a Stripe customer per tenant and link it in Metronome, so Metronome
-  # rates and Stripe collects payment, invoices and tax. Needs stripe.apiKey.
-  stripeLink: false
-  stripeCollectionMethod: charge_automatically
+  apiBase: https://api.metronome.com # tests only
+  # false (default): vBilling only sends usage, keyed on the tenant ID as the
+  # customer's ingest alias, and reads Metronome to check prices. Customers,
+  # billable metrics and contracts stay yours. true: vBilling creates billable
+  # metrics and customers, a contract on rateCard when set, and with
+  # stripe.apiKey a linked Stripe customer. See docs/metronome.html.
+  provision: false
+  rateCard: "" # provision only: rate card alias or ID for each tenant's contract
   webhookSecret: "" # enables /webhooks/metronome (spend and credit alerts)
 
 webhook:
@@ -226,13 +210,17 @@ webhook:
 
 api:
   port: 8080
-  token: "" # protects usage and admin endpoints
-  ingestToken: "" # enables POST /api/v1/events and /api/v1/records (defaults to token)
+  # Every endpoint except /healthz and /readyz needs this token, /metrics
+  # included (the ServiceMonitor gets it). Empty: the chart generates one in
+  # its Secret and keeps it across upgrades (helm lookup). Tools that render
+  # with helm template cannot look it up: set token or existingSecret there.
+  token: ""
+  ingestToken: "" # for POST /api/v1/events and /api/v1/records; generated when empty, never the API token
   # Ingest tokens bound to one tenant ({tenant: token}): usage sent with such
   # a token is always billed to that tenant, so a gateway inside a tenant's
   # cluster can never report usage for another tenant.
   tenantIngestTokens: {}
-  existingSecret: "" # keys: api-token, ingest-token
+  existingSecret: "" # keys: api-token (required), ingest-token, ingest-tokens
   service:
     type: ClusterIP
     port: 8080
@@ -241,11 +229,7 @@ api:
 # post one record per request; vBilling stores it durably and bills one event
 # per tenant, metric and window. See docs/usage-sources.html.
 records:
-  settle: 30s # records arriving later than this after their window are billed as a late adjustment
-  retention: 168h # raw request records kept for disputes; records older than this minus 1h are refused
-  allowUnkeyed: false # derive a request ID from the record when the emitter sends none
   unknownTenants: accept # accept (and report) or reject records for tenants vBilling does not know
-  archive: false # also archive raw request records (needs persistence.archive): request-level evidence, high volume
   # The built-in format for LiteLLM's generic API logger (?format=litellm). It
   # declares inference_input_tokens and inference_output_tokens.
   litellm: false
@@ -257,10 +241,11 @@ records:
     url: "" # LiteLLM proxy base URL, e.g. http://litellm.litellm.svc:4000
     key: "" # LiteLLM master or proxy admin key, stored in the chart's Secret
     existingSecret: "" # or a Secret with the key under litellm-key
-    client: litellm # the push's X-VBilling-Client (default: the format name, litellm)
-    tenant: "" # bill every pulled request to this tenant; set it when the push uses a tenant-bound token
-    interval: 5m
-    lookback: 1h # each pull starts this long before the end of the last one
+    # When the push uses an ingest token bound to one tenant, or names its own
+    # client (X-VBilling-Client), pin the pull the same way, so pulled copies
+    # of pushed requests count once.
+    tenant: ""
+    client: litellm
   # Read any other gateway's request log back as records (RECORDS_PULL_FILE),
   # like pullLiteLLM: rows go through a format below and count once with
   # the pushed copies. Tokens come from Secrets through pullEnv, as
@@ -332,7 +317,6 @@ enforcement:
     keepBilling: storage,load_balancers
     # How long to wait for workloads on a cluster's own nodes to stop before
     # its control plane is stopped.
-    drainTimeout: 2m
     # Namespaces whose DaemonSets (GPU driver, device plugin, CNI) keep
     # running on a paused cluster's own nodes; every other pod is stopped.
     # Empty: kube-system, kube-flannel, calico-system, tigera-operator,
@@ -344,10 +328,11 @@ persistence:
   enabled: true # the ledger is the durable outbox: keep it on a volume
   size: 5Gi
   storageClass: ""
-  retention: 168h
   # Long-term archive for invoice disputes (ARCHIVE_DIR). Before compaction
-  # deletes a ledger segment past `retention`, vBilling gzips it into this
-  # volume and records it in archive.jsonl (about 86 bytes per usage event).
+  # deletes a ledger segment older than 7 days, vBilling gzips it and records
+  # it in archive.jsonl (about 86 bytes per usage event). Without this
+  # volume there is no archive: an archive inside the ledger volume would grow
+  # until it stopped metering.
   # vBilling never deletes from it: keep it as long as invoices can be disputed,
   # 13 months or more. `vbilling ledger verify` proves it unaltered and
   # `vbilling ledger export` reads usage back (docs: Retention and disputes).
@@ -356,7 +341,7 @@ persistence:
   # storage, e.g. Cloud Storage FUSE (GCS) or Mountpoint for Amazon S3: bind a
   # PersistentVolumeClaim to the bucket and set existingClaim. The mount must
   # let the pod user (65532) create files, rename them and append to them.
-  # Each pod writes to <mountPath>/<pod name>, so replicas can share a bucket.
+  # vBilling writes to <mountPath>/<pod name>.
   #
   # Without existingClaim, the chart adds a volumeClaimTemplate. Kubernetes
   # does not allow adding one to an existing StatefulSet: run

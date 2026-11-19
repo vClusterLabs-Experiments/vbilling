@@ -35,6 +35,10 @@
         "tenant_class": {"type": "string"},
         "zone": {"type": "string"},
         "namespace": {"type": "string", "description": "Namespace inside the tenant cluster (METER_BY_NAMESPACE)."},
+        "vcpus": {"type": "string", "description": "Node-hour events: the node's CPU capacity in cores."},
+        "memory_gib": {"type": "string", "description": "Node-hour events: the node's memory capacity in GiB."},
+        "gpu_count": {"type": "string", "description": "Node-hour events: the node's physical GPUs."},
+        "public_ip": {"enum": ["true", "false"], "description": "Node-hour events: whether the node has an ExternalIP address."},
         "node": {"type": "string"},
         "instance_type": {"type": "string"}
       }

@@ -217,8 +217,11 @@ func (f *fakePricing) addRate(card, product, productName string, price float64, 
 	f.rates[card] = append(f.rates[card], r)
 }
 
+// newPricingAdapter checks prices in provisioning mode: the rate card is
+// METRONOME_RATE_CARD or the tenant's plan, and billable metrics are the ones
+// vBilling created (stored ID, else name).
 func newPricingAdapter(t *testing.T, f *fakePricing, rateCard string) *Adapter {
-	cfg := &config.Config{MetronomeRateCard: rateCard}
+	cfg := &config.Config{MetronomeRateCard: rateCard, MetronomeProvision: true}
 	a := New(NewClient(f.srv.URL, "mtk_test"), cfg, kv.Memory(), nil)
 	a.now = func() time.Time { return now }
 	return a
@@ -426,12 +429,23 @@ func TestPriceCheckUsesStoredBillableMetricID(t *testing.T) {
 }
 
 func TestPricePlanAndDims(t *testing.T) {
-	a := New(nil, &config.Config{MetronomeRateCard: "default-rc"}, kv.Memory(), nil)
+	a := New(nil, &config.Config{MetronomeRateCard: "default-rc", MetronomeProvision: true}, kv.Memory(), nil)
 	if p := a.PricePlan(usage.Tenant{ID: "t"}); p != "default-rc" {
 		t.Errorf("plan %q", p)
 	}
 	if p := a.PricePlan(usage.Tenant{ID: "t", Plan: "enterprise"}); p != "enterprise" {
 		t.Errorf("plan %q", p)
+	}
+	// Without provisioning neither the rate card setting nor the tenant's
+	// plan decides: the tenant's own customer's contracts do, once read.
+	ro := New(nil, &config.Config{MetronomeRateCard: "default-rc"}, kv.Memory(), nil)
+	for _, tn := range []usage.Tenant{{ID: "t"}, {ID: "t", Plan: "enterprise"}} {
+		if p := ro.PricePlan(tn); p != aliasPlan+"t" {
+			t.Errorf("default mode plan %q, want %q", p, aliasPlan+"t")
+		}
+	}
+	if p := ro.PricePlan(usage.Tenant{}); p != "" {
+		t.Errorf("default mode plan of no tenant %q", p)
 	}
 	dims := a.PriceDims(usage.MetricGPUHours)
 	for _, d := range dims {

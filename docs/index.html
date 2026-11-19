@@ -995,7 +995,7 @@
           <a href="getting-started.html" class="btn-secondary">Read the docs</a>
           <a href="https://github.com/vClusterLabs-Experiments/vbilling" class="btn-secondary">View on GitHub</a>
         </div>
-        <p class="hero-new"><strong>New in v0.3:</strong> per-request usage from AI gateways, exact Prometheus counters, source health, and enforcement inside clusters with their own nodes. <a href="usage-sources.html">How vBilling keeps usage exact &#8594;</a> <a href="https://github.com/vClusterLabs-Experiments/vbilling/releases/tag/v0.3.0">Release notes &#8594;</a></p>
+        <p class="hero-new"><strong>New in v0.3:</strong> per-request usage from AI gateways, exact Prometheus counters, source health, and enforcement inside clusters with their own nodes. <a href="usage-sources.html">How vBilling keeps usage exact &#8594;</a> <a href="https://github.com/vClusterLabs-Experiments/vbilling/releases/tag/v0.3.1">Release notes &#8594;</a></p>
       </div>
 
       <div class="hero-visual">
@@ -1340,7 +1340,7 @@
               <div class="code-block">
                 <button class="copy-btn" onclick="copyCode(this)">Copy</button>
                 <pre><code><span class="comment"># Clone vBilling and start Lago</span>
-git clone --branch v0.3.0 https://github.com/vClusterLabs-Experiments/vbilling.git
+git clone --branch v0.3.1 https://github.com/vClusterLabs-Experiments/vbilling.git
 cd vbilling/deploy/lago
 openssl genrsa 2048 > lago_rsa.key
 echo <span class="string">"LAGO_RSA_PRIVATE_KEY=$(base64 -i lago_rsa.key | tr -d '\n')"</span> > .env
@@ -1447,7 +1447,7 @@ vcluster_cpu_core_hours  vcluster_instance_hours  ...</code></pre>
             <div class="qs-num">1</div>
             <div class="qs-content">
               <h3>Install vBilling with Metronome</h3>
-              <p>Metronome rates usage; vBilling creates each tenant's Stripe customer and links it, so Stripe collects payment, invoices and tax.</p>
+              <p>Metronome rates usage. With <code>metronome.provision=true</code>, vBilling also creates each tenant's customer, contract and linked Stripe customer, so Stripe collects payment, invoices and tax. Leave it off when your portal owns those: vBilling then only sends usage.</p>
               <div class="code-block">
                 <button class="copy-btn" onclick="copyCode(this)">Copy</button>
                 <pre><code>kubectl <span class="flag">-n</span> vbilling-system create secret generic vbilling-metronome <span class="flag">--from-file</span>=api-token=./metronome-token
@@ -1455,7 +1455,7 @@ kubectl <span class="flag">-n</span> vbilling-system create secret generic vbill
 helm upgrade <span class="flag">--install</span> vbilling deploy/helm/vbilling <span class="flag">-n</span> vbilling-system \
   <span class="flag">--set</span> adapters=<span class="string">'{metronome}'</span> \
   <span class="flag">--set</span> metronome.existingSecret=vbilling-metronome <span class="flag">--set</span> metronome.rateCard=payg-aud \
-  <span class="flag">--set</span> metronome.stripeLink=true <span class="flag">--set</span> stripe.existingSecret=vbilling-stripe</code></pre>
+  <span class="flag">--set</span> metronome.provision=true <span class="flag">--set</span> stripe.existingSecret=vbilling-stripe</code></pre>
               </div>
             </div>
           </div>
@@ -1464,7 +1464,7 @@ helm upgrade <span class="flag">--install</span> vbilling deploy/helm/vbilling <
             <div class="qs-num">2</div>
             <div class="qs-content">
               <h3>Price on dimensions</h3>
-              <p>vBilling creates SUM billable metrics, each with one compound group key (for GPU hours: region, sku, capacity_type, billing_mode, tenant_cluster). Add rate card products whose pricing and presentation group keys together form it.</p>
+              <p>vBilling's billable metrics are SUM metrics, created with <code>metronome.provision=true</code> or added to your catalog from <code>vbilling metronome billable-metrics</code>, each with one compound group key (for GPU hours: region, sku, capacity_type, billing_mode, tenant_cluster). Add rate card products whose pricing and presentation group keys together form it.</p>
               <div class="code-block">
                 <button class="copy-btn" onclick="copyCode(this)">Copy</button>
                 <pre><code><span class="comment"># Metronome product on vcluster_gpu_hours</span>
@@ -1481,7 +1481,7 @@ presentation_group_key: [tenant_cluster]</code></pre>
               <p>Compare the ledger with what Metronome recorded for the previous UTC day.</p>
               <div class="code-block">
                 <button class="copy-btn" onclick="copyCode(this)">Copy</button>
-                <pre><code>curl <span class="flag">-s</span> localhost:8080/api/v1/reconcile <span class="flag">|</span> jq <span class="string">'.results[] | {destination, ok}'</span></code></pre>
+                <pre><code>curl <span class="flag">-H</span> <span class="string">"Authorization: Bearer $VBILLING_TOKEN"</span> <span class="flag">-s</span> localhost:8080/api/v1/reconcile <span class="flag">|</span> jq <span class="string">'.results[] | {destination, ok}'</span></code></pre>
               </div>
             </div>
           </div>

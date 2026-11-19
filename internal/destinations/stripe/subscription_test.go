@@ -53,7 +53,8 @@ func TestNewSubscriptionStartsAtTheFirstUsage(t *testing.T) {
 	a := subscribedAdapter(t, f, "", "month")
 	first := now.Add(-3 * time.Hour)
 	ctx := destinations.WithUsageStart(context.Background(), first)
-	if err := a.EnsureTenant(ctx, usage.Tenant{ID: "acme"}); err != nil {
+	// A cluster created earlier today, first billed three hours ago.
+	if err := a.EnsureTenant(ctx, usage.Tenant{ID: "acme", CreatedAt: first.Add(30 * time.Minute)}); err != nil {
 		t.Fatal(err)
 	}
 	if got := onlySub(t, f).StartDate; got != first.Unix() {
@@ -70,6 +71,27 @@ func TestNewSubscriptionStartsAtTheFirstUsage(t *testing.T) {
 	}
 	if len(f.events) != 1 || f.events[0].Identifier != atStart.ID {
 		t.Fatalf("sent %+v, want only the event at the subscription start", f.events)
+	}
+}
+
+// A tenant that only sends gateway records (no cluster, so no creation
+// time) is subscribed an hour before its first usage, at the hour: a
+// record that arrives late for a minute before that usage (a retried push,
+// a pull reading an hour back) is invoiced, not dead-lettered.
+func TestTokenOnlyTenantsSubscriptionCoversLateRecords(t *testing.T) {
+	f := newFakeStripe(t, func() time.Time { return now })
+	a := subscribedAdapter(t, f, "", "month")
+	first := now.Add(-3*time.Hour + 20*time.Minute) // 09:20
+	if err := a.EnsureTenant(destinations.WithUsageStart(context.Background(), first), usage.Tenant{ID: "tokens-co"}); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Unix(onlySub(t, f).StartDate, 0).UTC()
+	if want := first.Add(-time.Hour).Truncate(time.Hour); !start.Equal(want) {
+		t.Fatalf("subscription starts %s, want %s", start, want)
+	}
+	late := gpuEvent("tokens-co", "NVIDIA-H100-80GB-HBM3", first.Add(-50*time.Minute), 1) // a late adjustment
+	if err := a.SendEvents(context.Background(), []usage.Event{late}); err != nil {
+		t.Fatalf("a late adjustment from before the first usage was refused: %v", err)
 	}
 }
 

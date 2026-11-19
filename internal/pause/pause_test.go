@@ -1,6 +1,8 @@
 package pause
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -132,5 +134,85 @@ func TestOutside(t *testing.T) {
 	}
 	if _, err := ParseKeep("storage,workloads"); err != nil {
 		t.Fatalf("workloads is a valid PAUSE_KEEP_BILLING kind: %v", err)
+	}
+}
+
+// A pause that turned out not to hold is dropped, not ended: none of its
+// time stops billing, and earlier pauses stay.
+func TestDiscardDropsOnlyTheOpenSpan(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = s.Begin("c1", t0, ByVBilling)
+	_, _ = s.End("c1", t0.Add(time.Minute))
+	_, _ = s.Begin("c1", t0.Add(2*time.Minute), ByVBilling)
+	if ok, err := s.Discard("c1"); !ok || err != nil {
+		t.Fatalf("Discard = %t, %v", ok, err)
+	}
+	got := s.Spans("c1")
+	if len(got) != 1 || got[0].Open() || !got[0].To.Equal(t0.Add(time.Minute)) {
+		t.Fatalf("spans after discard = %+v, want only the closed one", got)
+	}
+	if ok, _ := s.Discard("c1"); ok {
+		t.Fatal("Discard dropped a closed span")
+	}
+	if !(Span{By: ByVBilling}).Verified() || !(Span{}).Verified() || (Span{By: ByExternal}).Verified() {
+		t.Fatal("only spans vBilling did not make are unverified")
+	}
+}
+
+// A span read back from the store is verified only if vBilling marked it
+// when it opened it. v0.3.0 opened its spans at its mark, before its drain,
+// and wrote no mark: those, and spans from before By existed, read back
+// unverified, so they never stop billing capacity.
+func TestOnlySpansMarkedVerifiedReadBackVerified(t *testing.T) {
+	dir := t.TempDir()
+	// pause-spans.json as v0.3.0 and v0.2 left it.
+	old := `{"v030": "[{\"from\":\"2026-11-18T04:00:00Z\",\"by\":\"vbilling\"}]", "v02": "[{\"from\":\"2026-11-18T04:00:00Z\"}]"}`
+	if err := os.WriteFile(filepath.Join(dir, "pause-spans.json"), []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"v030", "v02"} {
+		sp, open := s.Current(id)
+		if !open || sp.Verified() || !sp.Unproven() {
+			t.Errorf("%s: span %+v (open %t): an unmarked vBilling span must read back unverified and unproven", id, sp, open)
+		}
+	}
+	if _, err := s.BeginVerified("new", t0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Begin("observed", t0, ByExternal); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Begin("unmarked", t0, ByVBilling); err != nil {
+		t.Fatal(err)
+	}
+	// Ending an unmarked span keeps it unverified.
+	if _, err := s.End("v030", t0.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	r, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		id                 string
+		verified, unproven bool
+	}{{"new", true, false}, {"observed", false, false}, {"unmarked", false, true}, {"v030", false, true}} {
+		spans := r.Spans(tc.id)
+		if len(spans) != 1 {
+			t.Fatalf("%s: spans %+v", tc.id, spans)
+		}
+		if sp := spans[0]; sp.Verified() != tc.verified || sp.Unproven() != tc.unproven {
+			t.Errorf("%s: verified %t, unproven %t; want %t, %t (%+v)", tc.id, sp.Verified(), sp.Unproven(), tc.verified, tc.unproven, sp)
+		}
+	}
+	if sp := r.Spans("new")[0]; !sp.Drained || sp.By != ByVBilling {
+		t.Errorf("verified span = %+v, want by vbilling and drained", sp)
 	}
 }

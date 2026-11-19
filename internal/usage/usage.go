@@ -39,6 +39,17 @@ const (
 	DimInstanceType  = "instance_type"
 )
 
+// Instance attributes on dedicated and private node-hour events: what an
+// instance-level SKU is made of (vCores, RAM, GPU quantity, a public IP).
+// They describe the node; they are not group keys, so pricing never splits
+// on them unless a billing platform is configured to.
+const (
+	DimVCPUs     = "vcpus"      // CPU capacity of the node, in cores
+	DimMemoryGiB = "memory_gib" // memory capacity of the node, in GiB (one decimal)
+	DimGPUCount  = "gpu_count"  // physical GPUs (MIG and time-slicing converted back)
+	DimPublicIP  = "public_ip"  // "true" when the node has an ExternalIP address
+)
+
 // Capacity types.
 const (
 	CapacityOnDemand    = "on-demand"

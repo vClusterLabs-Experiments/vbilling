@@ -32,7 +32,8 @@ type LiteLLMPullOptions struct {
 	Client string
 	// Tenant bills every pulled request to one tenant, like a tenant-bound
 	// ingest token. It must equal the push token's tenant when the push
-	// uses one, because the bound tenant is part of every record ID.
+	// uses one: the pull stores rows under the record IDs of the tenant's
+	// bound token (Ingester.CheckPin).
 	Tenant string
 	// Interval between pulls (default 5m).
 	Interval time.Duration
@@ -103,6 +104,9 @@ func NewLiteLLMPuller(in *Ingester, opts LiteLLMPullOptions, h *health.Registry,
 	if tel == nil {
 		tel = telemetry.New()
 	}
+	// A push of the same LiteLLM under another client or tenant would be
+	// stored twice: the ingester flags such pushes.
+	in.expectPull("litellm", opts.Client, opts.Tenant)
 	return &LiteLLMPuller{opts: opts, in: in, health: h, tel: tel, name: health.Name("records", opts.Client, "pull")}
 }
 
@@ -128,9 +132,9 @@ func (p *LiteLLMPuller) Run(ctx context.Context) {
 	t := time.NewTicker(p.opts.Interval)
 	defer t.Stop()
 	for {
-		if res, err := p.Pull(ctx); err == nil && (res.Accepted > 0 || res.NoCallID > 0 || len(res.Rejected) > 0) {
+		if res, err := p.Pull(ctx); err == nil && (res.Accepted > 0 || res.NoCallID > 0 || res.RejectedCount > 0) {
 			log.Printf("[records] pulled %d LiteLLM spend log rows (%s to %s): %d new, %d already stored, %d skipped, %d rejected",
-				res.Rows, res.From.Format(time.RFC3339), res.To.Format(time.RFC3339), res.Accepted, res.AlreadyStored, res.Skipped+res.NoCallID, len(res.Rejected))
+				res.Rows, res.From.Format(time.RFC3339), res.To.Format(time.RFC3339), res.Accepted, res.AlreadyStored, res.Skipped+res.NoCallID, res.RejectedCount)
 		}
 		select {
 		case <-ctx.Done():
@@ -154,7 +158,7 @@ func (p *LiteLLMPuller) Pull(ctx context.Context) (PullResult, error) {
 	}
 	p.tel.Add("vbilling_records_pull_failures_total", "Failed pulls of a gateway's own request logs.", labels, failed)
 	if err != nil {
-		p.health.Fail(p.name, "records", p.opts.Client, err, "check RECORDS_PULL_LITELLM_URL and that RECORDS_PULL_LITELLM_KEY is a LiteLLM master or proxy admin key")
+		p.health.Fail(p.name, "records", p.opts.Client, err, "check LITELLM_URL and that LITELLM_API_KEY is a LiteLLM master or proxy admin key")
 		return res, err
 	}
 	p.tel.Set("vbilling_records_pull_last_success_timestamp_seconds", "When the last pull of a gateway's own request logs succeeded.", labels, float64(p.opts.Now().Unix()))
@@ -245,7 +249,12 @@ func (r *PullResult) add(o Result) {
 	r.UsageRows += o.UsageRows
 	r.Skipped += o.Skipped
 	r.DuplicatesInBatch += o.DuplicatesInBatch
-	r.Rejected = append(r.Rejected, o.Rejected...)
+	r.RejectedCount += o.RejectedCount
+	for _, rej := range o.Rejected {
+		if len(r.Rejected) < MaxRejections {
+			r.Rejected = append(r.Rejected, rej)
+		}
+	}
 	for _, t := range o.UnknownTenants {
 		if !containsString(r.UnknownTenants, t) {
 			r.UnknownTenants = append(r.UnknownTenants, t)

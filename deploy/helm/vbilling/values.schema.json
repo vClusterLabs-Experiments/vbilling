@@ -1,0 +1,12 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "replicaCount": {
+      "description": "vBilling runs as one instance: each replica would keep its own ledger, so records would split between replicas and a second replica could not take over. Restarts are safe: the ledger and backfill resume where vBilling stopped.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1
+    }
+  }
+}

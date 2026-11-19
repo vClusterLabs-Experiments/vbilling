@@ -29,6 +29,8 @@ import (
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
+
+	"github.com/vclusterlabs-experiments/vbilling/internal/safehttp"
 )
 
 // Management API resources (management.loft.sh/v1).
@@ -116,11 +118,18 @@ func NewClient(opts ClientOptions) (*Client, error) {
 	mc := rest.CopyConfig(base)
 	mc.Host += "/kubernetes/management"
 	mc.QPS, mc.Burst = 20, 40 // a refresh is five requests; reads forced by new clusters add more
-	mgmt, err := dynamic.NewForConfig(mc)
+	// The access key is sent with every request, so it never follows a
+	// redirect to another host (clients for the proxy are built the same
+	// way in internal/tenantapi).
+	hc, err := safehttp.KubeHTTPClient(mc)
 	if err != nil {
 		return nil, err
 	}
-	disc, err := discovery.NewDiscoveryClientForConfig(mc)
+	mgmt, err := dynamic.NewForConfigAndClient(mc, hc)
+	if err != nil {
+		return nil, err
+	}
+	disc, err := discovery.NewDiscoveryClientForConfigAndClient(mc, hc)
 	if err != nil {
 		return nil, err
 	}

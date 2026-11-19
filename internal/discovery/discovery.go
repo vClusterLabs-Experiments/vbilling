@@ -57,17 +57,31 @@ type TenantCluster struct {
 	// Platform is the cluster's owner in vCluster Platform when
 	// TENANT_SOURCE=platform resolved one. It decides the tenant.
 	Platform *PlatformBinding
-	// Paused is true while the control plane is paused: by vBilling
-	// (vbilling.vcluster.com/paused-by) or by `vcluster pause`
-	// (loft.sh/paused).
+	// Paused is true while the control plane is really down: scaled to zero
+	// replicas with none of them ready, whoever stopped it (vBilling,
+	// `vcluster pause`, an operator, vCluster Platform's sleep mode). An
+	// annotation alone never makes a cluster paused: whoever writes
+	// vcluster.yaml writes the workload's annotations.
 	Paused bool
+	// Namesakes are the namespaces of the other vClusters on this control
+	// plane cluster with the same name, metered or not. NamesakesUnknown is
+	// set when discovery could not list them all. See HostNamespaces.Whose.
+	Namesakes        []string
+	NamesakesUnknown bool
 }
+
+// NameShared reports whether objects carrying this cluster's name in
+// vcluster.loft.sh/managed-by may be another cluster's: another vCluster
+// has the name, or vBilling could not list every vCluster.
+func (c *TenantCluster) NameShared() bool { return len(c.Namesakes) > 0 || c.NamesakesUnknown }
 
 // AnnotationPaused is the annotation `vcluster pause` sets on a paused
 // cluster's StatefulSet or Deployment. vBilling marks its own pauses with
 // the other three instead: `vcluster connect` resumes a cluster that
 // carries loft.sh/paused, while it refuses one that is only scaled down, so
-// connecting to debug never lifts a billing pause by accident.
+// connecting to debug never lifts a billing pause by accident. These marks
+// say who paused a cluster and how to resume it; they never decide whether
+// it is paused (see TenantCluster.Paused) or since when.
 const (
 	AnnotationPaused         = "loft.sh/paused"
 	AnnotationPausedBy       = AnnotationPrefix + "paused-by"
@@ -75,9 +89,10 @@ const (
 	AnnotationPausedReplicas = AnnotationPrefix + "paused-replicas"
 )
 
-// pausedBy reports whether workload annotations mark a paused cluster.
-func pausedBy(ann map[string]string) bool {
-	return ann[AnnotationPaused] == "true" || ann[AnnotationPausedBy] == "vbilling"
+// down reports whether a control plane is really stopped: no replicas
+// wanted (an unset count means one) and none ready.
+func down(replicas *int32, ready int32) bool {
+	return replicas != nil && *replicas == 0 && ready == 0
 }
 
 // ExternalID is the stable tenant-cluster identifier (v0.1 compatible).
@@ -171,6 +186,7 @@ func (d *Discoverer) Discover(ctx context.Context) ([]TenantCluster, error) {
 	if err != nil {
 		return nil, err
 	}
+	d.markNamesakes(ctx, clusters)
 	nsMeta, err := d.namespaceMeta(ctx, clusters)
 	if err != nil {
 		return nil, err
@@ -239,7 +255,7 @@ func (d *Discoverer) fromWorkloads(ctx context.Context) ([]TenantCluster, error)
 			seen[key] = true
 			out = append(out, TenantCluster{
 				Name: s.Name, Namespace: s.Namespace, UID: string(s.UID), CreatedAt: s.CreationTimestamp.Time,
-				Ready: s.Status.ReadyReplicas > 0, Source: "statefulset", Paused: pausedBy(s.Annotations),
+				Ready: s.Status.ReadyReplicas > 0, Source: "statefulset", Paused: down(s.Spec.Replicas, s.Status.ReadyReplicas),
 				Labels: copyMap(s.Labels), Annotations: copyMap(s.Annotations),
 			})
 		}
@@ -255,12 +271,45 @@ func (d *Discoverer) fromWorkloads(ctx context.Context) ([]TenantCluster, error)
 			seen[key] = true
 			out = append(out, TenantCluster{
 				Name: dep.Name, Namespace: dep.Namespace, UID: string(dep.UID), CreatedAt: dep.CreationTimestamp.Time,
-				Ready: dep.Status.ReadyReplicas > 0, Source: "deployment", Paused: pausedBy(dep.Annotations),
+				Ready: dep.Status.ReadyReplicas > 0, Source: "deployment", Paused: down(dep.Spec.Replicas, dep.Status.ReadyReplicas),
 				Labels: copyMap(dep.Labels), Annotations: copyMap(dep.Annotations),
 			})
 		}
 	}
 	return out, nil
+}
+
+// markNamesakes sets each cluster's Namesakes from every vCluster on the
+// control plane cluster, excluded and held-back ones included: those are
+// the ones whose synced objects carry the same name. With WATCH_NAMESPACES,
+// the workloads outside it are listed for this too. If they cannot be, no
+// cluster's name counts as unique.
+func (d *Discoverer) markNamesakes(ctx context.Context, clusters []TenantCluster) {
+	all := clusters
+	if len(d.namespaces) > 0 {
+		var err error
+		if all, err = (&Discoverer{client: d.client}).fromWorkloads(ctx); err != nil {
+			log.Printf("[discovery] cannot list every vCluster, so objects clusters sync to other namespaces are not billed: %v", err)
+			for i := range clusters {
+				clusters[i].NamesakesUnknown = true
+			}
+			return
+		}
+	}
+	byName := map[string][]string{}
+	for _, c := range all {
+		byName[c.Name] = append(byName[c.Name], c.Namespace)
+	}
+	for i := range clusters {
+		c := &clusters[i]
+		c.Namesakes = nil
+		for _, ns := range byName[c.Name] {
+			if ns != c.Namespace {
+				c.Namesakes = append(c.Namesakes, ns)
+			}
+		}
+		sort.Strings(c.Namesakes)
+	}
 }
 
 func (d *Discoverer) namespaceMeta(ctx context.Context, clusters []TenantCluster) (map[string]*corev1.Namespace, error) {

@@ -760,6 +760,33 @@ func ScanLedger(dir, archiveDir string, from, to time.Time, fn func(*usage.Event
 	return sc.sum, nil
 }
 
+// ScanAll is Scan through the archive: events of segments that compaction
+// moved to ArchiveDir come first, then the retained ledger's, so a range
+// older than retention (month to date after the first week) is complete.
+// Without an ArchiveDir it is Scan.
+func (s *Spool) ScanAll(from, to time.Time, fn func(*usage.Event) error) error {
+	if s.opts.ArchiveDir == "" {
+		return s.Scan(from, to, fn)
+	}
+	archiveMu.Lock() // no segment moves from the ledger to the archive meanwhile
+	defer archiveMu.Unlock()
+	idx, err := readArchiveIndex(s.opts.ArchiveDir)
+	if err != nil {
+		return err
+	}
+	retained := s.FirstSeq()
+	sc := &eventScan{from: from, to: to, fn: fn}
+	for _, e := range idx.entries {
+		if retained != 0 && e.First >= retained {
+			break // still in the ledger: read there
+		}
+		if err := sc.archived(s.opts.ArchiveDir, e); err != nil {
+			return err
+		}
+	}
+	return s.Scan(from, to, fn)
+}
+
 type eventScan struct {
 	segReader
 	from, to time.Time

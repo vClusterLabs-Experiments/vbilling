@@ -34,7 +34,7 @@ No file here contains a key, token or account ID. Keep yours out of the reposito
 
 ```bash
 export ZONE=us-central1-a CLUSTER=vbilling-demo
-git clone --branch v0.3.0 https://github.com/vClusterLabs-Experiments/vbilling && cd vbilling/examples/gke-gpu
+git clone --branch v0.3.1 https://github.com/vClusterLabs-Experiments/vbilling && cd vbilling/examples/gke-gpu
 ```
 
 ## 1. Control plane cluster
@@ -152,10 +152,11 @@ kubectl -n vbilling rollout restart statefulset/vbilling
 ## 7. Check it
 
 ```bash
+export VBILLING_TOKEN=$(kubectl -n vbilling get secret vbilling -o jsonpath='{.data.api-token}' | base64 -d)
 kubectl -n vbilling port-forward svc/vbilling 8080:8080 &
-# dashboard: http://localhost:8080/
-curl -s "localhost:8080/api/v1/events?from=$(date -u +%Y-%m-%dT%H:00:00Z)" | head
-curl -s "localhost:8080/api/v1/reconcile?from=<start>&to=<end>"     # ledger vs Stripe, per tenant and metric
+# dashboard: http://localhost:8080/ (it asks for the token)
+curl -H "Authorization: Bearer $VBILLING_TOKEN" -s "localhost:8080/api/v1/events?from=$(date -u +%Y-%m-%dT%H:00:00Z)" | head
+curl -H "Authorization: Bearer $VBILLING_TOKEN" -s "localhost:8080/api/v1/reconcile?from=<start>&to=<end>"     # ledger vs Stripe, per tenant and metric
 ```
 
 What one 30 second window looks like:

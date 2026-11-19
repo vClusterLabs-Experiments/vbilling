@@ -240,8 +240,8 @@ func TestPlatform412TenantOwnsProjects(t *testing.T) {
 		t.Fatalf("train-1: tenant %s plan %q email %q name %q exclude %q project %s binding %+v",
 			tr.TenantID(discovery.TenantPerPlatform), tr.Meta("plan"), tr.Meta("email"), tr.Meta("display-name"), tr.Meta("exclude"), tr.Project, tr.Platform)
 	}
-	if tr.Meta("prometheus-url") != "http://prom.vc-train-1:9090" {
-		t.Errorf("per-cluster settings stay on the cluster: %q", tr.Meta("prometheus-url"))
+	if tr.Meta("prometheus-url") != "" {
+		t.Errorf("a metering setting on the workload must not survive the binding: %q", tr.Meta("prometheus-url"))
 	}
 	if in := got["infer-1"]; in.TenantID(discovery.TenantPerPlatform) != "tenant-acme" || in.Platform.InstancePhase != "Sleeping" {
 		t.Errorf("infer-1: %+v", in.Platform)
@@ -517,4 +517,38 @@ func fakeKube(t *testing.T, ns, name string) kubernetes.Interface {
 		&appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, UID: types.UID("uid-sts-" + name), Labels: map[string]string{"app": "vcluster"},
 			CreationTimestamp: metav1.NewTime(old)}, Status: appsv1.StatefulSetStatus{ReadyReplicas: 1}},
 	)
+}
+
+// The access key is sent with every management API request. An answer
+// that redirects to another host comes back as an error; the key never
+// goes there.
+func TestManagementAPINeverFollowsARedirect(t *testing.T) {
+	var mu sync.Mutex
+	var leaked []string
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		leaked = append(leaked, r.Header.Get("Authorization"))
+		mu.Unlock()
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer other.Close()
+	plat := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL+r.URL.Path, http.StatusTemporaryRedirect)
+	}))
+	defer plat.Close()
+	c, err := NewClient(ClientOptions{URL: plat.URL, AccessKey: testKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.list(context.Background(), projectsGVR); err == nil {
+		t.Fatal("a redirected list must fail")
+	}
+	if _, err := c.servesTenants(); err == nil {
+		t.Fatal("a redirected discovery must fail")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(leaked) > 0 {
+		t.Fatalf("the access key followed a redirect to another host: %q", leaked)
+	}
 }

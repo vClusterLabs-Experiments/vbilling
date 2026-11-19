@@ -257,6 +257,7 @@
         <a href="usage-sources.html">Usage Sources</a>
         <a href="private-nodes.html">Dedicated and Private Nodes</a>
         <a href="example-gke.html">Example: GKE with GPUs</a>
+        <a href="security.html">Security</a>
         <a href="troubleshooting.html">Troubleshooting</a>
       </div>
       <div class="sidebar-section">
@@ -322,7 +323,7 @@
           <tbody>
             <tr><td><code>com.vcluster.vbilling.<wbr>usage.v1</code></td><td>For every event committed to the ledger, collector and ingested alike: every metric, including informational (<code>vcluster_gpu_utilization</code>, <code>vcluster_gpu_downtime_hours</code>) and custom ones</td><td>One <a href="https://github.com/vClusterLabs-Experiments/vbilling/blob/main/docs/schema/usage-event.v1.json" target="_blank">usage event</a></td></tr>
             <tr><td><code>com.vcluster.vbilling.<wbr>tenant.v1</code></td><td>Before the tenant's first usage event, again when its details change, and after a restart</td><td>The tenant: <code>id</code>, <code>display_name</code>, <code>email</code>, <code>currency</code>, <code>region</code>, <code>project</code>, <code>class</code>, <code>plan</code>, <code>clusters</code>, <code>metadata</code>, <code>provider_ids</code>, <code>created_at</code></td></tr>
-            <tr><td><code>com.vcluster.vbilling.<wbr>tenant.<wbr>offboarded.v1</code></td><td>Once the tenant has had no tenant clusters for <code>OFFBOARD_GRACE</code> (default 1h)</td><td>The tenant</td></tr>
+            <tr><td><code>com.vcluster.vbilling.<wbr>tenant.<wbr>offboarded.v1</code></td><td>Once the tenant has had no clusters and no usage for an hour, and its last usage is delivered</td><td>The tenant</td></tr>
             <tr><td><code>com.vcluster.vbilling.<wbr>catalog.v1</code></td><td>Each time vBilling starts, before any usage</td><td>Every metric definition: <code>code</code>, <code>name</code>, <code>unit</code>, <code>description</code>, <code>billable</code>, <code>group_keys</code>, <code>custom</code></td></tr>
           </tbody>
         </table>
@@ -384,11 +385,11 @@ def verify(body: bytes, header: str, secret: str, tolerance: int = 300) -&gt; bo
         <div><strong>Deduplicate on <code>id</code>.</strong> A batch can arrive twice: after a timeout, a restart before the cursor was saved, a dead-letter replay or a cursor rewind. A usage event keeps its ID for the same window, so upsert on it. Tenant and catalog IDs carry a timestamp: keep the latest. Return 2xx for types you ignore. A catalog event your endpoint rejects with 400, 413 or 422 is logged and skipped; any other failure holds delivery to the endpoint until the catalog event is accepted.</div>
       </div>
       <p>Dead letters stay on the ledger volume until a replay clears them. Add <code>-H "Authorization: Bearer $API_TOKEN"</code> when the API is protected:</p>
-      <div class="code-block"><code><span class="cmd">curl</span> -s localhost:8080/api/v1/destinations/webhook/dead-letters \
+      <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-H</span> <span class="string">"Authorization: Bearer $VBILLING_TOKEN"</span> -s localhost:8080/api/v1/destinations/webhook/dead-letters \
   | jq <span class="string">'.dead_letters[] | {reason, id: .event.id}'</span>
-<span class="cmd">curl</span> -s -X POST localhost:8080/api/v1/destinations/webhook/dead-letters/replay
-<span class="comment"># send the retained ledger (RETENTION, default 7 days) to a new endpoint</span>
-<span class="cmd">curl</span> -s -X POST localhost:8080/api/v1/destinations/webhook/cursor -d <span class="string">'{"seq": 0}'</span></code></div>
+<span class="cmd">curl</span> <span class="flag">-H</span> <span class="string">"Authorization: Bearer $VBILLING_TOKEN"</span> -s -X POST localhost:8080/api/v1/destinations/webhook/dead-letters/replay
+<span class="comment"># send the retained ledger (the last 7 days) to a new endpoint</span>
+<span class="cmd">curl</span> <span class="flag">-H</span> <span class="string">"Authorization: Bearer $VBILLING_TOKEN"</span> -s -X POST localhost:8080/api/v1/destinations/webhook/cursor -d <span class="string">'{"seq": 0}'</span></code></div>
 
       <h2 id="ingest">Ingest API</h2>
       <p>Usage vBilling cannot measure itself, such as inference tokens from a model gateway or Slurm accounting, goes in through <code>POST /api/v1/events</code>. Accepted events are committed to the same ledger as collector events and fan out to every adapter, the webhook and your own adapter included. Declare the metric, enable ingest with a token, and send closed windows:</p>
@@ -402,7 +403,7 @@ def verify(body: bytes, header: str, secret: str, tolerance: int = 300) -&gt; bo
     "window_start": "2026-10-05T10:00:00Z", "window_end": "2026-10-05T10:01:00Z",
     "dimensions": {"model": "llama-3.3-70b"}}]}'</span></code></div>
       <ul>
-        <li>Ingest is off until <code>INGEST_TOKEN</code> (or <code>API_TOKEN</code>) is set. Up to 5,000 events or 10 MiB per request, as <code>{"events": [...]}</code> or a bare array.</li>
+        <li>Ingest takes <code>INGEST_TOKEN</code> or a tenant-bound token, never the API token. Without <code>INGEST_TOKEN</code>, vBilling generates one into <code>DATA_DIR/ingest-token</code>, and the chart into its Secret (key <code>ingest-token</code>). Up to 5,000 events or 10 MiB per request, as <code>{"events": [...]}</code> or a bare array.</li>
         <li>The metric must be built in or declared in <code>metering.customMetrics</code> (or <code>CUSTOM_METRICS</code>, <code>code:unit[:group_key|group_key]</code>). Custom metrics are billable unless declared with <code>billable: false</code>, so billing adapters create them at bootstrap. See <a href="metrics.html#custom-metrics">Custom metrics</a>.</li>
         <li><code>window_end</code> may be at most 5 minutes in the future and <code>window_start</code> at most 34 days old. <code>region</code> defaults to <code>REGION</code>, and <code>source</code> becomes <code>ingest:&lt;X-VBilling-Client&gt;</code>.</li>
         <li>Send a stable <code>id</code>, or let vBilling derive one from the event's identity, which excludes the quantity. An ID seen in the last 48 hours is reported as a duplicate and dropped, so send each window once, after it closes.</li>
@@ -428,7 +429,7 @@ type Destination interface {
             <tr><td><code>Name</code></td><td>Wherever the adapter is named: status, logs, <code>/api/v1/destinations/&lt;name&gt;</code></td><td>Return the name you register, the one operators list in <code>adapters</code> (<code>ADAPTERS</code>). A name may be listed once.</td></tr>
             <tr><td><code>Bootstrap</code></td><td>When delivery starts, with the whole catalog (built-in, informational and custom metrics)</td><td>Create meters or billable metrics. No event is delivered until it succeeds; failures are retried with backoff.</td></tr>
             <tr><td><code>EnsureTenant</code></td><td>Before a tenant's first event reaches the adapter, when its details change, and after a restart</td><td>Create or update the customer. A <code>Permanent</code> error is logged and delivery continues; any other error retries the batch.</td></tr>
-            <tr><td><code>RemoveTenant</code></td><td>Once a tenant has had no tenant clusters for <code>OFFBOARD_GRACE</code></td><td>Decide what offboarding means. Never delete a customer with open invoices. An error is retried on the next pass.</td></tr>
+            <tr><td><code>RemoveTenant</code></td><td>Once a tenant has had no clusters and no usage for an hour, and its last usage is delivered</td><td>Decide what offboarding means. Never delete a customer with open invoices. An error is retried on the next pass.</td></tr>
             <tr><td><code>SendEvents</code></td><td>With batches of up to 500 events from the ledger, and with every parked dead letter on a replay</td><td>Deliver them. The error you return decides what happens next (below).</td></tr>
           </tbody>
         </table>
@@ -458,7 +459,7 @@ type Destination interface {
         </table>
       </div>
       <p><code>destinations.StatusError</code> applies the same rule to HTTP responses: 400, 413 and 422 are permanent, everything else is retried.</p>
-      <p><strong>Idempotency.</strong> Event IDs are deterministic: <code>vb1_</code> plus a SHA-256 of the event's identity (tenant, metric, window, region, project, SKU, resource ID and dimensions), never of its quantity. A window keeps its ID through restarts, backfills, replays and a second replica. Send <code>ev.ID</code> as the platform's idempotency key and treat "already exists" as success. A retried batch repeats events you already delivered; <code>destinations.SentCache</code> skips them without a request. Events can also arrive late (backfill up to <code>MAX_BACKFILL</code>, default 6h, tenant API gap fills, replays), so accept backdated timestamps, or reject too-old events one by one with a <code>PartialError</code>, as the Stripe adapter does for Stripe's 35-day limit.</p>
+      <p><strong>Idempotency.</strong> Event IDs are deterministic: <code>vb1_</code> plus a SHA-256 of the event's identity (tenant, metric, window, region, project, SKU, resource ID and dimensions), never of its quantity. A window keeps its ID through restarts, backfills and replays. Send <code>ev.ID</code> as the platform's idempotency key and treat "already exists" as success. A retried batch repeats events you already delivered; <code>destinations.SentCache</code> skips them without a request. Events can also arrive late (backfill up to 6 hours back, cluster API gap fills, replays), so accept backdated timestamps, or reject too-old events one by one with a <code>PartialError</code>, as the Stripe adapter does for Stripe's 35-day limit.</p>
 
       <h3 id="skeleton">A minimal adapter</h3>
       <p><code>internal/destinations/acme/adapter.go</code>, for a platform that takes JSON over HTTPS. Its settings come from the environment in the factory:</p>

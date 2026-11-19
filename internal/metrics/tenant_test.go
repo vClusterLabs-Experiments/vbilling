@@ -69,14 +69,28 @@ func boundPVC(name, size string) *corev1.PersistentVolumeClaim {
 		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound, Capacity: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse(size)}}}
 }
 
+// machine sets the machine IDs a node reports (status.nodeInfo). vCluster's
+// copy of a control plane cluster node carries that node's.
+func machine(systemUUID string) func(*corev1.Node) {
+	return func(n *corev1.Node) {
+		n.Status.NodeInfo.SystemUUID = systemUUID
+		n.Status.NodeInfo.MachineID = "machine-" + systemUUID
+	}
+}
+
 func TestPrivateNodesBilledWholeFromTheTenantAPI(t *testing.T) {
-	host := []runtime.Object{node("cp-worker-1", nil, 0, true)}
+	// cp-worker-2 runs a pod the cluster synced, so vCluster shows the
+	// cluster a placeholder for it, with machine IDs of its own.
+	host := []runtime.Object{node("cp-worker-1", nil, 0, true, machine("4c4c4544-0001")),
+		node("cp-worker-2", nil, 0, true, machine("4c4c4544-0002")), pod("web", "cp-worker-2")}
 	gpuNode := node("gpu-a100-1", map[string]string{"nvidia.com/gpu.product": "NVIDIA-A100-SXM4-80GB", "node.kubernetes.io/instance-type": "a2-ultragpu-8g"}, 8, true)
 	tenant := tenantConn(
-		node("cp-worker-1", nil, 0, true), // a synced copy of a control plane cluster node: never billed here
-		node("vcluster-fake", map[string]string{LabelFakeNode: "true"}, 0, true),
+		node("cp-worker-1", nil, 0, true, machine("4c4c4544-0001")), // a synced copy of a control plane cluster node: never billed here
+		node("cp-worker-2", map[string]string{LabelFakeNode: "true"}, 0, true, machine("e1f0c2d3-0000")),
 		gpuNode,
+		// A node's own labels never exempt it: whoever runs the cluster writes them.
 		node("byo-gpu", map[string]string{"nvidia.com/gpu.product": "NVIDIA-L4", LabelBillable: "false"}, 1, true),
+		node("not-a-placeholder", map[string]string{LabelFakeNode: "true"}, 0, true),
 		pod("trainer", "gpu-a100-1", withGPU("nvidia.com/gpu", 8)),
 		boundPVC("ckpt", "100Gi"),
 		lbService("serve"),
@@ -85,21 +99,26 @@ func TestPrivateNodesBilledWholeFromTheTenantAPI(t *testing.T) {
 		c.UseTenantAPI(fakeTenantAPI{conns: map[string]*TenantConn{"gpu": tenant}})
 	})
 	evs := out[we]
-	if st.PrivateNodes != 2 {
-		t.Errorf("private nodes = %d, want gpu-a100-1 and byo-gpu", st.PrivateNodes)
+	if st.PrivateNodes != 3 {
+		t.Errorf("private nodes = %d, want gpu-a100-1, byo-gpu and not-a-placeholder", st.PrivateNodes)
 	}
 	if got, n := find(evs, usage.MetricPrivateNodeHours, "resource_id", "gpu-a100-1", "sku", "a2-ultragpu-8g", usage.DimBillingMode, "private_node"); n != 1 || !near(got, usage.Round(1.0/60)) {
 		t.Fatalf("private node hours = %v (%d events)", got, n)
 	}
-	if got, _ := find(evs, usage.MetricGPUHours, usage.DimBillingMode, "private_node"); !near(got, usage.Round(8.0/60)) {
-		t.Fatalf("private node GPU hours = %v, want the node's 8 GPUs", got)
+	if got, _ := find(evs, usage.MetricGPUHours, usage.DimBillingMode, "private_node"); !near(got, usage.Round(9.0/60)) {
+		t.Fatalf("private node GPU hours = %v, want gpu-a100-1's 8 GPUs and byo-gpu's 1", got)
 	}
 	if _, n := find(evs, usage.MetricGPUHours, usage.DimBillingMode, "shared"); n != 0 {
 		t.Fatal("pods on a private node were billed again per pod")
 	}
-	for _, name := range []string{"cp-worker-1", "vcluster-fake", "byo-gpu"} {
+	for _, name := range []string{"cp-worker-1", "cp-worker-2"} {
 		if _, n := find(evs, usage.MetricPrivateNodeHours, "resource_id", name); n != 0 {
 			t.Errorf("node %s must not be billed as a private node", name)
+		}
+	}
+	for _, name := range []string{"byo-gpu", "not-a-placeholder"} {
+		if _, n := find(evs, usage.MetricPrivateNodeHours, "resource_id", name); n != 1 {
+			t.Errorf("node %s must be billed as a private node: its labels are the cluster's to write", name)
 		}
 	}
 	if got, _ := find(evs, usage.MetricStorageGBHours, "sku", "fast-nvme"); !near(got, usage.Round(100.0/60)) {
@@ -113,10 +132,13 @@ func TestPrivateNodesBilledWholeFromTheTenantAPI(t *testing.T) {
 func TestSharedTenantClusterIsNeverBilledTwice(t *testing.T) {
 	// Shared tenant clusters see the control plane cluster's nodes (synced or
 	// as placeholders); with a tenant API configured, nothing extra is billed.
-	h100 := node("h100-1", map[string]string{"nvidia.com/gpu.product": "NVIDIA-H100"}, 8, true)
-	host := []runtime.Object{h100, pod("a", "h100-1", withGPU("nvidia.com/gpu", 2))}
-	tenant := tenantConn(node("h100-1", map[string]string{"nvidia.com/gpu.product": "NVIDIA-H100"}, 8, true),
-		node("h100-2", map[string]string{LabelFakeNode: "true"}, 8, true))
+	// h100-1 is synced as it is (same machine IDs); h100-2, which runs
+	// another of the cluster's pods, is shown as vCluster's placeholder.
+	h100 := node("h100-1", map[string]string{"nvidia.com/gpu.product": "NVIDIA-H100"}, 8, true, machine("4c4c4544-0001"))
+	host := []runtime.Object{h100, pod("a", "h100-1", withGPU("nvidia.com/gpu", 2)),
+		node("h100-2", map[string]string{"nvidia.com/gpu.product": "NVIDIA-H100"}, 8, true, machine("4c4c4544-0002")), pod("b", "h100-2")}
+	tenant := tenantConn(node("h100-1", map[string]string{"nvidia.com/gpu.product": "NVIDIA-H100"}, 8, true, machine("4c4c4544-0001")),
+		node("h100-2", map[string]string{LabelFakeNode: "true"}, 0, true, machine("0f9e8d7c-0000")))
 	withAPI, st := collectWith(t, Options{}, host, latest(), func(c *Collector) {
 		c.UseTenantAPI(fakeTenantAPI{conns: map[string]*TenantConn{"gpu": tenant}})
 	})

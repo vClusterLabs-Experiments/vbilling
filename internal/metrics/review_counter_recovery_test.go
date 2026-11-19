@@ -20,6 +20,9 @@ func TestReviewNewCounterDuringPartialOutageKeepsItsUsage(t *testing.T) {
 		// A new pod/model starts 15 seconds into the failed window.
 		{name: "vllm:generation_tokens_total", labels: map[string]string{"model_name": "new"},
 			samples: counterSamples(ws.Add(75*time.Second), ws.Add(3*time.Minute), 3, time.Time{})},
+		// vLLM's prometheus_client exposes when the counter was created
+		// (v0.3.1: a counter counts from zero only with this evidence).
+		createdSeries("vllm:generation_tokens_created", map[string]string{"model_name": "new"}, ws.Add(70*time.Second), ws.Add(75*time.Second), ws.Add(3*time.Minute)),
 	}}
 	flakySrv := httptest.NewServer(flaky.handler(t))
 	defer flakySrv.Close()

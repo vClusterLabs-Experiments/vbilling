@@ -378,6 +378,39 @@ func TestDeadLetters(t *testing.T) {
 	}
 }
 
+// A batch bisected after a rejection and retried after a transient error
+// rejects the same events again: each event is parked once, so
+// reconciliation subtracts it once. Files written before (with repeats)
+// read back each event once too.
+func TestDeadLettersAreParkedOncePerEvent(t *testing.T) {
+	c := &clock{t: t0}
+	dir := t.TempDir()
+	s := open(t, dir, c, Options{})
+	e := ev("t", t0, 1)
+	for i := 0; i < 3; i++ {
+		if err := s.AddDeadLetter("stripe", e, "too old"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if dls, _ := s.DeadLetters("stripe"); len(dls) != 1 {
+		t.Fatalf("parked %d times, want once", len(dls))
+	}
+	s.Close()
+	// A file a previous version wrote with the event twice.
+	line, _ := os.ReadFile(filepath.Join(dir, "deadletter-stripe.log"))
+	if err := os.WriteFile(filepath.Join(dir, "deadletter-stripe.log"), append(line, line...), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	s = open(t, dir, c, Options{})
+	defer s.Close()
+	if err := s.AddDeadLetter("stripe", e, "too old"); err != nil {
+		t.Fatal(err)
+	}
+	if dls, _ := s.DeadLetters("stripe"); len(dls) != 1 {
+		t.Fatalf("read back %d dead letters of one event, want 1", len(dls))
+	}
+}
+
 func TestScanPrefilterMatchesFullDecode(t *testing.T) {
 	c := &clock{t: t0}
 	s := open(t, t.TempDir(), c, Options{SegmentMaxRecords: 10})

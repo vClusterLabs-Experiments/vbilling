@@ -70,17 +70,36 @@ func (d *recDest) RecordedTotals(_ context.Context, q destinations.TotalsQuery) 
 }
 
 type env struct {
-	srv  *httptest.Server
-	sp   *spool.Spool
-	dest *recDest
-	disp *pipeline.Dispatcher
-	enf  *enforcement.Enforcer
+	srv    *httptest.Server
+	server *Server
+	sp     *spool.Spool
+	dest   *recDest
+	disp   *pipeline.Dispatcher
+	enf    *enforcement.Enforcer
+	token  string // the API token e.get sends
+}
+
+// adminToken is the API token of the test servers.
+const adminToken = "admin-secret"
+
+// do sends a request with the API token, as an operator does.
+func do(t *testing.T, method, url, token string, body io.Reader) *http.Response {
+	t.Helper()
+	req, _ := http.NewRequest(method, url, body)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
 }
 
 func setup(t *testing.T, mutate ...func(*config.Config)) *env {
 	t.Helper()
 	cfg := &config.Config{Region: "ap-southeast-2", ClusterName: "syd-1", Adapters: []string{"fakebill"}, CollectionInterval: time.Minute,
-		IngestToken: "ingest-secret", EnforcementMode: "observe", StripeWebhookSecret: "whsec_api"}
+		APIToken: adminToken, IngestToken: "ingest-secret", EnforcementMode: "observe", StripeWebhookSecret: "whsec_api"}
 	for _, m := range mutate {
 		m(cfg)
 	}
@@ -100,7 +119,7 @@ func setup(t *testing.T, mutate ...func(*config.Config)) *env {
 	s.now = func() time.Time { return now }
 	srv := httptest.NewServer(s.Handler())
 	t.Cleanup(srv.Close)
-	return &env{srv: srv, sp: sp, dest: dest, disp: disp, enf: enf}
+	return &env{srv: srv, server: s, sp: sp, dest: dest, disp: disp, enf: enf, token: cfg.APIToken}
 }
 
 type resolver map[string]string
@@ -130,12 +149,16 @@ func (e *env) commit(t *testing.T, windows int, start time.Time) {
 	}
 }
 
+// get reads path with the server's API token.
 func (e *env) get(t *testing.T, path string) (int, string) {
 	t.Helper()
-	resp, err := http.Get(e.srv.URL + path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	return e.getAs(t, path, e.token)
+}
+
+// getAs reads path with token ("" sends none).
+func (e *env) getAs(t *testing.T, path, token string) (int, string) {
+	t.Helper()
+	resp := do(t, http.MethodGet, e.srv.URL+path, token, nil)
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
 	return resp.StatusCode, string(b)
@@ -174,7 +197,7 @@ func TestUsageLineItemsAndCSV(t *testing.T) {
 		t.Fatalf("rows: %+v", resp.Rows)
 	}
 	code, body = e.get(t, "/api/v1/usage?format=csv&group_by=tenant,day")
-	if code != 200 || !strings.HasPrefix(body, "tenant,day,metric,unit,quantity,events\n") || !strings.Contains(body, "acme,2026-10-05,vcluster_gpu_hours,gpu-hours,15.99999996,120") {
+	if code != 200 || !strings.HasPrefix(body, "tenant,day,metric,unit,quantity,events,dead_lettered,held\n") || !strings.Contains(body, "acme,2026-10-05,vcluster_gpu_hours,gpu-hours,15.99999996,120,,") {
 		t.Fatalf("csv: %d\n%s", code, body)
 	}
 	code, body = e.get(t, "/api/v1/events?format=csv&limit=3")
@@ -278,7 +301,8 @@ func TestReconcileMatchesAndExplainsDeadLetters(t *testing.T) {
 	e.dest.mu.Lock()
 	e.dest.recorded["acme|"+usage.MetricGPUHours] += 1
 	e.dest.mu.Unlock()
-	resp2, _ := http.Post(e.srv.URL+"/api/v1/destinations/fakebill/dead-letters/replay", "application/json", nil)
+	resp2 := do(t, http.MethodPost, e.srv.URL+"/api/v1/destinations/fakebill/dead-letters/replay", e.token, nil)
+	resp2.Body.Close()
 	if resp2.StatusCode != 200 {
 		t.Fatalf("replay status %d", resp2.StatusCode)
 	}
@@ -295,7 +319,8 @@ func TestVerifyDestinationsCursorAndWebhook(t *testing.T) {
 	if code, body := e.get(t, "/api/v1/ledger/verify"); code != 200 || !strings.Contains(body, `"ok": true`) {
 		t.Fatalf("verify: %d %s", code, body)
 	}
-	resp, _ := http.Post(e.srv.URL+"/api/v1/destinations/fakebill/cursor", "application/json", strings.NewReader(`{"seq":0}`))
+	resp := do(t, http.MethodPost, e.srv.URL+"/api/v1/destinations/fakebill/cursor", e.token, strings.NewReader(`{"seq":0}`))
+	resp.Body.Close()
 	if resp.StatusCode != 200 || e.sp.Cursor("fakebill") != 0 {
 		t.Fatalf("cursor rewind: %d", resp.StatusCode)
 	}
@@ -327,17 +352,51 @@ func TestVerifyDestinationsCursorAndWebhook(t *testing.T) {
 
 func TestAPITokenProtectsReadEndpoints(t *testing.T) {
 	e := setup(t, func(c *config.Config) { c.APIToken = "read-secret" })
-	if code, _ := e.get(t, "/api/v1/usage"); code != 401 {
+	if code, _ := e.getAs(t, "/api/v1/usage", ""); code != 401 {
 		t.Fatalf("unauthenticated usage read: %d", code)
 	}
-	req, _ := http.NewRequest("GET", e.srv.URL+"/api/v1/usage", nil)
-	req.Header.Set("Authorization", "Bearer read-secret")
-	resp, _ := http.DefaultClient.Do(req)
-	if resp.StatusCode != 200 {
-		t.Fatalf("authenticated read: %d", resp.StatusCode)
+	if code, _ := e.getAs(t, "/api/v1/usage", "ingest-secret"); code != 401 {
+		t.Fatalf("an ingest token must not read usage: %d", code)
 	}
-	if code, _ := e.get(t, "/healthz"); code != 200 {
-		t.Fatal("healthz must stay open for probes")
+	if code, _ := e.getAs(t, "/api/v1/usage", "read-secret"); code != 200 {
+		t.Fatalf("authenticated read: %d", code)
+	}
+	for _, open := range []string{"/healthz", "/readyz"} {
+		if code, _ := e.getAs(t, open, ""); code != 200 {
+			t.Fatalf("%s must stay open for probes", open)
+		}
+	}
+}
+
+// Every endpoint but the probes, the signed webhooks, ingest and the
+// dashboard's static page needs the API token, /metrics included. With no
+// token configured the API is closed, not open.
+func TestAPIIsNeverOpen(t *testing.T) {
+	protected := []struct{ method, path string }{
+		{"GET", "/metrics"}, {"GET", "/api/v1/status"}, {"GET", "/api/v1/catalog"}, {"GET", "/api/v1/tenants"},
+		{"GET", "/api/v1/usage"}, {"GET", "/api/v1/events"}, {"GET", "/api/v1/sources"}, {"GET", "/api/v1/crosscheck"},
+		{"GET", "/api/v1/pricing"}, {"POST", "/api/v1/pricing/check"}, {"GET", "/api/v1/reconcile"}, {"GET", "/api/v1/ledger/verify"},
+		{"GET", "/api/v1/destinations"}, {"GET", "/api/v1/destinations/fakebill/dead-letters"},
+		{"POST", "/api/v1/destinations/fakebill/dead-letters/replay"}, {"POST", "/api/v1/destinations/fakebill/cursor"},
+		{"GET", "/api/v1/billing-states"}, {"PUT", "/api/v1/billing-states/acme"},
+	}
+	for _, apiToken := range []string{adminToken, ""} {
+		e := setup(t, func(c *config.Config) { c.APIToken = apiToken })
+		for _, p := range protected {
+			for _, tok := range []string{"", "ingest-secret", "wrong"} {
+				resp := do(t, p.method, e.srv.URL+p.path, tok, strings.NewReader(`{"seq":0,"state":"paused"}`))
+				resp.Body.Close()
+				if resp.StatusCode != http.StatusUnauthorized {
+					t.Errorf("API_TOKEN %q: %s %s with token %q answered %d, want 401", apiToken, p.method, p.path, tok, resp.StatusCode)
+				}
+			}
+		}
+		if e.enf.StateOf("acme").State == enforcement.Paused {
+			t.Fatal("an unauthenticated request paused a tenant")
+		}
+		if code, _ := e.getAs(t, "/", ""); code != 200 {
+			t.Errorf("the dashboard's page must load without a token (its data calls need one): %d", code)
+		}
 	}
 }
 
@@ -369,5 +428,43 @@ func TestReconcileFiltersSelectTenantMetricPairs(t *testing.T) {
 	json.Unmarshal([]byte(body), &r)
 	if len(r.Results) != 1 || !r.Results[0].OK || len(r.Results[0].Rows) != 0 {
 		t.Fatalf("a filter that matches nothing should compare nothing: %s", body)
+	}
+}
+
+// PUT /api/v1/billing-states sets the operator hold unless the request names
+// another. No webhook touches it: a payment never lifts an operator's pause,
+// even when the billing platform shows nothing owed. A portal that wants a
+// payment to lift its hold names the billing hold.
+func TestBillingStatePutSetsTheOperatorHoldByDefault(t *testing.T) {
+	e := setup(t)
+	put := func(body string) enforcement.TenantState {
+		t.Helper()
+		resp := do(t, http.MethodPut, e.srv.URL+"/api/v1/billing-states/acme", adminToken, strings.NewReader(body))
+		defer resp.Body.Close()
+		var ts enforcement.TenantState
+		if err := json.NewDecoder(resp.Body).Decode(&ts); err != nil || resp.StatusCode != http.StatusOK {
+			t.Fatalf("PUT %s: %d %v", body, resp.StatusCode, err)
+		}
+		return ts
+	}
+	if ts := put(`{"state":"paused","reason":"wallet empty"}`); ts.State != enforcement.Paused || ts.Hold != enforcement.HoldOperator {
+		t.Fatalf("PUT without a hold: %+v, want the operator hold paused", ts)
+	}
+	body := []byte(fmt.Sprintf(`{"id":"evt_paid","type":"invoice.paid","created":%d,"data":{"object":{"object":"invoice","id":"in_1","customer":"cus_acme"}}}`, now.Unix()))
+	req, _ := http.NewRequest("POST", e.srv.URL+"/webhooks/stripe", bytes.NewReader(body))
+	req.Header.Set("Stripe-Signature", stripe.SignatureHeader(body, "whsec_api", now))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if st := e.enf.StateOf("acme"); st.State != enforcement.Paused || st.Hold != enforcement.HoldOperator {
+		t.Fatalf("a payment webhook changed the operator's pause: %+v", st)
+	}
+	if ts := put(`{"state":"active"}`); ts.State != enforcement.Active || len(ts.Holds) != 0 {
+		t.Fatalf("PUT active without a hold: %+v, want the operator hold lifted", ts)
+	}
+	if ts := put(`{"state":"suspended","hold":"billing","reason":"invoice overdue"}`); ts.State != enforcement.Suspended || ts.Hold != enforcement.HoldBilling {
+		t.Fatalf("PUT with the billing hold: %+v", ts)
 	}
 }

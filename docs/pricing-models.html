@@ -277,6 +277,7 @@
         <a href="usage-sources.html">Usage Sources</a>
         <a href="private-nodes.html">Dedicated and Private Nodes</a>
         <a href="example-gke.html">Example: GKE with GPUs</a>
+        <a href="security.html">Security</a>
         <a href="troubleshooting.html">Troubleshooting</a>
       </div>
       <div class="sidebar-section">
@@ -314,7 +315,7 @@
       <p>None of them bills GPU utilization: a GPU allocated to one customer cannot be sold to another, used or not. Utilization is recorded next to GPU-hours for showback when the DCGM exporter is installed. See <a href="how-metering-works.html">How Metering Works</a>.</p>
 
       <h2 id="dedicated">Dedicated GPUs and endpoints</h2>
-      <p>A customer gets GPUs of its own: a cluster on shared nodes with GPU pods, whole nodes (dedicated nodes, Private Nodes), or a model endpoint with its own replicas. vBilling bills each GPU for every second it is allocated: from a container's start to its end, or every second a whole node is healthy. Scaling an endpoint to zero replicas stops the bill; a node that is down, a GPU whose driver is not ready, and a paused cluster are not billed.</p>
+      <p>A customer gets GPUs of its own: whole nodes (Private Nodes, dedicated nodes), a model endpoint with its own replicas, or, for internal teams, GPU pods on shared nodes. vBilling bills each GPU for every second it is allocated: from a container's start to its end, or every second a whole node is healthy. Scaling an endpoint to zero replicas stops the bill; a node that is down, a GPU whose driver is not ready, and a paused cluster are not billed.</p>
       <div class="code-block"><code>tenantSource: platform                  <span class="comment"># the Platform Tenant pays</span>
 metering:
   cpuMemoryBasis: requests              <span class="comment"># exact; the default</span>
@@ -397,7 +398,7 @@ enforcement:
         <table class="props-table">
           <thead><tr><th>Need</th><th>Where</th></tr></thead>
           <tbody>
-            <tr><td>Prepaid credit that stops the customer when it runs out</td><td>Metronome contracts with prepaid commits. Its balance alert becomes a billing state: <code>enforcement.rules: "alerts.low_remaining_contract_credit_balance_reached=paused"</code> pauses clusters and blocks gateway teams.</td></tr>
+            <tr><td>Prepaid credit that stops the customer when it runs out</td><td>Metronome contracts with prepaid commits. Its commit balance alert becomes a billing state: <code>enforcement.rules: "alerts.low_remaining_commit_balance_reached=paused"</code> pauses clusters and blocks gateway teams (see <a href="metronome.html#prepaid-loop">the prepaid wallet loop</a>).</td></tr>
             <tr><td>Committed spend, reserved capacity, volume tiers</td><td>Metronome rate cards and contracts, Stripe tiered prices, Lago graduated charges.</td></tr>
             <tr><td>Included allowances (for example, the first 32 GiB of storage)</td><td>Metronome or Lago free units, or a Stripe tiered price with a free first tier.</td></tr>
             <tr><td>Payment, tax, dunning</td><td>Stripe, directly or linked from Metronome. Failed payments become billing states through the webhooks.</td></tr>

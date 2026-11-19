@@ -1,9 +1,13 @@
 package records
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"hash/fnv"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/vclusterlabs-experiments/vbilling/internal/health"
@@ -34,6 +38,10 @@ type Options struct {
 	RejectUnknownTenants bool
 	Region               string
 	Now                  func() time.Time
+	// BoundTokens is INGEST_TOKENS (token -> tenant). A pull pinned to a
+	// tenant stores its rows under the record IDs of that tenant's bound
+	// token (see CheckPin). Only the tokens' IDs (TokenID) are kept.
+	BoundTokens map[string]string
 }
 
 func (o *Options) defaults() {
@@ -57,6 +65,65 @@ func (o *Options) defaults() {
 	}
 }
 
+// Bounds of one pushed request. Every usage row of a record carries the
+// record's request ID and dimensions, so a record of many metrics is
+// stored many times over.
+const (
+	// MaxRequestIDLen bounds a record's request ID, in bytes. Gateways use
+	// UUIDs and short prefixed IDs (chatcmpl-...); a longer ID (a client can
+	// choose LiteLLM's call ID) is replaced by its hash (RequestID).
+	MaxRequestIDLen = 256
+	// MaxUsagePerRecord bounds the usage keys (metrics) of one record. A
+	// request reports a handful; each key becomes a usage row.
+	MaxUsagePerRecord = 64
+	// MaxRejections bounds the refused records a Result lists;
+	// RejectedCount counts them all.
+	MaxRejections = 100
+	// MaxStoredPerRequest bounds what one pushed request writes to the
+	// records ledger, estimated before anything is written: about 120,000
+	// usage rows. A gateway that batches (LiteLLM posts up to 512 records
+	// per request) stays far below it.
+	MaxStoredPerRequest = 64 << 20
+)
+
+// ErrTooLarge is returned for a push whose usage rows would take more than
+// MaxStoredPerRequest in the records ledger. Nothing was stored.
+type ErrTooLarge struct{ Bytes int }
+
+func (e ErrTooLarge) Error() string {
+	return fmt.Sprintf("these records would take about %d MiB in the records ledger, more than the %d MiB one request may write: send fewer records per request",
+		e.Bytes>>20, MaxStoredPerRequest>>20)
+}
+
+// TokenID identifies an ingest token without revealing it: 8 bytes of its
+// SHA-256, in hex. Record IDs, SKU caps and rate limits use it, never the
+// token.
+func TokenID(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:8])
+}
+
+// boundNamespace is the record ID namespace of records sent with the
+// tenant-bound token tokenID under client (and of rows a pull pinned to the
+// token's tenant stores). Each token has its own: a tenant chooses its
+// client names and can learn the request IDs of the gateways that serve
+// it, and billing keeps the first copy of an ID, so a copy sent with
+// another token must never take the ID of the gateway's own record.
+func boundNamespace(tokenID, client string) string { return "bound\x00" + tokenID + "\x00" + client }
+
+// RequestID is the request ID a record is stored under: id itself, or, for
+// an ID longer than MaxRequestIDLen, "sha256:" and its hash in hex. Pushed
+// and pulled copies of a request get the same. An ID that starts with
+// "sha256:" is hashed too, so no request can take the ID a long one is
+// stored under.
+func RequestID(id string) string {
+	if len(id) <= MaxRequestIDLen && !strings.HasPrefix(id, "sha256:") {
+		return id
+	}
+	sum := sha256.Sum256([]byte(id))
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
 // TenantResolver maps an emitter's tenant value (a team ID, an API key
 // alias, a customer ID) to a billing tenant. known is false when nothing
 // matched, in which case tenant is the value itself.
@@ -64,12 +131,111 @@ type TenantResolver func(value string) (tenant string, known bool)
 
 // Ingester validates records and writes them to the records ledger.
 type Ingester struct {
-	spool   *spool.Spool
-	formats Formats
-	opts    Options
-	resolve TenantResolver
-	health  *health.Registry
-	tel     *telemetry.Registry
+	spool    *spool.Spool
+	formats  Formats
+	opts     Options
+	resolve  TenantResolver
+	health   *health.Registry
+	tel      *telemetry.Registry
+	skuGate  SKUGate
+	arrivals *arrivals
+	before   *storedBefore
+
+	mu    sync.Mutex
+	pulls map[string]pullIdentity // format -> what its pull stores rows under
+
+	pins map[string][]string // tenant -> IDs of its tokens in Options.BoundTokens, sorted
+}
+
+// SKUGate bounds the new SKUs usage brings in, per source (SKUSource...)
+// and tenant.
+type SKUGate interface {
+	// Admit returns the SKU a usage row is stored under: sku itself, or a
+	// replacement (overflow true) once the source brought in too many new
+	// SKUs for the tenant.
+	Admit(source, tenant, sku string) (stored string, overflow bool)
+	// Overflowed reports that n usage rows of one request or pull, now
+	// stored, carry the replacement.
+	Overflowed(source, tenant string, n int)
+}
+
+// SKU sources: what usage came in with. Each counts new SKUs on its own, so
+// what a tenant sends with its own token never uses up what the operator's
+// gateway or pulls report for it.
+const (
+	SKUSourceShared = "shared" // the shared ingest token
+	SKUSourceBound  = "bound"  // prefix of the source of each token bound to a tenant (SKUSourceToken)
+)
+
+// SKUSourceToken is the SKU source of the tenant-bound token tokenID
+// (TokenID): every bound token counts on its own, so a tenant's own token
+// never uses up what the operator's gateway reports with the tenant's other
+// token.
+func SKUSourceToken(tokenID string) string { return SKUSourceBound + ":" + tokenID }
+
+// SKUSourcePull is the SKU source of the pulls of client's request log.
+func SKUSourcePull(client string) string { return "pull:" + client }
+
+// UseSKUGate applies g to every usage row stored, pushed or pulled. Set it
+// before records are ingested.
+func (in *Ingester) UseSKUGate(g SKUGate) { in.skuGate = g }
+
+// HasFormat reports whether records can be sent in format.
+func (in *Ingester) HasFormat(format string) bool {
+	_, ok := in.formats[format]
+	return ok || format == Native
+}
+
+// recordValues checks a pushed record's values and dimensions, which reach
+// dashboards, exports and billing platforms.
+func recordValues(rec *Record) string {
+	for _, f := range []struct{ name, v string }{{"sku", rec.SKU}, {"region", rec.Region}, {"project", rec.Project}, {"tenant_cluster", rec.TenantCluster}} {
+		if err := usage.CheckValue(f.v); err != nil {
+			return f.name + " " + err.Error()
+		}
+	}
+	if len(rec.Dimensions) > usage.MaxDimensions {
+		return fmt.Sprintf("%d dimensions, more than %d", len(rec.Dimensions), usage.MaxDimensions)
+	}
+	keys := make([]string, 0, len(rec.Dimensions))
+	for k := range rec.Dimensions {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if usage.ReservedDimension(k) {
+			return fmt.Sprintf("dimension %s is the name of a property of the usage itself; rename it", k)
+		}
+		if err := usage.CheckValue(rec.Dimensions[k]); err != nil {
+			return fmt.Sprintf("dimension %s %v", k, err)
+		}
+	}
+	return ""
+}
+
+// makeSafe repairs a pulled record's values instead of refusing it: the
+// request was served, and dropping its usage would be worse. Dimensions
+// named after a property of the usage itself are dropped, and so are those
+// past usage.MaxDimensions (in key order).
+func makeSafe(rec *Record) {
+	rec.SKU = usage.SafeValue(rec.SKU)
+	rec.Region = usage.SafeValue(rec.Region)
+	rec.Project = usage.SafeValue(rec.Project)
+	rec.TenantCluster = usage.SafeValue(rec.TenantCluster)
+	keys := make([]string, 0, len(rec.Dimensions))
+	for k := range rec.Dimensions {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	kept := 0
+	for _, k := range keys {
+		if usage.ReservedDimension(k) || kept == usage.MaxDimensions {
+			delete(rec.Dimensions, k)
+			continue
+		}
+		rec.Dimensions[k] = usage.SafeValue(rec.Dimensions[k])
+		kept++
+	}
 }
 
 // NewIngester returns an ingester writing to sp, the records ledger.
@@ -84,7 +250,239 @@ func NewIngester(sp *spool.Spool, formats Formats, opts Options, resolve TenantR
 	if tel == nil {
 		tel = telemetry.New()
 	}
-	return &Ingester{spool: sp, formats: formats, opts: opts, resolve: resolve, health: h, tel: tel}
+	in := &Ingester{spool: sp, formats: formats, opts: opts, resolve: resolve, health: h, tel: tel, arrivals: newArrivals(), pins: map[string][]string{}}
+	for tok, tenant := range opts.BoundTokens {
+		in.pins[tenant] = append(in.pins[tenant], TokenID(tok))
+	}
+	for _, ids := range in.pins {
+		sort.Strings(ids)
+	}
+	in.opts.BoundTokens = nil // the tokens themselves are not kept
+	in.loadRecent(sp, opts.Now().UTC())
+	return in
+}
+
+// CheckPin refuses to pin a pull to a tenant with more than one token in
+// INGEST_TOKENS. A pinned pull stores its rows under the record IDs of the
+// tenant's bound token, so that a request the pulled gateway pushed with
+// that token and the pull reads back count once; with two tokens it cannot
+// tell which one the gateway uses, and the other's copies, sent first,
+// would replace the gateway's records.
+func (in *Ingester) CheckPin(tenant string) error {
+	if n := len(in.pins[tenant]); tenant != "" && n > 1 {
+		return fmt.Errorf("tenant %s has %d tokens in INGEST_TOKENS: a pull pinned to a tenant stores its rows under the record IDs of the tenant's bound token, "+
+			"and cannot tell which of them the gateway it reads pushes with. Bind one token to %s, the one that gateway pushes with, or do not pin the pull", tenant, n, tenant)
+	}
+	return nil
+}
+
+// pinToken is the ID of the bound token whose namespace rows a pull pins to
+// tenant use: the tenant's only token in INGEST_TOKENS, or "" (a namespace
+// no token has) when it has none, or several (CheckPin refuses those).
+func (in *Ingester) pinToken(tenant string) string {
+	if ids := in.pins[tenant]; len(ids) == 1 {
+		return ids[0]
+	}
+	return ""
+}
+
+// arrivalMemory is how long vBilling remembers when a record without a
+// time first arrived. Gateways retry within seconds to minutes; send a time
+// with every record to be safe from retries any later than this.
+const arrivalMemory = time.Hour
+
+// arrivals dates records without a time. Such a record is dated when it
+// first arrives, and a retry of it gets that same time: dated on arrival,
+// a retry that crossed a window boundary would land in another window,
+// where its request ID is no duplicate, and be billed twice. Keyed by row
+// ID (request and metric); rebuilt from the records ledger on start.
+// Only rows stored in the records ledger are remembered, so a refused
+// record leaves nothing behind. While a request is stored, the rows it
+// dated are pending, and a retry that arrives meanwhile gets their time.
+type arrivals struct {
+	mu      sync.Mutex
+	first   map[string]time.Time // rows stored
+	order   []arrival            // by arrival, to forget the oldest
+	pending map[string]pending   // rows of requests in flight
+}
+
+type arrival struct {
+	id string
+	at time.Time
+}
+
+type pending struct {
+	at    time.Time
+	holds int // requests in flight that dated the row
+}
+
+func newArrivals() *arrivals {
+	return &arrivals{first: map[string]time.Time{}, pending: map[string]pending{}}
+}
+
+// date returns the time a record whose rows have these IDs first arrived:
+// when a stored row of it arrived, when a request in flight dated it, or
+// now. It returns the IDs it dated now, which stay pending until release.
+func (a *arrivals) date(ids []string, now time.Time) (time.Time, []string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.forget(now)
+	for _, id := range ids {
+		if at, ok := a.first[id]; ok {
+			return at, nil
+		}
+		if p, ok := a.pending[id]; ok {
+			return p.at, nil
+		}
+	}
+	for _, id := range ids {
+		a.pending[id] = pending{at: now, holds: a.pending[id].holds + 1}
+	}
+	return now, ids
+}
+
+// release lets go of IDs date returned. Remember the stored rows first.
+func (a *arrivals) release(ids []string) {
+	if len(ids) == 0 {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, id := range ids {
+		if p := a.pending[id]; p.holds > 1 {
+			p.holds--
+			a.pending[id] = p
+		} else {
+			delete(a.pending, id)
+		}
+	}
+}
+
+// forget drops arrivals older than arrivalMemory. a.mu held.
+func (a *arrivals) forget(now time.Time) {
+	n := 0
+	for n < len(a.order) && now.Sub(a.order[n].at) > arrivalMemory {
+		if a.first[a.order[n].id].Equal(a.order[n].at) {
+			delete(a.first, a.order[n].id)
+		}
+		n++
+	}
+	a.order = a.order[n:]
+}
+
+// add remembers the arrivals of rows in the records ledger: found there at
+// the start, or just stored.
+func (a *arrivals) add(found []arrival) {
+	sort.SliceStable(found, func(i, j int) bool { return found[i].at.Before(found[j].at) })
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, f := range found {
+		if _, ok := a.first[f.id]; !ok {
+			a.first[f.id] = f.at
+			a.order = append(a.order, f)
+		}
+	}
+}
+
+// storedBefore holds hashes of the IDs of the records stored in the hour
+// before this start, for an hour. Records sent with a tenant-bound token
+// get IDs of their own since v0.3.1, so a batch an emitter stored with
+// v0.3.0 and retries after the upgrade is recognized here by the ID v0.3.0
+// gave it.
+type storedBefore struct {
+	mu    sync.Mutex
+	until time.Time
+	ids   map[uint64]struct{}
+}
+
+func idHash(id string) uint64 {
+	h := fnv.New64a()
+	h.Write([]byte(id))
+	return h.Sum64()
+}
+
+// has reports whether id was stored before the start, while that is still
+// remembered.
+func (b *storedBefore) has(id string, now time.Time) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.ids == nil {
+		return false
+	}
+	if now.After(b.until) {
+		b.ids = nil // retries come within minutes; free the memory
+		return false
+	}
+	_, ok := b.ids[idHash(id)]
+	return ok
+}
+
+// loadRecent reads the records stored in the last arrivalMemory: when the
+// records without a time arrived, so a retry after a restart keeps its
+// time, and every ID, for storedBefore.
+func (in *Ingester) loadRecent(sp *spool.Spool, now time.Time) {
+	in.before = &storedBefore{until: now.Add(arrivalMemory), ids: map[uint64]struct{}{}}
+	if sp == nil {
+		return
+	}
+	var found []arrival
+	_ = sp.ScanAppended(now.Add(-arrivalMemory), now.Add(24*time.Hour), func(ev *usage.Event, _ time.Time) error {
+		in.before.ids[idHash(ev.ID)] = struct{}{}
+		if ev.Properties["arrival_time"] != true {
+			return nil
+		}
+		s, _ := ev.Properties["at"].(string)
+		if at, err := time.Parse(time.RFC3339Nano, s); err == nil {
+			found = append(found, arrival{ev.ID, at})
+		}
+		return nil
+	})
+	in.arrivals.add(found)
+}
+
+// pullIdentity is the client, tenant and token namespace a pull stores a
+// gateway's rows under. A push of the same gateway must use the same, or
+// each request is stored under two record IDs and billed twice.
+type pullIdentity struct{ client, tenant, token string }
+
+// expectPull records the identity LiteLLM's pull stores rows under, so
+// pushes in the litellm format from the gateway it reads, under another
+// identity, are flagged in health.
+func (in *Ingester) expectPull(format, client, tenant string) {
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	if in.pulls == nil {
+		in.pulls = map[string]pullIdentity{}
+	}
+	in.pulls[format] = pullIdentity{client, tenant, in.pinToken(tenant)}
+}
+
+// checkPull marks a push source failing when the push comes from the
+// gateway vBilling pulls under another identity. Only two pushes can be
+// that gateway: one with the shared ingest token, the operator's, under
+// the pull's client (LITELLM_CLIENT) while the pull is pinned to a tenant,
+// and one with the token of the pinned tenant whose namespace the pull
+// uses, under another client. A push with any other tenant-bound token is
+// that tenant's own gateway, never flagged: a hint to pin the pull to it
+// would bill every request of the pulled gateway to that tenant.
+func (in *Ingester) checkPull(format, client, bound, token string) {
+	in.mu.Lock()
+	p, ok := in.pulls[format]
+	in.mu.Unlock()
+	if !ok {
+		return
+	}
+	const twice = "every request the pull reads back is stored a second time under another record ID and billed twice"
+	name := health.Name("records", client, bound, "litellm-pull")
+	switch {
+	case bound == "" && client == p.client && p.tenant != "":
+		in.health.Fail(name, "records", client, fmt.Errorf("LiteLLM pushes with the shared ingest token, but the LiteLLM pull bills every request to tenant %s (LITELLM_TENANT): %s", p.tenant, twice),
+			"unset LITELLM_TENANT, or push with the token INGEST_TOKENS binds to "+p.tenant)
+	case bound != "" && bound == p.tenant && token == p.token && client != p.client:
+		in.health.Fail(name, "records", client, fmt.Errorf("LiteLLM pushes as client %s with the token INGEST_TOKENS binds to %s, but the LiteLLM pull reads its spend logs as client %s (LITELLM_CLIENT): %s",
+			client, bound, p.client, twice),
+			"set LITELLM_CLIENT="+client+", or have LiteLLM send X-VBilling-Client: "+p.client)
+	}
 }
 
 // Rejection explains why one record was refused.
@@ -96,18 +494,30 @@ type Rejection struct {
 
 // Result reports what happened to a payload.
 type Result struct {
-	Format            string      `json:"format"`
-	Received          int         `json:"received"`
-	Accepted          int         `json:"accepted"`
-	UsageRows         int         `json:"usage_rows"`
-	Skipped           int         `json:"skipped,omitempty"`
-	DuplicatesInBatch int         `json:"duplicates_in_batch,omitempty"`
-	Rejected          []Rejection `json:"rejected,omitempty"`
-	UnknownTenants    []string    `json:"unknown_tenants,omitempty"`
-	Warnings          []string    `json:"warnings,omitempty"`
-	// AlreadyStored counts valid records a puller read again: every usage
-	// row of each was in the records ledger already, so none was stored.
+	Format            string `json:"format"`
+	Received          int    `json:"received"`
+	Accepted          int    `json:"accepted"`
+	UsageRows         int    `json:"usage_rows"`
+	Skipped           int    `json:"skipped,omitempty"`
+	DuplicatesInBatch int    `json:"duplicates_in_batch,omitempty"`
+	// Rejected lists the first MaxRejections refused records, and
+	// RejectedCount counts them all.
+	Rejected       []Rejection `json:"rejected,omitempty"`
+	RejectedCount  int         `json:"rejected_count,omitempty"`
+	UnknownTenants []string    `json:"unknown_tenants,omitempty"`
+	Warnings       []string    `json:"warnings,omitempty"`
+	// AlreadyStored counts valid records that were in the records ledger
+	// already, every usage row of each, so none was stored again: rows a
+	// puller read again, or a push retried across an upgrade.
 	AlreadyStored int `json:"already_stored,omitempty"`
+}
+
+// reject records a refused record.
+func (r *Result) reject(rej Rejection) {
+	r.RejectedCount++
+	if len(r.Rejected) < MaxRejections {
+		r.Rejected = append(r.Rejected, rej)
+	}
 }
 
 // ErrUnknownFormat is returned for a format that is not configured.
@@ -117,19 +527,46 @@ func (e ErrUnknownFormat) Error() string {
 	return fmt.Sprintf("unknown format %q (built in: %s; litellm with RECORDS_LITELLM=true; others in RECORDS_MAPPINGS_FILE)", e.Name, Native)
 }
 
-// Ingest maps, validates and durably stores a payload. boundTenant is the
-// tenant the caller's ingest token is bound to, or "" for an unbound token.
-// It returns only after the records are fsynced; a returned error means
-// nothing was stored and the emitter should retry.
+// Push identifies one pushed payload (POST /api/v1/records).
+type Push struct {
+	// Client names the emitter: X-VBilling-Client, or the format name.
+	Client string
+	// Bound is the tenant the caller's ingest token is bound to; "" for
+	// the shared ingest token.
+	Bound string
+	// Token identifies the bound token (TokenID), never the token itself:
+	// records sent with it get IDs in its own namespace. "" is the bound
+	// tenant's only token in Options.BoundTokens, the one its pinned pulls
+	// use.
+	Token string
+	// Known reports whether a push of this client was accepted before.
+	// Metric series and health sources name a client only then, or once
+	// its push is accepted: a name that only ever comes with refused
+	// records costs nothing.
+	Known bool
+}
+
+// Ingest maps, validates and durably stores a payload pushed by a known
+// client. boundTenant is the tenant the caller's ingest token is bound to,
+// or "" for an unbound token; a bound push comes with the tenant's only
+// token in Options.BoundTokens (see Push.Token).
 func (in *Ingester) Ingest(format, client, boundTenant string, body []byte) (Result, error) {
-	if _, ok := in.formats[format]; !ok && format != Native {
+	return in.IngestPush(format, Push{Client: client, Bound: boundTenant, Known: true}, body)
+}
+
+// IngestPush maps, validates and durably stores a pushed payload. It
+// returns only after the records are fsynced; a returned error means
+// nothing was stored and the emitter should retry, except ErrUnknownFormat
+// and ErrTooLarge.
+func (in *Ingester) IngestPush(format string, p Push, body []byte) (Result, error) {
+	if !in.HasFormat(format) {
 		return Result{Format: format}, ErrUnknownFormat{format}
 	}
 	objs, err := Parse(body)
 	if err != nil {
 		return Result{Format: format}, err
 	}
-	return in.ingest(format, client, boundTenant, objs, nil)
+	return in.ingest(ingestCall{format: format, client: p.Client, bound: p.Bound, token: p.Token, known: p.Known}, objs)
 }
 
 // ingestPulled stores records a puller read from an emitter's own logs,
@@ -140,44 +577,90 @@ func (in *Ingester) Ingest(format, client, boundTenant string, body []byte) (Res
 // a trailing range on every pass. Pulled records do not touch the health
 // of the client's push source.
 func (in *Ingester) ingestPulled(format, client, boundTenant string, objs []map[string]any, stored *storedIndex) (Result, error) {
-	if _, ok := in.formats[format]; !ok && format != Native {
+	if !in.HasFormat(format) {
 		return Result{Format: format}, ErrUnknownFormat{format}
 	}
 	if stored == nil {
 		stored = &storedIndex{ids: map[string]struct{}{}}
 	}
-	return in.ingest(format, client, boundTenant, objs, stored)
+	return in.ingest(ingestCall{format: format, client: client, bound: boundTenant, stored: stored}, objs)
 }
 
-// ingest stores records; stored is non-nil for pulled records.
-func (in *Ingester) ingest(format, client, boundTenant string, objs []map[string]any, stored *storedIndex) (Result, error) {
+// ingestCall is one payload to store.
+type ingestCall struct {
+	format, client, bound string
+	token                 string // TokenID of the bound token; "" for the bound tenant's pin
+	// stored indexes the records ledger for pulled records; nil for pushes.
+	stored *storedIndex
+	// known: the pushing client had a push accepted before.
+	known bool
+}
+
+// ingest stores records.
+func (in *Ingester) ingest(c ingestCall, objs []map[string]any) (Result, error) {
+	client, boundTenant, stored := c.client, c.bound, c.stored
+	// Records sent with a token bound to a tenant get IDs in the token's own
+	// namespace, and rows a pull pins to a tenant in that of the tenant's
+	// bound token (boundNamespace).
+	idClient, token := client, ""
+	if boundTenant != "" {
+		if token = c.token; token == "" {
+			token = in.pinToken(boundTenant)
+		}
+		idClient = boundNamespace(token, client)
+	}
 	pulled := stored != nil
-	res := Result{Format: format}
-	mapping := in.formats[format]
+	res := Result{Format: c.format}
+	mapping := in.formats[c.format]
 	res.Received = len(objs)
 	now := in.opts.Now().UTC()
 	source := "records:" + client
 	seen := map[string]bool{}
 	unknown := map[string]bool{}
+	// v030 maps the ID of a row to the ID v0.3.0 gave the same row, before
+	// bound rows had a namespace of their own and long request IDs were
+	// hashed: a row stored under it is the same request (see dropStored and
+	// storedBefore).
+	v030 := map[string]string{}
 	noTime := 0
+	size := 0
 	var recs [][]usage.Event // usage rows per accepted record
+	// Rows of records without a time are dated on arrival (arrivals). Those
+	// dated here are pending until the request ends, and only the ones
+	// stored are remembered.
+	var dating []string
+	defer func() { in.arrivals.release(dating) }()
+	datedAt := map[string]time.Time{}
 	for i, obj := range objs {
-		rec, skip, err := Map(format, mapping, obj)
+		rec, skip, err := Map(c.format, mapping, obj)
 		if skip {
 			res.Skipped++
 			continue
 		}
-		reject := func(msg string) { res.Rejected = append(res.Rejected, Rejection{Index: i, ID: rec.ID, Error: msg}) }
+		sentID := rec.ID
+		rec.ID = RequestID(rec.ID)
+		reject := func(msg string) { res.reject(Rejection{Index: i, ID: rec.ID, Error: msg}) }
 		if err != nil {
 			reject(err.Error())
 			continue
 		}
 		if rec.ID == "" {
 			if !in.opts.AllowUnkeyed {
-				reject("no request ID: every record needs a unique, stable ID so retries are not billed twice (set RECORDS_ALLOW_UNKEYED=true to derive one from the record's content)")
+				reject("no request ID: every record needs a unique, stable ID so retries are not billed twice")
 				continue
 			}
 			rec.ID = ContentID(obj)
+			sentID = rec.ID
+		}
+		if len(rec.Usage) > MaxUsagePerRecord {
+			reject(fmt.Sprintf("%d usage keys, more than %d", len(rec.Usage), MaxUsagePerRecord))
+			continue
+		}
+		if pulled {
+			makeSafe(&rec)
+		} else if msg := recordValues(&rec); msg != "" {
+			reject(msg)
+			continue
 		}
 		switch {
 		case boundTenant != "":
@@ -197,8 +680,16 @@ func (in *Ingester) ingest(format, client, boundTenant string, objs []map[string
 			}
 			rec.Tenant = t
 		}
-		if rec.Time.IsZero() {
-			rec.Time = now
+		dated := rec.Time.IsZero()
+		if dated {
+			var ids, held []string
+			for metric, q := range rec.Usage {
+				if q != 0 {
+					ids = append(ids, RecordID(idClient, rec.TenantKey, rec.ID, metric))
+				}
+			}
+			rec.Time, held = in.arrivals.date(ids, now)
+			dating = append(dating, held...)
 			noTime++
 		}
 		if rec.Time.After(now.Add(in.opts.MaxFuture)) {
@@ -227,7 +718,7 @@ func (in *Ingester) ingest(format, client, boundTenant string, objs []map[string
 			if q == 0 {
 				continue
 			}
-			id := RecordID(client, rec.TenantKey, rec.ID, metric)
+			id := RecordID(idClient, rec.TenantKey, rec.ID, metric)
 			if seen[id] {
 				res.DuplicatesInBatch++
 				continue
@@ -244,6 +735,10 @@ func (in *Ingester) ingest(format, client, boundTenant string, objs []map[string
 			if pulled {
 				ev.Properties["via"] = "pull"
 			}
+			if dated {
+				ev.Properties["arrival_time"] = true // "at" is when it first arrived
+				datedAt[id] = rec.Time
+			}
 			if ev.Region == "" {
 				ev.Region = in.opts.Region
 			}
@@ -258,30 +753,58 @@ func (in *Ingester) ingest(format, client, boundTenant string, objs []map[string
 				problems = append(problems, err.Error())
 				continue
 			}
+			if boundTenant != "" || sentID != rec.ID {
+				v030[id] = RecordID(client, rec.TenantKey, sentID, metric)
+			}
 			recRows = append(recRows, ev)
 		}
 		if len(problems) > 0 {
 			reject(strings.Join(problems, "; "))
 			continue
 		}
+		for i := range recRows {
+			size += rowSize(&recRows[i])
+		}
 		res.Accepted++
 		recs = append(recs, recRows)
 	}
+	if !pulled && size > MaxStoredPerRequest {
+		return Result{Format: c.format, Received: res.Received}, ErrTooLarge{Bytes: size}
+	}
 	if pulled {
 		var err error
-		if recs, err = in.dropStored(recs, stored); err != nil {
+		if recs, err = in.dropStored(recs, stored, v030); err != nil {
 			return res, fmt.Errorf("read records ledger: %w", err)
 		}
-		res.AlreadyStored = res.Accepted - len(recs)
-		res.Accepted = len(recs)
+	} else if len(v030) > 0 {
+		recs = in.dropStoredBefore(recs, v030, now)
 	}
+	res.AlreadyStored = res.Accepted - len(recs)
+	res.Accepted = len(recs)
 	var rows []usage.Event
 	for _, r := range recs {
 		rows = append(rows, r...)
 	}
+	skuSource := SKUSourceShared
+	switch {
+	case pulled:
+		skuSource = SKUSourcePull(client)
+	case boundTenant != "":
+		skuSource = SKUSourceToken(token)
+	}
+	overflow := map[string]int{} // tenant -> rows stored under another SKU
+	if in.skuGate != nil {
+		for i := range rows {
+			var over bool
+			if rows[i].SKU, over = in.skuGate.Admit(skuSource, rows[i].Tenant, rows[i].SKU); over {
+				overflow[rows[i].Tenant]++
+			}
+		}
+	}
+	report := pulled || c.known || res.Accepted > 0 || res.AlreadyStored > 0 // health and metrics may name the client
 	if len(rows) > 0 {
 		if _, err := in.spool.AppendBatch(source, rows); err != nil {
-			if !pulled {
+			if !pulled && c.known {
 				in.health.Fail(health.Name("records", client), "records", client, err, "the records ledger could not be written; the emitter must retry")
 			}
 			return res, fmt.Errorf("records ledger write failed: %w", err)
@@ -291,6 +814,21 @@ func (in *Ingester) ingest(format, client, boundTenant string, objs []map[string
 				stored.ids[ev.ID] = struct{}{}
 			}
 		}
+		var arrived []arrival
+		for _, ev := range rows {
+			if at, ok := datedAt[ev.ID]; ok {
+				arrived = append(arrived, arrival{ev.ID, at})
+			}
+		}
+		in.arrivals.add(arrived)
+		total := 0
+		for t, n := range overflow {
+			in.skuGate.Overflowed(skuSource, t, n)
+			total += n
+		}
+		if total > 0 {
+			res.Warnings = append(res.Warnings, fmt.Sprintf("%d usage row(s) are billed under another SKU: their source sent too many new SKUs for the tenant today", total))
+		}
 	}
 	res.UsageRows = len(rows)
 	for t := range unknown {
@@ -299,22 +837,38 @@ func (in *Ingester) ingest(format, client, boundTenant string, objs []map[string
 	sort.Strings(res.UnknownTenants)
 	if len(res.UnknownTenants) > 0 {
 		res.Warnings = append(res.Warnings, fmt.Sprintf("billed to tenants vBilling does not know (%s); map gateway identities with the vbilling.vcluster.com/aliases annotation or the format's tenantMap", strings.Join(res.UnknownTenants, ", ")))
-		in.health.Set(health.Name("records", client, "unknown-tenants"), "records", client, health.Empty,
-			"records for unknown tenants: "+strings.Join(res.UnknownTenants, ", "), "map them with the vbilling.vcluster.com/aliases annotation or tenantMap")
+		if report {
+			in.health.Set(health.Name("records", client, "unknown-tenants"), "records", client, health.Empty,
+				"records for unknown tenants: "+strings.Join(res.UnknownTenants, ", "), "map them with the vbilling.vcluster.com/aliases annotation or tenantMap")
+		}
 	}
 	if noTime > 0 {
-		res.Warnings = append(res.Warnings, fmt.Sprintf("%d record(s) had no time; the arrival time was used", noTime))
+		res.Warnings = append(res.Warnings, fmt.Sprintf("%d record(s) had no time; the time each first arrived was used (a retry within an hour keeps it; send a time to be safe from later retries)", noTime))
 	}
-	if pulled {
+	if pulled || !report {
 		return res, nil // the puller reports its own health and counters
 	}
-	if res.Accepted > 0 {
+	if res.Accepted > 0 || res.AlreadyStored > 0 {
 		in.health.OK(health.Name("records", client), "records", client, res.Accepted)
+		in.checkPull(c.format, client, boundTenant, token)
 	}
 	in.tel.Add("vbilling_records_received_total", "Per-request usage records received.", map[string]string{"client": client}, float64(res.Received))
 	in.tel.Add("vbilling_records_accepted_total", "Per-request usage records durably stored.", map[string]string{"client": client}, float64(res.Accepted))
-	in.tel.Add("vbilling_records_rejected_total", "Per-request usage records refused.", map[string]string{"client": client}, float64(len(res.Rejected)))
+	in.tel.Add("vbilling_records_rejected_total", "Per-request usage records refused.", map[string]string{"client": client}, float64(res.RejectedCount))
 	return res, nil
+}
+
+// rowSize estimates the bytes a usage row takes in the records ledger: its
+// JSON, and the record envelope (sequence, time, hash chain) around it.
+func rowSize(ev *usage.Event) int {
+	n := 450 + len(ev.ID) + len(ev.Tenant) + len(ev.Metric) + len(ev.Unit) + len(ev.Region) + len(ev.Project) + len(ev.SKU) + len(ev.Source)
+	for k, v := range ev.Dimensions {
+		n += len(k) + len(v) + 6
+	}
+	if id, ok := ev.Properties["request_id"].(string); ok {
+		n += len(id)
+	}
+	return n
 }
 
 // storedIndex holds the IDs of the records stored for windows within
@@ -340,12 +894,13 @@ func (idx *storedIndex) covers(ev *usage.Event) bool {
 }
 
 // dropStored removes the usage rows already in the records ledger, and the
-// records left with none. Rows the index does not cover (a request longer
-// than the range the puller indexed) are looked up in the ledger. A row
-// stored between the scan and the append is stored twice, which the
-// aggregator's deduplication absorbs.
-func (in *Ingester) dropStored(recs [][]usage.Event, idx *storedIndex) ([][]usage.Event, error) {
-	have := func(ev *usage.Event) bool { _, ok := idx.ids[ev.ID]; return ok }
+// records left with none. A bound row, or one whose request ID was hashed,
+// also counts as stored under the ID v0.3.0 gave it (v030), so a pull that
+// re-reads requests v0.3.0 stored does not store them again. Rows the index does not cover (a request longer than
+// the range the puller indexed) are looked up in the ledger. A row stored
+// between the scan and the append is stored twice, which the aggregator's
+// deduplication absorbs.
+func (in *Ingester) dropStored(recs [][]usage.Event, idx *storedIndex, v030 map[string]string) ([][]usage.Event, error) {
 	want := map[string]bool{}
 	var from, to time.Time
 	for _, r := range recs {
@@ -355,6 +910,9 @@ func (in *Ingester) dropStored(recs [][]usage.Event, idx *storedIndex) ([][]usag
 				continue
 			}
 			want[ev.ID] = false
+			if old := v030[ev.ID]; old != "" {
+				want[old] = false
+			}
 			if from.IsZero() || ev.WindowStart.Before(from) {
 				from = ev.WindowStart
 			}
@@ -374,11 +932,15 @@ func (in *Ingester) dropStored(recs [][]usage.Event, idx *storedIndex) ([][]usag
 			return nil, err
 		}
 	}
+	have := func(id string) bool {
+		_, ok := idx.ids[id]
+		return ok || want[id]
+	}
 	kept := recs[:0]
 	for _, r := range recs {
 		var left []usage.Event
 		for i := range r {
-			if !have(&r[i]) && !want[r[i].ID] {
+			if old := v030[r[i].ID]; !have(r[i].ID) && (old == "" || !have(old)) {
 				left = append(left, r[i])
 			}
 		}
@@ -387,4 +949,23 @@ func (in *Ingester) dropStored(recs [][]usage.Event, idx *storedIndex) ([][]usag
 		}
 	}
 	return kept, nil
+}
+
+// dropStoredBefore removes the rows of a push that were stored before this
+// start under the ID v0.3.0 gave them (a batch retried across the
+// upgrade), and the records left with none.
+func (in *Ingester) dropStoredBefore(recs [][]usage.Event, v030 map[string]string, now time.Time) [][]usage.Event {
+	kept := recs[:0]
+	for _, r := range recs {
+		var left []usage.Event
+		for i := range r {
+			if old := v030[r[i].ID]; old == "" || !in.before.has(old, now) {
+				left = append(left, r[i])
+			}
+		}
+		if len(left) > 0 {
+			kept = append(kept, left)
+		}
+	}
+	return kept
 }

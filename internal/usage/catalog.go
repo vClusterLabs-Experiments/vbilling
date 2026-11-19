@@ -145,6 +145,17 @@ func SetAccuracy(code, accuracy string) {
 	}
 }
 
+// Estimate reports whether an event's quantity is an estimate: the catalog
+// marks its metric as one, or the event says so itself (a metrics-server
+// sample, a PromQL query).
+func (e *Event) Estimate() bool {
+	if v, ok := e.Properties["estimate"].(bool); ok && v {
+		return true
+	}
+	def, ok := Lookup(e.Metric)
+	return ok && def.Accuracy == AccuracyEstimate
+}
+
 // Lookup finds a metric definition by code.
 func Lookup(code string) (MetricDef, bool) {
 	for _, d := range builtin {

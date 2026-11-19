@@ -44,6 +44,7 @@ type Row struct {
 	Status       string              `json:"status"` // priced | unpriced | zero | unknown
 	Detail       string              `json:"detail,omitempty"`
 	Hint         string              `json:"hint,omitempty"`
+	Uncounted    bool                `json:"uncounted,omitempty"`    // the platform would not count this usage at all yet: held in warn mode too
 	NoUsageYet   bool                `json:"no_usage_yet,omitempty"` // a catalog metric with no recent usage
 	Combinations int                 `json:"combinations,omitempty"` // series with other pricing dimensions
 	Missing      []map[string]string `json:"missing,omitempty"`      // unpriced combinations of those dimensions
@@ -51,7 +52,7 @@ type Row struct {
 	CheckedAt    time.Time           `json:"checked_at,omitempty"`
 	HeldEvents   int                 `json:"held_events,omitempty"`
 	// ReleasedUnpriced counts held events released without a price after
-	// PRICE_CHECK_MAX_HOLD since vBilling started.
+	// MaxHold (23 hours) since vBilling started.
 	ReleasedUnpriced   int       `json:"released_unpriced_events,omitempty"`
 	ReleasedUnpricedAt time.Time `json:"released_unpriced_at,omitempty"`
 	HeldSince          time.Time `json:"held_since,omitempty"`
@@ -113,6 +114,7 @@ func (s *Service) destReport(ds *destState) DestReport {
 		} else if rank[st.status] < rank[r.Status] {
 			r.Status, r.Detail, r.Hint, r.CheckedAt = st.status, st.detail, st.hint, st.checkedAt
 		}
+		r.Uncounted = r.Uncounted || st.uncounted
 		r.ReleasedUnpriced += st.releasedUnpriced
 		if st.releasedAt.After(r.ReleasedUnpricedAt) {
 			r.ReleasedUnpricedAt = st.releasedAt

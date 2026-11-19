@@ -80,6 +80,28 @@ type Collector struct {
 	pauses  *pause.Store // inventories of paused clusters; nil = none
 	invMu   sync.Mutex
 	lastInv map[string]*tenantInventory // last inventory read from each cluster's own API
+	// ownNodes records whether each cluster has nodes of its own that
+	// metering bills (OwnNodes).
+	ownNodes map[string]bool
+
+	// nodeHistory is what vBilling first saw of each node of a cluster's
+	// own, and the most GPUs it had (privateNodeHistory).
+	nodeHistory *privateNodeHistory
+	// syncedReported: clusters (by ID, "" for the list itself) whose
+	// synced-namespaces source is reported (guarded by invMu).
+	syncedReported map[string]bool
+	// nsForbidden: a cluster refused to list its namespaces (logged once;
+	// guarded by invMu).
+	nsForbidden bool
+
+	// hostMu guards the last read of the objects clusters synced to other
+	// namespaces (synced) and what vBilling remembers of namespaces: their
+	// labels as last read (hostSeen), and the namespaces clusters ran in
+	// (hostRan), when last seen. See readSynced.
+	hostMu   sync.Mutex
+	synced   *syncedView
+	hostSeen map[string]remembered
+	hostRan  map[string]time.Time
 }
 
 // UseGraveyard makes the collector bill pods and nodes deleted between
@@ -145,7 +167,9 @@ func NewCollector(kube kubernetes.Interface, mc metricsclient.Interface, opts Op
 	if opts.PauseKeep == nil {
 		opts.PauseKeep, _ = pause.ParseKeep(pause.DefaultKeep)
 	}
-	c := &Collector{kube: kube, metrics: mc, opts: opts, excludedTenantNS: map[string]bool{}, lastInv: map[string]*tenantInventory{}}
+	c := &Collector{kube: kube, metrics: mc, opts: opts, excludedTenantNS: map[string]bool{}, lastInv: map[string]*tenantInventory{},
+		ownNodes: map[string]bool{}, nodeHistory: newPrivateNodeHistory(), syncedReported: map[string]bool{},
+		hostSeen: map[string]remembered{}, hostRan: map[string]time.Time{}}
 	for _, ns := range opts.TenantExcludeNamespaces {
 		c.excludedTenantNS[ns] = true
 	}
@@ -173,14 +197,39 @@ type Target struct {
 	Paused []pause.Span
 }
 
+// pausesFor returns the pauses that stop billing capacity of the given
+// kind (pause.Keep*) for a target: none when that kind keeps billing while
+// paused. Only pauses vBilling verified (it confirmed the cluster's
+// workloads were gone) stop billing nodes, workloads, volumes and load
+// balancers. A pause it only observed (pause.ByExternal: vcluster pause, an
+// operator, sleep mode, the tenant scaling its own control plane down)
+// stops the control plane's hours alone: nothing confirms the workloads on
+// the cluster's nodes stopped, so they and their nodes keep billing.
+func (c *Collector) pausesFor(t Target, kind string) []pause.Span {
+	if len(t.Paused) == 0 || c.opts.PauseKeep[kind] {
+		return nil
+	}
+	if kind == pause.KeepControlPlane {
+		return t.Paused
+	}
+	var out []pause.Span
+	for _, sp := range t.Paused {
+		if sp.Verified() {
+			out = append(out, sp)
+		}
+	}
+	return out
+}
+
 // pausedFor returns the part of [start, end) inside [ws, we) during which
 // the target was paused, for capacity of the given kind (pause.Keep*). It
 // is zero when that kind keeps billing while paused.
 func (c *Collector) pausedFor(t Target, kind string, start, end, ws, we time.Time) time.Duration {
-	if len(t.Paused) == 0 || c.opts.PauseKeep[kind] {
+	spans := c.pausesFor(t, kind)
+	if len(spans) == 0 {
 		return 0
 	}
-	return pause.Overlap(t.Paused, start, end, ws, we)
+	return pause.Overlap(spans, start, end, ws, we)
 }
 
 // clip returns a pausedFor bound to one target and kind.
@@ -191,10 +240,7 @@ func (c *Collector) clip(t Target, kind string) pausedFn {
 // workloadPauses returns the pause spans that end the billing of a
 // target's pods (none when PAUSE_KEEP_BILLING keeps workloads).
 func (c *Collector) workloadPauses(t Target) []pause.Span {
-	if c.opts.PauseKeep[pause.KeepWorkloads] {
-		return nil
-	}
-	return t.Paused
+	return c.pausesFor(t, pause.KeepWorkloads)
 }
 
 // pausedFn returns how much of [start, end) inside [ws, we) is not billed
@@ -326,17 +372,28 @@ func (c *Collector) collect(ctx context.Context, targets []Target, windows []Win
 		}
 		r.Retain(clusters)
 	}
-	for _, t := range targets {
-		// External tenant clusters have nothing on this control plane cluster.
-		if !onlyTenantAPI && !t.Cluster.External {
-			if err := c.collectTarget(ctx, t, nodes, dra, windows, accs, &st); err != nil {
-				return nil, st, fmt.Errorf("meter %s: %w", t.Cluster.ExternalID(), err)
-			}
-		}
-		if c.tenants != nil {
-			c.collectTenant(ctx, t, nodes, windows, accs, &st)
+	targets = withNamesakes(targets)
+	var synced *syncedView // objects synced to other namespaces (synced.go)
+	if !onlyTenantAPI {
+		if synced, err = c.readSynced(ctx, targets); err != nil {
+			return nil, st, err
 		}
 	}
+	for _, t := range targets {
+		// External tenant clusters have nothing on this control plane cluster.
+		var syncedOn map[string]bool
+		if !onlyTenantAPI && !t.Cluster.External {
+			on, err := c.collectTarget(ctx, t, nodes, dra, synced.awayOf(t.Cluster), windows, accs, &st)
+			if err != nil {
+				return nil, st, fmt.Errorf("meter %s: %w", t.Cluster.ExternalID(), err)
+			}
+			syncedOn = on
+		}
+		if c.tenants != nil {
+			c.collectTenant(ctx, t, nodes, syncedOn, windows, accs, &st)
+		}
+	}
+	c.saveNodeHistory()
 	for _, w := range windows {
 		var evs []usage.Event
 		for _, ev := range accs[w.End].list() {
@@ -362,7 +419,11 @@ func (c *Collector) collect(ctx context.Context, targets []Target, windows []Win
 	return out, st, nil
 }
 
-func (c *Collector) collectTarget(ctx context.Context, t Target, nodes map[string]*nodeInfo, dra *draIndex, windows []Window, accs map[time.Time]*accumulator, st *Stats) error {
+// collectTarget meters what a cluster runs on the control plane cluster: in
+// its own namespace, and what it synced to other namespaces (away). It
+// returns the control plane cluster nodes its synced pods run on (hostViews).
+func (c *Collector) collectTarget(ctx context.Context, t Target, nodes map[string]*nodeInfo, dra *draIndex, away *elsewhere,
+	windows []Window, accs map[time.Time]*accumulator, st *Stats) (map[string]bool, error) {
 	cl := t.Cluster
 	ns := cl.Namespace
 	extID := cl.ExternalID()
@@ -371,11 +432,22 @@ func (c *Collector) collectTarget(ctx context.Context, t Target, nodes map[strin
 
 	podList, err := c.kube.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{})
 	if err != nil {
-		return fmt.Errorf("list pods: %w", err)
+		return nil, fmt.Errorf("list pods: %w", err)
 	}
 	c.graveyard.SeenPods(podList.Items, c.opts.Now())
 	pods := withDeleted(podList.Items, c.graveyard.Pods(ns))
 	owned := ownedFilter(entryLabels(pods), cl.Name, c.opts.MeterControlPlane)
+	include := func(p *corev1.Pod) bool { return owned(p.Labels) }
+	syncedOn := map[string]bool{}
+	syncedNodes(syncedOn, pods, func(p *corev1.Pod) bool { return !controlPlaneObject(p.Labels, cl.Name) && owned(p.Labels) })
+	// Pods it synced to other namespaces: all of them are its workloads.
+	c.graveyard.SeenPods(away.pods, c.opts.Now())
+	if awayPods := withDeleted(away.pods, away.gone); len(awayPods) > 0 {
+		pods = append(pods, awayPods...)
+		include = func(p *corev1.Pod) bool { return p.Namespace != ns || owned(p.Labels) }
+		syncedNodes(syncedOn, awayPods, func(*corev1.Pod) bool { return true })
+	}
+	c.reportElsewhere(cl, away)
 
 	// Dedicated nodes: billed whole, so pods on them are not billed again.
 	dedicated := map[string]*nodeInfo{}
@@ -390,10 +462,15 @@ func (c *Collector) collectTarget(ctx context.Context, t Target, nodes map[strin
 	latest := windows[len(windows)-1]
 	if latest.Latest && c.opts.Basis != "requests" && c.metrics != nil {
 		usageByPod = podUsage(ctx, c.metrics, ns)
+		for _, other := range namespacesOf(away.pods, ns) {
+			for k, v := range podUsage(ctx, c.metrics, other) {
+				usageByPod[k] = v
+			}
+		}
 	}
 
 	virtualNS := func(p *corev1.Pod) string { return p.Labels[LabelVirtualNamespace] }
-	c.meterPods(pods, func(p *corev1.Pod) bool { return owned(p.Labels) }, virtualNS,
+	c.meterPods(pods, include, virtualNS,
 		nodes, dedicated, dra, windows, accs, st, base, usageByPod, "shared", c.workloadPauses(t))
 
 	// Dedicated nodes: full capacity, per node.
@@ -407,18 +484,20 @@ func (c *Collector) collectTarget(ctx context.Context, t Target, nodes map[strin
 	// Storage: bound PVCs synced from the tenant cluster, per storage class.
 	pvcs, err := c.kube.CoreV1().PersistentVolumeClaims(ns).List(ctx, metav1.ListOptions{})
 	if err != nil {
-		return fmt.Errorf("list pvcs: %w", err)
+		return nil, fmt.Errorf("list pvcs: %w", err)
 	}
 	meterVolumes(pvcs.Items, ownedFilter(pvcLabels(pvcs.Items), cl.Name, c.opts.MeterControlPlane), windows, accs, base, c.clip(t, pause.KeepStorage))
+	meterVolumes(away.pvcs, func(map[string]string) bool { return true }, windows, accs, base, c.clip(t, pause.KeepStorage))
 
 	// Load balancers with an assigned address.
 	svcs, err := c.kube.CoreV1().Services(ns).List(ctx, metav1.ListOptions{})
 	if err != nil {
-		return fmt.Errorf("list services: %w", err)
+		return nil, fmt.Errorf("list services: %w", err)
 	}
 	meterLoadBalancers(svcs.Items, func(svc *corev1.Service) bool {
-		return !isControlPlane(svc.Labels, cl.Name) || c.opts.MeterControlPlane
+		return !controlPlaneObject(svc.Labels, cl.Name) || c.opts.MeterControlPlane
 	}, windows, accs, base, c.clip(t, pause.KeepLoadBalancers))
+	meterLoadBalancers(away.services, func(*corev1.Service) bool { return true }, windows, accs, base, c.clip(t, pause.KeepLoadBalancers))
 
 	// Control plane hours, only while ready (no charge while provisioning,
 	// asleep or paused, including paused time in backfilled windows). A
@@ -441,7 +520,7 @@ func (c *Collector) collectTarget(ctx context.Context, t Target, nodes map[strin
 		}
 	}
 
-	return nil
+	return syncedOn, nil
 }
 
 // podUsage returns current CPU cores and memory bytes per pod name.
@@ -496,7 +575,7 @@ func ownedFilter(all []map[string]string, clusterName string, includeControlPlan
 		}
 	}
 	return func(l map[string]string) bool {
-		if isControlPlane(l, clusterName) {
+		if controlPlaneObject(l, clusterName) {
 			return includeControlPlane
 		}
 		if labeled {
@@ -661,6 +740,11 @@ func (c *Collector) meterWholeNode(name string, n *nodeInfo, windows []Window, a
 		nodeEv.Dimensions[usage.DimNode] = name
 		if n.instanceType != "" {
 			nodeEv.Dimensions[usage.DimInstanceType] = n.instanceType
+		}
+		// vCPUs, memory, GPUs and public IP of the instance: not group keys,
+		// so nothing is priced on them unless a billing platform chooses to.
+		for k, v := range n.instanceAttributes() {
+			nodeEv.Dimensions[k] = v
 		}
 		acc.add(nodeEv, h, nil)
 		if gpus := n.physicalGPUs(); gpus > 0 {

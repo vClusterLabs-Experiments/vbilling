@@ -7,12 +7,8 @@ clusterName: gke-us-central1
 billing:
   defaultPlanCode: gpu-cloud   # tenants subscribe to prices tagged metadata[vbilling_plan]=gpu-cloud
   currency: USD
-  collectionInterval: 30s      # 60s in production keeps the DCGM math steadier
-  maxBackfill: 2h
 metering:
   cpuMemoryBasis: requests
-tenantAPI:
-  enabled: true                # private nodes, through each tenant cluster's vbilling-kubeconfig
 prometheus:
   url: http://prometheus.monitoring.svc:9090
   # The defaults (namespace or exported_namespace, MIG instances included),

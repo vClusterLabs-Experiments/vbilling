@@ -101,8 +101,11 @@ type Mapping struct {
 
 // LiteLLM maps LiteLLM's StandardLoggingPayload, as its generic API logger
 // (callback_type: generic_api) posts it. Records are billed to the team of
-// the virtual key, falling back to its organization and user; failed calls
-// are skipped; the model group becomes the SKU. Input tokens served from a
+// the virtual key, and only to it: LiteLLM sets the team from the key, while
+// fields such as end_user come from the client's request, and a client
+// must never choose who pays. A request whose key has no team is refused
+// (give every key a team). Failed calls are skipped; the model group
+// becomes the SKU. Input tokens served from a
 // prompt cache are their own metric (inference_cached_input_tokens) and are
 // taken out of inference_input_tokens, as token factories price them
 // separately; a requested service tier (priority, flex) is a dimension. The request ID is
@@ -114,7 +117,7 @@ var LiteLLM = Mapping{
 	RequestID:     LiteLLMRequestID,
 	Time:          Path{"endTime", "startTime"},
 	TimePrecision: time.Millisecond,
-	Tenant:        Path{"metadata.user_api_key_team_id", "metadata.user_api_key_org_id", "metadata.user_api_key_user_id", "end_user"},
+	Tenant:        Path{"metadata.user_api_key_team_id"},
 	Usage: map[string]Path{
 		"inference_input_tokens":        {"prompt_tokens"},
 		"inference_cached_input_tokens": {"metadata.usage_object.prompt_tokens_details.cached_tokens"},
@@ -196,6 +199,14 @@ func LoadFormats(path string, litellm bool) (Formats, error) {
 				if _, ok := m.Usage[mm]; !ok {
 					return nil, fmt.Errorf("%s: format %q: subtract names %q, which is not in its usage", path, name, mm)
 				}
+			}
+		}
+		if len(m.Dimensions) > usage.MaxDimensions {
+			return nil, fmt.Errorf("%s: format %q has %d dimensions, more than %d", path, name, len(m.Dimensions), usage.MaxDimensions)
+		}
+		for k := range m.Dimensions {
+			if usage.ReservedDimension(k) {
+				return nil, fmt.Errorf("%s: format %q: dimension %q is the name of a property of the usage itself (value, unit, sku, region, project, resource_id, source, window_start, window_end, schema_version, accuracy, estimate); rename it", path, name, k)
 			}
 		}
 		m.TimePrecision = time.Duration(m.TimeRound)
@@ -464,8 +475,22 @@ func toFloat(v any) (float64, error) {
 	if math.IsNaN(f) || math.IsInf(f, 0) || f < 0 {
 		return 0, fmt.Errorf("%v must be a finite, non-negative number", f)
 	}
+	if f > maxRecordQuantity {
+		return 0, fmt.Errorf("%v is more than one request can use (at most %.0e of a metric per request): an encoding error, not usage", f, maxRecordQuantity)
+	}
 	return f, nil
 }
+
+// maxRecordQuantity is the most of one metric a single request may carry.
+// A record is one API call, and the largest per-request counts are tokens:
+// the longest context windows of today's models hold about ten million, so
+// a billion leaves a hundred times that for any per-request unit (tokens,
+// images, seconds of audio, characters). A larger value is an encoding
+// error, never usage: an unsigned count that wrapped below zero (4294967295,
+// 1.8e19), or a Unix timestamp in seconds (1.7e9) or milliseconds sent
+// where a quantity belongs. Count per-request bytes in GB, as the catalog's
+// own egress is.
+const maxRecordQuantity = 1e9
 
 // parseTime accepts RFC 3339 (with or without zone, UTC assumed) or a Unix
 // timestamp in seconds, milliseconds, microseconds or nanoseconds.

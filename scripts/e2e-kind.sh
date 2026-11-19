@@ -124,7 +124,7 @@ python3 "$WORK/receiver.py" & PIDS+=($!)
 (cd "$ROOT" && CGO_ENABLED=0 go build -o "$WORK/vbilling" ./cmd/vbilling)
 ADAPTERS=stripe,webhook STRIPE_API_KEY=sk_test_123 STRIPE_API_BASE=http://localhost:12111 STRIPE_WEBHOOK_SECRET=$STRIPE_WHSEC \
 WEBHOOK_URL=http://127.0.0.1:19999/events WEBHOOK_SECRET=$WEBHOOK_SECRET \
-REGION=ap-southeast-2 CLUSTER_NAME=syd-cp-1 COLLECTION_INTERVAL=20s RECONCILE_INTERVAL=10s \
+REGION=ap-southeast-2 CLUSTER_NAME=syd-cp-1 \
 DATA_DIR=$WORK/data LISTEN_ADDR=$API API_TOKEN=$TOKEN CPU_MEMORY_BASIS=requests ENFORCEMENT_MODE=enforce \
   "$WORK/vbilling" > "$WORK/vbilling.log" 2>&1 & PIDS+=($!)
 # Wait until a few windows have closed after every workload was running, so
@@ -135,11 +135,11 @@ sleep 5
 
 step "metering"
 WIN=$(api "/api/v1/events?metric=vcluster_gpu_hours" | jq -s -r '[.[] | .window_start] | unique | .[-1]')
-WEND=$(date -u -j -v+20S -f "%Y-%m-%dT%H:%M:%SZ" "$WIN" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "$WIN + 20 seconds" +%Y-%m-%dT%H:%M:%SZ)
+WEND=$(date -u -j -v+60S -f "%Y-%m-%dT%H:%M:%SZ" "$WIN" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "$WIN + 60 seconds" +%Y-%m-%dT%H:%M:%SZ)
 q() { api "/api/v1/usage?from=$WIN&to=$WEND&group_by=tenant,sku,billing_mode&metric=vcluster_gpu_hours" | jq -r "[.rows[] | select($1) | .quantity] | add // 0"; }
-check "acme H100: 2 pods x 2 GPUs x 20s = 0.022222222 GPU-hours" '[ "$(q '"'"'.tenant=="acme" and .sku=="NVIDIA-H100-80GB-HBM3"'"'"')" = "0.022222222" ]'
-check "acme L40S (spot): 1 GPU x 20s = 0.005555556" '[ "$(q '"'"'.tenant=="acme" and .sku=="NVIDIA-L40S"'"'"')" = "0.005555556" ]'
-check "Globex dedicated node: 8 GPUs x 20s = 0.044444444, billing_mode=dedicated_node" '[ "$(q '"'"'.tenant=="vcluster-team-b-team-b" and .billing_mode=="dedicated_node"'"'"')" = "0.044444444" ]'
+check "acme H100: 2 pods x 2 GPUs x 60s = 0.066666667 GPU-hours" '[ "$(q '"'"'.tenant=="acme" and .sku=="NVIDIA-H100-80GB-HBM3"'"'"')" = "0.066666667" ]'
+check "acme L40S (spot): 1 GPU x 60s = 0.016666667" '[ "$(q '"'"'.tenant=="acme" and .sku=="NVIDIA-L40S"'"'"')" = "0.016666667" ]'
+check "Globex dedicated node: 8 GPUs x 60s = 0.133333333, billing_mode=dedicated_node" '[ "$(q '"'"'.tenant=="vcluster-team-b-team-b" and .billing_mode=="dedicated_node"'"'"')" = "0.133333333" ]'
 check "Globex pod on its own dedicated node is not billed again as shared" '[ "$(q '"'"'.tenant=="vcluster-team-b-team-b" and .billing_mode=="shared"'"'"')" = "0" ]'
 check "two tenant clusters roll up into one customer" '[ "$(api /api/v1/tenants | jq "[.tenants[] | select(.id==\"acme\") | .clusters | length] | .[0]")" = "2" ]'
 
@@ -156,7 +156,14 @@ CUS=$(jq -r '.["cus/acme"]' "$WORK/data/state-stripe.json")
 send() { python3 - "$1" "$2" "$3" "$CUS" <<'EOF'
 import hmac, hashlib, json, sys, time, urllib.request
 typ, status, evid, cus = sys.argv[1:5]
-body = json.dumps({"id": evid, "type": typ, "data": {"object": {"customer": cus, "status": status}}}).encode()
+# As Stripe sends them: a subscription event names its subscription, an
+# invoice its own ID and its subscription. A payment lifts a hold only when
+# it settles what caused it.
+if typ.startswith("customer.subscription."):
+    obj = {"id": "sub_e2e", "object": "subscription", "customer": cus, "status": status}
+else:
+    obj = {"id": "in_e2e", "object": "invoice", "customer": cus, "subscription": "sub_e2e", "status": status or "paid"}
+body = json.dumps({"id": evid, "type": typ, "created": int(time.time()), "data": {"object": obj}}).encode()
 t = str(int(time.time())); sig = hmac.new(b"whsec_e2e", (t + ".").encode() + body, hashlib.sha256).hexdigest()
 urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:18080/webhooks/stripe", data=body, headers={"Stripe-Signature": f"t={t},v1={sig}"}))
 EOF
@@ -168,7 +175,10 @@ vcluster connect team-a -n team-a --driver helm -- kubectl run probe -n training
 sleep 10
 check "admission policy blocks new pods for the suspended tenant" '[ "$(kubectl get pods -n team-a --no-headers 2>/dev/null | grep -c "^probe-")" = "0" ]'
 check "running workloads keep running" '[ "$(kubectl get pods -n team-a --no-headers | grep trainer | grep -c Running)" = "2" ]'
+# Paying the invoice brings the subscription back; Stripe then sends the
+# subscription as active, which settles what caused the hold.
 send invoice.paid "" evt_e2e_2
+send customer.subscription.updated active evt_e2e_3
 sleep 20
 check "a paid invoice lifts the suspension and the pod starts" '[ "$(kubectl get pods -n team-a --no-headers | grep "^probe-" | grep -c Running)" = "1" ]'
 

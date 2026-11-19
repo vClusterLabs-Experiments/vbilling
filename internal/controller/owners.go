@@ -29,15 +29,17 @@ type collectFunc func(ctx context.Context, targets []metrics.Target, windows []m
 // collectAttributed meters windows with collect, split into runs wherever a
 // cluster's owner changed, and stamps vCluster Platform UIDs on the events.
 // Without owner history, or without a move in the range, it is one call.
-func (c *Controller) collectAttributed(ctx context.Context, targets []metrics.Target, windows []metrics.Window, collect collectFunc) (map[time.Time][]usage.Event, metrics.Stats, error) {
+// failed maps each cluster whose own API could not be read to the windows
+// of the runs that missed it: only those, not the whole range.
+func (c *Controller) collectAttributed(ctx context.Context, targets []metrics.Target, windows []metrics.Window, collect collectFunc) (
+	out map[time.Time][]usage.Event, st metrics.Stats, failed map[string][]metrics.Window, err error) {
 	runs := c.ownerRuns(targets, windows)
-	out := map[time.Time][]usage.Event{}
-	var st metrics.Stats
-	failed := map[string]bool{}
+	out = map[time.Time][]usage.Event{}
+	failed = map[string][]metrics.Window{}
 	for _, r := range runs {
 		byWindow, rst, err := collect(ctx, r.targets, r.windows)
 		if err != nil {
-			return nil, rst, err
+			return nil, rst, nil, err
 		}
 		props := platformProps(r.targets)
 		for end, evs := range byWindow {
@@ -45,7 +47,7 @@ func (c *Controller) collectAttributed(ctx context.Context, targets []metrics.Ta
 			out[end] = evs
 		}
 		for _, id := range rst.TenantAPIFailed {
-			failed[id] = true
+			failed[id] = append(failed[id], r.windows...)
 		}
 		st = rst // counters of the latest run, for logs
 	}
@@ -56,7 +58,7 @@ func (c *Controller) collectAttributed(ctx context.Context, targets []metrics.Ta
 		}
 		sort.Strings(st.TenantAPIFailed)
 	}
-	return out, st, nil
+	return out, st, failed, nil
 }
 
 // ownerRun is a run of consecutive windows during which every cluster had
@@ -68,11 +70,15 @@ type ownerRun struct {
 }
 
 // ownerRuns splits windows into runs wherever a cluster's owner changed.
-// Without owner history, or without a move in the range, it is one run.
+// Without owner history, or without a move in the range, it is one run. A
+// window of another length (the partial window that realigns an old
+// watermark with the grid) is a run of its own: Prometheus queries take
+// the window length from a run's first window.
 func (c *Controller) ownerRuns(targets []metrics.Target, windows []metrics.Window) []ownerRun {
 	var runs []ownerRun
 	for _, w := range windows {
 		ts, sig := c.targetsFor(targets, w.End)
+		sig += "\x02" + w.End.Sub(w.Start).String()
 		if n := len(runs); n > 0 && runs[n-1].sig == sig {
 			runs[n-1].windows = append(runs[n-1].windows, w)
 			continue

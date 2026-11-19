@@ -48,7 +48,7 @@ type Options struct {
 	DecideWait time.Duration
 	// Debounce coalesces the checks new series trigger (default 2s).
 	Debounce time.Duration
-	// MaxHold is PRICE_CHECK_MAX_HOLD, for messages (the dispatcher enforces it).
+	// MaxHold is how long usage is held at most, for messages (the dispatcher enforces it).
 	MaxHold time.Duration
 	// Ready reports when tenants (and so their plans) are known; the first
 	// full check waits for it, up to ReadyWait (default 2m).
@@ -105,6 +105,7 @@ type destState struct {
 	name string
 	pc   destinations.PriceChecker
 	dest destinations.Destination
+	uc   UncountedReporter // nil: the platform counts whatever it receives
 
 	checkMu sync.Mutex // one check of a destination at a time
 
@@ -124,6 +125,7 @@ type seriesState struct {
 	status    string // "" until a check answered for it
 	detail    string
 	hint      string
+	uncounted bool // the last answer says the platform would not count the series' usage at all (UncountedReporter)
 	checkedAt time.Time
 	attempted bool // a check ran (or failed) since the series appeared
 	// releasedUnpriced counts held events released without a price after
@@ -163,7 +165,8 @@ func New(sp *spool.Spool, dests []destinations.Destination, tenants *pipeline.Te
 			continue
 		}
 		s.order = append(s.order, d.Name())
-		s.dests[d.Name()] = &destState{name: d.Name(), pc: pc, dest: d, series: map[string]*seriesState{}, prepared: map[string]bool{}, gapSources: map[string]bool{}}
+		uc, _ := d.(UncountedReporter)
+		s.dests[d.Name()] = &destState{name: d.Name(), pc: pc, dest: d, uc: uc, series: map[string]*seriesState{}, prepared: map[string]bool{}, gapSources: map[string]bool{}}
 	}
 	return s
 }
@@ -536,15 +539,17 @@ func (s *Service) check(ctx context.Context, ds *destState) {
 			continue
 		}
 		prev := st.status
+		wasReleasable := s.releasable(ds, st)
 		st.status, st.detail, st.hint, st.checkedAt = c.Status, c.Detail, c.Hint, now
+		st.uncounted = ds.uc != nil && c.Status == destinations.PriceMissing && ds.uc.Uncounted(c)
 		if prev != c.Status {
 			moves = append(moves, transition{c.Series, prev, c.Status, c.Detail, c.Hint})
 		}
-		if !c.Series.Catalog && (prev == "" || prev == destinations.PriceMissing) && c.Status != destinations.PriceMissing {
-			released = true
-			if c.Status == destinations.PriceCovered || c.Status == destinations.PriceZero {
-				newlyPriced = true
-			}
+		if !c.Series.Catalog && !wasReleasable && s.releasable(ds, st) {
+			released = true // held events of the series may ship now
+		}
+		if !c.Series.Catalog && (prev == "" || prev == destinations.PriceMissing) && (c.Status == destinations.PriceCovered || c.Status == destinations.PriceZero) {
+			newlyPriced = true
 		}
 	}
 	if released {
@@ -614,10 +619,18 @@ func (s *Service) report(ds *destState) {
 		}
 		now[name] = true
 		gaps = append(gaps, r.Metric+skuSuffix(r.SKU))
+		if r.ReleasedUnpriced > 0 && r.Uncounted {
+			expired++
+			s.health.Fail(name, "pricing", ds.name,
+				fmt.Errorf("%d held event(s) were released after being held %s (before their invoice period can be final), last at %s, although nothing in %s counts them: "+
+					"%s keeps them and bills none: %s", r.ReleasedUnpriced, s.opts.MaxHold, r.ReleasedUnpricedAt.Format(time.RFC3339), ds.name, ds.name, msg),
+				"add what counts this usage in "+ds.name+" ("+r.Hint+"); usage released before that is billed only once "+ds.name+"'s support reflows it")
+			continue
+		}
 		if r.ReleasedUnpriced > 0 {
 			expired++
 			s.health.Fail(name, "pricing", ds.name,
-				fmt.Errorf("%d held event(s) were released WITHOUT A PRICE after PRICE_CHECK_MAX_HOLD (%s), last at %s, and %s bills them at 0: %s",
+				fmt.Errorf("%d held event(s) were released WITHOUT A PRICE after being held %s (before their invoice period can be final), last at %s, and %s bills them at 0: %s",
 					r.ReleasedUnpriced, s.opts.MaxHold, r.ReleasedUnpricedAt.Format(time.RFC3339), ds.name, msg),
 				"Finance must add the price in "+ds.name+" so it re-rates the released usage: "+r.Hint)
 			continue
@@ -640,7 +653,7 @@ func (s *Service) report(ds *destState) {
 	summary := health.Name("pricing", ds.name)
 	if expired > 0 {
 		s.health.Fail(summary, "pricing", ds.name,
-			fmt.Errorf("%d unpriced series, %d with usage released without a price after PRICE_CHECK_MAX_HOLD: %s", len(gaps), expired, strings.Join(first(gaps, 5), ", ")),
+			fmt.Errorf("%d unpriced series, %d with usage released without a price after the longest hold: %s", len(gaps), expired, strings.Join(first(gaps, 5), ", ")),
 			"Finance must add the missing prices in "+ds.name+" so it re-rates the released usage; see GET /api/v1/pricing")
 		return
 	}

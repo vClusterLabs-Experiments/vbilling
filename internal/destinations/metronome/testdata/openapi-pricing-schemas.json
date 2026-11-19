@@ -1,4 +1,439 @@
 {
+ "get_customer_alert": {
+  "method": "POST",
+  "path": "/v1/customer-alerts/get",
+  "query": {},
+  "request": {
+   "properties": {
+    "alert_id": {
+     "format": "uuid",
+     "type": "string"
+    },
+    "alert_specifiers": {
+     "items": {
+      "properties": {
+       "custom_field_filters": {
+        "items": {
+         "properties": {
+          "entity": {
+           "enum": [
+            "Contract",
+            "Commit",
+            "ContractCredit",
+            "ContractCreditOrCommit"
+           ],
+           "type": "string"
+          },
+          "key": {
+           "type": "string"
+          },
+          "value": {
+           "type": "string"
+          }
+         },
+         "required": [
+          "entity",
+          "key",
+          "value"
+         ],
+         "type": "object"
+        },
+        "type": "array"
+       },
+       "exclude": {
+        "items": {
+         "properties": {
+          "custom_field_filters": {
+           "items": {
+            "properties": {
+             "entity": {
+              "enum": [
+               "Contract",
+               "Commit",
+               "ContractCredit",
+               "ContractCreditOrCommit"
+              ],
+              "type": "string"
+             },
+             "key": {
+              "type": "string"
+             },
+             "value": {
+              "type": "string"
+             }
+            },
+            "required": [
+             "entity",
+             "key",
+             "value"
+            ],
+            "type": "object"
+           },
+           "type": "array"
+          }
+         },
+         "type": "object"
+        },
+        "type": "array"
+       }
+      },
+      "required": [
+       "custom_field_filters"
+      ],
+      "type": "object"
+     },
+     "type": "array"
+    },
+    "custom_field_filters": {
+     "items": {
+      "properties": {
+       "entity": {
+        "enum": [
+         "Contract",
+         "Commit",
+         "ContractCredit",
+         "ContractCreditOrCommit"
+        ],
+        "type": "string"
+       },
+       "key": {
+        "type": "string"
+       },
+       "value": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "entity",
+       "key",
+       "value"
+      ],
+      "type": "object"
+     },
+     "type": "array"
+    },
+    "customer_id": {
+     "format": "uuid",
+     "type": "string"
+    },
+    "group_values": {
+     "items": {
+      "properties": {
+       "key": {
+        "type": "string"
+       },
+       "value": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "key",
+       "value"
+      ],
+      "type": "object"
+     },
+     "type": "array"
+    },
+    "plans_or_contracts": {
+     "enum": [
+      "PLANS",
+      "CONTRACTS"
+     ],
+     "type": "string"
+    },
+    "seat_filter": {
+     "properties": {
+      "seat_group_key": {
+       "type": "string"
+      },
+      "seat_group_value": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "seat_group_key",
+      "seat_group_value"
+     ],
+     "type": "object"
+    },
+    "webhook_notification_id": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "customer_id",
+    "alert_id"
+   ],
+   "type": "object"
+  },
+  "response": {
+   "properties": {
+    "data": {
+     "properties": {
+      "alert": {
+       "properties": {
+        "access_type": {
+         "enum": [
+          "SPEND",
+          "QUANTITY"
+         ],
+         "type": "string"
+        },
+        "alert_specifiers": {
+         "items": {
+          "properties": {
+           "custom_field_filters": {
+            "items": {
+             "properties": {
+              "entity": {
+               "enum": [
+                "Contract",
+                "Commit",
+                "ContractCredit",
+                "ContractCreditOrCommit"
+               ],
+               "type": "string"
+              },
+              "key": {
+               "type": "string"
+              },
+              "value": {
+               "type": "string"
+              }
+             },
+             "required": [
+              "entity",
+              "key"
+             ],
+             "type": "object"
+            },
+            "type": "array"
+           },
+           "exclude": {
+            "items": {
+             "properties": {
+              "custom_field_filters": {
+               "items": {
+                "properties": {
+                 "entity": {
+                  "enum": [
+                   "Contract",
+                   "Commit",
+                   "ContractCredit",
+                   "ContractCreditOrCommit"
+                  ],
+                  "type": "string"
+                 },
+                 "key": {
+                  "type": "string"
+                 },
+                 "value": {
+                  "type": "string"
+                 }
+                },
+                "required": [
+                 "entity",
+                 "key",
+                 "value"
+                ],
+                "type": "object"
+               },
+               "type": "array"
+              }
+             },
+             "type": "object"
+            },
+            "type": "array"
+           }
+          },
+          "type": "object"
+         },
+         "type": "array"
+        },
+        "credit_grant_type_filters": {
+         "items": {
+          "type": "string"
+         },
+         "type": "array"
+        },
+        "credit_type": {
+         "nullable": true,
+         "properties": {
+          "id": {
+           "format": "uuid",
+           "type": "string"
+          },
+          "name": {
+           "type": "string"
+          }
+         },
+         "required": [
+          "name",
+          "id"
+         ],
+         "type": "object"
+        },
+        "custom_field_filters": {
+         "items": {
+          "properties": {
+           "entity": {
+            "enum": [
+             "Contract",
+             "Commit",
+             "ContractCredit",
+             "ContractCreditOrCommit"
+            ],
+            "type": "string"
+           },
+           "key": {
+            "type": "string"
+           },
+           "value": {
+            "type": "string"
+           }
+          },
+          "required": [
+           "entity",
+           "key",
+           "value"
+          ],
+          "type": "object"
+         },
+         "type": "array"
+        },
+        "group_key_filter": {
+         "properties": {
+          "key": {
+           "type": "string"
+          },
+          "value": {
+           "type": "string"
+          }
+         },
+         "required": [
+          "key",
+          "value"
+         ],
+         "type": "object"
+        },
+        "group_values": {
+         "items": {
+          "properties": {
+           "key": {
+            "type": "string"
+           },
+           "value": {
+            "type": "string"
+           }
+          },
+          "required": [
+           "key"
+          ],
+          "type": "object"
+         },
+         "type": "array"
+        },
+        "id": {
+         "type": "string"
+        },
+        "invoice_types_filter": {
+         "items": {
+          "type": "string"
+         },
+         "type": "array"
+        },
+        "name": {
+         "type": "string"
+        },
+        "seat_filter": {
+         "properties": {
+          "seat_group_key": {
+           "type": "string"
+          },
+          "seat_group_value": {
+           "type": "string"
+          }
+         },
+         "required": [
+          "seat_group_key"
+         ],
+         "type": "object"
+        },
+        "status": {
+         "enum": [
+          "enabled",
+          "archived",
+          "disabled"
+         ],
+         "type": "string"
+        },
+        "threshold": {
+         "type": "number"
+        },
+        "type": {
+         "enum": [
+          "spend_threshold_reached",
+          "monthly_invoice_total_spend_threshold_reached",
+          "low_remaining_days_for_commit_segment_reached",
+          "low_remaining_commit_balance_reached",
+          "low_remaining_commit_percentage_reached",
+          "low_remaining_days_for_contract_credit_segment_reached",
+          "low_remaining_contract_credit_balance_reached",
+          "low_remaining_contract_credit_percentage_reached",
+          "low_remaining_contract_credit_and_commit_balance_reached",
+          "low_remaining_contract_credit_and_commit_percentage_reached",
+          "low_remaining_seat_balance_reached",
+          "invoice_total_reached"
+         ],
+         "type": "string"
+        },
+        "uniqueness_key": {
+         "maxLength": 128,
+         "minLength": 1,
+         "type": "string"
+        },
+        "updated_at": {
+         "format": "date-time",
+         "type": "string"
+        }
+       },
+       "required": [
+        "id",
+        "name",
+        "type",
+        "status",
+        "threshold",
+        "updated_at"
+       ],
+       "type": "object"
+      },
+      "customer_status": {
+       "enum": [
+        "ok",
+        "in_alarm",
+        "evaluating"
+       ],
+       "nullable": true,
+       "type": "string"
+      },
+      "triggered_by": {
+       "nullable": true,
+       "type": "string"
+      }
+     },
+     "required": [
+      "customer_status",
+      "alert"
+     ],
+     "type": "object"
+    }
+   },
+   "required": [
+    "data"
+   ],
+   "type": "object"
+  }
+ },
  "get_rates": {
   "method": "POST",
   "path": "/v1/contract-pricing/rate-cards/getRates",

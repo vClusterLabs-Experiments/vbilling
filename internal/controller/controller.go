@@ -4,6 +4,8 @@ package controller
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log"
 	"path/filepath"
 	"sort"
@@ -14,10 +16,12 @@ import (
 	"github.com/vclusterlabs-experiments/vbilling/internal/config"
 	"github.com/vclusterlabs-experiments/vbilling/internal/destinations"
 	"github.com/vclusterlabs-experiments/vbilling/internal/discovery"
+	"github.com/vclusterlabs-experiments/vbilling/internal/health"
 	"github.com/vclusterlabs-experiments/vbilling/internal/kv"
 	"github.com/vclusterlabs-experiments/vbilling/internal/metrics"
 	"github.com/vclusterlabs-experiments/vbilling/internal/pause"
 	"github.com/vclusterlabs-experiments/vbilling/internal/pipeline"
+	"github.com/vclusterlabs-experiments/vbilling/internal/safeguard"
 	"github.com/vclusterlabs-experiments/vbilling/internal/spool"
 	"github.com/vclusterlabs-experiments/vbilling/internal/telemetry"
 	"github.com/vclusterlabs-experiments/vbilling/internal/usage"
@@ -60,16 +64,29 @@ type Controller struct {
 
 	mu         sync.Mutex
 	clusters   []discovery.TenantCluster
-	lastSeen   map[string]time.Time       // tenant -> last time it had a tenant cluster
+	lastSeen   map[string]time.Time       // tenant -> last time it had a tenant cluster or new usage
 	offboarded map[string]map[string]bool // tenant -> destinations done offboarding it
+	off        offboarding                // where each departed tenant's usage ends (offboard.go)
+	held       heldUsage                  // optional: usage held from destinations until priced
+	safeguard  *safeguard.Checker         // optional: flags windows that bill more than exists
 	discovered bool
 	lastWindow time.Time
 	// lastUnrequested is the last logged count of pods without requests.
 	lastUnrequested int
 
-	// gaps: tenant cluster external ID -> end of the first window its own
-	// API could not be read for. Persisted, so a restart still fills them.
+	// usageRead is the ledger sequence read through for recent usage
+	// (usageSince); usageStarted is false until the first reconcile;
+	// usageThrough is whether the last reconcile read the ledger through.
+	usageRead    uint64
+	usageStarted bool
+	usageThrough bool
+
+	// gaps: a cluster's external ID -> the windows its own API could not be
+	// read for (tenantGaps). Persisted, so a restart still fills them.
 	gaps *kv.Store
+	// gapsFailing: the last write of gaps failed (reported once it works).
+	gapsFailing bool
+	health      *health.Registry // optional: where gap writes are reported
 
 	prom    PromCollector
 	aliases map[string]string // gateway or external identity -> tenant ID
@@ -80,17 +97,58 @@ type Controller struct {
 	owners      Owners // optional: past owners of clusters (TENANT_SOURCE=platform)
 
 	pauses *pause.Store // pause spans; nil = pauses are not tracked
+
+	// bound are the tenants INGEST_TOKENS are bound to; known reports
+	// tenants vBilling knows from elsewhere (UseKnownTenants).
+	bound map[string]bool
+	known func(id string) bool
+	// shared are external IDs that more than one discovered cluster maps
+	// to (see sharedIDs); sharedWarned is what was last logged about them.
+	shared       map[string]bool
+	sharedWarned string
 }
 
 // UsePauses tracks when clusters are paused, so capacity is not billed for
 // that time (PAUSE_KEEP_BILLING decides what keeps billing).
 func (c *Controller) UsePauses(p *pause.Store) { c.pauses = p }
 
+// UseHealth reports the controller's own sources (tenant-api-gaps).
+func (c *Controller) UseHealth(h *health.Registry) { c.health = h }
+
+// UseKnownTenants adds tenants vBilling knows without a cluster: those its
+// records configuration names (tenant maps, tenant-bound pulls) and those
+// holding a billing state. No alias can capture them. Call it before Run.
+func (c *Controller) UseKnownTenants(known func(id string) bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.known = known
+}
+
+// KnownTenant reports whether id is a tenant vBilling knows: discovered
+// from a cluster, bound to an ingest token, or named by the records
+// configuration or a billing state (UseKnownTenants). Such an ID always
+// bills to itself: an alias that equals it is ignored.
+func (c *Controller) KnownTenant(id string) bool {
+	if id == "" {
+		return false
+	}
+	if _, ok := c.tenants.Get(id); ok || c.bound[id] {
+		return true
+	}
+	c.mu.Lock()
+	known := c.known
+	c.mu.Unlock()
+	return known != nil && known(id)
+}
+
 // SetPaused updates the known state of a cluster right after vBilling
 // paused or resumed it, ahead of the next discovery.
 func (c *Controller) SetPaused(id string, paused bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.shared[id] {
+		return // two clusters answer to this ID: discovery tells them apart
+	}
 	for i := range c.clusters {
 		if c.clusters[i].ExternalID() == id {
 			c.clusters[i].Paused = paused
@@ -100,10 +158,20 @@ func (c *Controller) SetPaused(id string, paused bool) {
 
 type pauseForgetter interface{ ForgetPaused(id string) }
 
-// observePauses records pauses seen in discovery: ones vBilling did not
-// make (vcluster pause, an operator) and resumes made outside vBilling.
-// vBilling's own pauses start at their paused-at annotation, to the second.
-func (c *Controller) observePauses(clusters []discovery.TenantCluster, now time.Time) {
+// observePauses records pauses vBilling did not make, and ends the pause
+// of any cluster that runs again, whoever paused it.
+//
+// A cluster is paused only while its control plane is really down
+// (discovery.TenantCluster.Paused); annotations never pause billing, and a
+// paused-at annotation never dates a pause, since whoever writes
+// vcluster.yaml can write both. vBilling's own pauses are recorded by its
+// enforcer, from the moment it verified the cluster's workloads were gone,
+// so a cluster it marked is left to it here. Any other pause (vcluster
+// pause, an operator, vCluster Platform's sleep mode, the tenant scaling
+// its control plane down) is recorded from when discovery sees it, as
+// external: it stops the control plane's hours only, because vBilling
+// cannot verify the cluster's nodes and workloads stopped.
+func (c *Controller) observePauses(clusters []discovery.TenantCluster, shared map[string]bool, now time.Time) {
 	if c.pauses == nil {
 		return
 	}
@@ -113,26 +181,22 @@ func (c *Controller) observePauses(clusters []discovery.TenantCluster, now time.
 			continue // no control plane here to see paused: vBilling's enforcer records its pauses
 		}
 		id := cl.ExternalID()
+		if shared[id] {
+			continue // two clusters answer to this ID: neither gets a pause span
+		}
 		_, open := c.pauses.Current(id)
 		switch {
-		case cl.Paused && !open:
-			at, by := now, "external"
-			if cl.Annotations[discovery.AnnotationPausedBy] == "vbilling" {
-				by = "vbilling"
-				if t, err := time.Parse(time.RFC3339Nano, cl.Annotations[discovery.AnnotationPausedAt]); err == nil && !t.After(now) {
-					at = t
-				}
-			}
-			if _, err := c.pauses.Begin(id, at, by); err != nil {
+		case cl.Paused && !open && cl.Annotations[discovery.AnnotationPausedBy] != pause.ByVBilling:
+			if _, err := c.pauses.Begin(id, now, pause.ByExternal); err != nil {
 				log.Printf("[controller] %s: record pause: %v", id, err)
 			} else {
-				log.Printf("[controller] %s: paused since %s (%s)", id, at.UTC().Format(time.RFC3339), by)
+				log.Printf("[controller] %s: paused outside vBilling since %s: its control plane stops billing, its nodes and workloads keep billing", id, now.UTC().Format(time.RFC3339))
 			}
 		case !cl.Paused && open:
 			if _, err := c.pauses.End(id, now); err != nil {
 				log.Printf("[controller] %s: record resume: %v", id, err)
 			} else {
-				log.Printf("[controller] %s: resumed", id)
+				log.Printf("[controller] %s: runs again, billed from %s", id, now.UTC().Format(time.RFC3339))
 			}
 		}
 		if !cl.Paused && forget != nil {
@@ -143,14 +207,53 @@ func (c *Controller) observePauses(clusters []discovery.TenantCluster, now time.
 	_ = c.pauses.Prune(now.Add(-c.cfg.MaxBackfill - time.Hour))
 }
 
+// sharedIDs returns the external IDs more than one cluster maps to.
+// vcluster-<namespace>-<name> is not unique (namespace a-b with cluster c
+// and namespace a with cluster b-c are both vcluster-a-b-c), and the ID
+// is the cluster's identity in the ledger, so it cannot change. Pause
+// state, saved inventories and tenant API gaps are kept by it too: for a
+// shared ID vBilling keeps no pause span, so neither cluster stops billing
+// because of the other's pause.
+func sharedIDs(clusters []discovery.TenantCluster) map[string]bool {
+	seen := map[string]int{}
+	for i := range clusters {
+		seen[clusters[i].ExternalID()]++
+	}
+	out := map[string]bool{}
+	for id, n := range seen {
+		if n > 1 {
+			out[id] = true
+		}
+	}
+	return out
+}
+
+func (c *Controller) warnSharedIDs(shared map[string]bool) {
+	ids := make([]string, 0, len(shared))
+	for id := range shared {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	msg := strings.Join(ids, ", ")
+	c.mu.Lock()
+	changed := msg != c.sharedWarned
+	c.sharedWarned = msg
+	c.mu.Unlock()
+	if changed && msg != "" {
+		log.Printf("[controller] WARNING: more than one cluster has the ID %s (vcluster-<namespace>-<name>): they are metered under one ID, and pausing them never stops their billing. Rename one of them", msg)
+	}
+}
+
 // UsePrometheus enables Prometheus-read usage.
 func (c *Controller) UsePrometheus(p PromCollector) { c.prom = p }
 
 // ResolveTenant maps a value an emitter sends (a tenant ID, or an alias
 // from the vbilling.vcluster.com/aliases setting of a cluster) to a known
-// tenant. Unknown values are returned as they are, with known=false.
+// tenant. A tenant vBilling knows (KnownTenant) always resolves to itself,
+// whatever aliases claim. Unknown values are returned as they are, with
+// known=false.
 func (c *Controller) ResolveTenant(v string) (string, bool) {
-	if _, ok := c.tenants.Get(v); ok {
+	if c.KnownTenant(v) {
 		return v, true
 	}
 	c.mu.Lock()
@@ -163,37 +266,37 @@ func (c *Controller) ResolveTenant(v string) (string, bool) {
 
 // GatewayIdentities lists a tenant's gateway identities: its ID and every
 // alias (vbilling.vcluster.com/aliases) that ResolveTenant maps to it. An
-// alias that is another tenant's ID bills to that tenant, so it is not one
-// of this tenant's identities; neither is an alias two tenants claim.
+// alias that is a tenant vBilling knows bills to that tenant, so it is not
+// one of this tenant's identities; neither is an alias two tenants claim.
 func (c *Controller) GatewayIdentities(tenant string) []string {
-	out := []string{tenant}
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	var claimed []string
 	for alias, t := range c.aliases {
-		if t != tenant || c.ambiguous[alias] {
-			continue
+		if t == tenant && !c.ambiguous[alias] {
+			claimed = append(claimed, alias)
 		}
-		if _, other := c.tenants.Get(alias); other {
-			continue
+	}
+	c.mu.Unlock()
+	out := []string{tenant}
+	for _, alias := range claimed {
+		if !c.KnownTenant(alias) {
+			out = append(out, alias)
 		}
-		out = append(out, alias)
 	}
 	sort.Strings(out[1:])
 	return out
 }
 
-// warnAliasConflicts logs, once per change, aliases that are another
-// tenant's ID or that two tenants claim.
+// warnAliasConflicts logs, once per change, aliases that are a tenant
+// vBilling knows or that two tenants claim.
 func (c *Controller) warnAliasConflicts(aliases map[string]string, ambiguous map[string]bool) {
 	warn := map[string]string{}
 	for a, t := range aliases {
 		switch {
 		case ambiguous[a]:
 			warn[a] = "is claimed by more than one tenant; usage bills to " + t + " and the gateway never blocks it"
-		default:
-			if _, ok := c.tenants.Get(a); ok {
-				warn[a] = "is tenant " + a + "'s own ID; usage sent as " + a + " bills to " + a + ", not to " + t
-			}
+		case c.KnownTenant(a):
+			warn[a] = "is tenant " + a + "'s own ID; usage sent as " + a + " bills to " + a + ", not to " + t
 		}
 	}
 	c.mu.Lock()
@@ -220,8 +323,14 @@ func New(cfg *config.Config, disc Discoverer, coll Collector, sp *spool.Spool, t
 			gaps = s
 		}
 	}
+	bound := map[string]bool{}
+	for _, t := range cfg.IngestTokens {
+		if t != "" {
+			bound[t] = true
+		}
+	}
 	return &Controller{cfg: cfg, disc: disc, coll: coll, spool: sp, tenants: tenants, dests: dests, tel: tel,
-		now: time.Now, lastSeen: map[string]time.Time{}, offboarded: map[string]map[string]bool{}, gaps: gaps}
+		now: time.Now, lastSeen: map[string]time.Time{}, offboarded: map[string]map[string]bool{}, gaps: gaps, bound: bound}
 }
 
 // Run reconciles tenants every ReconcileInterval and closes a metering
@@ -232,6 +341,7 @@ func (c *Controller) Run(ctx context.Context) error {
 	c.Reconcile(ctx)
 	c.CollectDue(ctx)
 	c.CollectPrometheusDue(ctx)
+	c.checkSafeguard()
 
 	reconcile := time.NewTicker(c.cfg.ReconcileInterval)
 	defer reconcile.Stop()
@@ -246,8 +356,20 @@ func (c *Controller) Run(ctx context.Context) error {
 		case <-collect.C:
 			c.CollectDue(ctx)
 			c.CollectPrometheusDue(ctx)
+			c.checkSafeguard()
 			collect.Reset(c.untilNextWindow())
 		}
+	}
+}
+
+// UseSafeguard checks, after every collection, that the windows committed
+// since (by any source) bill no more than exists. Health only: it never
+// holds delivery.
+func (c *Controller) UseSafeguard(s *safeguard.Checker) { c.safeguard = s }
+
+func (c *Controller) checkSafeguard() {
+	if c.safeguard != nil {
+		c.safeguard.Once()
 	}
 }
 
@@ -340,15 +462,37 @@ func (c *Controller) Reconcile(ctx context.Context) {
 		}
 	}
 	c.warnAliasConflicts(aliases, ambiguous)
-	c.observePauses(clusters, now)
+	shared := sharedIDs(clusters)
+	c.warnSharedIDs(shared)
+	c.observePauses(clusters, shared, now)
+	var head uint64
+	if c.spool != nil {
+		head = c.spool.Committed()
+	}
+	using, readThrough := c.usageSince(head)
 	c.mu.Lock()
 	c.aliases = aliases
 	c.ambiguous = ambiguous
+	c.shared = shared
 	c.clusters = clusters
 	c.discovered = true
 	for _, t := range tenants {
 		c.lastSeen[t.ID] = now
+		c.off.noteSeen(t.ID, head)
 		delete(c.offboarded, t.ID) // back before offboarding finished: start over next time
+	}
+	// A tenant whose usage still arrives (gateway records, ingest, Prometheus)
+	// is not gone, whether or not it still has a cluster: it was last seen
+	// when its latest usage was appended to the ledger (never later than
+	// now), whatever window that usage is for.
+	for id, at := range using {
+		if at.After(now) {
+			at = now
+		}
+		if seen, known := c.lastSeen[id]; known && at.After(seen) {
+			c.lastSeen[id] = at
+			delete(c.offboarded, id) // back before offboarding finished: start over next time
+		}
 	}
 	var gone []usage.Tenant
 	current := map[string]bool{}
@@ -356,7 +500,9 @@ func (c *Controller) Reconcile(ctx context.Context) {
 		current[t.ID] = true
 	}
 	for id, seen := range c.lastSeen {
-		if !current[id] && now.Sub(seen) >= c.cfg.OffboardGrace {
+		// Until the ledger is read through, a tenant's latest usage may be
+		// in the part not read yet: nobody is offboarded.
+		if readThrough && !current[id] && now.Sub(seen) >= c.cfg.OffboardGrace {
 			t, _ := c.tenants.Get(id)
 			gone = append(gone, t)
 		}
@@ -378,6 +524,14 @@ func (c *Controller) Reconcile(ctx context.Context) {
 			if done[d.Name()] {
 				continue
 			}
+			// Offboarding ends billing there (Lago terminates the subscription
+			// and ignores its later events): only once the destination has the
+			// tenant's last usage, delivery backlog and held usage included.
+			if ready, why := c.delivered(t.ID, d.Name()); !ready {
+				c.logWaiting(t.ID, d.Name(), why)
+				ok = false
+				continue
+			}
 			switch err := d.RemoveTenant(ctx, t); {
 			case err == nil:
 				done[d.Name()] = true
@@ -395,6 +549,7 @@ func (c *Controller) Reconcile(ctx context.Context) {
 			c.mu.Lock()
 			delete(c.lastSeen, t.ID)
 			delete(c.offboarded, t.ID)
+			c.off.forget(t.ID)
 			c.mu.Unlock()
 		}
 	}
@@ -480,33 +635,38 @@ func (c *Controller) CollectDue(ctx context.Context) {
 	}
 	size := c.cfg.CollectionInterval
 	latestEnd := c.latestDue()
-	firstEnd := latestEnd
+	start := latestEnd.Add(-size) // first run ever: the last closed window only
 	note := ""
 	if wm, ok := c.spool.Watermark(spool.SourceCollector); ok {
 		if !latestEnd.After(wm) {
 			return
 		}
-		firstEnd = wm.Add(size)
+		start = wm
 		// The oldest window we backfill starts MAX_BACKFILL before the latest end.
-		if earliest := latestEnd.Add(-c.cfg.MaxBackfill).Truncate(size).Add(size); firstEnd.Before(earliest) {
-			gap := earliest.Sub(firstEnd)
+		if earliest := latestEnd.Add(-c.cfg.MaxBackfill).Truncate(size); start.Before(earliest) {
+			gap := earliest.Sub(start)
 			note = "gap: " + gap.String() + " older than MAX_BACKFILL not metered"
 			log.Printf("[controller] %d window(s) before %s are older than MAX_BACKFILL=%s and will not be metered",
-				int(gap/size), earliest.Add(-size).Format(time.RFC3339), c.cfg.MaxBackfill)
-			firstEnd = earliest
+				int(gap/size), earliest.Format(time.RFC3339), c.cfg.MaxBackfill)
+			start = earliest
 		}
 	}
-	var windows []metrics.Window
-	for end := firstEnd; !end.After(latestEnd); end = end.Add(size) {
-		windows = append(windows, metrics.Window{Start: end.Add(-size), End: end, Latest: end.Equal(latestEnd)})
-	}
+	windows := windowsBetween(start, latestEnd, size, latestEnd)
 
 	targets := c.targets()
 
 	started := time.Now()
-	byWindow, st, err := c.collectAttributed(ctx, targets, windows, c.coll.Collect)
+	byWindow, st, failed, err := c.collectAttributed(ctx, targets, windows, c.coll.Collect)
 	if err != nil {
 		log.Printf("[controller] metering failed for %d window(s), will retry: %v", len(windows), err)
+		c.tel.Add("vbilling_collection_failures_total", "Failed metering runs (windows are retried).", nil, 1)
+		return
+	}
+	// The windows a cluster's own API missed are recorded before any is
+	// committed: a crash in between must not leave a window committed
+	// without its cluster's API read and nothing to fill it.
+	if err := c.recordGaps(failed, windows); err != nil {
+		log.Printf("[controller] record the windows clusters' own APIs missed: %v; %d window(s) are not committed and are read again", err, len(windows))
 		c.tel.Add("vbilling_collection_failures_total", "Failed metering runs (windows are retried).", nil, 1)
 		return
 	}
@@ -526,7 +686,7 @@ func (c *Controller) CollectDue(ctx context.Context) {
 		c.lastWindow = w.End
 		c.mu.Unlock()
 	}
-	c.fillTenantGaps(ctx, st, windows, targets)
+	c.fillTenantGaps(ctx, failed, windows, targets)
 	if len(windows) > 1 {
 		log.Printf("[controller] backfilled %d window(s) after a gap", len(windows)-1)
 		c.tel.Add("vbilling_backfilled_windows_total", "Windows metered after a gap (restart or outage).", nil, float64(len(windows)-1))
@@ -550,91 +710,337 @@ func (c *Controller) CollectDue(ctx context.Context) {
 	}
 }
 
-// fillTenantGaps records tenant clusters whose own API failed in this run
-// and, once it answers again, meters the windows it missed. Those events go
-// to the ledger as late events, deduplicated by ID. A gap is the span of
-// failed windows only (first|last window end), so a fill repeated after a
-// crash never touches windows that were committed normally. Windows older
-// than MAX_BACKFILL are not filled.
-func (c *Controller) fillTenantGaps(ctx context.Context, st metrics.Stats, windows []metrics.Window, targets []metrics.Target) {
-	failed := map[string]bool{}
-	first, last := windows[0].End, windows[len(windows)-1].End
-	for _, id := range st.TenantAPIFailed {
-		failed[id] = true
-		from := first
-		if g, ok := parseGap(c.gaps, id); ok {
-			from = g[0]
-		} else {
-			log.Printf("[controller] %s: tenant API unreachable from window %s, will fill once it answers", id, first.Format(time.RFC3339))
-		}
-		_ = c.gaps.Set(id, from.Format(time.RFC3339)+"|"+last.Format(time.RFC3339))
+// recordGaps records, before a run commits its windows, the windows each
+// cluster's own API missed in it (failed), so a window committed without
+// its cluster's API read is always that cluster's gap, even if vBilling
+// stops right after the commit. A gap recorded for windows whose commit
+// never happened (vBilling stopped, or a commit failed) is dropped here by
+// the next run, which reads those windows again: a gap never holds a window
+// that was committed with its cluster's API read. Gaps older than
+// MAX_BACKFILL are dropped. An error means a gap could not be saved: the
+// run must not commit (its windows are read again next time).
+func (c *Controller) recordGaps(failed map[string][]metrics.Window, windows []metrics.Window) error {
+	size := c.cfg.CollectionInterval
+	wm, _ := c.spool.Watermark(spool.SourceCollector)
+	earliest := windows[len(windows)-1].End.Add(-c.cfg.MaxBackfill)
+	ids := map[string]bool{}
+	for id := range c.gaps.WithPrefix("") {
+		ids[id] = true
 	}
+	for id := range failed {
+		ids[id] = true
+	}
+	sorted := make([]string, 0, len(ids))
+	for id := range ids {
+		sorted = append(sorted, id)
+	}
+	sort.Strings(sorted)
+	var errs []error
+	for _, id := range sorted {
+		g, known := parseGaps(c.gaps, id, size)
+		next := g.through(wm)
+		if ws := failed[id]; len(ws) > 0 {
+			if len(next) == 0 {
+				log.Printf("[controller] %s: tenant API unreachable from window %s, will fill once it answers", id, ws[0].End.Format(time.RFC3339))
+			}
+			next = next.add(ws)
+		}
+		next = next.after(earliest)
+		var err error
+		switch {
+		case len(next) == 0 && known:
+			err = c.gaps.Delete(id)
+		case len(next) > 0 && (!known || next.String() != g.String()):
+			err = c.gaps.Set(id, next.String())
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", id, err))
+		}
+	}
+	err := errors.Join(errs...)
+	c.reportGaps(err)
+	return err
+}
+
+// reportGaps reports whether tenant API gaps can be saved (reported when
+// they cannot, and once when they can again).
+func (c *Controller) reportGaps(err error) {
+	c.mu.Lock()
+	was := c.gapsFailing
+	c.gapsFailing = err != nil
+	c.mu.Unlock()
+	if c.health == nil {
+		return
+	}
+	switch {
+	case err != nil:
+		c.health.Fail("tenant-api-gaps", "tenant-api", "", fmt.Errorf("the windows clusters' own APIs missed cannot be saved, so no window is committed until they can: %w", err),
+			"check DATA_DIR (tenant-api-gaps.json): free space and permissions")
+	case was:
+		c.health.OK("tenant-api-gaps", "tenant-api", "", 0)
+	}
+}
+
+// fillTenantGaps meters, once a cluster's own API answers again, exactly
+// the windows it missed (recordGaps). Those events go to the ledger as late
+// events, deduplicated by ID. A gap holds the failed windows themselves
+// (tenantGaps), never one committed with the cluster's API side in
+// between: fill IDs are salted, so a committed window filled again would
+// bill twice. A fill repeated after a crash gets the same IDs and is
+// dropped as a duplicate. Windows older than MAX_BACKFILL are not filled.
+//
+// A gap an earlier version recorded ("first|last") is one span from the
+// first failed window to the last, which may hold windows committed with
+// the cluster's API read, or filled already: its windows are filled with
+// the unsalted IDs those versions gave, so what a billing platform or the
+// ledger already has is dropped as a duplicate, and an event an earlier
+// fill already gave a salted ID is left out.
+func (c *Controller) fillTenantGaps(ctx context.Context, failed map[string][]metrics.Window, windows []metrics.Window, targets []metrics.Target) {
 	filler, ok := c.coll.(tenantFiller)
 	if !ok {
 		return
 	}
 	size := c.cfg.CollectionInterval
-	earliest := last.Add(-c.cfg.MaxBackfill)
+	earliest := windows[len(windows)-1].End.Add(-c.cfg.MaxBackfill)
 	for _, t := range targets {
 		id := t.Cluster.ExternalID()
-		g, ok := parseGap(c.gaps, id)
-		if !ok || failed[id] {
+		g, ok := parseGaps(c.gaps, id, size)
+		if !ok || len(failed[id]) > 0 {
 			continue
 		}
-		var missed []metrics.Window
-		for end := g[0]; !end.After(g[1]); end = end.Add(size) {
-			if end.After(earliest) {
-				missed = append(missed, metrics.Window{Start: end.Add(-size), End: end})
-			}
-		}
+		missed := g.windows(size, earliest)
 		if len(missed) == 0 {
-			_ = c.gaps.Delete(id)
+			c.dropGap(id)
 			continue
 		}
-		byWindow, fst, err := c.collectAttributed(ctx, []metrics.Target{t}, missed, filler.CollectTenantAPI)
+		byWindow, fst, _, err := c.collectAttributed(ctx, []metrics.Target{t}, missed, filler.CollectTenantAPI)
 		if err != nil || len(fst.TenantAPIFailed) > 0 {
 			continue // still unreachable: try again next window
 		}
+		legacy := g.legacyEnds(size)
 		var evs []usage.Event
 		for _, w := range missed {
-			evs = append(evs, byWindow[w.End]...)
+			for _, ev := range byWindow[w.End] {
+				salted := usage.DeriveIDWith(&ev, "fill")
+				if legacy[w.End] {
+					if c.spool.IngestedRecently(salted) {
+						continue // filled already, by a version that salted fills
+					}
+					salted = ev.ID
+				}
+				ev.ID = salted
+				if ev.Properties == nil {
+					ev.Properties = map[string]any{}
+				}
+				ev.Properties["filled"] = true
+				evs = append(evs, ev)
+			}
 		}
 		accepted, dups, err := c.spool.AppendIngest(SourceTenantFill, evs)
 		if err != nil {
 			log.Printf("[controller] %s: fill %d window(s): %v", id, len(missed), err)
 			continue
 		}
-		_ = c.gaps.Delete(id)
+		c.dropGap(id)
 		log.Printf("[controller] %s: filled %d window(s) missed during a tenant API outage (%d events, %d already in the ledger)",
 			id, len(missed), len(accepted), len(dups))
 		c.tel.Add("vbilling_tenant_api_filled_windows_total", "Windows filled after a tenant API outage.", nil, float64(len(missed)))
 	}
 }
 
-// parseGap reads a "first|last" window-end span.
-func parseGap(store *kv.Store, id string) ([2]time.Time, bool) {
+// dropGap forgets a filled gap. If that cannot be saved, the next fill
+// gives the same IDs and AppendIngest drops them as duplicates.
+func (c *Controller) dropGap(id string) {
+	err := c.gaps.Delete(id)
+	if err != nil {
+		log.Printf("[controller] %s: forget a filled tenant API gap: %v (filled again next time; the ledger drops the duplicates)", id, err)
+		c.reportGaps(err)
+		return
+	}
+	c.mu.Lock()
+	failing := c.gapsFailing
+	c.mu.Unlock()
+	if failing {
+		c.reportGaps(nil)
+	}
+}
+
+// gapSpan is a run of consecutive windows a cluster's own API missed, from
+// the first one's start to the last one's end. legacy marks a span an
+// earlier version recorded (see fillTenantGaps).
+type gapSpan struct {
+	start, end time.Time
+	legacy     bool
+}
+
+// tenantGaps are the windows a cluster's own API missed, as runs in time
+// order. Stored as "start/end,start/end" (RFC 3339), a span from an earlier
+// version as "start/end/legacy".
+type tenantGaps []gapSpan
+
+func (g tenantGaps) String() string {
+	parts := make([]string, len(g))
+	for i, s := range g {
+		parts[i] = s.start.Format(time.RFC3339) + "/" + s.end.Format(time.RFC3339)
+		if s.legacy {
+			parts[i] += "/legacy"
+		}
+	}
+	return strings.Join(parts, ",")
+}
+
+// add returns the gaps with windows added, runs that touch merged (a span
+// from an earlier version stays apart).
+func (g tenantGaps) add(ws []metrics.Window) tenantGaps {
+	all := append(tenantGaps(nil), g...)
+	for _, w := range ws {
+		all = append(all, gapSpan{start: w.Start.UTC(), end: w.End.UTC()})
+	}
+	sort.SliceStable(all, func(i, j int) bool { return all[i].start.Before(all[j].start) })
+	var out tenantGaps
+	for _, s := range all {
+		if n := len(out); n > 0 && out[n-1].legacy == s.legacy && !s.start.After(out[n-1].end) {
+			if s.end.After(out[n-1].end) {
+				out[n-1].end = s.end
+			}
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+// after drops the runs that end at or before t.
+func (g tenantGaps) after(t time.Time) tenantGaps {
+	var out tenantGaps
+	for _, s := range g {
+		if s.end.After(t) {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// through keeps the windows that end at or before t: the committed ones.
+func (g tenantGaps) through(t time.Time) tenantGaps {
+	var out tenantGaps
+	for _, s := range g {
+		if !s.start.Before(t) {
+			continue
+		}
+		if s.end.After(t) {
+			s.end = t
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+// windows returns the missed windows that end after earliest.
+func (g tenantGaps) windows(size time.Duration, earliest time.Time) []metrics.Window {
+	var out []metrics.Window
+	for _, s := range g {
+		for _, w := range windowsBetween(s.start, s.end, size, time.Time{}) {
+			if w.End.After(earliest) {
+				out = append(out, w)
+			}
+		}
+	}
+	return out
+}
+
+// legacyEnds are the ends of the windows of spans from earlier versions.
+func (g tenantGaps) legacyEnds(size time.Duration) map[time.Time]bool {
+	out := map[time.Time]bool{}
+	for _, s := range g {
+		if s.legacy {
+			for _, w := range windowsBetween(s.start, s.end, size, time.Time{}) {
+				out[w.End] = true
+			}
+		}
+	}
+	return out
+}
+
+// parseGaps reads a cluster's gaps. Earlier versions stored one span from
+// the first to the last failed window, "first|last|start", or "first|last"
+// (v0.3.0, whose first window was a whole window of the current size): it
+// is read as that span, marked legacy.
+func parseGaps(store *kv.Store, id string, size time.Duration) (tenantGaps, bool) {
 	v, ok := store.Get(id)
 	if !ok {
-		return [2]time.Time{}, false
+		return nil, false
 	}
-	a, b, found := strings.Cut(v, "|")
-	from, err1 := time.Parse(time.RFC3339, a)
-	to, err2 := time.Parse(time.RFC3339, b)
-	if !found || err1 != nil || err2 != nil || to.Before(from) {
+	var g tenantGaps
+	if strings.Contains(v, "|") {
+		parts := strings.Split(v, "|")
+		var times []time.Time
+		for _, p := range parts {
+			t, err := time.Parse(time.RFC3339, p)
+			if err != nil {
+				break
+			}
+			times = append(times, t)
+		}
+		if len(times) == len(parts) && len(times) >= 2 && len(times) <= 3 && !times[1].Before(times[0]) {
+			s := gapSpan{start: times[0].Add(-size), end: times[1], legacy: true}
+			if len(times) == 3 && times[2].Before(times[0]) {
+				s.start = times[2]
+			}
+			g = tenantGaps{s}
+		}
+	} else {
+		for _, part := range strings.Split(v, ",") {
+			fields := strings.Split(part, "/")
+			if len(fields) < 2 || len(fields) > 3 || len(fields) == 3 && fields[2] != "legacy" {
+				g = nil
+				break
+			}
+			s, errS := time.Parse(time.RFC3339, fields[0])
+			e, errE := time.Parse(time.RFC3339, fields[1])
+			if errS != nil || errE != nil || !e.After(s) {
+				g = nil
+				break
+			}
+			g = append(g, gapSpan{start: s, end: e, legacy: len(fields) == 3})
+		}
+	}
+	if len(g) == 0 {
 		_ = store.Delete(id)
-		return [2]time.Time{}, false
+		return nil, false
 	}
-	return [2]time.Time{from, to}, true
+	return g, true
+}
+
+// windowsBetween splits start to end into windows on the grid of size, the
+// last one marked Latest when it ends at latest. A start off the grid, the
+// watermark of an install that used another window size, first gets one
+// partial window up to the grid, so every later window lines up again.
+func windowsBetween(start, end time.Time, size time.Duration, latest time.Time) []metrics.Window {
+	var out []metrics.Window
+	for s := start; s.Before(end); {
+		e := s.Truncate(size).Add(size)
+		if e.After(end) {
+			e = end
+		}
+		out = append(out, metrics.Window{Start: s, End: e, Latest: e.Equal(latest)})
+		s = e
+	}
+	return out
 }
 
 // targets resolves every known cluster to its billing identity.
 func (c *Controller) targets() []metrics.Target {
 	src := discovery.TenantSource(c.cfg.TenantSource)
+	c.mu.Lock()
+	shared := c.shared
+	c.mu.Unlock()
 	var targets []metrics.Target
 	for _, cl := range c.Clusters() {
 		t, _ := c.tenants.Get(cl.TenantID(src))
 		target := metrics.Target{Cluster: cl, Tenant: t.ID, Project: cl.Project, TenantClass: t.Class}
-		if c.pauses != nil {
+		if c.pauses != nil && !shared[cl.ExternalID()] {
+			// A shared ID's spans could be either cluster's: neither is clipped.
 			target.Paused = c.pauses.Spans(cl.ExternalID())
 		}
 		targets = append(targets, target)
@@ -655,22 +1061,19 @@ func (c *Controller) CollectPrometheusDue(ctx context.Context) {
 	}
 	size := c.cfg.CollectionInterval
 	latestEnd := c.latestDue()
-	firstEnd := latestEnd
+	start := latestEnd.Add(-size)
 	if wm, ok := c.spool.Watermark(metrics.SourcePrometheus); ok {
 		if !latestEnd.After(wm) {
 			return
 		}
-		firstEnd = wm.Add(size)
-		if earliest := latestEnd.Add(-c.cfg.MaxBackfill).Truncate(size).Add(size); firstEnd.Before(earliest) {
+		start = wm
+		if earliest := latestEnd.Add(-c.cfg.MaxBackfill).Truncate(size); start.Before(earliest) {
 			log.Printf("[controller] Prometheus windows before %s are older than MAX_BACKFILL=%s; counters bill that usage in the first window read",
-				earliest.Add(-size).Format(time.RFC3339), c.cfg.MaxBackfill)
-			firstEnd = earliest
+				earliest.Format(time.RFC3339), c.cfg.MaxBackfill)
+			start = earliest
 		}
 	}
-	var windows []metrics.Window
-	for end := firstEnd; !end.After(latestEnd); end = end.Add(size) {
-		windows = append(windows, metrics.Window{Start: end.Add(-size), End: end, Latest: end.Equal(latestEnd)})
-	}
+	windows := windowsBetween(start, latestEnd, size, latestEnd)
 	// Windows read after the fact bill each cluster's owner during them,
 	// as Kubernetes backfill does. Each run of windows with the same owners
 	// is read and committed before the next one is read: counters bill

@@ -23,6 +23,7 @@ WORK=${WORK:-$(mktemp -d -t vbilling-pause)}
 CLUSTER=vbilling-e2e-pause
 KEEP=${1:-}
 API=127.0.0.1:28191
+TOKEN=e2e-admin-token # the API always needs a token
 export KUBECONFIG=$WORK/kubeconfig # never touches ~/.kube/config
 
 pass=0; fail=0
@@ -30,8 +31,8 @@ ok()    { echo "  PASS  $*"; pass=$((pass+1)); }
 bad()   { echo "  FAIL  $*"; fail=$((fail+1)); }
 step()  { echo; echo "==> $*"; }
 check() { if eval "$2"; then ok "$1"; else bad "$1"; fi; }
-api()   { curl -fsS "http://$API$1"; }
-put()   { curl -fsS -X PUT -H 'Content-Type: application/json' -d "$2" "http://$API$1"; }
+api()   { curl -fsS -H "Authorization: Bearer $TOKEN" "http://$API$1"; }
+put()   { curl -fsS -X PUT -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d "$2" "http://$API$1"; }
 vc()    { vcluster connect team-a -n vc-team-a --driver helm -- "$@"; }
 utc()   { python3 -I -c 'import datetime,sys; print((datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(seconds=int(sys.argv[1]))).strftime("%Y-%m-%dT%H:%M:%SZ"))' "${1:-0}"; }
 minute(){ python3 -I -c 'import datetime,sys; t=datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(seconds=int(sys.argv[1])); print(t.replace(second=0,microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ"))' "${1:-0}"; }
@@ -99,6 +100,7 @@ region: e2e
 metering: {cpuMemoryBasis: requests}
 enforcement: {mode: enforce, admissionPolicy: {enabled: true}}
 persistence: {enabled: true, size: 1Gi}
+api: {token: $TOKEN}
 EOF
 helm install vbilling "$ROOT/deploy/helm/vbilling" -n vbilling --create-namespace -f "$WORK/values.yaml" --wait --timeout 180s >/dev/null
 forward
@@ -110,7 +112,9 @@ step "Pause"
 put /api/v1/billing-states/acme '{"state":"paused","hold":"billing","reason":"prepaid balance reached zero"}' >/dev/null
 check "the pause completes" "wait_for 120 '[ \"\$(phase)\" = paused ]'"
 PAUSED_AT=$(ann vbilling.vcluster.com/paused-at)
-echo "  paused at $PAUSED_AT"
+# Billing stops when vBilling has verified the stop: the pause span's start.
+STOPPED_AT=$(api /api/v1/billing-states | jq -r '.pause_spans["vcluster-vc-team-a-team-a"][0].from')
+echo "  paused at $PAUSED_AT, stop verified at $STOPPED_AT"
 check "the control plane is scaled to zero" "[ \"\$(replicas)\" = 0 ]"
 check "it carries vBilling's pause annotations, not vcluster pause's" "[ \"\$(ann vbilling.vcluster.com/paused-by)\" = vbilling ] && [ \"\$(ann vbilling.vcluster.com/paused-replicas)\" = 1 ] && [ -z \"\$(ann loft.sh/paused)\" ]"
 check "the synced workloads are gone" "wait_for 60 '[ \"\$(synced)\" = 0 ]'"
@@ -125,7 +129,7 @@ FROM=$(minute 60)   # first window that starts after the pause
 TO=$(minute 180)    # two full paused windows
 check "two paused windows are metered" "wait_for 240 'window_done $TO'"
 api "/api/v1/events?from=$BEFORE&to=$TO&limit=100000" >"$WORK/events.jsonl"
-python3 -I - "$WORK/events.jsonl" "$PAUSED_AT" "$FROM" >"$WORK/paused.json" <<'EOF'
+python3 -I - "$WORK/events.jsonl" "$STOPPED_AT" "$FROM" >"$WORK/paused.json" <<'EOF'
 import json, sys, datetime
 import re
 # Python parses at most microseconds: trim RFC 3339 nanoseconds.
@@ -148,7 +152,7 @@ m() { jq -r "$1" "$WORK/paused.json"; }
 check "CPU was billed before the pause" "[ \"\$(m '.before.vcluster_cpu_core_hours // 0')\" != 0 ]"
 check "no CPU hours in fully paused windows" "[ \"\$(m '.paused_windows.vcluster_cpu_core_hours // 0')\" = 0 ]"
 check "no control plane hours in fully paused windows" "[ \"\$(m '.paused_windows.vcluster_instance_hours // 0')\" = 0 ]"
-check "control plane hours stop at the second of the pause" \
+check "control plane hours stop at the second the stop is verified" \
   "python3 -I -c 'import sys; a,b=float(sys.argv[1]),float(sys.argv[2]); sys.exit(abs(a-b)>1.5/3600)' \"\$(m '.pause_window.vcluster_instance_hours // 0')\" \"\$(m .expected_cp_hours)\""
 check "the volume keeps billing (1 GiB x 2 windows)" \
   "python3 -I -c 'import sys; sys.exit(abs(float(sys.argv[1])-2/60)>1e-6)' \"\$(m '.paused_windows.vcluster_storage_gb_hours // 0')\""

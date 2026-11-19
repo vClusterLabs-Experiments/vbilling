@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -26,16 +27,19 @@ import (
 	"github.com/vclusterlabs-experiments/vbilling/internal/destinations/metronome"
 	"github.com/vclusterlabs-experiments/vbilling/internal/destinations/stripe"
 	"github.com/vclusterlabs-experiments/vbilling/internal/discovery"
+	"github.com/vclusterlabs-experiments/vbilling/internal/diskspace"
 	"github.com/vclusterlabs-experiments/vbilling/internal/enforcement"
 	"github.com/vclusterlabs-experiments/vbilling/internal/gateway"
 	"github.com/vclusterlabs-experiments/vbilling/internal/health"
 	"github.com/vclusterlabs-experiments/vbilling/internal/kv"
+	"github.com/vclusterlabs-experiments/vbilling/internal/lease"
 	"github.com/vclusterlabs-experiments/vbilling/internal/metrics"
 	"github.com/vclusterlabs-experiments/vbilling/internal/pause"
 	"github.com/vclusterlabs-experiments/vbilling/internal/pipeline"
 	"github.com/vclusterlabs-experiments/vbilling/internal/platform"
 	"github.com/vclusterlabs-experiments/vbilling/internal/pricing"
 	"github.com/vclusterlabs-experiments/vbilling/internal/records"
+	"github.com/vclusterlabs-experiments/vbilling/internal/safeguard"
 	"github.com/vclusterlabs-experiments/vbilling/internal/spool"
 	"github.com/vclusterlabs-experiments/vbilling/internal/telemetry"
 	"github.com/vclusterlabs-experiments/vbilling/internal/tenantapi"
@@ -47,11 +51,14 @@ import (
 	_ "github.com/vclusterlabs-experiments/vbilling/internal/destinations/webhook"
 )
 
-var version = "0.3.0"
+var version = "0.3.1"
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "ledger" {
 		os.Exit(runLedgerCmd(os.Args[2:]))
+	}
+	if len(os.Args) > 1 && os.Args[1] == "metronome" {
+		os.Exit(runMetronomeCmd(os.Args[2:]))
 	}
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	log.Printf("vBilling %s: usage metering for tenant clusters", version)
@@ -60,9 +67,8 @@ func main() {
 	if err := cfg.Validate(); err != nil {
 		log.Fatalf("invalid configuration: %v", err)
 	}
-	if cfg.SpotDiscountPercent > 0 {
-		log.Printf("WARNING: SPOT_DISCOUNT_PERCENT is deprecated and ignored. Quantities are no longer discounted; " +
-			"price spot and preemptible capacity in your billing backend using the capacity_type dimension.")
+	for _, w := range cfg.Warnings {
+		log.Printf("WARNING: setting %s", w)
 	}
 	customs, err := usage.ParseCustomMetrics(cfg.CustomMetrics)
 	if err != nil {
@@ -108,6 +114,21 @@ func main() {
 	log.Printf("Adapters: %v | Region: %s | Window: %s | CPU/memory basis: %s | Data: %s",
 		cfg.Adapters, cfg.Region, cfg.CollectionInterval, cfg.CPUMemoryBasis, cfg.DataDir)
 
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+	kubeConfig, namespace, err := getKubeConfig()
+	if err != nil {
+		log.Fatalf("kubernetes config: %v", err)
+	}
+	kube, err := kubernetes.NewForConfig(kubeConfig)
+	if err != nil {
+		log.Fatalf("kubernetes client: %v", err)
+	}
+	// One instance at a time: nothing is opened, metered, taken in or
+	// delivered before this process holds the Lease.
+	guard := holdLease(ctx, kube, namespace, cfg.ListenAddr)
+	defer guard.Release()
+
 	sp, err := spool.Open(filepath.Join(cfg.DataDir, "ledger"), spool.Options{Retention: cfg.Retention, ArchiveDir: cfg.ArchiveDir})
 	if err != nil {
 		log.Fatalf("open ledger: %v", err)
@@ -128,14 +149,6 @@ func main() {
 		log.Fatalf("initialize adapters: %v", err)
 	}
 
-	kubeConfig, err := getKubeConfig()
-	if err != nil {
-		log.Fatalf("kubernetes config: %v", err)
-	}
-	kube, err := kubernetes.NewForConfig(kubeConfig)
-	if err != nil {
-		log.Fatalf("kubernetes client: %v", err)
-	}
 	metricsClient, err := metricsclient.NewForConfig(kubeConfig)
 	if err != nil {
 		log.Fatalf("metrics client: %v", err)
@@ -147,17 +160,24 @@ func main() {
 
 	tel := telemetry.Default
 	sources := health.New(tel)
+	// A full ledger volume stops every commit: report it long before.
+	go diskspace.Watch(ctx, map[string]string{"ledger-volume": cfg.DataDir, "archive-volume": cfg.ArchiveDir}, sources, tel)
 	tenants := pipeline.NewTenantRegistry()
-	// Events held until their billing platform prices them (PRICE_CHECK=hold).
-	// Always opened, so whatever an earlier run held is released.
+	// Events held until their billing platform counts them (Metronome: a
+	// billable metric, unless PRICE_CHECK=off) or prices them
+	// (PRICE_CHECK=hold). Always opened, so whatever an earlier run held is
+	// released.
 	held, err := pipeline.OpenHeld(filepath.Join(cfg.DataDir, "held"), false)
 	if err != nil {
 		log.Fatalf("open held events: %v", err)
 	}
+	// Held usage is released, unpriced, before its invoice period can be
+	// final, after pipeline.MaxUnpricedHold.
+	maxHold := min(cfg.PriceCheckMaxHold, pipeline.MaxUnpricedHold)
 	var prices *pricing.Service
 	if cfg.PriceCheck != pricing.ModeOff {
 		prices = pricing.New(sp, dests, tenants, held, sources, tel, pricing.Options{
-			Mode: cfg.PriceCheck, Interval: cfg.PriceCheckInterval, Lookback: cfg.PriceCheckLookback, MaxHold: cfg.PriceCheckMaxHold,
+			Mode: cfg.PriceCheck, Interval: cfg.PriceCheckInterval, Lookback: cfg.PriceCheckLookback, MaxHold: maxHold,
 		})
 	}
 	var gate pipeline.Gate
@@ -169,11 +189,8 @@ func main() {
 		Bootstrap: func(ctx context.Context, d destinations.Destination) error { return d.Bootstrap(ctx, usage.Catalog()) },
 		Held:      held,
 		Gate:      gate,
-		MaxHold:   cfg.PriceCheckMaxHold,
+		MaxHold:   maxHold,
 	}, tel)
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
-
 	disc := discovery.NewDiscoverer(kube, dynamicClient, cfg.WatchNamespaces, cfg.PlatformCluster)
 	owners := newPlatformResolver(cfg, sources, sp)
 	if owners != nil {
@@ -215,6 +232,11 @@ func main() {
 	coll.UseDynamic(dynamicClient)
 	coll.UsePauses(pauses)
 	coll.UseHealth(sources)
+	// What vBilling first saw of each node of a cluster's own, and the most
+	// GPUs it had: a relabel inside the cluster never lowers its bill.
+	if err := coll.UsePrivateNodeHistory(filepath.Join(cfg.DataDir, "private-nodes.json")); err != nil {
+		log.Fatalf("private node history: %v", err)
+	}
 	prom, err := coll.NewPromSource(metrics.PromOptions{
 		SourceLabel: cfg.PromSourceLabel,
 		Lookback:    cfg.PromLookback,
@@ -246,15 +268,15 @@ func main() {
 			Retention:     retention,
 		}
 		if owners != nil && cfg.PlatformProxy {
-			topts.Platform = owners // the vbilling-kubeconfig Secret still overrides it per cluster
-			log.Printf("Tenant APIs: clusters bound to vCluster Platform are reached through its proxy at %s", owners.Client().Host())
+			topts.Platform = owners // the only route: kubeconfig Secrets are not read in Platform mode
+			log.Printf("Tenant APIs: clusters are reached only through the vCluster Platform proxy at %s", owners.Client().Host())
 		}
 		mgr := tenantapi.New(ctx, kube, topts)
 		coll.UseTenantAPI(mgr)
 		tenantMgr = mgr
 		disc.WithExternal(mgr.Clusters())
-		log.Printf("Tenant APIs: Secret %q per tenant cluster (admin fallback %t), %d external tenant cluster(s), private nodes billed by %s",
-			cfg.TenantKubeconfigSecret, cfg.TenantAdminFallback, len(ext), cfg.PrivateNodeBilling)
+		log.Printf("Cluster APIs: Secret %q per cluster, %d external cluster(s), private nodes billed by %s",
+			cfg.TenantKubeconfigSecret, len(ext), cfg.PrivateNodeBilling)
 	}
 	checks, err := crosscheck.Parse(cfg.CrossChecks)
 	if err != nil {
@@ -263,6 +285,9 @@ func main() {
 	ctrl := controller.New(cfg, disc, coll, sp, tenants, dests, tel)
 	ctrl.UsePrometheus(prom)
 	ctrl.UsePauses(pauses)
+	ctrl.UseHeld(held) // offboarding waits for usage held until priced
+	ctrl.UseHealth(sources)
+	ctrl.UseSafeguard(safeguard.New(sp, sources, tel))
 	if prices != nil {
 		prices.SetReady(ctrl.Ready) // plans are known once tenants are discovered
 	}
@@ -278,6 +303,7 @@ func main() {
 		AllowUnkeyed:         cfg.RecordsAllowUnkeyed,
 		RejectUnknownTenants: cfg.RecordsRejectUnknown,
 		Region:               cfg.Region,
+		BoundTokens:          cfg.IngestTokens, // pinned pulls use the record IDs of the tenant's bound token
 	}
 	// The aggregator must exist before the API accepts records: it raises the
 	// records ledger's clock past every window already committed.
@@ -315,20 +341,37 @@ func main() {
 			if lb := time.Duration(spec.Lookback); lb > cfg.RecordsRetention-2*time.Hour {
 				log.Fatalf("RECORDS_PULL_FILE: pull %s: lookback %s must be at most RECORDS_RETENTION minus 2h (%s)", spec.Name, lb, cfg.RecordsRetention-2*time.Hour)
 			}
+			if err := ingester.CheckPin(spec.Tenant); err != nil {
+				log.Fatalf("RECORDS_PULL_FILE: pull %s: %v", spec.Name, err)
+			}
 			pullers = append(pullers, records.NewPuller(ingester, spec, state, ctrl.Ready, sources, tel))
 			log.Printf("Records: pulling %s (format %s, client %q) every %s, lookback %s", spec.Name, spec.Format, spec.Client,
 				time.Duration(spec.Interval), time.Duration(spec.Lookback))
 		}
 	}
+	// Tenants that exist without a cluster: those the records configuration
+	// bills to (tenant maps, tenant-bound pulls) and those holding a billing
+	// state. No cluster's alias can capture them.
+	recordsTenants := recordsConfigTenants(cfg, formats, pullSpecs)
+	ctrl.UseKnownTenants(func(id string) bool { return recordsTenants[id] || enf.HasState(id) })
 
-	srv := &http.Server{
-		Addr:              cfg.ListenAddr,
-		Handler:           api.New(cfg, sp, disp, tenants, ctrl, enf, tel, version).WithHealth(sources).WithPauses(pauses).WithRecords(ingester).WithCrossChecks(checks).WithPricing(prices).Handler(),
-		ReadHeaderTimeout: 10 * time.Second,
+	// The API is never open: without API_TOKEN, a token is generated in
+	// DATA_DIR (log its path, never the token). Ingest has a token of its
+	// own, never the API token.
+	tokenFiles, err := api.PrepareTokens(cfg)
+	if err != nil {
+		log.Fatalf("API token: %v", err)
 	}
-	if cfg.APIToken == "" {
-		log.Printf("WARNING: API_TOKEN is not set; usage and admin endpoints on %s are unauthenticated (keep the Service internal)", cfg.ListenAddr)
+	if tokenFiles.API != "" {
+		log.Printf("API_TOKEN is not set: the API requires the token vBilling keeps in %s", tokenFiles.API)
 	}
+	if tokenFiles.Ingest != "" {
+		log.Printf("INGEST_TOKEN is not set: gateways send usage with the token vBilling keeps in %s (never the API token)", tokenFiles.Ingest)
+	}
+	apiServer := api.New(cfg, sp, disp, tenants, ctrl, enf, tel, version).WithHealth(sources).WithPauses(pauses).WithRecords(ingester).WithCrossChecks(checks).WithPricing(prices)
+	go apiServer.Run(ctx) // the SKUs tenants have in the ledger and those billing platforms price
+	// Read, write and idle timeouts; the raw export streams past them.
+	srv := apiServer.HTTPServer(cfg.ListenAddr)
 
 	var wg sync.WaitGroup
 	wg.Add(6)
@@ -354,24 +397,14 @@ func main() {
 			}
 		}
 	}()
-	go func() {
-		// Converge clusters created or unreachable during a state change,
-		// and pause again at once any cluster of a paused tenant that runs.
-		t := time.NewTicker(2 * time.Minute)
-		defer t.Stop()
-		guard := time.NewTicker(15 * time.Second)
-		defer guard.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return // a pause cut short here is finished at the next start
-			case <-t.C:
-				enf.Resync(ctx)
-			case <-guard.C:
-				enf.Guard(ctx)
-			}
-		}
-	}()
+	// Converge clusters created or unreachable during a state change, and
+	// pause again at once any cluster of a paused tenant that runs. Each
+	// loop has its own goroutine: slow cluster APIs or gateway calls in a
+	// resync never hold up the guard, and a woken paused cluster is stopped
+	// within 15 seconds. A pause cut short at shutdown is finished at the
+	// next start.
+	go every(ctx, 2*time.Minute, enf.Resync)
+	go every(ctx, 15*time.Second, enf.Guard)
 	go func() {
 		defer wg.Done()
 		compactLoop(ctx, recSpool, nil)
@@ -519,7 +552,7 @@ func newEnforcer(cfg *config.Config, kube kubernetes.Interface, ctrl *controller
 		}
 		log.Printf("Enforcement inside clusters: on (needs write access to admission policies in each cluster)")
 	}
-	return enforcement.New(kube, enforcement.Options{
+	opts := enforcement.Options{
 		TenantClient:           tenantClient,
 		Mode:                   cfg.EnforcementMode,
 		StripeWebhookSecret:    cfg.StripeWebhookSecret,
@@ -529,13 +562,72 @@ func newEnforcer(cfg *config.Config, kube kubernetes.Interface, ctrl *controller
 		Resolvers:              resolvers,
 		State:                  state,
 		Telemetry:              tel,
+		IsTenant:               ctrl.KnownTenant,
+		Neighbors:              neighbors(cfg, ctrl),
 		Pauses:                 pauses,
-		Freeze:                 coll.Freeze,
 		OnPause:                ctrl.SetPaused,
 		DrainTimeout:           cfg.PauseDrainTimeout,
 		KeepNamespaces:         cfg.PauseKeepNamespaces,
 		Gateway:                gw,
-	})
+	}
+	if tenantMgr != nil {
+		// Metering reads clusters' own APIs, so it bills their own nodes: a
+		// pause verifies they are empty before it stops billing them.
+		opts.Freeze, opts.OwnNodes = coll.Freeze, coll.OwnNodes
+	}
+	return enforcement.New(kube, opts)
+}
+
+// neighbors lists the clusters in a control plane cluster namespace with
+// the tenant each bills to.
+func neighbors(cfg *config.Config, ctrl *controller.Controller) func(string) map[string]string {
+	src := discovery.TenantSource(cfg.TenantSource)
+	return func(ns string) map[string]string {
+		out := map[string]string{}
+		for _, cl := range ctrl.Clusters() {
+			if !cl.External && cl.Namespace == ns {
+				out[cl.Name] = cl.TenantID(src)
+			}
+		}
+		return out
+	}
+}
+
+// recordsConfigTenants returns the tenants the records configuration bills
+// to by name: tenant-bound pulls and the targets of formats' tenant maps.
+// (Tenants bound to ingest tokens the controller reads from the
+// configuration itself.)
+func recordsConfigTenants(cfg *config.Config, formats records.Formats, pulls []records.PullSpec) map[string]bool {
+	out := map[string]bool{}
+	add := func(t string) {
+		if t = strings.TrimSpace(t); t != "" {
+			out[t] = true
+		}
+	}
+	add(cfg.RecordsPullLiteLLMTenant)
+	for _, p := range pulls {
+		add(p.Tenant)
+	}
+	for _, f := range formats {
+		for _, t := range f.TenantMap {
+			add(t)
+		}
+	}
+	return out
+}
+
+// every runs f every interval until ctx ends.
+func every(ctx context.Context, interval time.Duration, f func(context.Context)) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			f(ctx)
+		}
+	}
 }
 
 // newPlatformResolver sets up TENANT_SOURCE=platform: tenant identity from
@@ -590,18 +682,56 @@ func compactLoop(ctx context.Context, sp *spool.Spool, consumers []string) {
 	}
 }
 
-func getKubeConfig() (*rest.Config, error) {
+// getKubeConfig returns the Kubernetes config and the namespace vBilling
+// runs in: the pod's own, or the kubeconfig context's ("" when it names none).
+func getKubeConfig() (*rest.Config, string, error) {
 	if cfg, err := rest.InClusterConfig(); err == nil {
 		log.Println("Using in-cluster Kubernetes config")
-		return cfg, nil
+		ns, _ := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
+		return cfg, strings.TrimSpace(string(ns)), nil
 	}
 	rules := clientcmd.NewDefaultClientConfigLoadingRules()
-	cfg, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, &clientcmd.ConfigOverrides{}).ClientConfig()
+	cc := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, &clientcmd.ConfigOverrides{})
+	cfg, err := cc.ClientConfig()
 	if err != nil {
-		return nil, err
+		return nil, "", err
+	}
+	ns := ""
+	if raw, err := cc.RawConfig(); err == nil {
+		if c := raw.Contexts[raw.CurrentContext]; c != nil {
+			ns = c.Namespace
+		}
 	}
 	log.Printf("Using kubeconfig (%s)", os.Getenv("KUBECONFIG"))
-	return cfg, nil
+	return cfg, ns, nil
+}
+
+// holdLease takes the vbilling Lease in namespace (see internal/lease) and
+// stops the process if it is ever lost. A second instance waits here, alive
+// but not Ready. Without a namespace, or without RBAC for Leases, vBilling
+// runs without the guard and says so.
+func holdLease(ctx context.Context, kube kubernetes.Interface, namespace, listen string) *lease.Held {
+	if namespace == "" {
+		log.Printf("WARNING: vBilling does not know its namespace (outside a cluster, set one on the kubeconfig context), so it cannot take its Lease and runs without the single-instance guard: never run two vBilling instances against the same clusters")
+		return nil
+	}
+	held, err := lease.Acquire(ctx, kube, lease.Options{Namespace: namespace, Listen: listen})
+	switch {
+	case err == nil:
+	case errors.Is(err, lease.ErrForbidden):
+		log.Printf("WARNING: %v: running without the single-instance guard. Grant get, create and update on leases in namespace %s (the chart's Role does)", err, namespace)
+		return nil
+	case ctx.Err() != nil:
+		log.Println("vBilling stopped while waiting for its Lease")
+		os.Exit(0)
+	case err != nil:
+		log.Fatalf("Lease %s/%s: %v", namespace, lease.Name, err)
+	}
+	go func() {
+		<-held.Lost()
+		log.Fatalf("[lease] lost Lease %s/%s: stopping now so another instance can take over; the ledger and backfill resume where this one stopped", namespace, lease.Name)
+	}()
+	return held
 }
 
 func onOff(b bool) string {
