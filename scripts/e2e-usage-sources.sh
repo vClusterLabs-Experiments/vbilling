@@ -76,7 +76,59 @@ kind create cluster --name "$CLUSTER" --wait 120s >/dev/null
 kind get kubeconfig --name "$CLUSTER" >"$KUBECONFIG"
 docker build -q -t vbilling:e2e-sources "$ROOT" >/dev/null
 kind load docker-image vbilling:e2e-sources --name "$CLUSTER" >/dev/null
-vcluster create team-a -n vc-team-a --driver helm --connect=false >/dev/null
+# vBilling reaches the cluster with the read-only kubeconfig vCluster exports,
+# plus the documented right to manage its own admission policies.
+cat >"$WORK/vcluster.yaml" <<'VC'
+exportKubeConfig:
+  additionalSecrets:
+    - name: vbilling-kubeconfig
+      serviceAccount:
+        name: vbilling-reader
+        namespace: kube-system
+        clusterRole: vbilling-reader
+experimental:
+  deploy:
+    vcluster:
+      manifests: |-
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: ClusterRole
+        metadata:
+          name: vbilling-reader
+        rules:
+          - apiGroups: [""]
+            resources: [nodes, pods, persistentvolumeclaims, services, namespaces]
+            verbs: [get, list, watch]
+          - apiGroups: [coordination.k8s.io]
+            resources: [leases]
+            verbs: [get]
+        ---
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: ClusterRole
+        metadata:
+          name: vbilling-enforcer
+        rules:
+          - apiGroups: [admissionregistration.k8s.io]
+            resources: [validatingadmissionpolicies, validatingadmissionpolicybindings]
+            verbs: [create]
+          - apiGroups: [admissionregistration.k8s.io]
+            resources: [validatingadmissionpolicies, validatingadmissionpolicybindings]
+            resourceNames: [vbilling-suspended, vbilling-paused]
+            verbs: [get, update, delete]
+        ---
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: ClusterRoleBinding
+        metadata:
+          name: vbilling-enforcer
+        roleRef:
+          apiGroup: rbac.authorization.k8s.io
+          kind: ClusterRole
+          name: vbilling-enforcer
+        subjects:
+          - kind: ServiceAccount
+            name: vbilling-reader
+            namespace: kube-system
+VC
+vcluster create team-a -n vc-team-a --driver helm --connect=false -f "$WORK/vcluster.yaml" >/dev/null
 kubectl label ns vc-team-a vbilling.vcluster.com/tenant=acme --overwrite >/dev/null
 kubectl annotate ns vc-team-a vbilling.vcluster.com/aliases=team-acme-gw --overwrite >/dev/null
 
@@ -179,10 +231,9 @@ prometheus:
   metrics:
     - {code: engine_output_tokens, unit: tokens, billable: false, skuLabel: model_name, counter: 'vllm:generation_tokens_total{{selector}}'}
     - {code: engine_output_tokens_est, unit: tokens, billable: false, query: 'sum(increase(vllm:generation_tokens_total{{selector}}[{{window}}]))'}
-records: {settle: 20s, litellm: true}
+records: {litellm: true}
 crossChecks: [{primary: inference_output_tokens, secondary: engine_output_tokens, tolerancePercent: 2}]
 enforcement: {mode: enforce, inCluster: true, admissionPolicy: {enabled: true}}
-tenantAPI: {adminFallback: true}
 persistence: {enabled: true, size: 1Gi}
 EOF
 helm install vbilling "$ROOT/deploy/helm/vbilling" -n vbilling --create-namespace -f "$WORK/values.yaml" --wait --timeout 180s >/dev/null
