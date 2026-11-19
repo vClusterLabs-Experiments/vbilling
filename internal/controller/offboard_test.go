@@ -72,3 +72,39 @@ func TestOffboardingWaitsForDeliveryAndHeldUsage(t *testing.T) {
 		t.Fatal("tenant still registered after offboarding")
 	}
 }
+
+// A tenant without clusters stays while its usage arrives from any source,
+// and is offboarded OFFBOARD_GRACE after the end of its last window.
+func TestTenantIsOffboardedAGraceAfterItsLastUsage(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	h.disc.clusters = []discovery.TenantCluster{cluster("team-a", "train", map[string]string{discovery.AnnotationPrefix + "tenant": "acme"})}
+	h.c.Reconcile(ctx)
+	h.sp.Cursor("fake")
+	h.disc.clusters = nil
+	h.c.Reconcile(ctx)
+	var last time.Time
+	for i := 1; i <= 30; i++ { // gateway usage for 30 more minutes
+		h.now = h.now.Add(time.Minute)
+		last = h.now.Truncate(time.Minute)
+		ev := usage.Event{Tenant: "acme", Metric: usage.MetricNetworkEgressGB, Quantity: 1, WindowStart: last.Add(-time.Minute), WindowEnd: last}
+		ev.Finalize()
+		if err := h.sp.AppendWindow("prometheus", last, []usage.Event{ev}, ""); err != nil {
+			t.Fatal(err)
+		}
+		if err := h.sp.Ack("fake", h.sp.Committed()); err != nil {
+			t.Fatal(err)
+		}
+		h.c.Reconcile(ctx)
+	}
+	h.now = last.Add(59 * time.Minute)
+	h.c.Reconcile(ctx)
+	if len(h.dest.removed) != 0 {
+		t.Fatalf("offboarded %v within OFFBOARD_GRACE of its last usage", h.dest.removed)
+	}
+	h.now = last.Add(61 * time.Minute)
+	h.c.Reconcile(ctx)
+	if len(h.dest.removed) != 1 || h.dest.removed[0] != "acme" {
+		t.Fatalf("removed = %v, want acme offboarded a grace after its last usage", h.dest.removed)
+	}
+}

@@ -61,7 +61,7 @@ type Controller struct {
 
 	mu         sync.Mutex
 	clusters   []discovery.TenantCluster
-	lastSeen   map[string]time.Time       // tenant -> last time it had a tenant cluster
+	lastSeen   map[string]time.Time       // tenant -> last time it had a tenant cluster or new usage
 	offboarded map[string]map[string]bool // tenant -> destinations done offboarding it
 	off        offboarding                // where each departed tenant's usage ends (offboard.go)
 	held       heldUsage                  // optional: usage held from destinations until priced
@@ -70,6 +70,11 @@ type Controller struct {
 	lastWindow time.Time
 	// lastUnrequested is the last logged count of pods without requests.
 	lastUnrequested int
+
+	// usageRead is the ledger sequence read through for recent usage
+	// (usageSince); usageStarted is false until the first reconcile.
+	usageRead    uint64
+	usageStarted bool
 
 	// gaps: tenant cluster external ID -> end of the first window its own
 	// API could not be read for. Persisted, so a restart still fills them.
@@ -453,6 +458,7 @@ func (c *Controller) Reconcile(ctx context.Context) {
 	if c.spool != nil {
 		head = c.spool.Committed()
 	}
+	using, readThrough := c.usageSince(head)
 	c.mu.Lock()
 	c.aliases = aliases
 	c.ambiguous = ambiguous
@@ -464,13 +470,27 @@ func (c *Controller) Reconcile(ctx context.Context) {
 		c.off.noteSeen(t.ID, head)
 		delete(c.offboarded, t.ID) // back before offboarding finished: start over next time
 	}
+	// A tenant whose usage still arrives (gateway records, ingest, Prometheus)
+	// is not gone, whether or not it still has a cluster: it was last seen
+	// at the end of its latest window (never later than now).
+	for id, end := range using {
+		if end.After(now) {
+			end = now
+		}
+		if seen, known := c.lastSeen[id]; known && end.After(seen) {
+			c.lastSeen[id] = end
+			delete(c.offboarded, id) // back before offboarding finished: start over next time
+		}
+	}
 	var gone []usage.Tenant
 	current := map[string]bool{}
 	for _, t := range tenants {
 		current[t.ID] = true
 	}
 	for id, seen := range c.lastSeen {
-		if !current[id] && now.Sub(seen) >= c.cfg.OffboardGrace {
+		// Until the ledger is read through, a tenant's latest usage may be
+		// in the part not read yet: nobody is offboarded.
+		if readThrough && !current[id] && now.Sub(seen) >= c.cfg.OffboardGrace {
 			t, _ := c.tenants.Get(id)
 			gone = append(gone, t)
 		}
