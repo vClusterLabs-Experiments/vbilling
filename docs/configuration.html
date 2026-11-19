@@ -259,6 +259,7 @@
       <!-- Environment Variables -->
       <h2 id="environment-variables">Environment Variables</h2>
       <p>vBilling reads its configuration from environment variables; the Helm chart sets them from <code>values.yaml</code>. Credentials come from Kubernetes Secrets (see <code>existingSecret</code> in each section of the chart).</p>
+      <p>Most installs set about ten: <code>ADAPTERS</code>, that billing platform's credentials, <code>REGION</code>, <code>CLUSTER_NAME</code>, <code>TENANT_SOURCE</code> (with the Platform URL and key for <code>platform</code>), <code>ENFORCEMENT_MODE</code> and, for usage from Prometheus or AI gateways, <code>PROMETHEUS_URL</code> or the records settings. Everything else has a default that is right for billing. Settings removed in v0.3.1 are listed <a href="#removed">below</a>.</p>
       <h3>Destinations</h3>
       <div class="config-table-wrap">
         <table class="config-table">
@@ -270,11 +271,6 @@
               <td><code>ADAPTERS</code></td>
               <td>Comma-separated destinations usage fans out to: <code>stripe</code>, <code>metronome</code>, <code>lago</code>, <code>webhook</code>, <code>noop</code>. Each destination reads the ledger through its own cursor.</td>
               <td class="td-default">lago</td>
-            </tr>
-            <tr>
-              <td><code>ADAPTER</code></td>
-              <td>Deprecated v0.1 single-adapter form, used only when <code>ADAPTERS</code> is empty.</td>
-              <td class="td-default">(none)</td>
             </tr>
           </tbody>
         </table>
@@ -295,21 +291,6 @@
               <td><code>CLUSTER_NAME</code></td>
               <td>Name of this control plane cluster; used as the CloudEvents source.</td>
               <td class="td-default">control-plane</td>
-            </tr>
-            <tr>
-              <td><code>ZONE</code></td>
-              <td>Default zone when nodes carry no <code>topology.kubernetes.io/zone</code> label.</td>
-              <td class="td-default">(none)</td>
-            </tr>
-            <tr>
-              <td><code>REGION_FROM_NODE</code></td>
-              <td>Use the node's <code>topology.kubernetes.io/region</code> label instead of <code>REGION</code>.</td>
-              <td class="td-default">false</td>
-            </tr>
-            <tr>
-              <td><code>DEFAULT_TENANT_CLASS</code></td>
-              <td>Tenant class stamped on events when a tenant cluster has none (public, enterprise, government, dev, ...).</td>
-              <td class="td-default">(none)</td>
             </tr>
             <tr>
               <td><code>TENANT_SOURCE</code></td>
@@ -337,21 +318,6 @@
               <td class="td-default">(system roots) / false</td>
             </tr>
             <tr>
-              <td><code>PLATFORM_REFRESH</code></td>
-              <td>How often the Platform is read. A new cluster triggers an extra read. At least 10s.</td>
-              <td class="td-default">1m</td>
-            </tr>
-            <tr>
-              <td><code>PLATFORM_ORPHAN_GRACE</code></td>
-              <td>A cluster whose instance disappeared while its workload keeps running stays with its last owner this long, then falls back to the label rules. <code>0</code> keeps the last owner.</td>
-              <td class="td-default">0</td>
-            </tr>
-            <tr>
-              <td><code>PLATFORM_PROXY</code></td>
-              <td>Reach clusters with their own nodes through the Platform proxy with the same key. A <code>vbilling-kubeconfig</code> Secret still overrides it per cluster.</td>
-              <td class="td-default">true</td>
-            </tr>
-            <tr>
               <td><code>WATCH_NAMESPACES</code></td>
               <td>Comma-separated namespaces to discover tenant clusters in. Empty watches all namespaces.</td>
               <td class="td-default">(all)</td>
@@ -372,11 +338,6 @@
               <td class="td-default">/var/lib/vbilling</td>
             </tr>
             <tr>
-              <td><code>RETENTION</code></td>
-              <td>How long closed ledger segments stay on the ledger volume once every destination has consumed them. <code>0</code> keeps them forever.</td>
-              <td class="td-default">168h</td>
-            </tr>
-            <tr>
               <td><code>ARCHIVE_DIR</code></td>
               <td>Long-term archive. Before compaction deletes a segment, vBilling gzips it into this directory and records it in <code>archive.jsonl</code>. See <a href="#retention-and-disputes">Retention and disputes</a>.</td>
               <td class="td-default">(none)</td>
@@ -392,29 +353,9 @@
           </thead>
           <tbody>
             <tr>
-              <td><code>COLLECTION_INTERVAL</code></td>
-              <td>Metering window size, aligned to the wall clock. Must be 10s to 1h and divide an hour.</td>
-              <td class="td-default">60s</td>
-            </tr>
-            <tr>
               <td><code>COLLECTION_DELAY</code></td>
               <td>How long after a window ends it is metered (at least 5s, at most 10m). On spot or preemptible GPUs use <code>75s</code>: Kubernetes marks a node that died without warning 40 to 50 seconds after its last heartbeat, and with the longer delay the window it died in is billed only up to that heartbeat. Usage reaches billing platforms that much later. Helm: <code>billing.collectionDelay</code>.</td>
               <td class="td-default">5s</td>
-            </tr>
-            <tr>
-              <td><code>RECONCILE_INTERVAL</code></td>
-              <td>How often tenant clusters are rediscovered.</td>
-              <td class="td-default">30s</td>
-            </tr>
-            <tr>
-              <td><code>MAX_BACKFILL</code></td>
-              <td>Windows missed during downtime are backfilled up to this age.</td>
-              <td class="td-default">6h</td>
-            </tr>
-            <tr>
-              <td><code>OFFBOARD_GRACE</code></td>
-              <td>A tenant must have no tenant clusters for this long before destinations offboard it.</td>
-              <td class="td-default">1h</td>
             </tr>
             <tr>
               <td><code>CPU_MEMORY_BASIS</code></td>
@@ -502,11 +443,6 @@
               <td class="td-default">vcluster</td>
             </tr>
             <tr>
-              <td><code>PROMETHEUS_LOOKBACK</code></td>
-              <td>How far before a window vBilling looks for the sample a counter's increase starts from. Keep it longer than the scrape interval plus any remote-write delay.</td>
-              <td class="td-default">10m</td>
-            </tr>
-            <tr>
               <td><code>PROMETHEUS_BEARER_TOKEN_FILE</code></td>
               <td>Bearer token file, re-read on every query (for example a service account token for an OpenShift Thanos querier).</td>
               <td class="td-default">(none)</td>
@@ -519,14 +455,8 @@
         <table class="config-table">
           <thead><tr><th>Variable</th><th>Description</th><th>Default</th></tr></thead>
           <tbody>
-            <tr><td><code>TENANT_API</code></td><td>Meter tenant clusters with their own nodes (Private Nodes, Auto Nodes, Standalone) through their own API.</td><td class="td-default">true</td></tr>
-            <tr><td><code>TENANT_KUBECONFIG_SECRET</code></td><td>Secret in each tenant cluster's namespace holding a read-only kubeconfig (vCluster <code>exportKubeConfig.additionalSecrets</code>).</td><td class="td-default">vbilling-kubeconfig</td></tr>
-            <tr><td><code>TENANT_ADMIN_FALLBACK</code></td><td>Also accept the admin kubeconfig <code>vc-&lt;name&gt;</code> (needs Secret read access).</td><td class="td-default">false</td></tr>
             <tr><td><code>TENANT_CLUSTERS_FILE</code></td><td>YAML list of external tenant clusters: <code>name</code>, <code>kubeconfig</code>, <code>tenant</code>, <code>displayName</code>, <code>project</code>, <code>metadata</code>.</td><td class="td-default">(none)</td></tr>
             <tr><td><code>PRIVATE_NODE_BILLING</code></td><td><code>node</code> bills each private node whole; <code>usage</code> bills the pods on them.</td><td class="td-default">node</td></tr>
-            <tr><td><code>TENANT_EXCLUDE_NAMESPACES</code></td><td>Usage mode: namespaces never billed.</td><td class="td-default">kube-system</td></tr>
-            <tr><td><code>WATCH_DELETIONS</code></td><td>Bill pods and nodes deleted between windows until the moment they were deleted.</td><td class="td-default">true</td></tr>
-            <tr><td><code>DRA_GPU_DRIVERS</code></td><td>DRA drivers whose devices are GPUs (ResourceClaim metering).</td><td class="td-default">gpu.nvidia.com,gpu.amd.com</td></tr>
           </tbody>
         </table>
       </div>
@@ -536,20 +466,12 @@
         <table class="config-table">
           <thead><tr><th>Variable</th><th>Description</th><th>Default</th></tr></thead>
           <tbody>
-            <tr><td><code>RECORDS_SETTLE</code></td><td>How long after a window ends its records still count as on time. Records that arrive later become a separate late adjustment to the same window. Must be shorter than <code>COLLECTION_INTERVAL</code>; when the variable is unset, windows of 30s or less use half the window.</td><td class="td-default">30s</td></tr>
-            <tr><td><code>RECORDS_RETENTION</code></td><td>How long raw request records stay under <code>DATA_DIR/records</code>. Records older than this minus one hour (34 days at most) are refused. At least <code>2h</code>.</td><td class="td-default">168h</td></tr>
             <tr><td><code>RECORDS_MAPPINGS_FILE</code></td><td>Path of a YAML map of payload formats besides <code>vbilling</code> and <code>litellm</code>: field paths for the request ID, time, tenant and quantities of each gateway.</td><td class="td-default">(none)</td></tr>
             <tr><td><code>RECORDS_LITELLM</code></td><td>Enable the built-in <code>litellm</code> format for LiteLLM's generic API logger. It declares <code>inference_input_tokens</code> and <code>inference_output_tokens</code>, which every billing adapter then creates.</td><td class="td-default">false</td></tr>
-            <tr><td><code>RECORDS_ALLOW_UNKEYED</code></td><td>Derive a request ID from a record's content when the emitter sends none. Identical records then count once.</td><td class="td-default">false</td></tr>
             <tr><td><code>RECORDS_UNKNOWN_TENANTS</code></td><td><code>accept</code>: bill records for a tenant vBilling does not know to that tenant ID, and report it in the response and in source health. <code>reject</code>: refuse them.</td><td class="td-default">accept</td></tr>
-            <tr><td><code>RECORDS_ARCHIVE</code></td><td>Also archive raw request records to <code>ARCHIVE_DIR/records</code> before retention deletes them: request-level evidence, at a high volume. Needs <code>ARCHIVE_DIR</code>.</td><td class="td-default">false</td></tr>
             <tr><td><code>RECORDS_PULL_FILE</code></td><td>YAML list of gateway request logs to read back as records, for any gateway with a logs API: URL with a time range, headers (<code>${RECORDS_PULL_...}</code> variables only), rows path and paging. Pushed and pulled copies count once. Helm: <code>records.pull</code> and <code>records.pullEnv</code>. See <a href="usage-sources.html#gateway-pull">Pulling any gateway's request log</a>.</td><td class="td-default">(none)</td></tr>
-            <tr><td><code>RECORDS_PULL_LITELLM_URL</code></td><td>Base URL of a LiteLLM proxy (v1.103.0 or later, with a database) whose spend logs vBilling reads back as records, to fill what the generic API logger's push lost. Pushed and pulled copies of a request count once. Enables the <code>litellm</code> format. See <a href="usage-sources.html#litellm-pull">Pulling LiteLLM's spend logs</a>.</td><td class="td-default">(none)</td></tr>
-            <tr><td><code>RECORDS_PULL_LITELLM_KEY</code></td><td>A LiteLLM key that can read every team's spend logs: the master key or a proxy admin key. Required with <code>RECORDS_PULL_LITELLM_URL</code>.</td><td class="td-default">(none)</td></tr>
-            <tr><td><code>RECORDS_PULL_LITELLM_CLIENT</code></td><td>The client the pulled records are stored under. It is part of every record ID, so it must equal the push's client: its <code>X-VBilling-Client</code> header, which defaults to the format name.</td><td class="td-default">litellm</td></tr>
-            <tr><td><code>RECORDS_PULL_LITELLM_TENANT</code></td><td>Bill every pulled request to this tenant. Set it to the tenant of the push's token when the push uses a tenant-bound token from <code>INGEST_TOKENS</code>.</td><td class="td-default">(none)</td></tr>
-            <tr><td><code>RECORDS_PULL_LITELLM_INTERVAL</code></td><td>Time between pulls. At least <code>10s</code>.</td><td class="td-default">5m</td></tr>
-            <tr><td><code>RECORDS_PULL_LITELLM_LOOKBACK</code></td><td>Each pull starts this long before the end of the last successful pull, so rows LiteLLM writes late are read, and the first pull after an outage covers the outage. Between <code>1m</code> and <code>RECORDS_RETENTION</code> minus 2h.</td><td class="td-default">1h</td></tr>
+            <tr><td><code>LITELLM_URL</code></td><td>Base URL of a LiteLLM proxy (v1.103.0 or later, with a database) whose spend logs vBilling reads back as records, to fill what the generic API logger's push lost. Pushed and pulled copies of a request count once. Enables the <code>litellm</code> format. See <a href="usage-sources.html#litellm-pull">Pulling LiteLLM's spend logs</a>.</td><td class="td-default">(none)</td></tr>
+            <tr><td><code>LITELLM_API_KEY</code></td><td>A LiteLLM key that can read every team's spend logs: the master key or a proxy admin key. Required with <code>LITELLM_URL</code>.</td><td class="td-default">(none)</td></tr>
             <tr><td><code>CROSS_CHECKS</code></td><td>Compare two sources of the same usage per tenant and hour, <code>primary=secondary[:tolerance%],...</code>, for example <code>inference_output_tokens=vllm_output_tokens:2%</code>. Both metrics must be declared. Divergence above the tolerance shows in source health and <code>/metrics</code>.</td><td class="td-default">(none), tolerance 1%</td></tr>
           </tbody>
         </table>
@@ -565,9 +487,6 @@
           <thead><tr><th>Variable</th><th>Description</th><th>Default</th></tr></thead>
           <tbody>
             <tr><td><code>PRICE_CHECK</code></td><td><code>warn</code>: report usage a billing platform has no price for. <code>hold</code>: also keep the events of an unpriced series (metric, SKU, plan) out of that destination. They stay in the ledger and in <code>DATA_DIR/held</code>, and ship in ledger order once the price exists; other series and destinations are not delayed. <code>off</code>: no checks. Switching from <code>hold</code> back to <code>warn</code> or <code>off</code> releases everything held.</td><td class="td-default">warn</td></tr>
-            <tr><td><code>PRICE_CHECK_INTERVAL</code></td><td>How often every billing platform is checked. A series seen for the first time is checked within seconds, and a destination with held events every minute. At least <code>1m</code>.</td><td class="td-default">10m</td></tr>
-            <tr><td><code>PRICE_CHECK_LOOKBACK</code></td><td>Series seen in the ledger this recently are checked; at startup vBilling reads the usage appended in this period. Billable metrics with no usage in it are checked as a whole. At least <code>1h</code>.</td><td class="td-default">24h</td></tr>
-            <tr><td><code>PRICE_CHECK_MAX_HOLD</code></td><td>Hold mode only. Held events whose window started longer ago than this are released without a price (oldest first, with any older held events of their series), so the billing platform still accepts them and can re-rate them once priced; the series' source turns <code>failing</code>. A duration such as <code>672h</code>, or days such as <code>28d</code>. Between <code>1h</code> and <code>32d</code>: Metronome refuses usage older than 34 days.</td><td class="td-default">28d</td></tr>
           </tbody>
         </table>
       </div>
@@ -610,23 +529,18 @@
             </tr>
             <tr>
               <td><code>ENFORCEMENT_IN_CLUSTER</code></td>
-              <td>In <code>enforce</code> mode, also install the <code>vbilling-suspended</code> admission policy inside each of a suspended tenant's clusters, through their own API. The only enforcement that reaches clusters with their own nodes. Needs <code>TENANT_API=true</code> and write access to admission policies in each cluster. See <a href="private-nodes.html#enforcement">Billing-state enforcement inside the cluster</a>.</td>
+              <td>In <code>enforce</code> mode, also install the <code>vbilling-suspended</code> admission policy inside each of a suspended tenant's clusters, through their own API. The only enforcement that reaches clusters with their own nodes. Needs write access to admission policies in each cluster. See <a href="private-nodes.html#enforcement">Billing-state enforcement inside the cluster</a>.</td>
               <td class="td-default">false</td>
             </tr>
             <tr>
               <td><code>ENFORCEMENT_LITELLM</code></td>
-              <td>In <code>enforce</code> mode, block a suspended or paused tenant's LiteLLM teams and unblock them when it is active again (only blocks vBilling set). Uses <code>RECORDS_PULL_LITELLM_URL</code> and <code>RECORDS_PULL_LITELLM_KEY</code>. Helm: <code>enforcement.gateway.litellm</code>. See <a href="usage-sources.html#gateway-enforcement">Stopping a suspended tenant at the gateway</a>.</td>
+              <td>In <code>enforce</code> mode, block a suspended or paused tenant's LiteLLM teams and unblock them when it is active again (only blocks vBilling set). Uses <code>LITELLM_URL</code> and <code>LITELLM_API_KEY</code>. Helm: <code>enforcement.gateway.litellm</code>. See <a href="usage-sources.html#gateway-enforcement">Stopping a suspended tenant at the gateway</a>.</td>
               <td class="td-default">false</td>
             </tr>
             <tr>
               <td><code>PAUSE_KEEP_BILLING</code></td>
               <td>What keeps billing while a cluster is paused (state <code>paused</code>): any of <code>storage</code>, <code>load_balancers</code>, <code>nodes</code>, <code>control_plane</code>, <code>workloads</code>, or <code>none</code>. Without <code>workloads</code>, the usage of a paused cluster's pods stops at the second of the pause, even while they take their grace period to stop. Helm: <code>enforcement.pause.keepBilling</code>. See <a href="private-nodes.html#pause">Pausing a tenant</a>.</td>
               <td class="td-default">storage,load_balancers</td>
-            </tr>
-            <tr>
-              <td><code>PAUSE_DRAIN_TIMEOUT</code></td>
-              <td>How long a pause waits for workloads on a cluster's own nodes to stop before it stops the control plane. Helm: <code>enforcement.pause.drainTimeout</code>.</td>
-              <td class="td-default">2m</td>
             </tr>
             <tr>
               <td><code>PAUSE_KEEP_NAMESPACES</code></td>
@@ -655,39 +569,14 @@
               <td class="td-default">(none)</td>
             </tr>
             <tr>
-              <td><code>STRIPE_SPLIT_METERS_BY</code></td>
-              <td>Event fields that get their own meter (Stripe meters cannot price on dimensions).</td>
-              <td class="td-default">sku</td>
-            </tr>
-            <tr>
               <td><code>STRIPE_AUTO_SUBSCRIBE</code></td>
               <td>Subscribe tenants to active metered prices tagged <code>metadata[vbilling_plan]=&lt;plan&gt;</code>.</td>
-              <td class="td-default">false</td>
-            </tr>
-            <tr>
-              <td><code>STRIPE_MAX_RPS</code></td>
-              <td>Request rate cap; 0 picks 20 (test) or 200 (live).</td>
-              <td class="td-default">0</td>
-            </tr>
-            <tr>
-              <td><code>STRIPE_CANCEL_ON_REMOVE</code></td>
-              <td>Cancel the tenant's subscription at period end when it is offboarded.</td>
               <td class="td-default">false</td>
             </tr>
             <tr>
               <td><code>STRIPE_PRICE_CARD</code></td>
               <td>YAML file of each plan's metered prices, which vBilling creates in Stripe (with their meters) when missing, never changing existing ones. Helm: <code>stripe.priceCard</code>. See <a href="stripe.html#price-card">Price card</a>.</td>
               <td class="td-default">(none)</td>
-            </tr>
-            <tr>
-              <td><code>STRIPE_API_VERSION</code></td>
-              <td>Pinned Stripe API version.</td>
-              <td class="td-default">2026-09-30.endive</td>
-            </tr>
-            <tr>
-              <td><code>STRIPE_API_BASE</code></td>
-              <td>API base URL (stripe-mock for tests).</td>
-              <td class="td-default">https://api.stripe.com</td>
             </tr>
           </tbody>
         </table>
@@ -711,24 +600,14 @@
               <td class="td-default">(none)</td>
             </tr>
             <tr>
-              <td><code>METRONOME_RATE_CARD</code></td>
-              <td>Rate card alias or ID; creates a contract per tenant. A tenant's <code>plan</code> annotation overrides it.</td>
-              <td class="td-default">(none)</td>
-            </tr>
-            <tr>
-              <td><code>METRONOME_STRIPE_LINK</code></td>
-              <td>Create each tenant's Stripe customer and link it for invoicing (needs <code>STRIPE_API_KEY</code>).</td>
+              <td><code>METRONOME_PROVISION</code></td>
+              <td>Off: vBilling only sends usage, keyed on the tenant ID as the customer's ingest alias, and reads Metronome to check prices. Customers, billable metrics and contracts stay yours. On: vBilling creates billable metrics and customers, a contract on <code>METRONOME_RATE_CARD</code>, and with <code>STRIPE_API_KEY</code> a linked Stripe customer.</td>
               <td class="td-default">false</td>
             </tr>
             <tr>
-              <td><code>METRONOME_STRIPE_COLLECTION_METHOD</code></td>
-              <td><code>charge_automatically</code> or <code>send_invoice</code>.</td>
-              <td class="td-default">charge_automatically</td>
-            </tr>
-            <tr>
-              <td><code>METRONOME_API_BASE</code></td>
-              <td>API base URL.</td>
-              <td class="td-default">https://api.metronome.com</td>
+              <td><code>METRONOME_RATE_CARD</code></td>
+              <td>With <code>METRONOME_PROVISION=true</code>: rate card alias or ID for each tenant's contract. A tenant's <code>plan</code> setting overrides it.</td>
+              <td class="td-default">(none)</td>
             </tr>
           </tbody>
         </table>
@@ -805,17 +684,169 @@
           </tbody>
         </table>
       </div>
-      <h3>Deprecated</h3>
+      <h3 id="removed">Removed in v0.3.1</h3>
+      <p>These settings tuned internals that have one right value, or opened ways to get billing wrong. vBilling ignores them with a warning in its log, so old values never stop it from starting.</p>
       <div class="config-table-wrap">
         <table class="config-table">
           <thead>
-            <tr><th>Variable</th><th>Description</th><th>Default</th></tr>
+            <tr><th>Variable</th><th>Now</th></tr>
           </thead>
           <tbody>
             <tr>
+              <td><code>ADAPTER</code></td>
+              <td>Use ADAPTERS.</td>
+            </tr>
+            <tr>
+              <td><code>COLLECTION_INTERVAL</code></td>
+              <td>Windows are always 60s.</td>
+            </tr>
+            <tr>
+              <td><code>DEFAULT_TENANT_CLASS</code></td>
+              <td>Set vbilling.vcluster.com/tenant-class on the tenant.</td>
+            </tr>
+            <tr>
+              <td><code>DRA_GPU_DRIVERS</code></td>
+              <td>Gpu.nvidia.com, gpu.amd.com and gpu.intel.com are GPUs.</td>
+            </tr>
+            <tr>
+              <td><code>MAX_BACKFILL</code></td>
+              <td>Fixed at 6h.</td>
+            </tr>
+            <tr>
+              <td><code>METRONOME_STRIPE_COLLECTION_METHOD</code></td>
+              <td>Fixed at charge_automatically.</td>
+            </tr>
+            <tr>
+              <td><code>METRONOME_STRIPE_LINK</code></td>
+              <td>METRONOME_PROVISION=true links a Stripe customer when STRIPE_API_KEY is set.</td>
+            </tr>
+            <tr>
+              <td><code>OFFBOARD_GRACE</code></td>
+              <td>Fixed at 1h.</td>
+            </tr>
+            <tr>
+              <td><code>PAUSE_DRAIN_TIMEOUT</code></td>
+              <td>Fixed at 2m.</td>
+            </tr>
+            <tr>
+              <td><code>PLATFORM_ORPHAN_GRACE</code></td>
+              <td>Removed.</td>
+            </tr>
+            <tr>
+              <td><code>PLATFORM_PROXY</code></td>
+              <td>With TENANT_SOURCE=platform, clusters are always reached through the Platform proxy.</td>
+            </tr>
+            <tr>
+              <td><code>PLATFORM_REFRESH</code></td>
+              <td>Fixed at 1m.</td>
+            </tr>
+            <tr>
+              <td><code>PRICE_CHECK_INTERVAL</code></td>
+              <td>Fixed at 10m.</td>
+            </tr>
+            <tr>
+              <td><code>PRICE_CHECK_LOOKBACK</code></td>
+              <td>Fixed at 24h.</td>
+            </tr>
+            <tr>
+              <td><code>PRICE_CHECK_MAX_HOLD</code></td>
+              <td>Fixed at 28 days.</td>
+            </tr>
+            <tr>
+              <td><code>PROMETHEUS_LOOKBACK</code></td>
+              <td>Fixed at 10m.</td>
+            </tr>
+            <tr>
+              <td><code>RECONCILE_INTERVAL</code></td>
+              <td>Fixed at 30s.</td>
+            </tr>
+            <tr>
+              <td><code>RECORDS_ALLOW_UNKEYED</code></td>
+              <td>Removed: every record needs a request ID.</td>
+            </tr>
+            <tr>
+              <td><code>RECORDS_ARCHIVE</code></td>
+              <td>Records are archived whenever ARCHIVE_DIR is on.</td>
+            </tr>
+            <tr>
+              <td><code>RECORDS_PULL_LITELLM_CLIENT</code></td>
+              <td>Removed.</td>
+            </tr>
+            <tr>
+              <td><code>RECORDS_PULL_LITELLM_INTERVAL</code></td>
+              <td>Fixed at 5m.</td>
+            </tr>
+            <tr>
+              <td><code>RECORDS_PULL_LITELLM_LOOKBACK</code></td>
+              <td>Fixed at 1h.</td>
+            </tr>
+            <tr>
+              <td><code>RECORDS_PULL_LITELLM_TENANT</code></td>
+              <td>Removed: pulled rows bill to their LiteLLM team.</td>
+            </tr>
+            <tr>
+              <td><code>RECORDS_RETENTION</code></td>
+              <td>Fixed at 7 days.</td>
+            </tr>
+            <tr>
+              <td><code>RECORDS_SETTLE</code></td>
+              <td>Fixed at 30s.</td>
+            </tr>
+            <tr>
+              <td><code>REGION_FROM_NODE</code></td>
+              <td>REGION is stamped on every event; run one vBilling per region.</td>
+            </tr>
+            <tr>
+              <td><code>RETENTION</code></td>
+              <td>Live segments are kept 7 days; ARCHIVE_DIR keeps compressed copies.</td>
+            </tr>
+            <tr>
               <td><code>SPOT_DISCOUNT_PERCENT</code></td>
-              <td>Ignored since v0.2. Price <code>capacity_type</code> in your billing platform instead, so quantities stay physical and reconcilable.</td>
-              <td class="td-default">(none)</td>
+              <td>Removed in v0.2: price capacity_type in your billing platform.</td>
+            </tr>
+            <tr>
+              <td><code>STRIPE_API_VERSION</code></td>
+              <td>Pinned by vBilling.</td>
+            </tr>
+            <tr>
+              <td><code>STRIPE_CANCEL_ON_REMOVE</code></td>
+              <td>Removed: end subscriptions in Stripe.</td>
+            </tr>
+            <tr>
+              <td><code>STRIPE_MAX_RPS</code></td>
+              <td>VBilling paces Stripe requests itself.</td>
+            </tr>
+            <tr>
+              <td><code>STRIPE_SPLIT_METERS_BY</code></td>
+              <td>Meters are split by SKU.</td>
+            </tr>
+            <tr>
+              <td><code>TENANT_ADMIN_FALLBACK</code></td>
+              <td>Removed: vBilling never uses a cluster&#x27;s admin kubeconfig.</td>
+            </tr>
+            <tr>
+              <td><code>TENANT_API</code></td>
+              <td>Clusters with their own nodes are always metered through their API.</td>
+            </tr>
+            <tr>
+              <td><code>TENANT_EXCLUDE_NAMESPACES</code></td>
+              <td>Label a namespace vbilling.vcluster.com/exclude=true.</td>
+            </tr>
+            <tr>
+              <td><code>TENANT_KUBECONFIG_SECRET</code></td>
+              <td>The Secret is always vbilling-kubeconfig.</td>
+            </tr>
+            <tr>
+              <td><code>WATCH_DELETIONS</code></td>
+              <td>Deleted pods and nodes are always billed to the second.</td>
+            </tr>
+            <tr>
+              <td><code>ZONE</code></td>
+              <td>The zone comes from each node&#x27;s topology.kubernetes.io/zone label.</td>
+            </tr>
+            <tr>
+              <td><code>RECORDS_PULL_LITELLM_URL</code>, <code>RECORDS_PULL_LITELLM_KEY</code></td>
+              <td>Renamed <code>LITELLM_URL</code> and <code>LITELLM_API_KEY</code>. The old names still work.</td>
             </tr>
           </tbody>
         </table>
@@ -841,14 +872,9 @@
               <td class="td-default">default / control-plane</td>
             </tr>
             <tr>
-              <td><code>tenantClass / tenantSource</code></td>
-              <td>DEFAULT_TENANT_CLASS / TENANT_SOURCE</td>
-              <td class="td-default">&quot;&quot; / cluster</td>
-            </tr>
-            <tr>
-              <td><code>billing.collectionInterval / reconcileInterval / maxBackfill / offboardGrace</code></td>
-              <td>COLLECTION_INTERVAL, RECONCILE_INTERVAL, MAX_BACKFILL, OFFBOARD_GRACE</td>
-              <td class="td-default">60s / 30s / 6h / 1h</td>
+              <td><code>tenantSource</code></td>
+              <td>TENANT_SOURCE</td>
+              <td class="td-default">cluster</td>
             </tr>
             <tr>
               <td><code>billing.defaultPlanCode / currency</code></td>
@@ -861,13 +887,13 @@
               <td class="td-default">{}</td>
             </tr>
             <tr>
-              <td><code>billing.priceCheck.mode / interval / lookback / maxHold</code></td>
-              <td>PRICE_CHECK / PRICE_CHECK_INTERVAL / PRICE_CHECK_LOOKBACK / PRICE_CHECK_MAX_HOLD</td>
-              <td class="td-default">warn / 10m / 24h / 28d</td>
+              <td><code>billing.priceCheck.mode</code></td>
+              <td>PRICE_CHECK</td>
+              <td class="td-default">warn</td>
             </tr>
             <tr>
               <td><code>metering.*</code></td>
-              <td>CPU_MEMORY_BASIS, METER_*, GPU_RESOURCES, SKU_LABEL, CAPACITY_TYPE_LABEL, UNHEALTHY_NODE_TAINTS, VCLUSTER_NODE_LABEL, REGION_FROM_NODE</td>
+              <td>CPU_MEMORY_BASIS, METER_*, GPU_RESOURCES, SKU_LABEL, CAPACITY_TYPE_LABEL, UNHEALTHY_NODE_TAINTS, VCLUSTER_NODE_LABEL</td>
               <td class="td-default">see above</td>
             </tr>
             <tr>
@@ -881,14 +907,14 @@
               <td class="td-default">(none)</td>
             </tr>
             <tr>
-              <td><code>prometheus.sourceLabel / lookback</code></td>
-              <td>PROMETHEUS_SOURCE_LABEL / PROMETHEUS_LOOKBACK</td>
-              <td class="td-default">vcluster / 10m</td>
+              <td><code>prometheus.sourceLabel</code></td>
+              <td>PROMETHEUS_SOURCE_LABEL</td>
+              <td class="td-default">vcluster</td>
             </tr>
             <tr>
-              <td><code>records.settle / retention / allowUnkeyed / unknownTenants / archive</code></td>
-              <td>RECORDS_SETTLE / RECORDS_RETENTION / RECORDS_LITELLM / RECORDS_ALLOW_UNKEYED / RECORDS_UNKNOWN_TENANTS / RECORDS_ARCHIVE (only with <code>persistence.archive.enabled</code>)</td>
-              <td class="td-default">30s / 168h / false / accept / false</td>
+              <td><code>records.litellm / unknownTenants</code></td>
+              <td>RECORDS_LITELLM / RECORDS_UNKNOWN_TENANTS</td>
+              <td class="td-default">false / accept</td>
             </tr>
             <tr>
               <td><code>records.formats</code></td>
@@ -896,9 +922,9 @@
               <td class="td-default">{}</td>
             </tr>
             <tr>
-              <td><code>records.pullLiteLLM.url / key / existingSecret / client / tenant / interval / lookback</code></td>
-              <td>RECORDS_PULL_LITELLM_URL / RECORDS_PULL_LITELLM_KEY (chart Secret, or <code>existingSecret</code> key <code>litellm-key</code>) / RECORDS_PULL_LITELLM_CLIENT / RECORDS_PULL_LITELLM_TENANT / RECORDS_PULL_LITELLM_INTERVAL / RECORDS_PULL_LITELLM_LOOKBACK, set only when <code>url</code> is</td>
-              <td class="td-default">"" / "" / "" / litellm / "" / 5m / 1h</td>
+              <td><code>records.pullLiteLLM.url / key / existingSecret</code></td>
+              <td>LITELLM_URL / LITELLM_API_KEY (chart Secret, or <code>existingSecret</code> key <code>litellm-key</code>), set only when <code>url</code> is</td>
+              <td class="td-default">"" / "" / ""</td>
             </tr>
             <tr>
               <td><code>crossChecks</code></td>
@@ -906,14 +932,9 @@
               <td class="td-default">[]</td>
             </tr>
             <tr>
-              <td><code>tenantAPI.enabled / secretName / adminFallback / privateNodeBilling / excludeNamespaces / externalClustersSecret</code></td>
-              <td>TENANT_API / TENANT_KUBECONFIG_SECRET / TENANT_ADMIN_FALLBACK / PRIVATE_NODE_BILLING / TENANT_EXCLUDE_NAMESPACES / TENANT_CLUSTERS_FILE (Secret mounted at /etc/vbilling/tenants)</td>
-              <td class="td-default">true / vbilling-kubeconfig / false / node / [kube-system] / ""</td>
-            </tr>
-            <tr>
-              <td><code>metering.watchDeletions / draGPUDrivers</code></td>
-              <td>WATCH_DELETIONS / DRA_GPU_DRIVERS</td>
-              <td class="td-default">true / [gpu.nvidia.com, gpu.amd.com]</td>
+              <td><code>tenantAPI.privateNodeBilling / externalClustersSecret</code></td>
+              <td>PRIVATE_NODE_BILLING / TENANT_CLUSTERS_FILE (Secret mounted at /etc/vbilling/tenants)</td>
+              <td class="td-default">node / ""</td>
             </tr>
             <tr>
               <td><code>platform.cluster</code></td>
@@ -921,9 +942,9 @@
               <td class="td-default">(none)</td>
             </tr>
             <tr>
-              <td><code>platform.url / accessKey / existingSecret (key access-key) / caSecret (key ca.crt) / insecure / refresh / orphanGrace / proxy</code></td>
-              <td>PLATFORM_URL / PLATFORM_ACCESS_KEY / PLATFORM_CA_FILE (mounted at /etc/vbilling/platform-ca) / PLATFORM_INSECURE / PLATFORM_REFRESH / PLATFORM_ORPHAN_GRACE / PLATFORM_PROXY, set when <code>tenantSource: platform</code></td>
-              <td class="td-default">"" / "" / "" / "" / false / 1m / 0s / true</td>
+              <td><code>platform.url / accessKey / existingSecret (key access-key) / caSecret (key ca.crt) / insecure</code></td>
+              <td>PLATFORM_URL / PLATFORM_ACCESS_KEY / PLATFORM_CA_FILE (mounted at /etc/vbilling/platform-ca) / PLATFORM_INSECURE, set when <code>tenantSource: platform</code></td>
+              <td class="td-default">"" / "" / "" / "" / false</td>
             </tr>
             <tr>
               <td><code>lago.apiURL / apiKey / existingSecret (key api-key)</code></td>
@@ -941,9 +962,9 @@
               <td class="td-default">(none)</td>
             </tr>
             <tr>
-              <td><code>stripe.splitMetersBy / autoSubscribe / maxRPS / cancelOnRemove / apiVersion / apiBase</code></td>
-              <td>STRIPE_*</td>
-              <td class="td-default">[sku] / false / 0 / false</td>
+              <td><code>stripe.autoSubscribe / priceCard</code></td>
+              <td>STRIPE_AUTO_SUBSCRIBE / STRIPE_PRICE_CARD</td>
+              <td class="td-default">false / {}</td>
             </tr>
             <tr>
               <td><code>metronome.apiToken / webhookSecret / existingSecret (keys api-token, webhook-secret)</code></td>
@@ -951,9 +972,9 @@
               <td class="td-default">(none)</td>
             </tr>
             <tr>
-              <td><code>metronome.rateCard / stripeLink / stripeCollectionMethod / apiBase</code></td>
-              <td>METRONOME_*</td>
-              <td class="td-default">(none)</td>
+              <td><code>metronome.provision / rateCard</code></td>
+              <td>METRONOME_PROVISION / METRONOME_RATE_CARD</td>
+              <td class="td-default">false / ""</td>
             </tr>
             <tr>
               <td><code>webhook.url / secret / headers / existingSecret (key secret)</code></td>
@@ -976,9 +997,9 @@
               <td class="td-default">observe / &quot;&quot; / false</td>
             </tr>
             <tr>
-              <td><code>enforcement.pause.keepBilling / drainTimeout / keepNamespaces</code></td>
-              <td>PAUSE_KEEP_BILLING / PAUSE_DRAIN_TIMEOUT / PAUSE_KEEP_NAMESPACES</td>
-              <td class="td-default">storage,load_balancers / 2m</td>
+              <td><code>enforcement.pause.keepBilling / keepNamespaces</code></td>
+              <td>PAUSE_KEEP_BILLING / PAUSE_KEEP_NAMESPACES</td>
+              <td class="td-default">storage,load_balancers / (default list)</td>
             </tr>
             <tr>
               <td><code>enforcement.admissionPolicy.enabled</code></td>
@@ -986,9 +1007,9 @@
               <td class="td-default">false</td>
             </tr>
             <tr>
-              <td><code>persistence.enabled / size / storageClass / retention</code></td>
-              <td>Ledger PVC (StatefulSet volumeClaimTemplate) / RETENTION</td>
-              <td class="td-default">true / 5Gi / &quot;&quot; / 168h</td>
+              <td><code>persistence.enabled / size / storageClass</code></td>
+              <td>Ledger PVC (StatefulSet volumeClaimTemplate). Live segments are kept 7 days; the archive keeps compressed copies.</td>
+              <td class="td-default">true / 5Gi / &quot;&quot;</td>
             </tr>
             <tr>
               <td><code>persistence.archive.enabled / existingClaim / size / storageClass / mountPath</code></td>
