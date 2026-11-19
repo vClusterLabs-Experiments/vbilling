@@ -116,8 +116,13 @@ func review2Bill(t *testing.T, ann map[string]string) (gpuHours, cpHours float64
 // alias equal to its ID still captures it: its records bill to the other
 // tenant, suspending the other tenant blocks its team, and suspending it
 // blocks nothing (main.go drops identities that bill elsewhere).
+//
+// v0.3.1: the controller cannot know a tenant nothing names, so the test
+// names it the way the comment below describes: an ingest token bound to
+// tokens-co. (Records configuration and billing states name tenants
+// through UseKnownTenants, see TestAliasesNeverCaptureKnownTenants.)
 func TestReview2AliasMustNotCaptureATokenOnlyTenant(t *testing.T) {
-	h := newHarness(t)
+	h := newHarness(t, func(c *config.Config) { c.IngestTokens = map[string]string{"tok-tokens-co": "tokens-co"} })
 	h.disc.clusters = []discovery.TenantCluster{
 		cluster("acme", "vc", map[string]string{discovery.AnnotationPrefix + "tenant": "acme", discovery.AnnotationPrefix + "aliases": "tokens-co"}),
 	}

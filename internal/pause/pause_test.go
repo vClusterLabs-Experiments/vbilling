@@ -134,3 +134,28 @@ func TestOutside(t *testing.T) {
 		t.Fatalf("workloads is a valid PAUSE_KEEP_BILLING kind: %v", err)
 	}
 }
+
+// A pause that turned out not to hold is dropped, not ended: none of its
+// time stops billing, and earlier pauses stay.
+func TestDiscardDropsOnlyTheOpenSpan(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = s.Begin("c1", t0, ByVBilling)
+	_, _ = s.End("c1", t0.Add(time.Minute))
+	_, _ = s.Begin("c1", t0.Add(2*time.Minute), ByVBilling)
+	if ok, err := s.Discard("c1"); !ok || err != nil {
+		t.Fatalf("Discard = %t, %v", ok, err)
+	}
+	got := s.Spans("c1")
+	if len(got) != 1 || got[0].Open() || !got[0].To.Equal(t0.Add(time.Minute)) {
+		t.Fatalf("spans after discard = %+v, want only the closed one", got)
+	}
+	if ok, _ := s.Discard("c1"); ok {
+		t.Fatal("Discard dropped a closed span")
+	}
+	if !(Span{By: ByVBilling}).Verified() || !(Span{}).Verified() || (Span{By: ByExternal}).Verified() {
+		t.Fatal("only spans vBilling did not make are unverified")
+	}
+}

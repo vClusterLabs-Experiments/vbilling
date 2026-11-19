@@ -369,6 +369,12 @@ func TestOffboardingIsFinalPerDestination(t *testing.T) {
 	}
 }
 
+// Discovery reports a cluster paused only while its control plane is down.
+// A pause vBilling did not make is recorded from when it is seen; one
+// vBilling marked is left to its enforcer, which records it once it
+// verified the cluster's workloads are gone, never from the paused-at
+// annotation (anyone who writes vcluster.yaml can back-date it). Any pause
+// ends when the cluster runs again.
 func TestPausesSeenInDiscoveryReachMetering(t *testing.T) {
 	h := newHarness(t)
 	spans := pause.Memory()
@@ -385,17 +391,21 @@ func TestPausesSeenInDiscoveryReachMetering(t *testing.T) {
 	h.c.Reconcile(ctx)
 
 	a, b := paused.ExternalID(), external.ExternalID()
-	if sp, open := spans.Current(a); !open || !sp.From.Equal(t0.Add(-90*time.Second)) || sp.By != "vbilling" {
-		t.Fatalf("vBilling pause span = %+v %t, want it from its paused-at annotation", sp, open)
+	if sp, open := spans.Current(a); open {
+		t.Fatalf("the controller recorded vBilling's pause itself: %+v (the enforcer records it once verified, never from paused-at)", sp)
 	}
-	if sp, open := spans.Current(b); !open || !sp.From.Equal(t0) || sp.By != "external" {
+	if sp, open := spans.Current(b); !open || !sp.From.Equal(t0) || sp.By != pause.ByExternal {
 		t.Fatalf("external pause span = %+v %t, want it from when it was seen", sp, open)
 	}
 	h.now = t0.Add(time.Minute)
 	h.c.CollectDue(ctx)
 	for _, tg := range h.coll.targets {
-		if len(tg.Paused) != 1 {
-			t.Fatalf("target %s carries %d pause spans", tg.Cluster.ExternalID(), len(tg.Paused))
+		want := 0
+		if tg.Cluster.ExternalID() == b {
+			want = 1
+		}
+		if len(tg.Paused) != want {
+			t.Fatalf("target %s carries %d pause spans, want %d", tg.Cluster.ExternalID(), len(tg.Paused), want)
 		}
 	}
 
@@ -408,12 +418,65 @@ func TestPausesSeenInDiscoveryReachMetering(t *testing.T) {
 	if len(got) != 1 || !got[0].To.Equal(h.now) {
 		t.Fatalf("external spans after resume = %+v", got)
 	}
+	// vBilling's own pause, once verified, also ends when discovery sees the
+	// cluster run again (scaled up by hand, woken by the Platform).
+	if _, err := spans.Begin(a, t0.Add(2*time.Minute), pause.ByVBilling); err != nil {
+		t.Fatal(err)
+	}
+	h.now = t0.Add(6 * time.Minute)
+	paused.Paused = false
+	h.disc.clusters = []discovery.TenantCluster{paused, external}
+	h.c.Reconcile(ctx)
+	if got := spans.Spans(a); len(got) != 1 || !got[0].To.Equal(h.now) {
+		t.Fatalf("vBilling's span of a cluster that runs again = %+v, want it ended when seen running", got)
+	}
 	// vBilling's own pause and resume are reflected at once.
-	h.c.SetPaused(a, false)
+	h.c.SetPaused(a, true)
 	for _, cl := range h.c.Clusters() {
-		if cl.ExternalID() == a && cl.Paused {
+		if cl.ExternalID() == a && !cl.Paused {
 			t.Fatal("SetPaused did not update the cluster")
 		}
+	}
+}
+
+// Two clusters whose namespace and name join to the same ID share pause
+// spans, saved inventories and gaps: their pauses never clip either one.
+func TestSharedClusterIDsAreNeverClipped(t *testing.T) {
+	h := newHarness(t)
+	spans := pause.Memory()
+	h.c.UsePauses(spans)
+	ctx := context.Background()
+	one, other := cluster("a-b", "c", nil), cluster("a", "b-c", nil)
+	if one.ExternalID() != other.ExternalID() {
+		t.Fatalf("test setup: %s and %s differ", one.ExternalID(), other.ExternalID())
+	}
+	one.Paused = true // one of them is down: no span may clip the other
+	h.disc.clusters = []discovery.TenantCluster{one, other}
+	h.c.Reconcile(ctx)
+	id := one.ExternalID()
+	if sp, open := spans.Current(id); open {
+		t.Fatalf("pause span %+v recorded for an ID two clusters share", sp)
+	}
+	// A span recorded before the second cluster appeared clips neither.
+	if _, err := spans.Begin(id, t0.Add(-time.Hour), pause.ByVBilling); err != nil {
+		t.Fatal(err)
+	}
+	h.now = t0.Add(time.Minute)
+	h.c.CollectDue(ctx)
+	for _, tg := range h.coll.targets {
+		if len(tg.Paused) != 0 {
+			t.Fatalf("target %s carries pause spans %+v of a shared ID", tg.Cluster.ExternalID(), tg.Paused)
+		}
+	}
+	h.c.SetPaused(id, false)
+	paused := 0
+	for _, cl := range h.c.Clusters() {
+		if cl.Paused {
+			paused++
+		}
+	}
+	if paused != 1 {
+		t.Fatalf("SetPaused on a shared ID changed what discovery saw: %d paused, want 1", paused)
 	}
 }
 

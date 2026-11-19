@@ -27,6 +27,11 @@ import (
 // metered "successfully" without the pods (no gap is recorded, so no fill
 // recovers them): their usage between the window start and the pause is
 // lost.
+//
+// v0.3.1: billing stops only on evidence vBilling verified itself. Nothing
+// confirms the pods of an external pause stopped (stopping the control
+// plane leaves the kubelets on the cluster's own nodes running them), so
+// they bill through the pause too, not only up to it: the whole window.
 func TestReview2ExternalPauseBillsPodsBeforeThePause(t *testing.T) {
 	c := pausedCollector(t, pause.DefaultKeep, nil)
 	c.opts.PrivateNodeBilling = "usage"
@@ -51,11 +56,11 @@ func TestReview2ExternalPauseBillsPodsBeforeThePause(t *testing.T) {
 	if len(st.TenantAPIFailed) != 0 {
 		t.Logf("recorded as a gap: %v", st.TenantAPIFailed)
 	}
-	if got, _ := find(out[we], usage.MetricGPUHours); !near(got, usage.Round(30.0/3600)) {
-		t.Errorf("GPU hours = %v, want 30 seconds of usage before the external pause", got)
+	if got, _ := find(out[we], usage.MetricGPUHours); !near(got, usage.Round(60.0/3600)) {
+		t.Errorf("GPU hours = %v, want the 30 seconds before the external pause and the 30 after it (nothing confirms the pod stopped)", got)
 	}
-	if got, _ := find(out[we], usage.MetricCPUCoreHours); !near(got, usage.Round(2*30.0/3600)) {
-		t.Errorf("CPU core-hours = %v, want 2 cores for 30 seconds before the external pause", got)
+	if got, _ := find(out[we], usage.MetricCPUCoreHours); !near(got, usage.Round(2*60.0/3600)) {
+		t.Errorf("CPU core-hours = %v, want 2 cores for the whole window, before and after the external pause", got)
 	}
 }
 

@@ -94,3 +94,32 @@ func TestPlatformEnrichment(t *testing.T) {
 		t.Fatalf("project tenant = %q", c.TenantID(TenantPerProject))
 	}
 }
+
+// A cluster is paused only while its control plane is really down: no
+// replicas wanted and none ready. Annotations, which whoever writes
+// vcluster.yaml writes, never make it paused.
+func TestPausedMeansTheControlPlaneIsDown(t *testing.T) {
+	zero, one := int32(0), int32(1)
+	withReplicas := func(s *appsv1.StatefulSet, r *int32) *appsv1.StatefulSet { s.Spec.Replicas = r; return s }
+	kube := fake.NewSimpleClientset(
+		nsObj("a", nil),
+		withReplicas(sts("a", "annotated", 1, map[string]string{AnnotationPaused: "true", AnnotationPausedBy: "vbilling",
+			AnnotationPausedAt: "2020-01-01T00:00:00Z"}), &one),
+		withReplicas(sts("a", "stopping", 1, nil), &zero), // scaled down, its pod still ready
+		withReplicas(sts("a", "down", 0, nil), &zero),
+		sts("a", "unset", 0, nil), // replicas unset means one: asleep or starting, not paused
+	)
+	got, err := NewDiscoverer(kube, nil, nil, "").Discover(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{"annotated": false, "stopping": false, "down": true, "unset": false}
+	if len(got) != len(want) {
+		t.Fatalf("discovered %d clusters", len(got))
+	}
+	for _, c := range got {
+		if c.Paused != want[c.Name] {
+			t.Errorf("%s: paused %t, want %t", c.Name, c.Paused, want[c.Name])
+		}
+	}
+}

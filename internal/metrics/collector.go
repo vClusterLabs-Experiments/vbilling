@@ -80,6 +80,9 @@ type Collector struct {
 	pauses  *pause.Store // inventories of paused clusters; nil = none
 	invMu   sync.Mutex
 	lastInv map[string]*tenantInventory // last inventory read from each cluster's own API
+	// ownNodes records whether each cluster has nodes of its own that
+	// metering bills (OwnNodes).
+	ownNodes map[string]bool
 }
 
 // UseGraveyard makes the collector bill pods and nodes deleted between
@@ -145,7 +148,8 @@ func NewCollector(kube kubernetes.Interface, mc metricsclient.Interface, opts Op
 	if opts.PauseKeep == nil {
 		opts.PauseKeep, _ = pause.ParseKeep(pause.DefaultKeep)
 	}
-	c := &Collector{kube: kube, metrics: mc, opts: opts, excludedTenantNS: map[string]bool{}, lastInv: map[string]*tenantInventory{}}
+	c := &Collector{kube: kube, metrics: mc, opts: opts, excludedTenantNS: map[string]bool{}, lastInv: map[string]*tenantInventory{},
+		ownNodes: map[string]bool{}}
 	for _, ns := range opts.TenantExcludeNamespaces {
 		c.excludedTenantNS[ns] = true
 	}
@@ -173,14 +177,39 @@ type Target struct {
 	Paused []pause.Span
 }
 
+// pausesFor returns the pauses that stop billing capacity of the given
+// kind (pause.Keep*) for a target: none when that kind keeps billing while
+// paused. Only pauses vBilling verified (it confirmed the cluster's
+// workloads were gone) stop billing nodes, workloads, volumes and load
+// balancers. A pause it only observed (pause.ByExternal: vcluster pause, an
+// operator, sleep mode, the tenant scaling its own control plane down)
+// stops the control plane's hours alone: nothing confirms the workloads on
+// the cluster's nodes stopped, so they and their nodes keep billing.
+func (c *Collector) pausesFor(t Target, kind string) []pause.Span {
+	if len(t.Paused) == 0 || c.opts.PauseKeep[kind] {
+		return nil
+	}
+	if kind == pause.KeepControlPlane {
+		return t.Paused
+	}
+	var out []pause.Span
+	for _, sp := range t.Paused {
+		if sp.Verified() {
+			out = append(out, sp)
+		}
+	}
+	return out
+}
+
 // pausedFor returns the part of [start, end) inside [ws, we) during which
 // the target was paused, for capacity of the given kind (pause.Keep*). It
 // is zero when that kind keeps billing while paused.
 func (c *Collector) pausedFor(t Target, kind string, start, end, ws, we time.Time) time.Duration {
-	if len(t.Paused) == 0 || c.opts.PauseKeep[kind] {
+	spans := c.pausesFor(t, kind)
+	if len(spans) == 0 {
 		return 0
 	}
-	return pause.Overlap(t.Paused, start, end, ws, we)
+	return pause.Overlap(spans, start, end, ws, we)
 }
 
 // clip returns a pausedFor bound to one target and kind.
@@ -191,10 +220,7 @@ func (c *Collector) clip(t Target, kind string) pausedFn {
 // workloadPauses returns the pause spans that end the billing of a
 // target's pods (none when PAUSE_KEEP_BILLING keeps workloads).
 func (c *Collector) workloadPauses(t Target) []pause.Span {
-	if c.opts.PauseKeep[pause.KeepWorkloads] {
-		return nil
-	}
-	return t.Paused
+	return c.pausesFor(t, pause.KeepWorkloads)
 }
 
 // pausedFn returns how much of [start, end) inside [ws, we) is not billed

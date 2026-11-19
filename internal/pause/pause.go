@@ -3,13 +3,14 @@
 // clusters whose own API is down while they are paused.
 //
 // A paused cluster's control plane is scaled to zero, the way `vcluster
-// pause` does it. Its workloads are stopped, which can take each pod's
-// termination grace period; their usage is cut at the pause too. What
-// remains is capacity that still exists: dedicated or private nodes,
-// volumes and load balancers. Which of those keep billing while paused is
-// policy (PAUSE_KEEP_BILLING); the spans recorded here let the collector
-// cut the rest at the second the pause took effect, in backfilled windows
-// too.
+// pause` does it, and its workloads are stopped. What remains is capacity
+// that still exists: dedicated or private nodes, volumes and load
+// balancers. Which of those keep billing while paused is policy
+// (PAUSE_KEEP_BILLING); the spans recorded here let the collector cut the
+// rest from the second vBilling verified the cluster's workloads were
+// gone, in backfilled windows too. Billing never stops on anything less:
+// a pause vBilling could not verify records no span, and a pause it only
+// observed (ByExternal) stops only the control plane's hours.
 package pause
 
 import (
@@ -30,10 +31,28 @@ import (
 type Span struct {
 	From time.Time `json:"from"`
 	To   time.Time `json:"to,omitempty"`
-	// By is who paused the cluster: "vbilling", or "external" for a pause
+	// By is who paused the cluster: ByVBilling, or ByExternal for a pause
 	// vBilling observed but did not make (vcluster pause, an operator).
 	By string `json:"by,omitempty"`
 }
+
+// Who paused a cluster.
+const (
+	// ByVBilling spans are pauses vBilling made and verified: it confirmed
+	// the cluster's workloads were gone before it recorded the span, so
+	// capacity stops billing for it (PAUSE_KEEP_BILLING decides what keeps
+	// billing).
+	ByVBilling = "vbilling"
+	// ByExternal spans are pauses vBilling only observed: the control plane
+	// is down, but nothing confirms the cluster's workloads stopped, so only
+	// the control plane stops billing.
+	ByExternal = "external"
+)
+
+// Verified reports whether a span stops billing more than the control
+// plane: only vBilling's own spans do (spans recorded before By existed
+// were all vBilling's).
+func (s Span) Verified() bool { return s.By != ByExternal }
 
 // Open reports whether the span has not ended.
 func (s Span) Open() bool { return s.To.IsZero() }
@@ -122,6 +141,20 @@ func (s *Store) End(id string, at time.Time) (bool, error) {
 	}
 	spans[n-1].To = at
 	return true, s.save(id, spans)
+}
+
+// Discard drops the open pause of a cluster, as if it had never begun, and
+// reports whether one was open. A pause that turned out not to hold (the
+// cluster ran on) must not stop billing for any of its time.
+func (s *Store) Discard(id string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	spans := s.load(id)
+	n := len(spans)
+	if n == 0 || !spans[n-1].Open() {
+		return false, nil
+	}
+	return true, s.save(id, spans[:n-1])
 }
 
 // Spans returns a cluster's pauses, oldest first.

@@ -80,17 +80,55 @@ type Controller struct {
 	owners      Owners // optional: past owners of clusters (TENANT_SOURCE=platform)
 
 	pauses *pause.Store // pause spans; nil = pauses are not tracked
+
+	// bound are the tenants INGEST_TOKENS are bound to; known reports
+	// tenants vBilling knows from elsewhere (UseKnownTenants).
+	bound map[string]bool
+	known func(id string) bool
+	// shared are external IDs that more than one discovered cluster maps
+	// to (see sharedIDs); sharedWarned is what was last logged about them.
+	shared       map[string]bool
+	sharedWarned string
 }
 
 // UsePauses tracks when clusters are paused, so capacity is not billed for
 // that time (PAUSE_KEEP_BILLING decides what keeps billing).
 func (c *Controller) UsePauses(p *pause.Store) { c.pauses = p }
 
+// UseKnownTenants adds tenants vBilling knows without a cluster: those its
+// records configuration names (tenant maps, tenant-bound pulls) and those
+// holding a billing state. No alias can capture them. Call it before Run.
+func (c *Controller) UseKnownTenants(known func(id string) bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.known = known
+}
+
+// KnownTenant reports whether id is a tenant vBilling knows: discovered
+// from a cluster, bound to an ingest token, or named by the records
+// configuration or a billing state (UseKnownTenants). Such an ID always
+// bills to itself: an alias that equals it is ignored.
+func (c *Controller) KnownTenant(id string) bool {
+	if id == "" {
+		return false
+	}
+	if _, ok := c.tenants.Get(id); ok || c.bound[id] {
+		return true
+	}
+	c.mu.Lock()
+	known := c.known
+	c.mu.Unlock()
+	return known != nil && known(id)
+}
+
 // SetPaused updates the known state of a cluster right after vBilling
 // paused or resumed it, ahead of the next discovery.
 func (c *Controller) SetPaused(id string, paused bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.shared[id] {
+		return // two clusters answer to this ID: discovery tells them apart
+	}
 	for i := range c.clusters {
 		if c.clusters[i].ExternalID() == id {
 			c.clusters[i].Paused = paused
@@ -100,10 +138,20 @@ func (c *Controller) SetPaused(id string, paused bool) {
 
 type pauseForgetter interface{ ForgetPaused(id string) }
 
-// observePauses records pauses seen in discovery: ones vBilling did not
-// make (vcluster pause, an operator) and resumes made outside vBilling.
-// vBilling's own pauses start at their paused-at annotation, to the second.
-func (c *Controller) observePauses(clusters []discovery.TenantCluster, now time.Time) {
+// observePauses records pauses vBilling did not make, and ends the pause
+// of any cluster that runs again, whoever paused it.
+//
+// A cluster is paused only while its control plane is really down
+// (discovery.TenantCluster.Paused); annotations never pause billing, and a
+// paused-at annotation never dates a pause, since whoever writes
+// vcluster.yaml can write both. vBilling's own pauses are recorded by its
+// enforcer, from the moment it verified the cluster's workloads were gone,
+// so a cluster it marked is left to it here. Any other pause (vcluster
+// pause, an operator, vCluster Platform's sleep mode, the tenant scaling
+// its control plane down) is recorded from when discovery sees it, as
+// external: it stops the control plane's hours only, because vBilling
+// cannot verify the cluster's nodes and workloads stopped.
+func (c *Controller) observePauses(clusters []discovery.TenantCluster, shared map[string]bool, now time.Time) {
 	if c.pauses == nil {
 		return
 	}
@@ -113,26 +161,22 @@ func (c *Controller) observePauses(clusters []discovery.TenantCluster, now time.
 			continue // no control plane here to see paused: vBilling's enforcer records its pauses
 		}
 		id := cl.ExternalID()
+		if shared[id] {
+			continue // two clusters answer to this ID: neither gets a pause span
+		}
 		_, open := c.pauses.Current(id)
 		switch {
-		case cl.Paused && !open:
-			at, by := now, "external"
-			if cl.Annotations[discovery.AnnotationPausedBy] == "vbilling" {
-				by = "vbilling"
-				if t, err := time.Parse(time.RFC3339Nano, cl.Annotations[discovery.AnnotationPausedAt]); err == nil && !t.After(now) {
-					at = t
-				}
-			}
-			if _, err := c.pauses.Begin(id, at, by); err != nil {
+		case cl.Paused && !open && cl.Annotations[discovery.AnnotationPausedBy] != pause.ByVBilling:
+			if _, err := c.pauses.Begin(id, now, pause.ByExternal); err != nil {
 				log.Printf("[controller] %s: record pause: %v", id, err)
 			} else {
-				log.Printf("[controller] %s: paused since %s (%s)", id, at.UTC().Format(time.RFC3339), by)
+				log.Printf("[controller] %s: paused outside vBilling since %s: its control plane stops billing, its nodes and workloads keep billing", id, now.UTC().Format(time.RFC3339))
 			}
 		case !cl.Paused && open:
 			if _, err := c.pauses.End(id, now); err != nil {
 				log.Printf("[controller] %s: record resume: %v", id, err)
 			} else {
-				log.Printf("[controller] %s: resumed", id)
+				log.Printf("[controller] %s: runs again, billed from %s", id, now.UTC().Format(time.RFC3339))
 			}
 		}
 		if !cl.Paused && forget != nil {
@@ -143,14 +187,53 @@ func (c *Controller) observePauses(clusters []discovery.TenantCluster, now time.
 	_ = c.pauses.Prune(now.Add(-c.cfg.MaxBackfill - time.Hour))
 }
 
+// sharedIDs returns the external IDs more than one cluster maps to.
+// vcluster-<namespace>-<name> is not unique (namespace a-b with cluster c
+// and namespace a with cluster b-c are both vcluster-a-b-c), and the ID
+// is the cluster's identity in the ledger, so it cannot change. Pause
+// state, saved inventories and tenant API gaps are kept by it too: for a
+// shared ID vBilling keeps no pause span, so neither cluster stops billing
+// because of the other's pause.
+func sharedIDs(clusters []discovery.TenantCluster) map[string]bool {
+	seen := map[string]int{}
+	for i := range clusters {
+		seen[clusters[i].ExternalID()]++
+	}
+	out := map[string]bool{}
+	for id, n := range seen {
+		if n > 1 {
+			out[id] = true
+		}
+	}
+	return out
+}
+
+func (c *Controller) warnSharedIDs(shared map[string]bool) {
+	ids := make([]string, 0, len(shared))
+	for id := range shared {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	msg := strings.Join(ids, ", ")
+	c.mu.Lock()
+	changed := msg != c.sharedWarned
+	c.sharedWarned = msg
+	c.mu.Unlock()
+	if changed && msg != "" {
+		log.Printf("[controller] WARNING: more than one cluster has the ID %s (vcluster-<namespace>-<name>): they are metered under one ID, and pausing them never stops their billing. Rename one of them", msg)
+	}
+}
+
 // UsePrometheus enables Prometheus-read usage.
 func (c *Controller) UsePrometheus(p PromCollector) { c.prom = p }
 
 // ResolveTenant maps a value an emitter sends (a tenant ID, or an alias
 // from the vbilling.vcluster.com/aliases setting of a cluster) to a known
-// tenant. Unknown values are returned as they are, with known=false.
+// tenant. A tenant vBilling knows (KnownTenant) always resolves to itself,
+// whatever aliases claim. Unknown values are returned as they are, with
+// known=false.
 func (c *Controller) ResolveTenant(v string) (string, bool) {
-	if _, ok := c.tenants.Get(v); ok {
+	if c.KnownTenant(v) {
 		return v, true
 	}
 	c.mu.Lock()
@@ -163,37 +246,37 @@ func (c *Controller) ResolveTenant(v string) (string, bool) {
 
 // GatewayIdentities lists a tenant's gateway identities: its ID and every
 // alias (vbilling.vcluster.com/aliases) that ResolveTenant maps to it. An
-// alias that is another tenant's ID bills to that tenant, so it is not one
-// of this tenant's identities; neither is an alias two tenants claim.
+// alias that is a tenant vBilling knows bills to that tenant, so it is not
+// one of this tenant's identities; neither is an alias two tenants claim.
 func (c *Controller) GatewayIdentities(tenant string) []string {
-	out := []string{tenant}
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	var claimed []string
 	for alias, t := range c.aliases {
-		if t != tenant || c.ambiguous[alias] {
-			continue
+		if t == tenant && !c.ambiguous[alias] {
+			claimed = append(claimed, alias)
 		}
-		if _, other := c.tenants.Get(alias); other {
-			continue
+	}
+	c.mu.Unlock()
+	out := []string{tenant}
+	for _, alias := range claimed {
+		if !c.KnownTenant(alias) {
+			out = append(out, alias)
 		}
-		out = append(out, alias)
 	}
 	sort.Strings(out[1:])
 	return out
 }
 
-// warnAliasConflicts logs, once per change, aliases that are another
-// tenant's ID or that two tenants claim.
+// warnAliasConflicts logs, once per change, aliases that are a tenant
+// vBilling knows or that two tenants claim.
 func (c *Controller) warnAliasConflicts(aliases map[string]string, ambiguous map[string]bool) {
 	warn := map[string]string{}
 	for a, t := range aliases {
 		switch {
 		case ambiguous[a]:
 			warn[a] = "is claimed by more than one tenant; usage bills to " + t + " and the gateway never blocks it"
-		default:
-			if _, ok := c.tenants.Get(a); ok {
-				warn[a] = "is tenant " + a + "'s own ID; usage sent as " + a + " bills to " + a + ", not to " + t
-			}
+		case c.KnownTenant(a):
+			warn[a] = "is tenant " + a + "'s own ID; usage sent as " + a + " bills to " + a + ", not to " + t
 		}
 	}
 	c.mu.Lock()
@@ -220,8 +303,14 @@ func New(cfg *config.Config, disc Discoverer, coll Collector, sp *spool.Spool, t
 			gaps = s
 		}
 	}
+	bound := map[string]bool{}
+	for _, t := range cfg.IngestTokens {
+		if t != "" {
+			bound[t] = true
+		}
+	}
 	return &Controller{cfg: cfg, disc: disc, coll: coll, spool: sp, tenants: tenants, dests: dests, tel: tel,
-		now: time.Now, lastSeen: map[string]time.Time{}, offboarded: map[string]map[string]bool{}, gaps: gaps}
+		now: time.Now, lastSeen: map[string]time.Time{}, offboarded: map[string]map[string]bool{}, gaps: gaps, bound: bound}
 }
 
 // Run reconciles tenants every ReconcileInterval and closes a metering
@@ -340,10 +429,13 @@ func (c *Controller) Reconcile(ctx context.Context) {
 		}
 	}
 	c.warnAliasConflicts(aliases, ambiguous)
-	c.observePauses(clusters, now)
+	shared := sharedIDs(clusters)
+	c.warnSharedIDs(shared)
+	c.observePauses(clusters, shared, now)
 	c.mu.Lock()
 	c.aliases = aliases
 	c.ambiguous = ambiguous
+	c.shared = shared
 	c.clusters = clusters
 	c.discovered = true
 	for _, t := range tenants {
@@ -630,11 +722,15 @@ func parseGap(store *kv.Store, id string) ([2]time.Time, bool) {
 // targets resolves every known cluster to its billing identity.
 func (c *Controller) targets() []metrics.Target {
 	src := discovery.TenantSource(c.cfg.TenantSource)
+	c.mu.Lock()
+	shared := c.shared
+	c.mu.Unlock()
 	var targets []metrics.Target
 	for _, cl := range c.Clusters() {
 		t, _ := c.tenants.Get(cl.TenantID(src))
 		target := metrics.Target{Cluster: cl, Tenant: t.ID, Project: cl.Project, TenantClass: t.Class}
-		if c.pauses != nil {
+		if c.pauses != nil && !shared[cl.ExternalID()] {
+			// A shared ID's spans could be either cluster's: neither is clipped.
 			target.Paused = c.pauses.Spans(cl.ExternalID())
 		}
 		targets = append(targets, target)
