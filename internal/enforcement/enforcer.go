@@ -14,7 +14,10 @@
 //
 // A tenant's state is the most severe of its holds. Billing webhooks own the
 // "billing" hold; operators can set others ("support", "abuse", ...) through
-// the API, and a payment never clears them.
+// the API, and a payment never clears them. A billing webhook can only raise
+// the billing hold, except a payment or an active subscription, which can
+// lower or clear it; webhooks apply in the order the billing platform says
+// they happened, and each once.
 //
 // Suspension stops growth, not service: running workloads keep running.
 // Pausing (state "paused", enforce mode) stops service: each of the tenant's
@@ -31,6 +34,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"sort"
 	"strings"
 	"sync"
@@ -81,14 +85,25 @@ const (
 
 // Signal is a normalized billing event.
 type Signal struct {
-	ID         string    `json:"id"`
-	Source     string    `json:"source"`
-	Type       string    `json:"type"`
-	CustomerID string    `json:"customer_id"`
-	Tenant     string    `json:"tenant"`
-	State      State     `json:"state"`
-	Reason     string    `json:"reason"`
-	At         time.Time `json:"at"`
+	ID         string `json:"id"`
+	Source     string `json:"source"`
+	Type       string `json:"type"`
+	CustomerID string `json:"customer_id"`
+	// Tenant is the tenant the signal applies to; when a customer's
+	// aliases name several, Tenant lists them comma-separated and Tenants
+	// holds each.
+	Tenant  string   `json:"tenant"`
+	Tenants []string `json:"tenants,omitempty"`
+	State   State    `json:"state"`
+	Reason  string   `json:"reason"`
+	// At is when vBilling received the event; EventAt is when the billing
+	// platform says it happened, which orders it against the others.
+	At      time.Time `json:"at"`
+	EventAt time.Time `json:"event_at"`
+	// Positive is true for a payment that succeeded, a paid invoice or an
+	// active subscription: the only signals that lower or clear the billing
+	// hold.
+	Positive bool `json:"positive,omitempty"`
 }
 
 // TenantState is the current standing of one tenant: the most severe of
@@ -104,6 +119,11 @@ type TenantState struct {
 	Hold string `json:"hold,omitempty"`
 	// Holds are the independent reasons a tenant is not active, by name.
 	Holds map[string]Hold `json:"holds,omitempty"`
+	// EventTimes is, per hold, when the newest change applied to it
+	// happened: the billing platform's time for a webhook, vBilling's for an
+	// operator. It outlives the hold, so a webhook about something older,
+	// delivered late or retried, never sets the hold again.
+	EventTimes map[string]time.Time `json:"event_times,omitempty"`
 }
 
 // Hold is one reason for a tenant's state.
@@ -148,9 +168,11 @@ type Options struct {
 	Rules                  map[string]State // event type -> state overrides
 	Clusters               func(tenant string) []discovery.TenantCluster
 	Resolvers              map[string]destinations.CustomerResolver // "stripe", "metronome"
-	State                  *kv.Store
-	Telemetry              *telemetry.Registry
-	Now                    func() time.Time
+	// State keeps billing states and the IDs of applied webhook events
+	// (DATA_DIR/billing-state.json).
+	State     *kv.Store
+	Telemetry *telemetry.Registry
+	Now       func() time.Time
 	// TenantClient connects to a tenant's cluster through its own API. When
 	// set, enforce mode also installs an admission policy inside the
 	// cluster. The credentials need create, update and delete on
@@ -158,6 +180,11 @@ type Options struct {
 	// It returns nil and no error for a cluster vBilling has no
 	// credentials for.
 	TenantClient func(ctx context.Context, cl discovery.TenantCluster) (kubernetes.Interface, error)
+	// IsTenant reports whether an ID is a tenant vBilling knows besides
+	// those holding a billing state: discovered from a cluster, or named by
+	// the records configuration. A webhook for a billing customer with
+	// several aliases applies to the ones that are known tenants.
+	IsTenant func(id string) bool
 
 	// Pausing (state paused, enforce mode).
 	Pauses *pause.Store // pause spans, so capacity is not billed while paused
@@ -192,14 +219,31 @@ type Gateway interface {
 	Apply(ctx context.Context, tenant string, blocked bool) error
 }
 
+// AliasResolver is implemented by customer resolvers that can list every
+// ingest alias of a billing customer (Metronome). A webhook for a customer
+// TenantForCustomer does not map then applies to each alias that is a
+// tenant vBilling knows or, when none is, to every alias: never to the
+// first alias alone, which a customer created outside vBilling may hold for
+// something else (an identity alias next to the compute one).
+type AliasResolver interface {
+	CustomerAliases(ctx context.Context, customerID string) ([]string, error)
+}
+
 // Enforcer is safe for concurrent use.
 type Enforcer struct {
 	kube kubernetes.Interface
 	opts Options
-	seen *destinations.SentCache
 
+	// setMu serializes state changes, so each is decided on the state the
+	// previous one left and written to disk in order.
+	setMu  sync.Mutex
 	mu     sync.Mutex
 	states map[string]TenantState
+
+	// applied are the webhook events already applied (ID -> when), kept
+	// for appliedKeep and at most appliedMax of them, in State.
+	evMu    sync.Mutex
+	applied map[string]time.Time
 
 	bg                         sync.WaitGroup // background pauses and resumes
 	resumeTimeout, resumeEvery time.Duration
@@ -213,6 +257,15 @@ type Enforcer struct {
 	verifiedAt map[string]time.Time // external clusters: last pass that found nothing running
 }
 
+// Applied webhook event IDs are kept this long, and at most appliedMax of
+// them (a variable for tests).
+const (
+	appliedKey  = "applied-events"
+	appliedKeep = 30 * 24 * time.Hour
+)
+
+var appliedMax = 20000
+
 func New(kube kubernetes.Interface, opts Options) *Enforcer {
 	if opts.Now == nil {
 		opts.Now = time.Now
@@ -223,7 +276,7 @@ func New(kube kubernetes.Interface, opts Options) *Enforcer {
 	if opts.Telemetry == nil {
 		opts.Telemetry = telemetry.New()
 	}
-	e := &Enforcer{kube: kube, opts: opts, seen: destinations.NewSentCache(10_000), states: map[string]TenantState{},
+	e := &Enforcer{kube: kube, opts: opts, states: map[string]TenantState{}, applied: map[string]time.Time{},
 		resumeTimeout: 10 * time.Minute, resumeEvery: 5 * time.Second,
 		workers: map[string]*worker{}, status: map[string]PauseStatus{},
 		failing: map[string]time.Time{}, checked: map[string]ownCheck{}, stopped: map[string]time.Time{}, verifiedAt: map[string]time.Time{}}
@@ -235,6 +288,12 @@ func New(kube kubernetes.Interface, opts Options) *Enforcer {
 				ts.Holds = map[string]Hold{HoldBilling: {State: ts.State, Reason: ts.Reason, Source: ts.Source, EventType: ts.EventType, Since: ts.Since}}
 			}
 			e.states[tenant] = ts
+		}
+	}
+	if raw, ok := opts.State.Get(appliedKey); ok {
+		if err := json.Unmarshal([]byte(raw), &e.applied); err != nil {
+			log.Printf("[enforcement] applied webhook events unreadable, starting over: %v", err)
+			e.applied = map[string]time.Time{}
 		}
 	}
 	return e
@@ -259,7 +318,8 @@ func ParseRules(spec string) (map[string]State, error) {
 
 // Errors the webhook handlers map to HTTP status codes.
 var (
-	// ErrIgnored: verified, but carries no billing signal (reply 200).
+	// ErrIgnored: verified, but carries no billing signal or changes
+	// nothing (reply 200).
 	ErrIgnored = errors.New("event type not relevant to billing state")
 	// ErrSignature: the webhook failed verification (reply 400).
 	ErrSignature = errors.New("webhook signature verification failed")
@@ -269,15 +329,17 @@ var (
 	ErrDuplicate = errors.New("event already applied")
 )
 
-// HandleStripe verifies and applies a Stripe webhook.
+// HandleStripe verifies and applies a Stripe webhook. Events are ordered by
+// their created time.
 func (e *Enforcer) HandleStripe(ctx context.Context, body []byte, sigHeader string) (Signal, error) {
 	if err := stripe.VerifySignature(body, sigHeader, e.opts.StripeWebhookSecret, stripe.DefaultTolerance, e.opts.Now()); err != nil {
 		return Signal{}, fmt.Errorf("%w: %v", ErrSignature, err)
 	}
 	var ev struct {
-		ID   string `json:"id"`
-		Type string `json:"type"`
-		Data struct {
+		ID      string `json:"id"`
+		Type    string `json:"type"`
+		Created int64  `json:"created"`
+		Data    struct {
 			Object struct {
 				Customer     string `json:"customer"`
 				Status       string `json:"status"`
@@ -288,12 +350,16 @@ func (e *Enforcer) HandleStripe(ctx context.Context, body []byte, sigHeader stri
 	if err := json.Unmarshal(body, &ev); err != nil {
 		return Signal{}, fmt.Errorf("decode: %w", err)
 	}
-	sig := Signal{ID: "stripe:" + ev.ID, Source: "stripe", Type: ev.Type, CustomerID: ev.Data.Object.Customer, At: e.opts.Now().UTC()}
+	now := e.opts.Now().UTC()
+	sig := Signal{ID: "stripe:" + ev.ID, Source: "stripe", Type: ev.Type, CustomerID: ev.Data.Object.Customer, At: now, EventAt: now}
+	if ev.Created > 0 {
+		sig.EventAt = time.Unix(ev.Created, 0).UTC()
+	}
 	switch ev.Type {
 	case "invoice.payment_failed":
 		sig.State, sig.Reason = Delinquent, fmt.Sprintf("invoice payment failed (attempt %d)", ev.Data.Object.AttemptCount)
 	case "invoice.paid", "invoice.payment_succeeded":
-		sig.State, sig.Reason = Active, "invoice paid"
+		sig.State, sig.Reason, sig.Positive = Active, "invoice paid", true
 	case "customer.subscription.created", "customer.subscription.updated", "customer.subscription.resumed":
 		switch ev.Data.Object.Status {
 		case "past_due":
@@ -301,7 +367,7 @@ func (e *Enforcer) HandleStripe(ctx context.Context, body []byte, sigHeader stri
 		case "unpaid", "canceled", "incomplete_expired":
 			sig.State = Suspended
 		case "active", "trialing":
-			sig.State = Active
+			sig.State, sig.Positive = Active, true
 		}
 		sig.Reason = "subscription " + ev.Data.Object.Status
 	case "customer.subscription.deleted":
@@ -313,7 +379,11 @@ func (e *Enforcer) HandleStripe(ctx context.Context, body []byte, sigHeader stri
 	return sig, err
 }
 
-// HandleMetronome verifies and applies a Metronome webhook.
+// HandleMetronome verifies and applies a Metronome webhook. Events are
+// ordered by the notification's own timestamp (top level, or under
+// properties for alerts and payment gate notifications); a notification
+// without one is ordered by its signed X-Metronome-Date header, which is
+// when it was sent.
 func (e *Enforcer) HandleMetronome(ctx context.Context, body []byte, date, signature string) (Signal, error) {
 	if err := metronome.VerifySignature(body, date, signature, e.opts.MetronomeWebhookSecret, metronome.DefaultTolerance, e.opts.Now()); err != nil {
 		return Signal{}, fmt.Errorf("%w: %v", ErrSignature, err)
@@ -321,6 +391,7 @@ func (e *Enforcer) HandleMetronome(ctx context.Context, body []byte, date, signa
 	var ev struct {
 		ID         string         `json:"id"`
 		Type       string         `json:"type"`
+		Timestamp  string         `json:"timestamp"`
 		CustomerID string         `json:"customer_id"`
 		Properties map[string]any `json:"properties"`
 	}
@@ -331,7 +402,14 @@ func (e *Enforcer) HandleMetronome(ctx context.Context, body []byte, date, signa
 	if v, ok := ev.Properties["customer_id"].(string); ok && v != "" {
 		cus = v
 	}
-	sig := Signal{ID: "metronome:" + ev.ID, Source: "metronome", Type: ev.Type, CustomerID: cus, At: e.opts.Now().UTC()}
+	now := e.opts.Now().UTC()
+	sig := Signal{ID: "metronome:" + ev.ID, Source: "metronome", Type: ev.Type, CustomerID: cus, At: now, EventAt: now}
+	inner, _ := ev.Properties["timestamp"].(string)
+	if t, ok := firstTime(ev.Timestamp, inner); ok {
+		sig.EventAt = t
+	} else if t, err := http.ParseTime(date); err == nil {
+		sig.EventAt = t.UTC()
+	}
 	switch {
 	case strings.HasPrefix(ev.Type, "alerts."):
 		sig.State, sig.Reason = Warning, strings.ReplaceAll(strings.TrimPrefix(ev.Type, "alerts."), "_", " ")
@@ -343,13 +421,27 @@ func (e *Enforcer) HandleMetronome(ctx context.Context, body []byte, date, signa
 		case "failed":
 			sig.State, sig.Reason = Delinquent, "threshold billing payment failed"
 		case "paid":
-			sig.State, sig.Reason = Active, "threshold billing payment succeeded"
+			sig.State, sig.Reason, sig.Positive = Active, "threshold billing payment succeeded", true
 		}
 	}
 	err := e.apply(ctx, &sig)
 	return sig, err
 }
 
+// firstTime parses the first RFC 3339 timestamp among values.
+func firstTime(values ...string) (time.Time, bool) {
+	for _, v := range values {
+		if t, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(v)); err == nil {
+			return t.UTC(), true
+		}
+	}
+	return time.Time{}, false
+}
+
+// apply records a webhook's signal on the billing hold of each tenant it
+// names. The event counts as applied once the states are stored: a retry
+// is then a duplicate, and clusters that could not be reached converge at
+// the next resync (the error still reaches the provider).
 func (e *Enforcer) apply(ctx context.Context, sig *Signal) error {
 	if override, ok := e.opts.Rules[sig.Type]; ok {
 		sig.State = override
@@ -358,59 +450,219 @@ func (e *Enforcer) apply(ctx context.Context, sig *Signal) error {
 	if sig.State == "" {
 		return ErrIgnored
 	}
-	if e.seen.Has(sig.ID) {
+	if e.wasApplied(sig.ID) {
 		return ErrDuplicate // providers retry and reorder; each event is applied once
 	}
 	resolver := e.opts.Resolvers[sig.Source]
 	if resolver == nil {
 		return fmt.Errorf("%w: no %s destination configured to resolve %s", ErrUnknownCustomer, sig.Source, sig.CustomerID)
 	}
-	tenant, ok := resolver.TenantForCustomer(ctx, sig.CustomerID)
-	if !ok {
-		return fmt.Errorf("%w: %s", ErrUnknownCustomer, sig.CustomerID)
-	}
-	sig.Tenant = tenant
-	if err := e.Set(ctx, tenant, sig.State, sig.Reason, sig.Source, sig.Type); err != nil {
+	tenants, err := e.tenantsFor(ctx, resolver, sig.CustomerID)
+	if err != nil {
 		return err
 	}
-	e.seen.Add(sig.ID)
+	sig.Tenants, sig.Tenant = tenants, strings.Join(tenants, ",")
+	type change struct{ prev, ts TenantState }
+	var changed []change
+	var stale []string
+	for _, tenant := range tenants {
+		ts, prev, res, err := e.store(tenant, update{hold: HoldBilling, state: sig.State, reason: sig.Reason,
+			source: sig.Source, eventType: sig.Type, webhook: true, positive: sig.Positive, at: sig.EventAt})
+		if err != nil {
+			return err // not marked applied: the provider retries it
+		}
+		switch res.kind {
+		case outStale:
+			stale = append(stale, tenant+": "+res.why)
+			continue
+		case outKept:
+			// Applied: under the hold rules it changes nothing.
+			log.Printf("[enforcement] tenant %s: %s %s leaves the billing hold as it is: %s", tenant, sig.Source, sig.Type, res.why)
+			continue
+		}
+		changed = append(changed, change{prev, ts})
+	}
+	if err := e.markApplied(sig.ID); err != nil {
+		return err
+	}
+	if len(stale) == len(tenants) {
+		return fmt.Errorf("%w: %s", ErrIgnored, strings.Join(stale, "; "))
+	}
+	var errs []error
+	for _, c := range changed {
+		errs = append(errs, e.reflectState(ctx, c.prev, c.ts, sig.Source, sig.Type))
+	}
+	return errors.Join(errs...)
+}
+
+// tenantsFor resolves a billing customer to the tenants its signals apply
+// to: the one it is mapped to or, for a resolver that lists a customer's
+// aliases (AliasResolver), the aliases that are tenants vBilling knows, or
+// all of them when none is.
+func (e *Enforcer) tenantsFor(ctx context.Context, resolver destinations.CustomerResolver, cus string) ([]string, error) {
+	if t, ok := resolver.TenantForCustomer(ctx, cus); ok {
+		return []string{t}, nil
+	}
+	ar, ok := resolver.(AliasResolver)
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", ErrUnknownCustomer, cus)
+	}
+	list, err := ar.CustomerAliases(ctx, cus)
+	if err != nil {
+		return nil, fmt.Errorf("list the aliases of customer %s: %w", cus, err)
+	}
+	seen := map[string]bool{}
+	var aliases, known []string
+	for _, a := range list {
+		if a = strings.TrimSpace(a); a == "" || seen[a] {
+			continue
+		}
+		seen[a] = true
+		aliases = append(aliases, a)
+		if e.isTenant(a) {
+			known = append(known, a)
+		}
+	}
+	if len(aliases) == 0 {
+		return nil, fmt.Errorf("%w: %s has no ingest alias", ErrUnknownCustomer, cus)
+	}
+	if len(known) > 0 {
+		return known, nil
+	}
+	return aliases, nil
+}
+
+// isTenant reports whether an ID is a tenant vBilling knows.
+func (e *Enforcer) isTenant(id string) bool {
+	return e.HasState(id) || e.opts.IsTenant != nil && e.opts.IsTenant(id)
+}
+
+func (e *Enforcer) wasApplied(id string) bool {
+	e.evMu.Lock()
+	defer e.evMu.Unlock()
+	_, ok := e.applied[id]
+	return ok
+}
+
+// markApplied durably records a webhook event as applied, forgetting those
+// older than appliedKeep and, past appliedMax, the oldest.
+func (e *Enforcer) markApplied(id string) error {
+	e.evMu.Lock()
+	defer e.evMu.Unlock()
+	now := e.opts.Now().UTC()
+	next := make(map[string]time.Time, len(e.applied)+1)
+	for k, at := range e.applied {
+		if now.Sub(at) < appliedKeep {
+			next[k] = at
+		}
+	}
+	next[id] = now
+	if over := len(next) - appliedMax; over > 0 {
+		ids := make([]string, 0, len(next))
+		for k := range next {
+			ids = append(ids, k)
+		}
+		sort.Slice(ids, func(i, j int) bool { return next[ids[i]].Before(next[ids[j]]) })
+		for _, k := range ids[:over] {
+			delete(next, k)
+		}
+	}
+	b, err := json.Marshal(next)
+	if err != nil {
+		return err
+	}
+	if err := e.opts.State.Set(appliedKey, string(b)); err != nil {
+		return fmt.Errorf("record applied event: %w", err)
+	}
+	e.applied = next
 	return nil
 }
 
 // Set records the billing hold of a tenant and reflects the resulting state
-// on its clusters.
+// on its clusters. It is the operator's: any state goes.
 func (e *Enforcer) Set(ctx context.Context, tenant string, state State, reason, source, eventType string) error {
 	return e.SetHold(ctx, tenant, HoldBilling, state, reason, source, eventType)
 }
 
-// SetHold sets one named hold. Setting a hold to active removes it; the
-// tenant's state is the most severe hold left.
+// SetHold sets one named hold, as an operator does through the API: any
+// state goes. Setting a hold to active removes it; the tenant's state is
+// the most severe hold left.
 func (e *Enforcer) SetHold(ctx context.Context, tenant, hold string, state State, reason, source, eventType string) error {
 	if !state.valid() {
 		return fmt.Errorf("invalid state %q", state)
 	}
-	if hold == "" {
-		hold = HoldBilling
+	ts, prev, _, err := e.store(tenant, update{hold: hold, state: state, reason: reason, source: source, eventType: eventType})
+	if err != nil {
+		return err
 	}
-	now := e.opts.Now().UTC()
+	return e.reflectState(ctx, prev, ts, source, eventType)
+}
+
+// update is one change to a hold.
+type update struct {
+	hold, reason, source, eventType string
+	state                           State
+	// webhook: a billing platform's event, applied only if it is not older
+	// than the newest one applied to the hold, and only if it raises the
+	// hold, unless it is positive.
+	webhook, positive bool
+	at                time.Time // when the platform says it happened
+}
+
+// storeResult says what store did with an update.
+type storeResult struct {
+	kind int    // outChanged, outKept or outStale
+	why  string // for outKept and outStale
+}
+
+const (
+	outChanged = iota // stored
+	outKept           // a lesser signal: the hold stays as it is
+	outStale          // older than the newest event applied to the hold
+)
+
+// store applies an update and writes the tenant's state to disk before it
+// is visible. Updates are serialized, so they are decided and written in
+// order.
+func (e *Enforcer) store(tenant string, u update) (ts, prev TenantState, res storeResult, err error) {
+	if u.hold == "" {
+		u.hold = HoldBilling
+	}
+	e.setMu.Lock()
+	defer e.setMu.Unlock()
 	e.mu.Lock()
-	prev := e.states[tenant]
+	prev = e.states[tenant]
+	e.mu.Unlock()
+	now := e.opts.Now().UTC()
+	at := now
+	if u.webhook {
+		if !u.at.IsZero() {
+			at = u.at.UTC()
+		}
+		if last := prev.EventTimes[u.hold]; at.Before(last) {
+			return prev, prev, storeResult{outStale, fmt.Sprintf("the event happened at %s, before the newest one applied to the %s hold (%s)",
+				at.Format(time.RFC3339), u.hold, last.Format(time.RFC3339))}, nil
+		}
+		if cur := orActive(prev.Holds[u.hold].State); !u.positive && severity[u.state] < severity[cur] {
+			return prev, prev, storeResult{outKept, fmt.Sprintf("%s is less severe than its %s; only a payment or an active subscription lowers it", u.state, cur)}, nil
+		}
+	}
 	holds := map[string]Hold{}
 	for k, v := range prev.Holds {
 		holds[k] = v
 	}
-	if state == Active {
-		delete(holds, hold)
+	if u.state == Active {
+		delete(holds, u.hold)
 	} else {
-		h := Hold{State: state, Reason: reason, Source: source, EventType: eventType, Since: now}
-		if old, ok := holds[hold]; ok && old.State == state {
+		h := Hold{State: u.state, Reason: u.reason, Source: u.source, EventType: u.eventType, Since: now}
+		if old, ok := holds[u.hold]; ok && old.State == u.state {
 			h.Since = old.Since
 		}
-		holds[hold] = h
+		holds[u.hold] = h
 	}
-	ts := effective(tenant, holds)
+	ts = effective(tenant, holds)
 	if len(holds) == 0 {
-		ts = TenantState{Tenant: tenant, State: Active, Reason: reason, Source: source, EventType: eventType}
+		ts = TenantState{Tenant: tenant, State: Active, Reason: u.reason, Source: u.source, EventType: u.eventType}
 	}
 	// Since is when the effective state began.
 	if orActive(prev.State) == ts.State && !prev.Since.IsZero() {
@@ -418,13 +670,30 @@ func (e *Enforcer) SetHold(ctx context.Context, tenant, hold string, state State
 	} else {
 		ts.Since = now
 	}
-	state = ts.State
+	ts.EventTimes = map[string]time.Time{}
+	for k, v := range prev.EventTimes {
+		ts.EventTimes[k] = v
+	}
+	if at.After(ts.EventTimes[u.hold]) {
+		ts.EventTimes[u.hold] = at
+	}
+	b, err := json.Marshal(ts)
+	if err != nil {
+		return prev, prev, storeResult{}, err
+	}
+	if err := e.opts.State.Set("state/"+tenant, string(b)); err != nil {
+		return prev, prev, storeResult{}, fmt.Errorf("store state of tenant %s: %w", tenant, err)
+	}
+	e.mu.Lock()
 	e.states[tenant] = ts
 	e.mu.Unlock()
-	b, _ := json.Marshal(ts)
-	if err := e.opts.State.Set("state/"+tenant, string(b)); err != nil {
-		return err
-	}
+	return ts, prev, storeResult{}, nil
+}
+
+// reflectState reports a stored state and reflects it on the tenant's
+// gateway identities and clusters.
+func (e *Enforcer) reflectState(ctx context.Context, prev, ts TenantState, source, eventType string) error {
+	tenant, state := ts.Tenant, ts.State
 	if prev.State != state {
 		log.Printf("[enforcement] tenant %s: %s -> %s (%s via %s %s, mode=%s)", tenant, orActive(prev.State), state, ts.Reason, source, eventType, e.opts.Mode)
 	}

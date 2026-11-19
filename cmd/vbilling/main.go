@@ -524,6 +524,7 @@ func newEnforcer(cfg *config.Config, kube kubernetes.Interface, ctrl *controller
 		Resolvers:              resolvers,
 		State:                  state,
 		Telemetry:              tel,
+		IsTenant:               ctrl.KnownTenant,
 		Pauses:                 pauses,
 		OnPause:                ctrl.SetPaused,
 		DrainTimeout:           cfg.PauseDrainTimeout,
