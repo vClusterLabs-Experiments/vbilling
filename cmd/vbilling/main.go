@@ -268,6 +268,7 @@ func main() {
 	ctrl := controller.New(cfg, disc, coll, sp, tenants, dests, tel)
 	ctrl.UsePrometheus(prom)
 	ctrl.UsePauses(pauses)
+	ctrl.UseHeld(held) // offboarding waits for usage held until priced
 	if prices != nil {
 		prices.SetReady(ctrl.Ready) // plans are known once tenants are discovered
 	}

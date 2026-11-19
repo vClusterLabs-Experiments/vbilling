@@ -337,6 +337,32 @@ func syncDir(dir string) error {
 	return d.Sync()
 }
 
+// Each calls fn with every event held for dest, series by series and in
+// ledger order within a series, until fn returns false.
+func (h *HeldStore) Each(dest string, fn func(HeldEntry) bool) error {
+	h.mu.Lock()
+	series := make([]string, 0, len(h.dests[dest]))
+	for k := range h.dests[dest] {
+		series = append(series, k)
+	}
+	h.mu.Unlock()
+	sort.Strings(series)
+	for _, s := range series {
+		stop := false
+		_, err := h.scan(dest, s, func(e HeldEntry) bool {
+			stop = !fn(e)
+			return !stop
+		})
+		if err != nil {
+			return err
+		}
+		if stop {
+			return nil
+		}
+	}
+	return nil
+}
+
 // Peek returns up to max of a series' held events, oldest first, and the
 // file offset after the last one (for Release).
 func (h *HeldStore) Peek(dest, series string, max int) ([]HeldEntry, int64, error) {

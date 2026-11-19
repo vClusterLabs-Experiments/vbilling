@@ -62,6 +62,8 @@ type Controller struct {
 	clusters   []discovery.TenantCluster
 	lastSeen   map[string]time.Time       // tenant -> last time it had a tenant cluster
 	offboarded map[string]map[string]bool // tenant -> destinations done offboarding it
+	off        offboarding                // where each departed tenant's usage ends (offboard.go)
+	held       heldUsage                  // optional: usage held from destinations until priced
 	discovered bool
 	lastWindow time.Time
 	// lastUnrequested is the last logged count of pods without requests.
@@ -341,6 +343,10 @@ func (c *Controller) Reconcile(ctx context.Context) {
 	}
 	c.warnAliasConflicts(aliases, ambiguous)
 	c.observePauses(clusters, now)
+	var head uint64
+	if c.spool != nil {
+		head = c.spool.Committed()
+	}
 	c.mu.Lock()
 	c.aliases = aliases
 	c.ambiguous = ambiguous
@@ -348,6 +354,7 @@ func (c *Controller) Reconcile(ctx context.Context) {
 	c.discovered = true
 	for _, t := range tenants {
 		c.lastSeen[t.ID] = now
+		c.off.noteSeen(t.ID, head)
 		delete(c.offboarded, t.ID) // back before offboarding finished: start over next time
 	}
 	var gone []usage.Tenant
@@ -378,6 +385,14 @@ func (c *Controller) Reconcile(ctx context.Context) {
 			if done[d.Name()] {
 				continue
 			}
+			// Offboarding ends billing there (Lago terminates the subscription
+			// and ignores its later events): only once the destination has the
+			// tenant's last usage, delivery backlog and held usage included.
+			if ready, why := c.delivered(t.ID, d.Name()); !ready {
+				c.logWaiting(t.ID, d.Name(), why)
+				ok = false
+				continue
+			}
 			switch err := d.RemoveTenant(ctx, t); {
 			case err == nil:
 				done[d.Name()] = true
@@ -395,6 +410,7 @@ func (c *Controller) Reconcile(ctx context.Context) {
 			c.mu.Lock()
 			delete(c.lastSeen, t.ID)
 			delete(c.offboarded, t.ID)
+			c.off.forget(t.ID)
 			c.mu.Unlock()
 		}
 	}
