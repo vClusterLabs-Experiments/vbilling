@@ -263,12 +263,12 @@
         </div>
         <div class="issue-body">
           <h4>Symptoms</h4>
-          <p>vBilling starts but meters no tenant clusters. No customers or events appear in your billing platform, and every window logs <code>[controller] window ...: 0 events for 0 tenant cluster(s)</code>.</p>
+          <p>vBilling starts but meters no clusters. No customers or events appear in your billing platform, and every window logs <code>[controller] window ...: 0 events for 0 tenant cluster(s)</code>.</p>
 
           <h4>Cause</h4>
-          <p>vBilling discovers tenant clusters by scanning for StatefulSets and Deployments with the label <code>app=vcluster</code>. If your tenant clusters use different labels, or if RBAC prevents listing these resources, discovery will find nothing.</p>
+          <p>vBilling discovers clusters by scanning for StatefulSets and Deployments with the label <code>app=vcluster</code>. If your clusters use different labels, or if RBAC prevents listing these resources, discovery will find nothing.</p>
 
-          <h4><span class="fix-label">Fix</span> Check that tenant clusters have the expected labels</h4>
+          <h4><span class="fix-label">Fix</span> Check that clusters have the expected labels</h4>
           <div class="code-block"><code><span class="comment"># List StatefulSets with the vcluster label</span>
 <span class="cmd">kubectl</span> get statefulsets <span class="flag">--all-namespaces</span> <span class="flag">-l</span> app=vcluster
 
@@ -290,7 +290,7 @@
 <span class="cmd">kubectl</span> get clusterrolebinding | <span class="cmd">grep</span> vbilling</code></div>
 
           <h4><span class="fix-label">Fix</span> Check vCluster Platform enrichment (optional)</h4>
-          <p>Workloads are the source of truth: vBilling finds tenant clusters by their StatefulSets and Deployments. With vCluster Platform, it also reads <code>VirtualClusterInstance</code> resources (<code>management.loft.sh/v1</code>) to add the project and display name, and logs:</p>
+          <p>Workloads are the source of truth: vBilling finds clusters by their StatefulSets and Deployments. With vCluster Platform, it also reads <code>VirtualClusterInstance</code> resources (<code>management.loft.sh/v1</code>) to add the project and display name, and logs:</p>
           <div class="code-block"><code><span class="output">[discovery] enriched 3 tenant cluster(s) from vCluster Platform</span></code></div>
           <p>Without vCluster Platform this line never appears. That is expected: discovery does not depend on it.</p>
 
@@ -309,7 +309,7 @@
         </div>
         <div class="issue-body">
           <h4>Symptoms</h4>
-          <p>vBilling discovers tenant clusters but CPU and memory metrics are always zero. The log shows warnings about failing to get pod metrics.</p>
+          <p>vBilling discovers clusters but CPU and memory metrics are always zero. The log shows warnings about failing to get pod metrics.</p>
 
           <h4>Cause</h4>
           <p>vBilling requires the Kubernetes metrics-server to be installed and functioning. Without it, the PodMetrics API is unavailable.</p>
@@ -383,13 +383,13 @@
         </div>
         <div class="issue-body">
           <h4>Symptoms</h4>
-          <p>You have labeled control plane cluster nodes with <code>vcluster.loft.sh/managed-by</code> but vBilling does not bill them as dedicated nodes. No <code>vcluster_private_node_hours</code> events with <code>billing_mode=dedicated_node</code> appear. (For nodes that join a tenant cluster through vCluster Private Nodes, see <a href="#private-nodes-not-metered">Private Nodes Not Metered</a>.)</p>
+          <p>You have labeled control plane cluster nodes with <code>vcluster.loft.sh/managed-by</code> but vBilling does not bill them as dedicated nodes. No <code>vcluster_private_node_hours</code> events with <code>billing_mode=dedicated_node</code> appear. (For nodes that join a cluster through vCluster Private Nodes, see <a href="#private-nodes-not-metered">Private Nodes Not Metered</a>.)</p>
 
           <h4>Cause</h4>
           <p>The most common cause is a label value mismatch between the node label and the vCluster namespace name. vBilling tries multiple label values, but they must correspond to the namespace.</p>
 
           <h4><span class="fix-label">Fix</span> Understand the label matching logic</h4>
-          <p>For a tenant cluster in namespace <code>vcluster-team-gpu</code>, vBilling searches for nodes with these selectors:</p>
+          <p>For a cluster in namespace <code>vcluster-team-gpu</code>, vBilling searches for nodes with these selectors:</p>
           <div class="code-block"><code><span class="comment"># Selector 1: full namespace name</span>
 vcluster.loft.sh/managed-by=<span class="string">vcluster-team-gpu</span>
 vcluster.loft.sh/cluster=<span class="string">vcluster-team-gpu</span>
@@ -430,17 +430,17 @@ vcluster.loft.sh/cluster=<span class="string">team-gpu</span>
         </div>
         <div class="issue-body">
           <h4>Symptoms</h4>
-          <p>A tenant cluster has private nodes, but no <code>vcluster_private_node_hours</code> events with <code>billing_mode=private_node</code> appear, or <code>GET /api/v1/status</code> lists the tenant cluster under failed tenant APIs.</p>
+          <p>A cluster has private nodes, but no <code>vcluster_private_node_hours</code> events with <code>billing_mode=private_node</code> appear, or <code>GET /api/v1/status</code> lists the cluster under failed tenant APIs.</p>
 
           <h4>Cause</h4>
-          <p>vBilling reads private nodes through the tenant cluster's own API, with the kubeconfig in the Secret <code>vbilling-kubeconfig</code> in the tenant cluster's namespace. Without that Secret, or with the tenant cluster's control plane down, there is nothing to read.</p>
+          <p>vBilling reads private nodes through the cluster's own API, with the kubeconfig in the Secret <code>vbilling-kubeconfig</code> in the cluster's namespace. Without that Secret, or with the cluster's control plane down, there is nothing to read.</p>
 
           <h4><span class="fix-label">Fix</span> Export the read-only kubeconfig</h4>
-          <p>Add <code>exportKubeConfig.additionalSecrets</code> with the <code>vbilling-reader</code> service account to the tenant cluster's <code>vcluster.yaml</code> (see <a href="private-nodes.html#private">Private Nodes</a>), then check the Secret exists:</p>
+          <p>Add <code>exportKubeConfig.additionalSecrets</code> with the <code>vbilling-reader</code> service account to the cluster's <code>vcluster.yaml</code> (see <a href="private-nodes.html#private">Private Nodes</a>), then check the Secret exists:</p>
           <div class="code-block"><code><span class="cmd">kubectl</span> <span class="flag">-n</span> &lt;tenant-namespace&gt; get secret vbilling-kubeconfig</code></div>
 
-          <h4><span class="fix-label">Fix</span> The tenant cluster's control plane exits</h4>
-          <p>An error naming the feature <code>'Private Nodes' (vcp-distro-private-nodes)</code> as not available means the tenant cluster has no license: register it with vCluster Platform (<code>vcluster platform add vcluster &lt;name&gt; -n &lt;namespace&gt;</code>). <code>denied by loft access key scope</code> means the CLI's access key is scoped and cannot register tenant clusters; log in with a key that can. vCluster 0.36.2 and later need Platform 4.11.3 or later.</p>
+          <h4><span class="fix-label">Fix</span> The cluster's control plane exits</h4>
+          <p>An error naming the feature <code>'Private Nodes' (vcp-distro-private-nodes)</code> as not available means the cluster has no license: register it with vCluster Platform (<code>vcluster platform add vcluster &lt;name&gt; -n &lt;namespace&gt;</code>). <code>denied by loft access key scope</code> means the CLI's access key is scoped and cannot register clusters; log in with a key that can. vCluster 0.36.2 and later need Platform 4.11.3 or later.</p>
 
           <h4><span class="fix-label">Fix</span> GPU-hours missing right after a node reboot</h4>
           <p>While a driver container rebuilds (after a reboot, a spot restart or a MIG change), a Ready node advertises no GPUs. vBilling bills the node and records its installed GPUs (GPU Feature Discovery's <code>nvidia.com/gpu.count</code>) as <code>vcluster_gpu_downtime_hours</code> with the reason "GPUs installed but not allocatable" until they are allocatable again.</p>
@@ -717,7 +717,7 @@ increase(vbilling_events_released_unpriced_total[1h]) &gt; 0</code></div>
           <p>After restarting the vBilling controller, you see warnings about subscription creation failing, or duplicate subscriptions appear in Lago.</p>
 
           <h4>Cause</h4>
-          <p>vBilling is designed to be idempotent on restart. When it discovers a tenant cluster, it first probes for an existing subscription using the <code>GetCurrentUsage</code> API call. If the subscription already exists, Lago returns usage data and vBilling reuses the subscription. If the probe fails (404), vBilling creates a new subscription.</p>
+          <p>vBilling is designed to be idempotent on restart. When it discovers a cluster, it first probes for an existing subscription using the <code>GetCurrentUsage</code> API call. If the subscription already exists, Lago returns usage data and vBilling reuses the subscription. If the probe fails (404), vBilling creates a new subscription.</p>
 
           <h4>How it works</h4>
           <div class="code-block"><code><span class="comment"># vBilling's subscription detection logic:</span>
@@ -786,7 +786,7 @@ LAGO_API_URL=<span class="string">http://localhost:3000</span></code></div>
             <li><code>[controller]</code>: metering windows, backfills and tenant changes</li>
             <li><code>[discovery]</code>: vCluster Platform enrichment</li>
             <li><code>[metrics]</code>: collection (CPU, memory, GPUs, Prometheus)</li>
-            <li><code>[tenantapi]</code>: tenant clusters read through their own API (Private Nodes, Standalone)</li>
+            <li><code>[tenantapi]</code>: clusters read through their own API (Private Nodes, Standalone)</li>
             <li><code>[pipeline]</code>: delivery to each adapter, retries and dead letters</li>
             <li><code>[health]</code>: usage sources that fail, return nothing, diverge or recover</li>
             <li><code>[records]</code>: late per-request records billed as adjustments</li>

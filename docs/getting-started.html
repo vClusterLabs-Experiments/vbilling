@@ -315,7 +315,7 @@
       <!-- Prerequisites -->
       <h2 id="prerequisites">Prerequisites</h2>
       <ul>
-        <li>A control plane cluster with at least one tenant cluster. vBilling meters every tenancy model: tenant clusters with their own nodes (vCluster Private Nodes, Auto Nodes, Standalone), dedicated nodes and shared nodes.</li>
+        <li>A control plane cluster with at least one cluster. vBilling meters every tenancy model: clusters with their own nodes (vCluster Private Nodes, Auto Nodes, Standalone), dedicated nodes and shared nodes.</li>
         <li><strong>kubectl</strong> and <strong>Helm 3</strong></li>
         <li><strong>metrics-server</strong> in the control plane cluster, for CPU and memory usage</li>
         <li>An account on your billing platform (a Stripe sandbox, a Metronome account), or Docker to run Lago locally</li>
@@ -323,7 +323,7 @@
 
       <div class="callout callout-info">
         <div class="callout-icon">i</div>
-        <div>vBilling finds tenant clusters by their StatefulSets or Deployments (label <code>app=vcluster</code>), and through the vCluster Platform API when it is available. No cluster yet? Run everything on a laptop with <a href="lago.html#laptop">vind and Lago</a>, or follow the <a href="example-gke.html">GKE example</a> with real GPUs.</div>
+        <div>vBilling finds clusters by their StatefulSets or Deployments (label <code>app=vcluster</code>), and through the vCluster Platform API when it is available. No cluster yet? Run everything on a laptop with <a href="lago.html#laptop">vind and Lago</a>, or follow the <a href="example-gke.html">GKE example</a> with real GPUs.</div>
       </div>
 
       <!-- Step 1 -->
@@ -374,7 +374,7 @@ ADAPTERS=noop DATA_DIR=./data <span class="cmd">./bin/vbilling</span></code></di
 
       <!-- Step 3 -->
       <h2 id="step-3"><span class="step-marker">3</span>Configure pricing and packaging</h2>
-      <p>vBilling creates the metrics in your billing platform; the prices are yours. Every tenant is on the default plan <code>vcluster-standard</code> unless its tenant cluster carries <code>vbilling.vcluster.com/plan</code>.</p>
+      <p>vBilling creates the metrics in your billing platform; the prices are yours. Every tenant is on the default plan <code>vcluster-standard</code> unless its cluster carries <code>vbilling.vcluster.com/plan</code>.</p>
       <ul>
         <li><strong>Stripe</strong>: a metered price on each meter you charge for, tagged with the plan for automatic subscriptions. See <a href="stripe.html#prices">Prices and subscriptions</a>.</li>
         <li><strong>Metronome</strong>: rate card products on the billable metrics, priced on dimensions such as SKU, region and capacity type. See <a href="metronome.html#pricing">Pricing on dimensions</a>.</li>

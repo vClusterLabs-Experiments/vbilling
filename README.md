@@ -4,7 +4,7 @@
 
 <p align="center">
   <strong>Usage metering for AI Clouds running vCluster</strong><br>
-  Meters tenant clusters to the second, keeps a durable, verifiable ledger, and ships reconcilable usage to Stripe, Metronome, Lago or your own pipeline.
+  Meters clusters to the second, keeps a durable, verifiable ledger, and ships reconcilable usage to Stripe, Metronome, Lago or your own pipeline.
 </p>
 
 <p align="center">
@@ -15,11 +15,11 @@
 
 ---
 
-vBilling is the **metering pipe**, not the billing engine. It turns what runs in your tenant clusters into canonical usage events. Your billing platform does the pricing, invoicing, tax and payments. vBilling makes sure every billable GPU-second reaches it exactly once, attributed to the right customer, region and SKU, and that you can prove it afterwards.
+vBilling is the **metering pipe**, not the billing engine. It turns what runs in your clusters into canonical usage events. Your billing platform does the pricing, invoicing, tax and payments. vBilling makes sure every billable GPU-second reaches it exactly once, attributed to the right customer, region and SKU, and that you can prove it afterwards.
 
 > vBilling lives in `vClusterLabs-Experiments`: it is an experimental project, not a supported vCluster Labs product.
 
-**[GPU metering with Stripe](examples/gke-stripe/README.md)** provides a step-by-step setup for shared L4 GPUs, optional private A100 nodes, usage delivery to Stripe test mode, and resource cleanup. Credentials and runtime data stay outside the repository.
+**[GPU metering with Stripe](examples/gke-stripe/README.md)** provides a step-by-step setup: shared L4 nodes for internal teams, an optional A100 joined as a private node, usage delivery to Stripe test mode, and resource cleanup. Credentials and runtime data stay outside the repository.
 
 ## What's new in v0.3
 
@@ -45,15 +45,15 @@ See [Usage sources](https://vclusterlabs-experiments.github.io/vbilling/usage-so
 - **Several destinations at once.** Each destination has its own cursor, so a down billing API never blocks your data platform feed.
 - **Deterministic event IDs.** Retries and replays deduplicate downstream.
 - **Second-level allocation metering.** GPU time is metered from container start to finish, including fractional GPUs (MIG mixed and single strategy, GKE GPU partitions, time-slicing including GKE time-sharing) and GPUs allocated through DRA ResourceClaims.
-- **Every tenancy model.** Shared nodes and dedicated nodes are metered from the control plane cluster. Tenant clusters with their own nodes (vCluster Private Nodes, Auto Nodes, Standalone) are metered through their own API, with a read-only kubeconfig vCluster exports for vBilling. No node is ever billed twice.
+- **Every tenancy model.** Shared nodes and dedicated nodes are metered from the control plane cluster. Clusters with their own nodes (vCluster Private Nodes, Auto Nodes, Standalone) are metered through their own API, with a read-only kubeconfig vCluster exports for vBilling. No node is ever billed twice.
 - **Nothing slips between windows.** Pods and nodes deleted between two collections (short jobs, Auto Nodes scale-down) are billed until the second they were deleted.
 - **Bill anything Prometheus knows.** Define billable metrics as PromQL (inference tokens from vLLM, any exporter's counter), or read vCluster Platform fleet observability with one preset.
 - **Fair metering.** GPU time on NotReady or unhealthy nodes is not billed. It is recorded as auditable downtime instead.
 - **Reconciliation API.** It recomputes usage from the ledger and compares it with what Stripe or Metronome recorded.
-- **Billing-state enforcement.** Payment failures and spend alerts can label, annotate or soft-suspend tenant clusters.
+- **Billing-state enforcement.** Payment failures and spend alerts can label, annotate or soft-suspend clusters.
 - **Ingest API.** Accepts usage vBilling cannot see itself: inference tokens, Slurm accounting, storage and network exporters.
 - **Built-in dashboard, Prometheus metrics, and CSV/JSONL exports.**
-- **An end-to-end example on GKE.** [`examples/gke-gpu`](examples/gke-gpu) goes from an empty project to Stripe invoices: a time-sliced L4 tenant cluster, an A100 joined as a private node with the NVIDIA GPU Operator and MIG, DCGM through your own Prometheus, and a spot preemption billed to the second.
+- **An end-to-end example on GKE.** [`examples/gke-gpu`](examples/gke-gpu) goes from an empty project to Stripe invoices: a time-sliced L4 cluster, an A100 joined as a private node with the NVIDIA GPU Operator and MIG, DCGM through your own Prometheus, and a spot preemption billed to the second.
 
 ## Architecture
 
@@ -78,7 +78,7 @@ See [Usage sources](https://vclusterlabs-experiments.github.io/vbilling/usage-so
  └───────────────────────────────────────────────────────┘
 ```
 
-1. **Discover** tenant clusters (vCluster StatefulSets and Deployments, enriched from vCluster Platform when available) and group them into billing tenants.
+1. **Discover** clusters (vCluster StatefulSets and Deployments, enriched from vCluster Platform when available) and group them into billing tenants.
 2. **Meter** each closed window (60s by default, aligned to the wall clock) into canonical events.
 3. **Commit** the window atomically to the ledger.
 4. **Deliver** to every destination at least once, with deterministic IDs so the effect is exactly-once.
@@ -91,8 +91,8 @@ See [Usage sources](https://vclusterlabs-experiments.github.io/vbilling/usage-so
 | `vcluster_gpu_hours` | gpu-hours | Container start to finish, per second. MIG at slices/7 (A30: /4) under the single or mixed strategy and on GKE GPU partitions, time-sliced at 1/replicas. Dedicated nodes in whole GPUs | `sku`, `gpu_profile`, `capacity_type`, `billing_mode`, `zone` |
 | `vcluster_cpu_core_hours` | core-hours | metrics-server usage, requests, or the larger of both (`CPU_MEMORY_BASIS`) | `capacity_type`, `billing_mode` |
 | `vcluster_memory_gb_hours` | gib-hours | As CPU | `capacity_type`, `billing_mode` |
-| `vcluster_private_node_hours` | node-hours | Whole nodes dedicated to a tenant cluster, per node | `sku` (SKU label or instance type), `capacity_type` |
-| `vcluster_storage_gb_hours` | gib-hours | Bound PVCs synced from the tenant cluster | `sku` = storage class |
+| `vcluster_private_node_hours` | node-hours | Whole nodes dedicated to a cluster, per node | `sku` (SKU label or instance type), `capacity_type` |
+| `vcluster_storage_gb_hours` | gib-hours | Bound PVCs synced from the cluster | `sku` = storage class |
 | `vcluster_instance_hours` | hours | Control plane hours while ready (not while provisioning or asleep) | `tenant_class` |
 | `vcluster_lb_hours` | hours | LoadBalancer services with an assigned address | |
 | `vcluster_network_egress_gb` | gib | Prometheus counter `container_network_transmit_bytes_total`, read sample by sample: the exact byte increase per window. `EGRESS_QUERY` replaces it with PromQL, an estimate | |
@@ -133,8 +133,8 @@ Every event carries `tenant`, `region`, `project`, `sku`, `resource_id`, `tenant
 
 - **Billing starts when a container starts**, not when the pod is created, so image pulls and scheduling are free. It stops when the last container finishes.
 - **Hardware downtime is not billed.** GPU time on a node that is NotReady, or carries a taint listed in `UNHEALTHY_NODE_TAINTS`, becomes `vcluster_gpu_downtime_hours` instead of `vcluster_gpu_hours`. A node that stops reporting (a preempted spot VM) is down from its last heartbeat or Lease renewal, not from the Unknown mark 40 to 50 seconds later. So does a node billed whole whose GPUs are installed (GPU Feature Discovery's `nvidia.com/gpu.count`) but not allocatable, for example while the driver rebuilds after a reboot.
-- **Provisioning and sleep are free.** Control plane hours accrue only while the tenant cluster has a ready replica.
-- **No double billing.** Pods on a tenant's own dedicated nodes are covered by the node allocation. The tenant cluster's own control plane pods and data PVCs are covered by instance hours (set `METER_CONTROL_PLANE=true` to bill them as well).
+- **Provisioning and sleep are free.** Control plane hours accrue only while the cluster has a ready replica.
+- **No double billing.** Pods on a tenant's own dedicated nodes are covered by the node allocation. The cluster's own control plane pods and data PVCs are covered by instance hours (set `METER_CONTROL_PLANE=true` to bill them as well).
 - **No invented usage.** Backfilled windows include only what is knowable: object lifetimes (allocations, requests) and the raw samples of Prometheus counters, egress included. Sampled usage (metrics-server CPU and memory) is never extrapolated into backfilled windows.
 - **Deleted is not free, and not overbilled.** A pod or node deleted between collections is billed until it was deleted. A deletion noticed only after a watch reconnects is dated to the last collection that still saw it, so an outage can only under-bill.
 
@@ -143,13 +143,13 @@ Every event carries `tenant`, `region`, `project`, `sku`, `resource_id`, `tenant
 | Tenancy model | Where workloads run | How vBilling meters it |
 |---|---|---|
 | Shared nodes | Control plane cluster nodes, pods synced by vCluster | From the control plane cluster: pods, volumes, load balancers (`billing_mode=shared`) |
-| Dedicated nodes | Control plane cluster nodes assigned to one tenant cluster | Whole node: node-hours, whole GPUs, CPU and memory capacity (`billing_mode=dedicated_node`) |
-| Private Nodes, Auto Nodes | Machines joined to the tenant cluster itself; nothing is synced to the control plane cluster | Through the tenant cluster's own API: each private node billed whole (`billing_mode=private_node`), plus the tenant cluster's volumes and load balancers. `PRIVATE_NODE_BILLING=usage` bills the pods on them instead |
+| Dedicated nodes | Control plane cluster nodes assigned to one cluster | Whole node: node-hours, whole GPUs, CPU and memory capacity (`billing_mode=dedicated_node`) |
+| Private Nodes, Auto Nodes | Machines joined to the cluster itself; nothing is synced to the control plane cluster | Through the cluster's own API: each private node billed whole (`billing_mode=private_node`), plus the cluster's volumes and load balancers. `PRIVATE_NODE_BILLING=usage` bills the pods on them instead |
 | Standalone, or any cluster elsewhere | No control plane cluster | Through a kubeconfig listed in `TENANT_CLUSTERS_FILE`, like private nodes |
 
-A node the tenant cluster's API reports is billed as a private node only if the control plane cluster does not have it and it is not one of vCluster's placeholder nodes (`vcluster.loft.sh/fake-node`). Shared tenant clusters are therefore never billed twice, even with tenant API access configured. Label a node `vbilling.vcluster.com/billable=false` to exempt hardware the tenant owns.
+A node the cluster's API reports is billed as a private node only if the control plane cluster does not have it and it is not one of vCluster's placeholder nodes (`vcluster.loft.sh/fake-node`). Shared clusters are therefore never billed twice, even with tenant API access configured. Label a node `vbilling.vcluster.com/billable=false` to exempt hardware the tenant owns.
 
-**Least-privilege access.** vBilling reads one Secret per tenant cluster, `vbilling-kubeconfig` in its namespace, and its RBAC is pinned to that Secret name. vCluster writes it with a read-only service account:
+**Least-privilege access.** vBilling reads one Secret per cluster, `vbilling-kubeconfig` in its namespace, and its RBAC is pinned to that Secret name. vCluster writes it with a read-only service account:
 
 ```yaml
 # vcluster.yaml (vCluster 0.36+)
@@ -182,7 +182,7 @@ experimental:
 
 vCluster exports kubeconfigs for `localhost`; vBilling connects to the cluster's Service instead and verifies TLS against `<name>.<namespace>`. vBilling never uses a cluster's admin kubeconfig, and with `TENANT_SOURCE=platform` it reaches clusters only through the vCluster Platform proxy.
 
-**Outages.** If a tenant cluster's API cannot be read, the rest of the fleet is still metered, and the missed windows are filled as soon as it answers (up to 6 hours back). Fills are late ledger events deduplicated by ID, so a repeated fill never bills twice.
+**Outages.** If a cluster's API cannot be read, the rest of the fleet is still metered, and the missed windows are filled as soon as it answers (up to 6 hours back). Fills are late ledger events deduplicated by ID, so a repeated fill never bills twice.
 
 ## Billing adapters
 
@@ -237,7 +237,7 @@ helm upgrade --install vbilling deploy/helm/vbilling -n vbilling-system \
 
 In Metronome, add products on the vBilling billable metrics with `pricing_group_key: ["region","sku","capacity_type","billing_mode"]` and `presentation_group_key: ["tenant_cluster"]` (together they must form the metric's group key) to price H100 differently from L40S, one region differently from another, and spot or preemptible at a flat discount. Rate cards carry the currency.
 
-**Shared and private GPU nodes on GKE**: [`examples/gke-gpu`](examples/gke-gpu) is a complete setup, from an empty project to Stripe invoices: a time-sliced L4 tenant cluster, an A100 joined as a vCluster private node, DCGM through Prometheus, and the manifests, values and commands for each step. Also on the [docs site](https://vclusterlabs-experiments.github.io/vbilling/example-gke.html).
+**Shared and private GPU nodes on GKE**: [`examples/gke-gpu`](examples/gke-gpu) is a complete setup, from an empty project to Stripe invoices: a time-sliced L4 cluster, an A100 joined as a vCluster private node, DCGM through Prometheus, and the manifests, values and commands for each step. Also on the [docs site](https://vclusterlabs-experiments.github.io/vbilling/example-gke.html).
 
 **Lago (local demo)**: `deploy/lago/docker-compose.yml` runs Lago locally. See the [Lago guide](https://vclusterlabs-experiments.github.io/vbilling/lago.html), which also runs the whole pipeline on a laptop with vind.
 
@@ -254,21 +254,21 @@ curl -s 'localhost:8080/api/v1/usage?group_by=tenant,sku' | jq      # line items
 
 ## Tenants, projects and metadata
 
-By default every tenant cluster is its own billing customer, with ID `vcluster-<namespace>-<name>` (the v0.1 format). Set labels or annotations on the tenant cluster's StatefulSet, its namespace, or its vCluster Platform `VirtualClusterInstance` (later sources win):
+By default every cluster is its own billing customer, with ID `vcluster-<namespace>-<name>` (the v0.1 format). Set labels or annotations on the cluster's StatefulSet, its namespace, or its vCluster Platform `VirtualClusterInstance` (later sources win):
 
 | Key (`vbilling.vcluster.com/...`) | Effect |
 |---|---|
-| `tenant` | Billing customer ID. Several tenant clusters can share one customer. |
+| `tenant` | Billing customer ID. Several clusters can share one customer. |
 | `display-name`, `email`, `currency` | Customer details sent to the billing platform |
 | `project` | Cost attribution (defaults to the vCluster Platform project) |
 | `tenant-class` | e.g. `public`, `enterprise`, `government`, `dev`. Stamped on events for pricing. |
 | `plan` | Lago plan, Stripe plan tag, or Metronome rate card alias/ID |
 | `stripe-customer-id`, `metronome-customer-id` | Pin an existing customer instead of creating one |
-| `exclude` | `"true"` stops metering this tenant cluster |
+| `exclude` | `"true"` stops metering this cluster |
 
-`TENANT_SOURCE=project` maps every tenant cluster in a vCluster Platform project to one customer (`project-<name>`). `TENANT_SOURCE=platform` reads identity from vCluster Platform itself (`PLATFORM_URL` plus an access key from a Secret): the Platform Tenant that owns the cluster's project pays (`tenant-<name>`), else the project; customer settings come from the Tenant or Project, never from labels the people who create clusters can set; clusters with their own nodes are reached through the Platform proxy instead of an exported kubeconfig; and owners survive Platform outages and are kept per window across moves between projects. See [vCluster Platform mode](docs/private-nodes.html#platform). `METER_BY_NAMESPACE=true` adds the namespace inside the tenant cluster as a dimension, so tenants can run their own internal chargeback.
+`TENANT_SOURCE=project` maps every cluster in a vCluster Platform project to one customer (`project-<name>`). `TENANT_SOURCE=platform` reads identity from vCluster Platform itself (`PLATFORM_URL` plus an access key from a Secret): the Platform Tenant that owns the cluster's project pays (`tenant-<name>`), else the project; customer settings come from the Tenant or Project, never from labels the people who create clusters can set; clusters with their own nodes are reached through the Platform proxy instead of an exported kubeconfig; and owners survive Platform outages and are kept per window across moves between projects. See [vCluster Platform mode](docs/private-nodes.html#platform). `METER_BY_NAMESPACE=true` adds the namespace inside the cluster as a dimension, so tenants can run their own internal chargeback.
 
-On nodes, `vbilling.vcluster.com/capacity-type` (`on-demand`, `spot`, `preemptible`, `reserved`) and an optional SKU label (`SKU_LABEL`) take precedence over cloud-provider labels. Nodes become **dedicated** to a tenant cluster with `vbilling.vcluster.com/tenant-cluster=<id or name>`, `vcluster.loft.sh/managed-by=<namespace or name>`, or the `VCLUSTER_NODE_LABEL` pattern.
+On nodes, `vbilling.vcluster.com/capacity-type` (`on-demand`, `spot`, `preemptible`, `reserved`) and an optional SKU label (`SKU_LABEL`) take precedence over cloud-provider labels. Nodes become **dedicated** to a cluster with `vbilling.vcluster.com/tenant-cluster=<id or name>`, `vcluster.loft.sh/managed-by=<namespace or name>`, or the `VCLUSTER_NODE_LABEL` pattern.
 
 ## Durability and correctness
 
@@ -280,7 +280,7 @@ On nodes, `vbilling.vcluster.com/capacity-type` (`on-demand`, `spot`, `preemptib
 | Tamper evidence | Every ledger record is SHA-256 chained to the previous one. `GET /api/v1/ledger/verify` re-hashes the whole retained ledger. |
 | Bad events don't block good ones | Payloads a billing platform rejects are isolated (partial-batch errors, or bisection) and parked as dead letters. Auth errors, rate limits and outages are retried with backoff; they are never dead-lettered. |
 | Provable totals | `GET /api/v1/reconcile` recomputes each tenant's usage from the ledger and compares it with what Stripe or Metronome recorded. Dead letters are accounted for. |
-| Tenant API outages do not lose usage | A tenant cluster whose own API is unreachable is recorded as a gap (persisted under `DATA_DIR`). Once it answers, exactly the missed windows are metered and appended as late events, deduplicated by ID. |
+| Tenant API outages do not lose usage | A cluster whose own API is unreachable is recorded as a gap (persisted under `DATA_DIR`). Once it answers, exactly the missed windows are metered and appended as late events, deduplicated by ID. |
 | A wrong customer is never billed | Customer search results must carry the tenant's exact metadata. Discovery errors never offboard tenants. A tenant must be gone for an hour, and its last usage delivered, before `RemoveTenant` runs, and customers are never deleted. |
 
 Run one replica. A restart loses nothing: the ledger keeps every committed window and missed windows are backfilled. A second replica would see only part of the gateway records, so the chart refuses `replicaCount` above 1, and a second vBilling instance waits on a Lease instead of metering.
@@ -310,8 +310,8 @@ Override any mapping with `ENFORCEMENT_RULES`, for example `alerts.spend_thresho
 
 `ENFORCEMENT_MODE` controls what happens:
 - **`observe`** (default): record the state only. It appears in the API, metrics and dashboard.
-- **`annotate`**: also annotate the tenant cluster, label its namespace `vbilling.vcluster.com/billing-state`, and emit a Kubernetes event.
-- **`enforce`**: also label suspended namespaces `vbilling.vcluster.com/suspended=true`. With `enforcement.admissionPolicy.enabled=true` (Kubernetes 1.30+), a ValidatingAdmissionPolicy then denies **new** pods in those namespaces. Running workloads keep running, the tenant sees the reason as a sync error inside their tenant cluster, and a paid invoice lifts it automatically. This policy acts in the control plane cluster, so it holds clusters on shared or dedicated nodes.
+- **`annotate`**: also annotate the cluster, label its namespace `vbilling.vcluster.com/billing-state`, and emit a Kubernetes event.
+- **`enforce`**: also label suspended namespaces `vbilling.vcluster.com/suspended=true`. With `enforcement.admissionPolicy.enabled=true` (Kubernetes 1.30+), a ValidatingAdmissionPolicy then denies **new** pods in those namespaces. Running workloads keep running, the tenant sees the reason as a sync error inside their cluster, and a paid invoice lifts it automatically. This policy acts in the control plane cluster, so it holds clusters on shared or dedicated nodes.
 
 Clusters with their own nodes (Private Nodes, Auto Nodes, Standalone) run their pods only inside themselves. With `ENFORCEMENT_IN_CLUSTER=true` (Helm `enforcement.inCluster`) in `enforce` mode, vBilling also installs a ValidatingAdmissionPolicy and binding named `vbilling-suspended` inside each of a suspended tenant's clusters, through their own API. It denies new pods outside `kube-system` and namespaces labeled `vbilling.vcluster.com/enforcement-exempt`, never stops running ones, and is removed when the tenant is active again. The exported service account needs `create` on validatingadmissionpolicies and validatingadmissionpolicybindings, and `get`, `update` and `delete` on `vbilling-suspended` (see [Dedicated and Private Nodes](https://vclusterlabs-experiments.github.io/vbilling/private-nodes.html#enforcement)).
 
@@ -393,7 +393,7 @@ Billing on DCGM fields takes two precautions. The exporter refreshes values ever
 
 ### vCluster Platform fleet observability
 
-vCluster Platform 4.11+ collects metrics from every tenant cluster, private nodes included, with an OpenTelemetry collector that pushes through the Platform's write gateway. The gateway stamps each series with `vcluster_platform_instance` and `vcluster_platform_project` from the collector's access key, after removing any such labels a tenant sent. `PROMETHEUS_PRESET=vcluster-platform` makes `{{matchers}}` those labels for every Prometheus metric, egress and DCGM GPU utilization included; set `PROMETHEUS_URL` to the fleet Prometheus (or the query proxy, with a metrics access key in `PROMETHEUS_HEADERS`).
+vCluster Platform 4.11+ collects metrics from every cluster, private nodes included, with an OpenTelemetry collector that pushes through the Platform's write gateway. The gateway stamps each series with `vcluster_platform_instance` and `vcluster_platform_project` from the collector's access key, after removing any such labels a tenant sent. `PROMETHEUS_PRESET=vcluster-platform` makes `{{matchers}}` those labels for every Prometheus metric, egress and DCGM GPU utilization included; set `PROMETHEUS_URL` to the fleet Prometheus (or the query proxy, with a metrics access key in `PROMETHEUS_HEADERS`).
 
 ### Cross-checks and source health
 

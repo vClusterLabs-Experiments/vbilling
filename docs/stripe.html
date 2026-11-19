@@ -278,7 +278,7 @@
 
     <main class="content">
       <h1>Stripe</h1>
-      <p class="subtitle">Bill tenant clusters with Stripe Billing Meters. vBilling creates the meters and customers, sends every usage window exactly once, keeps subscriptions in step with the prices you tag, and turns Stripe's payment events into billing states for your tenant clusters.</p>
+      <p class="subtitle">Bill clusters with Stripe Billing Meters. vBilling creates the meters and customers, sends every usage window exactly once, keeps subscriptions in step with the prices you tag, and turns Stripe's payment events into billing states for your clusters.</p>
 
       <h2 id="how-it-works">How it works</h2>
       <div class="flow-diagram"><pre>tenant clusters <span class="flow-arrow">──►</span> <span class="flow-highlight">vBilling</span> <span class="flow-arrow">──►</span> ledger <span class="flow-dim">(fsynced, hash-chained)</span>
@@ -352,7 +352,7 @@
             <tr><td>GPU hours</td><td><code>vcluster_gpu_hours__nvidia_h100_80gb_hbm3</code><br><code>vcluster_gpu_hours__nvidia_a100_sxm4_40gb_mig_1g_5gb</code><br><code>vcluster_gpu_hours__nvidia_l4_timeslice_4</code></td><td>The GPU model or the node's SKU label, plus the MIG profile or time-slicing replicas for fractional GPUs</td></tr>
             <tr><td>Dedicated node hours</td><td><code>vcluster_private_node_hours__bm_gpu_h100_8</code></td><td>The SKU label, the instance type, or <code>&lt;n&gt;x&lt;GPU model&gt;</code></td></tr>
             <tr><td>Storage GiB-hours</td><td><code>vcluster_storage_gb_hours__standard_rwo</code></td><td>The storage class</td></tr>
-            <tr><td>CPU core-hours, memory GiB-hours, tenant cluster hours, LoadBalancer hours, network egress</td><td><code>vcluster_cpu_core_hours</code>, <code>vcluster_memory_gb_hours</code>, and so on</td><td>No SKU: the base meter</td></tr>
+            <tr><td>CPU core-hours, memory GiB-hours, cluster hours, LoadBalancer hours, network egress</td><td><code>vcluster_cpu_core_hours</code>, <code>vcluster_memory_gb_hours</code>, and so on</td><td>No SKU: the base meter</td></tr>
           </tbody>
         </table>
       </div>
@@ -371,14 +371,14 @@
       <p>Every field multiplies the meters and prices you manage. Settle the split before you go live: a new split sends new usage to new meters, and earlier usage stays on the old ones.</p>
 
       <h2 id="customers">Customers</h2>
-      <p>Each vBilling tenant gets one Stripe customer. By default a tenant is one tenant cluster, with the ID <code>vcluster-&lt;namespace&gt;-&lt;name&gt;</code>; the <code>vbilling.vcluster.com/tenant</code> key groups several tenant clusters under one customer, and <code>TENANT_SOURCE=project</code> gives each vCluster Platform project one. vBilling finds the customer in this order:</p>
+      <p>Each vBilling tenant gets one Stripe customer. By default a tenant is one cluster, with the ID <code>vcluster-&lt;namespace&gt;-&lt;name&gt;</code>; the <code>vbilling.vcluster.com/tenant</code> key groups several clusters under one customer, and <code>TENANT_SOURCE=project</code> gives each vCluster Platform project one. vBilling finds the customer in this order:</p>
       <ol>
         <li>A customer ID pinned with <code>vbilling.vcluster.com/stripe-customer-id</code>.</li>
         <li>The customer vBilling recorded earlier in <code>state-stripe.json</code> on its volume.</li>
         <li>A Stripe customer whose <code>metadata[vbilling_tenant_id]</code> is exactly the tenant ID. vBilling uses customer search, and lists customers instead (by email first) for accounts without search.</li>
         <li>A new customer, created with an idempotency key so that a retry never creates a second one.</li>
       </ol>
-      <p>Customer details come from labels or annotations on the tenant cluster's StatefulSet, its namespace, or its vCluster Platform <code>VirtualClusterInstance</code>, and are updated when they change:</p>
+      <p>Customer details come from labels or annotations on the cluster's StatefulSet, its namespace, or its vCluster Platform <code>VirtualClusterInstance</code>, and are updated when they change:</p>
       <div class="code-block"><code><span class="cmd">kubectl</span> annotate namespace team-a \
   vbilling.vcluster.com/tenant=acme-ai \
   vbilling.vcluster.com/display-name=<span class="string">"Acme AI"</span> \
@@ -395,7 +395,7 @@
             <tr><td><code>metadata[vbilling_tenant_id]</code></td><td>The tenant ID. vBilling only uses a customer whose value matches exactly.</td></tr>
             <tr><td><code>metadata[vbilling_plan]</code></td><td>The tenant's plan</td></tr>
             <tr><td><code>metadata[vbilling_region]</code>, <code>[vbilling_project]</code>, <code>[vbilling_tenant_class]</code></td><td>The region, vCluster Platform project and tenant class</td></tr>
-            <tr><td><code>metadata[vbilling_clusters]</code></td><td>The tenant clusters billed to this customer</td></tr>
+            <tr><td><code>metadata[vbilling_clusters]</code></td><td>The clusters billed to this customer</td></tr>
           </tbody>
         </table>
       </div>
@@ -553,9 +553,9 @@ spec:
           <thead><tr><th>Mode</th><th>Effect</th></tr></thead>
           <tbody>
             <tr><td><code>observe</code> (default)</td><td>Record the state only.</td></tr>
-            <tr><td><code>annotate</code></td><td>Also annotate the tenant cluster, label its namespace <code>vbilling.vcluster.com/billing-state</code>, and emit a Kubernetes event.</td></tr>
+            <tr><td><code>annotate</code></td><td>Also annotate the cluster, label its namespace <code>vbilling.vcluster.com/billing-state</code>, and emit a Kubernetes event.</td></tr>
             <tr><td><code>enforce</code></td><td>Also label suspended namespaces <code>vbilling.vcluster.com/suspended=true</code>. With <code>enforcement.admissionPolicy.enabled=true</code> (Kubernetes 1.30+), new pods are denied there while running workloads keep running. A paid invoice lifts it.</td></tr>
-            <tr><td colspan="2">The admission policy acts in the control plane cluster, so it holds tenant clusters on shared or dedicated nodes. Tenant clusters with their own nodes (Private Nodes, Auto Nodes, Standalone) run their pods only inside the tenant cluster: with <code>enforcement.inCluster=true</code>, vBilling installs the same policy inside each of them through the cluster's own API (see <a href="private-nodes.html#enforcement">Billing-state enforcement inside the cluster</a>), or act on their billing state with your own automation.</td></tr>
+            <tr><td colspan="2">The admission policy acts in the control plane cluster, so it holds clusters on shared or dedicated nodes. Clusters with their own nodes (Private Nodes, Auto Nodes, Standalone) run their pods only inside the cluster: with <code>enforcement.inCluster=true</code>, vBilling installs the same policy inside each of them through the cluster's own API (see <a href="private-nodes.html#enforcement">Billing-state enforcement inside the cluster</a>), or act on their billing state with your own automation.</td></tr>
           </tbody>
         </table>
       </div>

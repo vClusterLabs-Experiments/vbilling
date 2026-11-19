@@ -252,8 +252,8 @@ func main() {
 		coll.UseTenantAPI(mgr)
 		tenantMgr = mgr
 		disc.WithExternal(mgr.Clusters())
-		log.Printf("Tenant APIs: Secret %q per tenant cluster (admin fallback %t), %d external tenant cluster(s), private nodes billed by %s",
-			cfg.TenantKubeconfigSecret, cfg.TenantAdminFallback, len(ext), cfg.PrivateNodeBilling)
+		log.Printf("Cluster APIs: Secret %q per cluster, %d external cluster(s), private nodes billed by %s",
+			cfg.TenantKubeconfigSecret, len(ext), cfg.PrivateNodeBilling)
 	}
 	checks, err := crosscheck.Parse(cfg.CrossChecks)
 	if err != nil {

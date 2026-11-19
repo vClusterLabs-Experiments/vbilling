@@ -278,7 +278,7 @@
 
     <main class="content">
       <h1>Lago</h1>
-      <p class="subtitle">Usage-based billing on open source from end to end. Lago rates and invoices, vBilling meters your tenant clusters and sends Lago the events, and both can run on a laptop next to your tenant clusters.</p>
+      <p class="subtitle">Usage-based billing on open source from end to end. Lago rates and invoices, vBilling meters your clusters and sends Lago the events, and both can run on a laptop next to your clusters.</p>
 
       <h2 id="how-it-works">What vBilling sets up</h2>
       <div class="config-table-wrap">
@@ -343,7 +343,7 @@
         <li><code>capacity_type</code>: a discount for <code>spot</code> and <code>preemptible</code>, or a <code>reserved</code> rate</li>
         <li><code>region</code>, <code>billing_mode</code>, <code>tenant_class</code> and <code>tenant_cluster</code></li>
       </ul>
-      <p>To price tenants differently, create more plans and set <code>vbilling.vcluster.com/plan</code> on their tenant clusters. <a href="configuration.html#lago-pricing">Lago pricing</a> lists the charges to configure, with example price lists.</p>
+      <p>To price tenants differently, create more plans and set <code>vbilling.vcluster.com/plan</code> on their clusters. <a href="configuration.html#lago-pricing">Lago pricing</a> lists the charges to configure, with example price lists.</p>
 
       <h3 id="sku-filters">One line per SKU</h3>
       <p>Lago prices an event property only through filters. The first time vBilling sends usage with a new <code>sku</code> for a metric, it adds the value to the billable metric's <code>sku</code> filter, then adds a charge filter for it to the metric's charge on each managed plan. Current usage and invoices then show one line per SKU. Lago applies filters when it computes usage, so usage sent before the filter existed counts under it too.</p>
@@ -418,7 +418,7 @@
       </ul>
 
       <h2 id="laptop">Run it all on a laptop with vind</h2>
-      <p>vind runs vCluster in Docker, so a control plane cluster, three tenant clusters, vBilling and Lago fit on one machine. Start Lago as above, then, from the repository root:</p>
+      <p>vind runs vCluster in Docker, so a control plane cluster, three clusters, vBilling and Lago fit on one machine. Start Lago as above, then, from the repository root:</p>
       <div class="code-block"><code><span class="comment"># a control plane cluster in Docker, with metrics-server</span>
 <span class="cmd">vcluster</span> use driver docker
 <span class="cmd">vcluster</span> create vbilling-host <span class="flag">--connect=true</span>
@@ -439,7 +439,7 @@
   <span class="flag">--set</span> adapters=<span class="string">'{lago}'</span> \
   <span class="flag">--set</span> lago.apiURL=http://host.docker.internal:3000 \
   <span class="flag">--set</span> lago.existingSecret=vbilling-lago</code></div>
-      <p>Within a minute or two the log shows a window line for the three tenant clusters and a subscription per tenant:</p>
+      <p>Within a minute or two the log shows a window line for the three clusters and a subscription per tenant:</p>
       <div class="code-block"><code><span class="cmd">kubectl</span> <span class="flag">-n</span> vbilling-system logs statefulset/vbilling
 <span class="output">[controller] starting (adapters=[lago], window=1m0s, reconcile=30s, region=default)
 API listening on :8080

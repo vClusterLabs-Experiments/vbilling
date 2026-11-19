@@ -314,7 +314,7 @@
       <p>None of them bills GPU utilization: a GPU allocated to one customer cannot be sold to another, used or not. Utilization is recorded next to GPU-hours for showback when the DCGM exporter is installed. See <a href="how-metering-works.html">How Metering Works</a>.</p>
 
       <h2 id="dedicated">Dedicated GPUs and endpoints</h2>
-      <p>A customer gets GPUs of its own: a cluster on shared nodes with GPU pods, whole nodes (dedicated nodes, Private Nodes), or a model endpoint with its own replicas. vBilling bills each GPU for every second it is allocated: from a container's start to its end, or every second a whole node is healthy. Scaling an endpoint to zero replicas stops the bill; a node that is down, a GPU whose driver is not ready, and a paused cluster are not billed.</p>
+      <p>A customer gets GPUs of its own: whole nodes (Private Nodes, dedicated nodes), a model endpoint with its own replicas, or, for internal teams, GPU pods on shared nodes. vBilling bills each GPU for every second it is allocated: from a container's start to its end, or every second a whole node is healthy. Scaling an endpoint to zero replicas stops the bill; a node that is down, a GPU whose driver is not ready, and a paused cluster are not billed.</p>
       <div class="code-block"><code>tenantSource: platform                  <span class="comment"># the Platform Tenant pays</span>
 metering:
   cpuMemoryBasis: requests              <span class="comment"># exact; the default</span>

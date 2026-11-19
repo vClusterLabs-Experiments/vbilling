@@ -294,12 +294,12 @@
             </tr>
             <tr>
               <td><code>TENANT_SOURCE</code></td>
-              <td><code>cluster</code>: one customer per tenant cluster. <code>project</code>: one per vCluster Platform project. With both, the <code>vbilling.vcluster.com/tenant</code> label always wins. <code>platform</code>: the vCluster Platform Tenant that owns the cluster's project, else the project, read from the Platform API; labels on clusters and namespaces never choose the customer (see <a href="private-nodes.html#platform">vCluster Platform mode</a>).</td>
+              <td><code>cluster</code>: one customer per cluster. <code>project</code>: one per vCluster Platform project. With both, the <code>vbilling.vcluster.com/tenant</code> label always wins. <code>platform</code>: the vCluster Platform Tenant that owns the cluster's project, else the project, read from the Platform API; labels on clusters and namespaces never choose the customer (see <a href="private-nodes.html#platform">vCluster Platform mode</a>).</td>
               <td class="td-default">cluster</td>
             </tr>
             <tr>
               <td><code>PLATFORM_CLUSTER</code></td>
-              <td>vCluster Platform cluster name of this control plane cluster, so Platform enrichment only applies to local tenant clusters. Set it with <code>TENANT_SOURCE=platform</code>: instances on other connected clusters then never match.</td>
+              <td>vCluster Platform cluster name of this control plane cluster, so Platform enrichment only applies to local clusters. Set it with <code>TENANT_SOURCE=platform</code>: instances on other connected clusters then never match.</td>
               <td class="td-default">(none)</td>
             </tr>
             <tr>
@@ -319,7 +319,7 @@
             </tr>
             <tr>
               <td><code>WATCH_NAMESPACES</code></td>
-              <td>Comma-separated namespaces to discover tenant clusters in. Empty watches all namespaces.</td>
+              <td>Comma-separated namespaces to discover clusters in. Empty watches all namespaces.</td>
               <td class="td-default">(all)</td>
             </tr>
           </tbody>
@@ -364,12 +364,12 @@
             </tr>
             <tr>
               <td><code>METER_CONTROL_PLANE</code></td>
-              <td>Also bill the tenant cluster's own control plane pods and data PVCs (normally covered by instance hours).</td>
+              <td>Also bill the cluster's own control plane pods and data PVCs (normally covered by instance hours).</td>
               <td class="td-default">false</td>
             </tr>
             <tr>
               <td><code>METER_BY_NAMESPACE</code></td>
-              <td>Add the namespace inside the tenant cluster as a dimension, for tenant-side chargeback.</td>
+              <td>Add the namespace inside the cluster as a dimension, for tenant-side chargeback.</td>
               <td class="td-default">false</td>
             </tr>
             <tr>
@@ -394,7 +394,7 @@
             </tr>
             <tr>
               <td><code>VCLUSTER_NODE_LABEL</code></td>
-              <td>Extra dedicated-node selector, <code>key=%s</code> where <code>%s</code> is the tenant cluster name. See <a href="private-nodes.html">Dedicated nodes</a>.</td>
+              <td>Extra dedicated-node selector, <code>key=%s</code> where <code>%s</code> is the cluster name. See <a href="private-nodes.html">Dedicated nodes</a>.</td>
               <td class="td-default">(none)</td>
             </tr>
             <tr>
@@ -450,12 +450,12 @@
           </tbody>
         </table>
       </div>
-      <h3>Tenant clusters with their own nodes</h3>
+      <h3>Clusters with their own nodes</h3>
       <div class="config-table-wrap">
         <table class="config-table">
           <thead><tr><th>Variable</th><th>Description</th><th>Default</th></tr></thead>
           <tbody>
-            <tr><td><code>TENANT_CLUSTERS_FILE</code></td><td>YAML list of external tenant clusters: <code>name</code>, <code>kubeconfig</code>, <code>tenant</code>, <code>displayName</code>, <code>project</code>, <code>metadata</code>.</td><td class="td-default">(none)</td></tr>
+            <tr><td><code>TENANT_CLUSTERS_FILE</code></td><td>YAML list of external clusters: <code>name</code>, <code>kubeconfig</code>, <code>tenant</code>, <code>displayName</code>, <code>project</code>, <code>metadata</code>.</td><td class="td-default">(none)</td></tr>
             <tr><td><code>PRIVATE_NODE_BILLING</code></td><td><code>node</code> bills each private node whole; <code>usage</code> bills the pods on them.</td><td class="td-default">node</td></tr>
           </tbody>
         </table>
@@ -1180,7 +1180,7 @@ Private Node Hours:    <span class="string">$0.50</span>   <span class="comment"
 
       <h2 id="stripe-metronome-pricing">Stripe and Metronome Pricing</h2>
       <p><strong>Stripe:</strong> vBilling creates a Billing Meter per metric and, because Stripe meters cannot price on dimensions, a meter per SKU as new SKUs appear (for example <code>vcluster_gpu_hours__nvidia_h100_80gb_hbm3</code>). Create a metered price on each meter you charge for. To subscribe new tenants automatically, tag the prices <code>metadata[vbilling_plan]=vcluster-standard</code> (or the tenant's <code>plan</code> annotation) and enable <code>stripe.autoSubscribe</code>.</p>
-      <p><strong>Metronome:</strong> vBilling creates SUM billable metrics named <code>&lt;Metric&gt; [&lt;code&gt;]</code>, each with one compound group key: <code>region, sku, capacity_type, billing_mode, tenant_cluster</code> for GPU hours. On your rate card, add a usage product per metric with <code>pricing_group_key</code> set to the dimensions you price on and <code>presentation_group_key: [tenant_cluster]</code> for invoice lines per tenant cluster; together the two must form the metric's group key (for GPU hours, <code>pricing_group_key: [region, sku, capacity_type, billing_mode]</code>). Rate cards carry the currency, so use one rate card per currency. Point <code>metronome.rateCard</code> or a tenant's <code>plan</code> annotation at it.</p>
+      <p><strong>Metronome:</strong> vBilling creates SUM billable metrics named <code>&lt;Metric&gt; [&lt;code&gt;]</code>, each with one compound group key: <code>region, sku, capacity_type, billing_mode, tenant_cluster</code> for GPU hours. On your rate card, add a usage product per metric with <code>pricing_group_key</code> set to the dimensions you price on and <code>presentation_group_key: [tenant_cluster]</code> for invoice lines per cluster; together the two must form the metric's group key (for GPU hours, <code>pricing_group_key: [region, sku, capacity_type, billing_mode]</code>). Rate cards carry the currency, so use one rate card per currency. Point <code>metronome.rateCard</code> or a tenant's <code>plan</code> annotation at it.</p>
 
 
     </main>

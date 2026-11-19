@@ -323,7 +323,7 @@
       </div>
       <div class="callout callout-info">
         <span class="callout-icon">&#9432;</span>
-        <div><strong>GPU-hours are allocated time, not utilization.</strong> A GPU is billed while it is allocated to the tenant, read from Kubernetes. That is how GPU clouds and dedicated inference endpoints bill: per second or per minute while a replica runs, with autoscaling and scale to zero keeping idle replicas off the bill. Shared (serverless) inference bills tokens instead. DCGM's utilization is recorded next to GPU-hours for showback; to put energy or utilization in the price, declare it as a Prometheus metric (DCGM's energy is a counter, so exact; utilization is an estimate). A cluster with no Prometheus at all is fully billable for GPUs, nodes, CPU, memory, storage and load balancers.</div>
+        <div><strong>GPU-hours are allocated time, not utilization.</strong> A GPU is billed while it is allocated to the tenant, read from Kubernetes. That is how AI Clouds and dedicated inference endpoints bill: per second or per minute while a replica runs, with autoscaling and scale to zero keeping idle replicas off the bill. Shared (serverless) inference bills tokens instead. DCGM's utilization is recorded next to GPU-hours for showback; to put energy or utilization in the price, declare it as a Prometheus metric (DCGM's energy is a counter, so exact; utilization is an estimate). A cluster with no Prometheus at all is fully billable for GPUs, nodes, CPU, memory, storage and load balancers.</div>
       </div>
 
       <h2 id="flow">From cluster to invoice</h2>
