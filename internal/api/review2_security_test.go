@@ -65,9 +65,11 @@ func TestReview2BoundTokenCannotPreemptCollectorEventIDs(t *testing.T) {
 		cfg.IngestTokens = map[string]string{"tok-acme": "acme"}
 	})
 	ws := now.Add(-2 * time.Minute)
-	// What the collector will commit for the window (see env.commit).
+	// What the collector will commit for the window (see env.commit). The
+	// collector stamps its events with Source "collector" (not part of the ID).
 	real := usage.Event{Tenant: "acme", Metric: usage.MetricGPUHours, Quantity: 8.0 / 60, SKU: "NVIDIA-H100", Region: "ap-southeast-2",
-		WindowStart: ws, WindowEnd: ws.Add(time.Minute), Dimensions: map[string]string{usage.DimTenantCluster: "vcluster-a-train"}, RecordedAt: now}
+		WindowStart: ws, WindowEnd: ws.Add(time.Minute), Dimensions: map[string]string{usage.DimTenantCluster: "vcluster-a-train"}, RecordedAt: now,
+		Source: spool.SourceCollector}
 	real.Finalize()
 
 	// The tenant, with its own bound token, while the window is still open.

@@ -692,6 +692,22 @@ const (
 	maxRecordsBody  = 16 << 20
 )
 
+// reservedIDPrefixes are the ID namespaces vBilling derives itself:
+// usage.DeriveID (vb1_, every event vBilling measures: collector,
+// Prometheus, records aggregator, fills), TenantEventID (te1_) and
+// IngestEventID (ie1_). An id sent with the shared ingest token is kept as
+// is, so it must not start with one of them.
+var reservedIDPrefixes = []string{"vb1_", "te1_", "ie1_"}
+
+func reservedID(id string) bool {
+	for _, p := range reservedIDPrefixes {
+		if strings.HasPrefix(id, p) {
+			return true
+		}
+	}
+	return false
+}
+
 // valueProblems checks the SKU and dimension values of an ingested event.
 // They reach dashboards, exports and billing platforms.
 func valueProblems(e *usage.Event) []string {
@@ -716,6 +732,11 @@ func valueProblems(e *usage.Event) []string {
 // Slurm accounting, storage or network exporters. Events need a declared
 // metric (builtin or CUSTOM_METRICS) and a closed window; an omitted ID is
 // derived from the event identity, so resends deduplicate.
+//
+// Ingested events never take an ID vBilling's own sources use: an event's
+// own id is scoped to the tenant (TenantEventID) when its token is bound to
+// one, and must not use a reserved prefix otherwise; an event without an id
+// gets IngestEventID.
 func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 	bound, ok := s.ingestAuth(w, r)
 	if !ok {
@@ -758,7 +779,8 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 	}
 	var valid []usage.Event
 	var rejected []rejection
-	derived := map[string]bool{} // IDs vBilling derived because the event had none
+	derived := map[string]bool{}  // IDs vBilling derived because the event had none
+	legacy := map[string]string{} // derived ID -> the ID v0.3.0 gave the same event
 	firstAt := map[string]int{}
 	for i := range events {
 		e := events[i]
@@ -775,7 +797,9 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 			e.Tenant = bound
 		}
 		noID := e.ID == ""
-		if bound != "" && !noID {
+		switch {
+		case noID:
+		case bound != "":
 			// A tenant chooses its own IDs, so two tenants may pick the same
 			// one: scope it to the tenant and client, as record IDs are.
 			if e.Properties == nil {
@@ -783,9 +807,19 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 			}
 			e.Properties["client_event_id"] = e.ID
 			e.ID = TenantEventID(bound, client, e.ID)
+		case reservedID(e.ID):
+			problems = append(problems, fmt.Sprintf("id %q starts with a prefix vBilling reserves for the IDs it derives (%s)",
+				e.ID, strings.Join(reservedIDPrefixes, ", ")))
 		}
 		problems = append(problems, valueProblems(&e)...)
 		e.Finalize()
+		if noID {
+			// e.ID is now usage.DeriveID: the ID of the same usage measured by
+			// vBilling itself. Move it into the ingest namespace.
+			id := IngestEventID(source, bound, client, e.ID)
+			legacy[id] = e.ID
+			e.ID = id
+		}
 		if j, dup := firstAt[e.ID]; dup && (noID || derived[e.ID]) {
 			problems = append(problems, fmt.Sprintf("same tenant, metric, window and dimensions as event %d and no id: "+
 				"events without an id are deduplicated by those fields, so separate requests would be counted once. "+
@@ -815,13 +849,25 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 		}
 		valid = append(valid, e)
 	}
+	// An event without an id that v0.3.0 stored (under its derived ID) is a
+	// retry across the upgrade: count it once.
+	fresh := valid[:0:0]
+	var retried []string
+	for _, e := range valid {
+		if old := legacy[e.ID]; old != "" && s.spool.IngestedRecently(old) {
+			retried = append(retried, e.ID)
+			continue
+		}
+		fresh = append(fresh, e)
+	}
 	var accepted, dups []string
-	if len(valid) > 0 {
-		if accepted, dups, err = s.spool.AppendIngest(source, valid); err != nil {
+	if len(fresh) > 0 {
+		if accepted, dups, err = s.spool.AppendIngest(source, fresh); err != nil {
 			writeErr(w, http.StatusServiceUnavailable, "ledger write failed: %v", err)
 			return
 		}
 	}
+	dups = append(dups, retried...)
 	status := http.StatusOK
 	if len(valid) == 0 {
 		status = http.StatusBadRequest
@@ -847,6 +893,18 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 func TenantEventID(tenant, client, id string) string {
 	sum := sha256.Sum256([]byte(tenant + "\x00" + client + "\x00" + id))
 	return "te1_" + hex.EncodeToString(sum[:16])
+}
+
+// IngestEventID is the ledger ID of an event sent without an id. derived is
+// the event's usage.DeriveID, which every event vBilling measures itself
+// (collector, Prometheus, records aggregator, fills) uses as its ID. The ingest
+// source, the tenant the token is bound to ("" for the shared ingest token)
+// and the client are hashed with it, so a retry gets the same ID while an
+// ingested event can never take the ID of vBilling's own usage, nor of
+// another tenant's or client's.
+func IngestEventID(source, bound, client, derived string) string {
+	sum := sha256.Sum256([]byte("ingest\x00" + source + "\x00" + bound + "\x00" + client + "\x00" + derived))
+	return "ie1_" + hex.EncodeToString(sum[:16])
 }
 
 // --- reconciliation ---
