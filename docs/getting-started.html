@@ -403,6 +403,27 @@ API listening on :8080
         <div>Once the destinations report deliveries, the usage is in your billing platform: meters and customers in Stripe, customers and usage in Metronome, or customers and subscriptions in Lago. A platform outage never loses usage: the ledger keeps it until the adapter catches up.</div>
       </div>
 
+      <h2 id="upgrading-v031">Upgrading to v0.3.1</h2>
+      <p>v0.3.1 closes the issues a second independent review found in v0.3.0: tenants can no longer lower their own bill, the API is never open, and the Metronome adapter no longer assumes it owns your Metronome account. Run <code>helm upgrade</code> with the v0.3.1 chart and keep the PVC.</p>
+      <p><strong>Act on these:</strong></p>
+      <ul>
+        <li><strong>API token.</strong> Every endpoint except <code>/healthz</code> and <code>/readyz</code> needs it, including the dashboard and <code>/metrics</code>. Without <code>api.token</code> or <code>api.existingSecret</code> the chart generates one and keeps it across upgrades. Tools that render with <code>helm template</code> (Argo CD) must set one of them, or the token changes on every render.</li>
+        <li><strong>Metronome.</strong> vBilling no longer creates billable metrics, customers or contracts unless <code>metronome.provision=true</code> (<code>metronome.stripeLink=true</code> still implies it). A customer pinned with <code>metronome-customer-id</code> needs the tenant ID as an ingest alias.</li>
+        <li><strong>vCluster Platform mode.</strong> <code>vbilling.vcluster.com/</code> settings on a cluster's StatefulSet, namespace or VirtualClusterInstance (<code>prometheus-url</code> and the others) are ignored: put them on the Tenant or Project. Clusters are reached only through the Platform proxy.</li>
+        <li><strong>One replica.</strong> The chart refuses <code>replicaCount</code> above 1. A second instance waits on a Lease instead of metering.</li>
+        <li><strong>Removed settings.</strong> 37 settings are gone; a value still set only logs a warning. LiteLLM's URL and key are now <code>LITELLM_URL</code> and <code>LITELLM_API_KEY</code> (the old names still work). See <a href="configuration.html#removed">Removed in v0.3.1</a>.</li>
+      </ul>
+      <p><strong>Behavior that changed:</strong></p>
+      <ul>
+        <li><strong>Pause.</strong> Capacity stops billing once vBilling has verified the cluster's workloads are gone; a pause it cannot verify still stops the control plane and keeps billing the cluster's own nodes. Pods get at most 30 seconds of grace. Pauses made by v0.3.0 keep their spans until the cluster runs again: resume and pause to verify them.</li>
+        <li><strong>Billing holds.</strong> Billing webhooks only raise a hold; a payment or an active subscription lowers it. Events apply in the order they happened, and a retried older event is ignored. <code>PUT /api/v1/billing-states</code> still sets anything.</li>
+        <li><strong>Suspension inside clusters.</strong> Only <code>kube-system</code> is exempt; the <code>enforcement-exempt</code> namespace label no longer works.</li>
+        <li><strong>Ingest.</strong> SKU and dimension values with markup or control characters are refused. Per-token rate limits apply, and a tenant's 101st distinct SKU in a UTC day is billed as <code>sku-limit-exceeded</code>. LiteLLM requests bill to the key's team only; keys without a team are refused.</li>
+        <li><strong>Counters.</strong> A Prometheus series that appears with history (for example, a ServiceMonitor added for a running engine) is billed from its first sample, unless its start time shows it is new.</li>
+        <li><strong>Ledger archive.</strong> It is on by default, in <code>DATA_DIR/archive</code>. Watch the volume's size.</li>
+        <li><strong>Node-hour events.</strong> They carry <code>vcpus</code>, <code>memory_gib</code>, <code>gpu_count</code> and <code>public_ip</code>, so their IDs differ from v0.3.0's. Committed windows are never sent again, so nothing is billed twice.</li>
+      </ul>
+
       <h2 id="upgrading">Upgrading from v0.2</h2>
       <p>Run <code>helm upgrade</code> with the v0.3.1 chart and keep the PVC. A ledger written by v0.2 opens, verifies and keeps its destination cursors and ingest dedupe, so nothing is billed twice or skipped. The chart adds read access to node Leases, and in <code>enforce</code> mode, delete access to pods.</p>
       <ul>

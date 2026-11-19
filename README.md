@@ -489,6 +489,28 @@ Most installs set about ten settings: `ADAPTERS`, that billing platform's creden
 
 v0.3.1 removed 37 settings that tuned internals with one right value (window size, lookbacks, retention, timeouts) or opened ways to get billing wrong. A removed setting that is still set only logs a warning. See [Removed in v0.3.1](https://vclusterlabs-experiments.github.io/vbilling/configuration.html#removed).
 
+## Upgrading to v0.3.1
+
+v0.3.1 closes the issues a second independent review found in v0.3.0: tenants can no longer lower their own bill, the API is never open, and the Metronome adapter no longer assumes it owns your Metronome account. Run `helm upgrade` with the v0.3.1 chart and keep the PVC.
+
+**Act on these:**
+
+- **API token.** Every endpoint except `/healthz` and `/readyz` needs it, including the dashboard and `/metrics`. Without `api.token` or `api.existingSecret` the chart generates one and keeps it across upgrades. Tools that render with `helm template` (Argo CD) must set one of them, or the token changes on every render.
+- **Metronome.** vBilling no longer creates billable metrics, customers or contracts unless `metronome.provision=true` (`metronome.stripeLink=true` still implies it). A customer pinned with `metronome-customer-id` needs the tenant ID as an ingest alias.
+- **vCluster Platform mode.** `vbilling.vcluster.com/` settings on a cluster's StatefulSet, namespace or VirtualClusterInstance (`prometheus-url` and the others) are ignored: put them on the Tenant or Project. Clusters are reached only through the Platform proxy.
+- **One replica.** The chart refuses `replicaCount` above 1. A second instance waits on a Lease instead of metering.
+- **Removed settings.** 37 settings are gone; a value still set only logs a warning. LiteLLM's URL and key are now `LITELLM_URL` and `LITELLM_API_KEY` (the old names still work). See [Removed in v0.3.1](https://vclusterlabs-experiments.github.io/vbilling/configuration.html#removed).
+
+**Behavior that changed:**
+
+- **Pause.** Capacity stops billing once vBilling has verified the cluster's workloads are gone; a pause it cannot verify still stops the control plane and keeps billing the cluster's own nodes. Pods get at most 30 seconds of grace. Pauses made by v0.3.0 keep their spans until the cluster runs again: resume and pause to verify them.
+- **Billing holds.** Billing webhooks only raise a hold; a payment or an active subscription lowers it. Events apply in the order they happened, and a retried older event is ignored. `PUT /api/v1/billing-states` still sets anything.
+- **Suspension inside clusters.** Only `kube-system` is exempt; the `enforcement-exempt` namespace label no longer works.
+- **Ingest.** SKU and dimension values with markup or control characters are refused. Per-token rate limits apply, and a tenant's 101st distinct SKU in a UTC day is billed as `sku-limit-exceeded`. LiteLLM requests bill to the key's team only; keys without a team are refused.
+- **Counters.** A Prometheus series that appears with history (for example, a ServiceMonitor added for a running engine) is billed from its first sample, unless its start time shows it is new.
+- **Ledger archive.** It is on by default, in `DATA_DIR/archive`. Watch the volume's size.
+- **Node-hour events.** They carry `vcpus`, `memory_gib`, `gpu_count` and `public_ip`, so their IDs differ from v0.3.0's. Committed windows are never sent again, so nothing is billed twice.
+
 ## Upgrading from v0.2
 
 Run `helm upgrade` with the v0.3.1 chart and keep the PVC. A ledger written by v0.2 opens, verifies and keeps its destination cursors and ingest dedupe, so nothing is billed twice or skipped. The chart adds read access to node Leases, and in `enforce` mode, delete access to pods.
