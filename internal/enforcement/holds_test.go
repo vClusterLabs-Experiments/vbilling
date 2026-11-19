@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -283,8 +284,10 @@ func TestWebhookForACustomerWithSeveralAliases(t *testing.T) {
 	if sig, err := send("w3", "cus-held"); err != nil || len(sig.Tenants) != 1 || sig.Tenants[0] != "identity-3" {
 		t.Fatalf("alias holding a state: %+v, %v", sig, err)
 	}
+	// A mapped customer's aliases are read too: its other tenants get the
+	// signal as well.
 	before := r.listed
-	if sig, err := send("w4", "cus-mapped"); err != nil || sig.Tenant != "mapped-co" || r.listed != before {
+	if sig, err := send("w4", "cus-mapped"); err != nil || sig.Tenant != "mapped-co" || r.listed != before+1 {
 		t.Fatalf("mapped customer: %+v, %v, aliases listed %d times", sig, err, r.listed-before)
 	}
 	if _, err := send("w5", "cus-none"); !errors.Is(err, ErrUnknownCustomer) {
@@ -293,5 +296,58 @@ func TestWebhookForACustomerWithSeveralAliases(t *testing.T) {
 	r.err = errors.New("metronome: 503")
 	if _, err := send("w6", "cus-portal"); err == nil || errors.Is(err, ErrUnknownCustomer) {
 		t.Fatalf("aliases unavailable: %v, want an error the provider retries", err)
+	}
+	if _, err := send("w7", "cus-mapped"); err == nil || errors.Is(err, ErrUnknownCustomer) {
+		t.Fatalf("aliases of a mapped customer unavailable: %v, want an error the provider retries", err)
+	}
+}
+
+// knowingResolver also knows some aliases as tenants itself (Metronome: the
+// ones it sends usage under).
+type knowingResolver struct {
+	*aliasResolver
+	knows map[string]bool
+}
+
+func (r knowingResolver) KnowsTenant(alias string) bool { return r.knows[alias] }
+
+// One customer's prepaid commit funds several tenants: a signal for it
+// reaches every one of them, whether the customer is mapped to one or not,
+// and whoever knows them as tenants (the enforcer or the resolver).
+func TestSignalReachesEveryTenantACustomerFunds(t *testing.T) {
+	r := knowingResolver{aliasResolver: &aliasResolver{mapped: map[string]string{"cus-mapped": "team-dev"}, aliases: map[string][]string{
+		"cus-mapped":   {"org-1", "team-dev", "team-prod", "team-stage"},
+		"cus-unmapped": {"org-2", "lab-a", "lab-b"},
+	}}, knows: map[string]bool{"team-prod": true, "lab-b": true}}
+	e := New(nil, Options{Mode: "observe", MetronomeWebhookSecret: "mtr_secret", Now: func() time.Time { return now },
+		Resolvers: map[string]destinations.CustomerResolver{"metronome": r},
+		IsTenant:  func(id string) bool { return id == "team-stage" || id == "lab-a" }})
+	rules, _ := ParseRules("alerts.low_remaining_commit_balance_reached=paused")
+	e.opts.Rules = rules
+	send := func(id, cus string) Signal {
+		t.Helper()
+		body := []byte(fmt.Sprintf(`{"id":%q,"type":"alerts.low_remaining_commit_balance_reached","properties":{"customer_id":%q,"alert_id":"a-1"}}`, id, cus))
+		date := now.Format(http.TimeFormat)
+		sig, err := e.HandleMetronome(context.Background(), body, date, metronome.Sign(body, date, "mtr_secret"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sig
+	}
+	if sig := send("w1", "cus-mapped"); strings.Join(sig.Tenants, ",") != "team-dev,team-prod,team-stage" {
+		t.Fatalf("mapped customer: tenants %v, want every tenant it funds", sig.Tenants)
+	}
+	if sig := send("w2", "cus-unmapped"); strings.Join(sig.Tenants, ",") != "lab-a,lab-b" {
+		t.Fatalf("unmapped customer: tenants %v, want the known aliases only", sig.Tenants)
+	}
+	for _, tenant := range []string{"team-dev", "team-prod", "team-stage", "lab-a", "lab-b"} {
+		if st := e.StateOf(tenant); st.State != Paused {
+			t.Errorf("%s is %s, want paused: its wallet is empty", tenant, st.State)
+		}
+	}
+	for _, other := range []string{"org-1", "org-2"} {
+		if e.HasState(other) {
+			t.Errorf("the identity alias %s got a billing state", other)
+		}
 	}
 }

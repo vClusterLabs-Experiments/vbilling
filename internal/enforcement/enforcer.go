@@ -231,13 +231,22 @@ type Gateway interface {
 }
 
 // AliasResolver is implemented by customer resolvers that can list every
-// ingest alias of a billing customer (Metronome). A webhook for a customer
-// TenantForCustomer does not map then applies to each alias that is a
-// tenant vBilling knows or, when none is, to every alias: never to the
-// first alias alone, which a customer created outside vBilling may hold for
-// something else (an identity alias next to the compute one).
+// ingest alias of a billing customer (Metronome). A webhook for such a
+// customer applies to the tenant TenantForCustomer maps it to and to each
+// alias that is a tenant vBilling knows, or, when none is, to every alias.
+// One customer's prepaid commit can fund several tenants, so an empty
+// wallet pauses each of them; and a customer created outside vBilling may
+// hold an alias for something else (an identity alias next to the compute
+// one), so no single alias stands for the customer.
 type AliasResolver interface {
 	CustomerAliases(ctx context.Context, customerID string) ([]string, error)
+}
+
+// TenantKnower is implemented by alias resolvers that know aliases as
+// vBilling's tenants themselves (Metronome: the aliases vBilling sends
+// usage under). Those count as known tenants too.
+type TenantKnower interface {
+	KnowsTenant(alias string) bool
 }
 
 // Enforcer is safe for concurrent use.
@@ -509,38 +518,47 @@ func (e *Enforcer) apply(ctx context.Context, sig *Signal) error {
 }
 
 // tenantsFor resolves a billing customer to the tenants its signals apply
-// to: the one it is mapped to or, for a resolver that lists a customer's
-// aliases (AliasResolver), the aliases that are tenants vBilling knows, or
-// all of them when none is.
+// to: the one it is mapped to and, for a resolver that lists a customer's
+// aliases (AliasResolver), every alias that is a tenant vBilling knows, or
+// all of the aliases when none is known. The aliases are read even for a
+// mapped customer, and a failed read is an error the provider retries: a
+// signal applied to one of the tenants a wallet funds would leave the
+// others running on it.
 func (e *Enforcer) tenantsFor(ctx context.Context, resolver destinations.CustomerResolver, cus string) ([]string, error) {
-	if t, ok := resolver.TenantForCustomer(ctx, cus); ok {
-		return []string{t}, nil
-	}
+	mapped, isMapped := resolver.TenantForCustomer(ctx, cus)
 	ar, ok := resolver.(AliasResolver)
 	if !ok {
+		if isMapped {
+			return []string{mapped}, nil
+		}
 		return nil, fmt.Errorf("%w: %s", ErrUnknownCustomer, cus)
 	}
 	list, err := ar.CustomerAliases(ctx, cus)
 	if err != nil {
 		return nil, fmt.Errorf("list the aliases of customer %s: %w", cus, err)
 	}
+	knower, _ := resolver.(TenantKnower)
 	seen := map[string]bool{}
 	var aliases, known []string
+	if isMapped {
+		seen[mapped] = true
+		known = append(known, mapped)
+	}
 	for _, a := range list {
 		if a = strings.TrimSpace(a); a == "" || seen[a] {
 			continue
 		}
 		seen[a] = true
 		aliases = append(aliases, a)
-		if e.isTenant(a) {
+		if e.isTenant(a) || knower != nil && knower.KnowsTenant(a) {
 			known = append(known, a)
 		}
 	}
-	if len(aliases) == 0 {
-		return nil, fmt.Errorf("%w: %s has no ingest alias", ErrUnknownCustomer, cus)
-	}
 	if len(known) > 0 {
 		return known, nil
+	}
+	if len(aliases) == 0 {
+		return nil, fmt.Errorf("%w: %s has no ingest alias", ErrUnknownCustomer, cus)
 	}
 	return aliases, nil
 }

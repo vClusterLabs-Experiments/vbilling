@@ -654,12 +654,20 @@ func (a *Adapter) CustomerAliases(ctx context.Context, customerID string) ([]str
 	return slices.Clone(aliases), nil
 }
 
+// KnowsTenant reports whether vBilling knows an ingest alias as one of its
+// tenants: it sent usage under it, or found or created the customer for
+// it. The enforcer applies a customer's webhooks to every alias it knows.
+func (a *Adapter) KnowsTenant(alias string) bool { return a.isTenant(alias) }
+
 // TenantForCustomer resolves a webhook's customer to a tenant: the alias of
 // the customer that vBilling knows as a tenant. A customer with an identity
 // alias and a compute alias (the tenant ID) resolves to the compute alias,
 // whatever their order; a customer with none of vBilling's tenants resolves
 // to nothing. With METRONOME_PROVISION, a customer vBilling created, found or
-// was pinned to resolves to that tenant directly.
+// was pinned to resolves to that tenant directly. A customer that holds the
+// aliases of several tenants (one commit funding them all) resolves to the
+// first here; the enforcer reads every alias (CustomerAliases, KnowsTenant)
+// and applies the webhook to each tenant.
 func (a *Adapter) TenantForCustomer(ctx context.Context, customerID string) (string, bool) {
 	stored, hasStored := a.state.Get("tenant/" + customerID)
 	if hasStored && a.provision() {
@@ -682,9 +690,6 @@ func (a *Adapter) TenantForCustomer(ctx context.Context, customerID string) (str
 		return "", false
 	case hasStored && slices.Contains(mapped, stored):
 		return stored, true
-	case len(mapped) > 1:
-		log.Printf("[metronome] customer %s holds the aliases of several tenants (%s); its webhooks resolve to %s",
-			customerID, strings.Join(mapped, ", "), mapped[0])
 	}
 	return mapped[0], true
 }
