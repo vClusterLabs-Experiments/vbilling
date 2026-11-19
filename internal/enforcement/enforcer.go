@@ -965,6 +965,9 @@ func (e *Enforcer) reflect(ctx context.Context, cl discovery.TenantCluster, ts T
 	if _, err := e.kube.CoreV1().Namespaces().Patch(ctx, cl.Namespace, types.MergePatchType, nsPatch, metav1.PatchOptions{}); err != nil {
 		return fmt.Errorf("label namespace: %w", err)
 	}
+	if err := e.reflectSynced(ctx, cl, ts); err != nil {
+		return err
+	}
 
 	if !withEvent {
 		return nil

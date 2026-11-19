@@ -139,6 +139,23 @@ func seriesOfEntry(e HeldEntry) destinations.PriceSeries {
 	return destinations.PriceSeries{Metric: e.Event.Metric, SKU: e.Event.SKU}
 }
 
+// MaxUnpricedHold bounds how long usage is held for a price. A billing
+// platform finalizes an invoice period once it ends plus a grace period
+// (Metronome: 24 hours by default), and usage that arrives after that is
+// never invoiced for that period, priced or not. Usage from the last moment
+// of a period must therefore ship within the grace of that moment, so held
+// usage is released, unpriced, once its window started 23 hours ago: the
+// platform can still rate it once Finance adds the price, before the period
+// is final. Options.MaxHold can only make the hold shorter.
+const MaxUnpricedHold = 23 * time.Hour
+
+// maxHold is how long a held event may wait for its price: Options.MaxHold,
+// at most MaxUnpricedHold. Zero holds without a limit (tests only: vBilling
+// always sets PRICE_CHECK_MAX_HOLD).
+func (d *Dispatcher) maxHold() time.Duration {
+	return min(d.opts.MaxHold, MaxUnpricedHold)
+}
+
 // release delivers the held events of every series that may ship now, in
 // ledger order, before any newer event of the destination. An error leaves
 // the rest held; the caller retries after a backoff.
@@ -146,7 +163,7 @@ func (d *Dispatcher) release(ctx context.Context, dest destinations.Destination)
 	name := dest.Name()
 	for _, h := range d.opts.Held.Series(name) {
 		if d.opts.Gate != nil && !d.opts.Gate.Releasable(ctx, name, h.Series, &h.Sample) {
-			if d.opts.MaxHold > 0 && !h.Oldest.IsZero() && time.Since(h.Oldest) > d.opts.MaxHold {
+			if mh := d.maxHold(); mh > 0 && !h.Oldest.IsZero() && time.Since(h.Oldest) > mh {
 				if err := d.releaseExpired(ctx, dest, h); err != nil {
 					return err
 				}
@@ -203,17 +220,17 @@ func (d *Dispatcher) release(ctx context.Context, dest destinations.Destination)
 }
 
 // releaseExpired delivers, unpriced, the held events of a series up to and
-// including the last one whose window started more than MaxHold ago. Usage
-// held longer could no longer be backdated into Metronome (34 days) or
-// Stripe (35 days); shipped now, the billing platform can re-rate it once
-// Finance adds the price. Held events are in ledger order, not window
-// order, so a late adjustment for an old window can sit behind younger
-// usage: those younger events ship with it, also unpriced, rather than
-// strand it past the deadline. Events after it stay held.
+// including the last one whose window started more than maxHold ago. Usage
+// held longer would reach the billing platform after the invoice period it
+// belongs to is final (MaxUnpricedHold); shipped now, the platform can
+// re-rate it once Finance adds the price. Held events are in ledger order,
+// not window order, so a late adjustment for an old window can sit behind
+// younger usage: those younger events ship with it, also unpriced, rather
+// than strand it past the deadline. Events after it stay held.
 func (d *Dispatcher) releaseExpired(ctx context.Context, dest destinations.Destination, h HeldSummary) error {
 	name := dest.Name()
 	total := 0
-	through, err := d.opts.Held.ExpiredThrough(name, h.Series, time.Now().Add(-d.opts.MaxHold))
+	through, err := d.opts.Held.ExpiredThrough(name, h.Series, time.Now().Add(-d.maxHold()))
 	if err != nil {
 		return err
 	}
@@ -246,7 +263,7 @@ func (d *Dispatcher) releaseExpired(ctx context.Context, dest destinations.Desti
 		total += n
 		labels := map[string]string{"destination": name}
 		d.tel.Add("vbilling_events_delivered_total", "Events accepted by a destination.", labels, float64(n-dead))
-		d.tel.Add("vbilling_events_released_unpriced_total", "Held events released without a price after PRICE_CHECK_MAX_HOLD.", labels, float64(n))
+		d.tel.Add("vbilling_events_released_unpriced_total", "Held events released without a price, before their invoice period is final.", labels, float64(n))
 		if dead > 0 {
 			d.tel.Add("vbilling_events_dead_lettered_total", "Events a destination permanently rejected.", labels, float64(dead))
 		}
@@ -262,9 +279,9 @@ func (d *Dispatcher) releaseExpired(ctx context.Context, dest destinations.Desti
 		}
 	}
 	if total > 0 {
-		log.Printf("[pipeline] WARNING: %s: released %d held event(s) of %s WITHOUT A PRICE: they were held longer than PRICE_CHECK_MAX_HOLD (%s). "+
-			"%s bills them at 0 until Finance adds the price, so it can re-rate them", name, total,
-			destinations.DescribeSeries(seriesOfEntry(HeldEntry{Event: h.Sample})), d.opts.MaxHold, name)
+		log.Printf("[pipeline] WARNING: %s: released %d held event(s) of %s WITHOUT A PRICE: they were held %s, and usage held longer may reach %s "+
+			"after its invoice period is final. %s bills them at 0 until Finance adds the price, so it can re-rate them", name, total,
+			destinations.DescribeSeries(seriesOfEntry(HeldEntry{Event: h.Sample})), d.maxHold(), name, name)
 		if d.opts.Gate != nil {
 			d.opts.Gate.ReleasedUnpriced(name, h.Series, &h.Sample, total)
 		}

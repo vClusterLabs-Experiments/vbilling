@@ -148,3 +148,24 @@ func podRequests(p *corev1.Pod) (cpu, mem float64) {
 func isControlPlane(labels map[string]string, clusterName string) bool {
 	return labels["app"] == "vcluster" && (labels["release"] == clusterName || labels["release"] == "")
 }
+
+// controlPlaneObject is isControlPlane for objects that may be synced: an
+// object vCluster synced carries vcluster.loft.sh/managed-by, which no part
+// of the control plane does, and its other labels are the tenant's to
+// choose, app=vcluster included.
+func controlPlaneObject(labels map[string]string, clusterName string) bool {
+	return isControlPlane(labels, clusterName) && labels[LabelManagedBy] == ""
+}
+
+// namespacesOf returns the namespaces of pods other than except.
+func namespacesOf(pods []corev1.Pod, except string) []string {
+	seen := map[string]bool{except: true}
+	var out []string
+	for i := range pods {
+		if ns := pods[i].Namespace; !seen[ns] {
+			seen[ns] = true
+			out = append(out, ns)
+		}
+	}
+	return out
+}

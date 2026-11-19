@@ -9,6 +9,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
@@ -28,9 +29,12 @@ import (
 // own API; it is then metered from the control plane cluster only.
 var ErrNoTenantAPI = errors.New("no tenant API credentials")
 
-// LabelFakeNode marks the placeholder nodes vCluster creates for shared
-// tenant clusters; LabelBillable=false exempts a node (for example hardware
-// the tenant owns) from whole-node billing.
+// LabelFakeNode marks the placeholder nodes vCluster creates for clusters on
+// shared nodes. It is written inside the cluster, so it decides nothing
+// (hostViews); it is read only from inventories saved by earlier versions.
+// LabelBillable=false exempts a dedicated node of the control plane cluster
+// (for example hardware the tenant owns), which the operator labels. On a
+// cluster's own nodes it is ignored: whoever runs the cluster writes those.
 const (
 	LabelFakeNode = "vcluster.loft.sh/fake-node"
 	LabelBillable = "vbilling.vcluster.com/billable"
@@ -81,7 +85,10 @@ func (c *Collector) CollectTenantAPI(ctx context.Context, targets []Target, wind
 // control plane is stopped), so its volumes keep billing and its nodes stop,
 // per PAUSE_KEEP_BILLING. Without a stored inventory its windows are filled
 // after it resumes, like an outage.
-func (c *Collector) collectTenant(ctx context.Context, t Target, hostNodes map[string]*nodeInfo, windows []Window, accs map[time.Time]*accumulator, st *Stats) {
+//
+// syncedOn are the control plane cluster nodes the cluster's synced pods run
+// on (hostViews), nil when they were not listed.
+func (c *Collector) collectTenant(ctx context.Context, t Target, hostNodes map[string]*nodeInfo, syncedOn map[string]bool, windows []Window, accs map[time.Time]*accumulator, st *Stats) {
 	id := t.Cluster.ExternalID()
 	tmp := map[time.Time]*accumulator{}
 	for _, w := range windows {
@@ -102,7 +109,7 @@ func (c *Collector) collectTenant(ctx context.Context, t Target, hostNodes map[s
 			}
 			return
 		}
-		if err := c.meterTenant(ctx, t, &TenantConn{External: t.Cluster.External}, inv, hostNodes, windows, tmp, st); err != nil {
+		if err := c.meterTenant(ctx, t, &TenantConn{External: t.Cluster.External}, inv, storedViews(inv, hostNodes, t.Cluster.External), windows, tmp, st); err != nil {
 			log.Printf("[metrics] %s: paused inventory: %v", id, err)
 			st.TenantAPIFailed = append(st.TenantAPIFailed, id)
 			return
@@ -120,7 +127,7 @@ func (c *Collector) collectTenant(ctx context.Context, t Target, hostNodes map[s
 		return
 	}
 	if err == nil {
-		err = c.collectTenantAPI(ctx, t, conn, hostNodes, windows, tmp, st)
+		err = c.collectTenantAPI(ctx, t, conn, hostNodes, syncedOn, windows, tmp, st)
 	}
 	if err != nil {
 		log.Printf("[metrics] %s: tenant API unavailable, its windows will be filled later: %v", id, err)
@@ -163,6 +170,14 @@ type tenantInventory struct {
 	// was read, whoever paused it.
 	Pods        []corev1.Pod         `json:"pods,omitempty"`
 	PodsDeleted map[string]time.Time `json:"podsDeleted,omitempty"`
+	// ExcludedNamespaces are the cluster's namespaces labeled
+	// vbilling.vcluster.com/exclude=true, read with the pods.
+	ExcludedNamespaces []string `json:"excludedNamespaces,omitempty"`
+	// Views are the nodes that were control plane cluster nodes seen through
+	// the cluster when it was read (hostViews). Classified is false for an
+	// inventory saved by an earlier version.
+	Views      []string `json:"views,omitempty"`
+	Classified bool     `json:"classified,omitempty"`
 }
 
 // podEntries returns an inventory's pods with their deletion times. From
@@ -181,9 +196,21 @@ func (inv *tenantInventory) podEntries(stored bool) []podEntry {
 	return out
 }
 
+// LabelExclude on a namespace inside a cluster keeps its pods out of
+// PRIVATE_NODE_BILLING=usage, as kube-system is. (The same setting on a
+// cluster's own namespace of the control plane cluster, its StatefulSet or
+// its VirtualClusterInstance excludes the whole cluster; see discovery.)
+const LabelExclude = discovery.AnnotationPrefix + "exclude"
+
 // readPods adds a cluster's pods to its inventory, with those deleted since
-// the last read and when they were deleted.
+// the last read and when they were deleted, and its namespaces labeled
+// LabelExclude=true.
 func (c *Collector) readPods(ctx context.Context, conn *TenantConn, inv *tenantInventory) error {
+	excluded, err := c.excludedNamespaces(ctx, conn.Kube)
+	if err != nil {
+		return err
+	}
+	inv.ExcludedNamespaces = excluded
 	list, err := conn.Kube.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return fmt.Errorf("list pods: %w", err)
@@ -202,6 +229,33 @@ func (c *Collector) readPods(ctx context.Context, conn *TenantConn, inv *tenantI
 	}
 	inv.Pods, inv.PodsDeleted = pods, deleted
 	return nil
+}
+
+// excludedNamespaces lists a cluster's namespaces labeled LabelExclude=true.
+// A reader role without access to namespaces excludes none (the cluster's
+// pods are all billed) and is logged once.
+func (c *Collector) excludedNamespaces(ctx context.Context, kube kubernetes.Interface) ([]string, error) {
+	list, err := kube.CoreV1().Namespaces().List(ctx, metav1.ListOptions{LabelSelector: LabelExclude + "=true"})
+	if apierrors.IsForbidden(err) {
+		c.invMu.Lock()
+		warned := c.nsForbidden
+		c.nsForbidden = true
+		c.invMu.Unlock()
+		if !warned {
+			log.Printf("[metrics] a cluster's API refuses to list namespaces, so no namespace in it is excluded with %s=true: grant its reader role list on namespaces (%v)", LabelExclude, err)
+		}
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("list namespaces: %w", err)
+	}
+	var out []string
+	for _, ns := range list.Items {
+		if ns.Labels[LabelExclude] == "true" {
+			out = append(out, ns.Name)
+		}
+	}
+	return out, nil
 }
 
 func readTenantInventory(ctx context.Context, kube kubernetes.Interface, at time.Time) (*tenantInventory, error) {
@@ -245,7 +299,8 @@ func (inv *tenantInventory) compact() {
 	inv.Services = kept
 }
 
-func (c *Collector) collectTenantAPI(ctx context.Context, t Target, conn *TenantConn, hostNodes map[string]*nodeInfo, windows []Window, accs map[time.Time]*accumulator, st *Stats) error {
+func (c *Collector) collectTenantAPI(ctx context.Context, t Target, conn *TenantConn, hostNodes map[string]*nodeInfo, syncedOn map[string]bool,
+	windows []Window, accs map[time.Time]*accumulator, st *Stats) error {
 	inv, err := readTenantInventory(ctx, conn.Kube, c.opts.Now())
 	if err != nil {
 		return err
@@ -258,36 +313,44 @@ func (c *Collector) collectTenantAPI(ctx context.Context, t Target, conn *Tenant
 			return err
 		}
 	}
+	views := c.newHostViews(t.Cluster, conn.External, hostNodes, syncedOn)
+	if err := views.classify(ctx, inv); err != nil {
+		return err
+	}
 	c.invMu.Lock()
 	c.lastInv[t.Cluster.ExternalID()] = inv
 	c.invMu.Unlock()
-	return c.meterTenant(ctx, t, conn, inv, hostNodes, windows, accs, st)
+	return c.meterTenant(ctx, t, conn, inv, views.view, windows, accs, st)
 }
 
 // meterTenant meters a cluster's own inventory. conn.Kube is nil for a
-// paused cluster metered from its stored inventory.
-func (c *Collector) meterTenant(ctx context.Context, t Target, conn *TenantConn, inv *tenantInventory, hostNodes map[string]*nodeInfo, windows []Window, accs map[time.Time]*accumulator, st *Stats) error {
+// paused cluster metered from its stored inventory. isView decides which
+// nodes are control plane cluster nodes seen through the cluster (hostViews).
+func (c *Collector) meterTenant(ctx context.Context, t Target, conn *TenantConn, inv *tenantInventory, isView func(context.Context, *corev1.Node) (bool, error),
+	windows []Window, accs map[time.Time]*accumulator, st *Stats) error {
 	base := c.baseFor(t)
 	private := map[string]*nodeInfo{}
-	consider := func(n *corev1.Node, deletedAt time.Time) {
-		if _, onHost := hostNodes[n.Name]; onHost && !conn.External {
-			return // a control plane cluster node: metered there (shared or dedicated)
+	consider := func(n *corev1.Node, deletedAt time.Time) error {
+		if view, err := isView(ctx, n); err != nil || view {
+			return err // a control plane cluster node: metered there (shared or dedicated)
 		}
-		if n.Labels[LabelFakeNode] == "true" {
-			return
-		}
-		ni := c.parseNodeLease(n, inv.Leases[n.Name])
+		ni := c.parsePrivateNode(n, inv.Leases[n.Name])
 		ni.deletedAt = deletedAt
 		private[ni.name] = ni
+		return nil
 	}
 	live := map[string]bool{}
 	for i := range inv.Nodes {
 		live[inv.Nodes[i].Name] = true
-		consider(&inv.Nodes[i], time.Time{})
+		if err := consider(&inv.Nodes[i], time.Time{}); err != nil {
+			return err
+		}
 	}
 	for _, d := range conn.Graveyard.Nodes() {
 		if !live[d.obj.Name] {
-			consider(d.obj, d.at)
+			if err := consider(d.obj, d.at); err != nil {
+				return err
+			}
 		}
 	}
 	c.prom.noteOwnNodes(t.Cluster.ExternalID(), len(private) > 0)
@@ -297,6 +360,7 @@ func (c *Collector) meterTenant(ctx context.Context, t Target, conn *TenantConn,
 	}
 	dra := c.draFor(ctx, conn.Dynamic, "")
 	applyDRANodes(private, dra)
+	c.rememberPrivateNodes(t.Cluster.ExternalID(), private)
 	st.PrivateNodes += len(private)
 	for _, n := range private {
 		if n.down {
@@ -317,17 +381,24 @@ func (c *Collector) meterTenant(ctx context.Context, t Target, conn *TenantConn,
 		if latest := windows[len(windows)-1]; live && latest.Latest && c.opts.Basis != "requests" && conn.Metrics != nil {
 			usageByPod = podUsage(ctx, conn.Metrics, "")
 		}
+		// Pods in kube-system, and in namespaces the cluster labels
+		// vbilling.vcluster.com/exclude=true, are not billed: in usage mode the
+		// cluster decides which of its namespaces are workloads.
+		excluded := map[string]bool{}
+		for _, ns := range inv.ExcludedNamespaces {
+			excluded[ns] = true
+		}
 		include := func(p *corev1.Pod) bool {
 			_, onPrivate := private[p.Spec.NodeName]
-			return onPrivate && !c.excludedTenantNS[p.Namespace]
+			return onPrivate && !c.excludedTenantNS[p.Namespace] && !excluded[p.Namespace]
 		}
 		c.meterPods(inv.podEntries(!live), include, func(p *corev1.Pod) string { return p.Namespace },
 			private, nil, dra, windows, accs, st, base, usageByPod, "private_node", c.workloadPauses(t))
 	} else {
+		// Whole, whatever the node's labels say: an exemption is the
+		// operator's to give (LabelBillable counts on the control plane
+		// cluster's dedicated nodes only).
 		for name, n := range private {
-			if n.labels[LabelBillable] == "false" {
-				continue
-			}
 			c.meterWholeNode(name, n, windows, accs, base, "private_node", c.clip(t, pause.KeepNodes))
 		}
 	}
@@ -367,24 +438,22 @@ func (c *Collector) Freeze(ctx context.Context, cl discovery.TenantCluster) erro
 	}
 	// Whether it has nodes of its own, as of right now: a pause vBilling
 	// cannot drain stops their billing only if it has none (OwnNodes).
-	// The rules are meterTenant's: a node of the control plane cluster, or
-	// a placeholder vCluster made for one, is metered there.
-	host := map[string]bool{}
+	// The rules are meterTenant's (hostViews): a node of the control plane
+	// cluster, or a placeholder vCluster made for one, is metered there.
+	host := map[string]*nodeInfo{}
 	if !conn.External {
 		nodes, err := c.kube.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 		if err != nil {
 			return fmt.Errorf("list control plane cluster nodes: %w", err)
 		}
-		for _, n := range nodes.Items {
-			host[n.Name] = true
+		for i := range nodes.Items {
+			host[nodes.Items[i].Name] = c.parseNode(&nodes.Items[i])
 		}
 	}
-	own := false
-	for i := range inv.Nodes {
-		n := &inv.Nodes[i]
-		own = own || !host[n.Name] && n.Labels[LabelFakeNode] != "true"
+	if err := c.newHostViews(cl, conn.External, host, nil).classify(ctx, inv); err != nil {
+		return err
 	}
-	c.noteOwnNodes(cl.ExternalID(), own)
+	c.noteOwnNodes(cl.ExternalID(), len(inv.Views) < len(inv.Nodes))
 	return c.storeInventory(cl.ExternalID(), inv)
 }
 

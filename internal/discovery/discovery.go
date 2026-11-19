@@ -63,6 +63,27 @@ type TenantCluster struct {
 	// annotation alone never makes a cluster paused: whoever writes
 	// vcluster.yaml writes the workload's annotations.
 	Paused bool
+	// Namesakes are the namespaces of the other vClusters on this control
+	// plane cluster with the same name, metered or not. NamesakesUnknown is
+	// set when discovery could not list them all. See SyncedHere.
+	Namesakes        []string
+	NamesakesUnknown bool
+}
+
+// NameShared reports whether objects carrying this cluster's name in
+// vcluster.loft.sh/managed-by may be another cluster's: another vCluster
+// has the name, or vBilling could not list every vCluster.
+func (c *TenantCluster) NameShared() bool { return len(c.Namesakes) > 0 || c.NamesakesUnknown }
+
+// SyncedHere reports whether an object in a namespace of the control plane
+// cluster that carries this cluster's name in vcluster.loft.sh/managed-by
+// (which vCluster's syncer sets and a tenant cannot) is this cluster's.
+// In its own namespace it is. In another one (vcluster.yaml
+// sync.toHost.namespaces syncs a cluster's pods, volumes and services to
+// namespaces of their own) the label holds only the cluster's name, so the
+// object is this cluster's only while no other vCluster has the name.
+func (c *TenantCluster) SyncedHere(namespace string) bool {
+	return namespace == c.Namespace || !c.External && !c.NameShared()
 }
 
 // AnnotationPaused is the annotation `vcluster pause` sets on a paused
@@ -176,6 +197,7 @@ func (d *Discoverer) Discover(ctx context.Context) ([]TenantCluster, error) {
 	if err != nil {
 		return nil, err
 	}
+	d.markNamesakes(ctx, clusters)
 	nsMeta, err := d.namespaceMeta(ctx, clusters)
 	if err != nil {
 		return nil, err
@@ -266,6 +288,39 @@ func (d *Discoverer) fromWorkloads(ctx context.Context) ([]TenantCluster, error)
 		}
 	}
 	return out, nil
+}
+
+// markNamesakes sets each cluster's Namesakes from every vCluster on the
+// control plane cluster, excluded and held-back ones included: those are
+// the ones whose synced objects carry the same name. With WATCH_NAMESPACES,
+// the workloads outside it are listed for this too. If they cannot be, no
+// cluster's name counts as unique.
+func (d *Discoverer) markNamesakes(ctx context.Context, clusters []TenantCluster) {
+	all := clusters
+	if len(d.namespaces) > 0 {
+		var err error
+		if all, err = (&Discoverer{client: d.client}).fromWorkloads(ctx); err != nil {
+			log.Printf("[discovery] cannot list every vCluster, so objects clusters sync to other namespaces are not billed: %v", err)
+			for i := range clusters {
+				clusters[i].NamesakesUnknown = true
+			}
+			return
+		}
+	}
+	byName := map[string][]string{}
+	for _, c := range all {
+		byName[c.Name] = append(byName[c.Name], c.Namespace)
+	}
+	for i := range clusters {
+		c := &clusters[i]
+		c.Namesakes = nil
+		for _, ns := range byName[c.Name] {
+			if ns != c.Namespace {
+				c.Namesakes = append(c.Namesakes, ns)
+			}
+		}
+		sort.Strings(c.Namesakes)
+	}
 }
 
 func (d *Discoverer) namespaceMeta(ctx context.Context, clusters []TenantCluster) (map[string]*corev1.Namespace, error) {

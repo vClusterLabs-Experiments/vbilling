@@ -416,28 +416,33 @@ func TestCounterFirstReadAndNewSeries(t *testing.T) {
 // A counter series that appears after the last read counts from zero only
 // with evidence that its process started after that read: its own
 // _created sample, else process_start_time_seconds of the same job and
-// instance. Otherwise its first sample is its baseline.
+// instance, when its first value could have been counted since that start.
+// Otherwise its first sample is its baseline.
 func TestCounterCountsFromZeroOnlyWithEvidence(t *testing.T) {
 	engine := map[string]string{"namespace": ns, "model_name": "llama", "job": "vllm", "instance": "10.0.0.7:8000"}
 	process := map[string]string{"namespace": ns, "job": "vllm", "instance": "10.0.0.7:8000", "pod": "engine-x-default-x-gpu"}
 	for _, tc := range []struct {
 		name     string
 		evidence []fakeSeries
+		before   float64 // what the series counted before its first scrape, beyond its first 3
 		want     float64
 	}{
-		{"created after the last read", []fakeSeries{createdSeries("vllm:generation_tokens_created", engine, ws.Add(70*time.Second), ws.Add(75*time.Second), we.Add(time.Minute))}, 5012},
-		{"created before the last read", []fakeSeries{createdSeries("vllm:generation_tokens_created", engine, ws.Add(-time.Hour), ws.Add(75*time.Second), we.Add(time.Minute))}, 9},
-		{"process started after the last read", []fakeSeries{createdSeries("process_start_time_seconds", process, ws.Add(65*time.Second), ws.Add(75*time.Second), we.Add(time.Minute))}, 5012},
-		{"process started before the last read", []fakeSeries{createdSeries("process_start_time_seconds", process, ws.Add(-48*time.Hour), ws.Add(75*time.Second), we.Add(time.Minute))}, 9},
-		{"another instance's process", []fakeSeries{createdSeries("process_start_time_seconds", map[string]string{"namespace": ns, "job": "vllm", "instance": "10.0.0.9:8000"}, ws.Add(65*time.Second), ws.Add(75*time.Second), we.Add(time.Minute))}, 9},
-		{"no evidence", nil, 9},
+		{"created after the last read", []fakeSeries{createdSeries("vllm:generation_tokens_created", engine, ws.Add(70*time.Second), ws.Add(75*time.Second), we.Add(time.Minute))}, 5000, 5012},
+		{"created before the last read", []fakeSeries{createdSeries("vllm:generation_tokens_created", engine, ws.Add(-time.Hour), ws.Add(75*time.Second), we.Add(time.Minute))}, 5000, 9},
+		// 3 by its first scrape, 10s after its process started: at its own rate.
+		{"process started after the last read", []fakeSeries{createdSeries("process_start_time_seconds", process, ws.Add(65*time.Second), ws.Add(75*time.Second), we.Add(time.Minute))}, 0, 12},
+		// 5003 in 10s, at 0.2 per second since: counted before this process.
+		{"process started after the last read, count older than the process", []fakeSeries{createdSeries("process_start_time_seconds", process, ws.Add(65*time.Second), ws.Add(75*time.Second), we.Add(time.Minute))}, 5000, 9},
+		{"process started before the last read", []fakeSeries{createdSeries("process_start_time_seconds", process, ws.Add(-48*time.Hour), ws.Add(75*time.Second), we.Add(time.Minute))}, 5000, 9},
+		{"another instance's process", []fakeSeries{createdSeries("process_start_time_seconds", map[string]string{"namespace": ns, "job": "vllm", "instance": "10.0.0.9:8000"}, ws.Add(65*time.Second), ws.Add(75*time.Second), we.Add(time.Minute))}, 5000, 9},
+		{"no evidence", nil, 5000, 9},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			// The series is first scraped at ws+75s holding 5003: everything
-			// the engine counted before that scrape.
+			// The series is first scraped at ws+75s holding 3 + before:
+			// everything the engine counted before that scrape.
 			samples := counterSamples(ws.Add(75*time.Second), we.Add(time.Minute), 3, time.Time{})
 			for i := range samples {
-				samples[i].V += 5000
+				samples[i].V += tc.before
 			}
 			fp := &fakeProm{series: append([]fakeSeries{{name: "vllm:generation_tokens_total", labels: engine, samples: samples}}, tc.evidence...)}
 			srv := httptest.NewServer(fp.handler(t))
@@ -454,8 +459,8 @@ func TestCounterCountsFromZeroOnlyWithEvidence(t *testing.T) {
 					billed += e.Quantity
 				}
 			}
-			// From zero: 5003 + 3 more samples of 3 = 5012. From the first
-			// sample: 3 samples of 3 = 9.
+			// From zero: the first value + 3 more samples of 3 (5012, or
+			// 12). From the first sample: 3 samples of 3 = 9.
 			if billed != tc.want {
 				t.Fatalf("billed %v, want %v", billed, tc.want)
 			}

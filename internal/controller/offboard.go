@@ -3,8 +3,10 @@ package controller
 import (
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/vclusterlabs-experiments/vbilling/internal/pipeline"
+	"github.com/vclusterlabs-experiments/vbilling/internal/spool"
 )
 
 // heldUsage is the store of events held back from destinations until they
@@ -19,6 +21,54 @@ func (c *Controller) UseHeld(h heldUsage) { c.held = h }
 // offboardScanLimit bounds the ledger records one reconcile reads per tenant
 // looking for its last event; the next reconcile continues.
 const offboardScanLimit = 100_000
+
+// usageSince reads the ledger committed since the last reconcile, through
+// head, and returns the tenants with usage in it, of any source (records,
+// ingest, Prometheus, the collector), each with the end of its latest
+// window. A tenant that lost its last cluster but still has usage is not
+// offboarded (its later usage would be ignored: Lago terminates its
+// subscription). readThrough is false while more than offboardScanLimit
+// records are left to read; the next reconcile goes on. The first call
+// starts at head.
+func (c *Controller) usageSince(head uint64) (tenants map[string]time.Time, readThrough bool) {
+	if c.spool == nil {
+		return nil, true
+	}
+	c.mu.Lock()
+	from, started := c.usageRead, c.usageStarted
+	if !started {
+		c.usageRead, c.usageStarted = head, true
+	}
+	c.mu.Unlock()
+	if !started {
+		return nil, true
+	}
+	tenants = map[string]time.Time{}
+	read := 0
+	var err error
+	for from < head && read < offboardScanLimit {
+		var recs []spool.Record
+		if recs, err = c.spool.Read(from, 5000); err != nil {
+			log.Printf("[controller] read the ledger for recent usage: %v (nobody is offboarded until it can)", err)
+			break
+		}
+		if len(recs) == 0 {
+			from = head // nothing more to read (compacted, or the head moved back)
+			break
+		}
+		for _, r := range recs {
+			if e := r.Event; e != nil && e.Tenant != "" && e.WindowEnd.After(tenants[e.Tenant]) {
+				tenants[e.Tenant] = e.WindowEnd
+			}
+		}
+		from = recs[len(recs)-1].Seq
+		read += len(recs)
+	}
+	c.mu.Lock()
+	c.usageRead = from
+	c.mu.Unlock()
+	return tenants, err == nil && from >= head
+}
 
 // offboarding finds each departed tenant's last ledger event. Offboarding
 // ends billing in a destination (Lago terminates the subscription and

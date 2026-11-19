@@ -123,3 +123,45 @@ func TestPausedMeansTheControlPlaneIsDown(t *testing.T) {
 		}
 	}
 }
+
+// Objects a cluster syncs to other namespaces carry only its name, so every
+// vCluster with that name counts: excluded ones, and with WATCH_NAMESPACES
+// those outside it too.
+func TestNamesakesAreEveryVClusterWithTheName(t *testing.T) {
+	kube := fake.NewSimpleClientset(
+		nsObj("team-a", nil), nsObj("team-b", nil), nsObj("team-c", nil),
+		sts("team-a", "gpu", 1, nil),
+		sts("team-b", "gpu", 1, map[string]string{AnnotationPrefix + "exclude": "true"}),
+		sts("team-c", "web", 1, nil),
+	)
+	for _, scope := range [][]string{nil, {"team-a", "team-c"}} {
+		got, err := NewDiscoverer(kube, nil, scope, "").Discover(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("scope %v: discovered %+v", scope, got)
+		}
+		gpu, web := got[0], got[1]
+		if len(gpu.Namesakes) != 1 || gpu.Namesakes[0] != "team-b" || !gpu.NameShared() || gpu.SyncedHere("gpu-x-ml") || !gpu.SyncedHere("team-a") {
+			t.Errorf("scope %v: gpu %+v, want team-b's gpu as its namesake", scope, gpu)
+		}
+		if web.NameShared() || !web.SyncedHere("web-x-frontend") {
+			t.Errorf("scope %v: web %+v, want its name unique", scope, web)
+		}
+	}
+	// Scoped, and the other namespaces cannot be listed: no name is unique.
+	kube.PrependReactor("list", "statefulsets", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		if a.GetNamespace() == "" {
+			return true, nil, errors.New("forbidden")
+		}
+		return false, nil, nil
+	})
+	got, err := NewDiscoverer(kube, nil, []string{"team-c"}, "").Discover(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || !got[0].NamesakesUnknown || got[0].SyncedHere("web-x-frontend") {
+		t.Fatalf("namesakes unknown: %+v", got)
+	}
+}

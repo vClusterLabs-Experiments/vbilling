@@ -72,14 +72,14 @@ func sum(evs []usage.Event, metric, mode string) float64 {
 // OwnNodes tells a pause whether metering bills nodes of a cluster's own:
 // unknown until the cluster was read, then as last read or saved.
 func TestOwnNodesIsWhatMeteringLastSaw(t *testing.T) {
-	c := pausedCollector(t, pause.DefaultKeep, []runtime.Object{node("cp-1", nil, 0, true)})
+	c := pausedCollector(t, pause.DefaultKeep, []runtime.Object{node("cp-1", nil, 0, true, machine("4c4c4544-0001"))})
 	private, shared := target("gpu", true), target("shared", true)
 	if _, known := c.OwnNodes(private.Cluster); known {
 		t.Fatal("OwnNodes known before the cluster was read")
 	}
 	c.UseTenantAPI(fakeTenantAPI{conns: map[string]*TenantConn{
 		"gpu":    privateTenant(),
-		"shared": tenantConn(node("cp-1", nil, 0, true)), // only the control plane cluster's node, seen from inside
+		"shared": tenantConn(node("cp-1", nil, 0, true, machine("4c4c4544-0001"))), // only the control plane cluster's node, seen from inside
 	}})
 	if _, _, err := c.Collect(context.Background(), []Target{private, shared}, latest()); err != nil {
 		t.Fatal(err)

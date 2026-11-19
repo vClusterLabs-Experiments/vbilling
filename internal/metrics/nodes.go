@@ -16,7 +16,10 @@ import (
 // nodeInfo is everything metering needs to know about a node.
 type nodeInfo struct {
 	name         string
+	uid          string
 	created      time.Time
+	systemUUID   string // status.nodeInfo: which machine the node reports it is
+	machineID    string
 	gpuType      string
 	zone         string
 	region       string
@@ -41,6 +44,10 @@ type nodeInfo struct {
 	migDevices     int64
 	sharedCapacity int64
 
+	// gpuFloor is the fewest physical GPUs the node is billed for: for a
+	// cluster's own node, the most it had while it lived (privateNodeHistory).
+	gpuFloor float64
+
 	// Fair metering: a node that is not Ready, or carries an unhealthy
 	// taint, is down. downSince is when that started (zero = unknown, so the
 	// whole window counts as down: the tenant gets the benefit of the doubt).
@@ -59,11 +66,36 @@ var gpuProductLabels = []string{
 
 func (c *Collector) parseNode(n *corev1.Node) *nodeInfo { return c.parseNodeLease(n, time.Time{}) }
 
-// parseNodeLease parses a node; renewed is its Lease's last renewal, read
-// only for a node whose kubelet went silent (kubeletSilent).
+// parseNodeLease parses a node of the control plane cluster; renewed is its
+// Lease's last renewal, read only for a node whose kubelet went silent
+// (kubeletSilent).
 func (c *Collector) parseNodeLease(n *corev1.Node, renewed time.Time) *nodeInfo {
+	return c.parseNodeAs(n, renewed, false)
+}
+
+// parsePrivateNode parses a node read through a cluster's own API. Its
+// labels, taints and status are written from inside the cluster, so they
+// are trusted less than on the operator's control plane cluster:
+//   - Only its Ready condition marks it down. Taints never do: anyone who
+//     can write the node can add one with an effect the node controller
+//     never reconciles, which evicts nothing.
+//   - Time-slicing replicas divide its advertised GPUs only when GPU Feature
+//     Discovery's count corroborates them (advertised devices = physical
+//     GPUs x replicas). GKE's time-sharing labels never do: GKE does not
+//     manage a cluster's own nodes.
+//
+// What it had when vBilling first saw it and the most GPUs it had are kept
+// separately (privateNodeHistory): what changes later never lowers its bill.
+func (c *Collector) parsePrivateNode(n *corev1.Node, renewed time.Time) *nodeInfo {
+	return c.parseNodeAs(n, renewed, true)
+}
+
+func (c *Collector) parseNodeAs(n *corev1.Node, renewed time.Time, private bool) *nodeInfo {
 	ni := &nodeInfo{
 		name:         n.Name,
+		uid:          string(n.UID),
+		systemUUID:   strings.TrimSpace(n.Status.NodeInfo.SystemUUID),
+		machineID:    strings.TrimSpace(n.Status.NodeInfo.MachineID),
 		created:      n.CreationTimestamp.Time,
 		gpuType:      "unknown",
 		zone:         firstLabel(n.Labels, "topology.kubernetes.io/zone", "failure-domain.beta.kubernetes.io/zone"),
@@ -113,11 +145,11 @@ func (c *Collector) parseNodeLease(n *corev1.Node, renewed time.Time) *nodeInfo 
 		}
 	}
 	if r, err := strconv.Atoi(n.Labels["nvidia.com/gpu.replicas"]); err == nil && r > 1 &&
-		n.Labels["nvidia.com/gpu.sharing-strategy"] != "none" {
+		n.Labels["nvidia.com/gpu.sharing-strategy"] != "none" && (!private || ni.replicasCorroborated(n.Labels, r)) {
 		ni.gpuReplicas = r
 	}
 	// GKE shares GPUs natively (time-sharing or MPS) and labels the node itself.
-	if s := n.Labels["cloud.google.com/gke-gpu-sharing-strategy"]; s == "time-sharing" || s == "mps" {
+	if s := n.Labels["cloud.google.com/gke-gpu-sharing-strategy"]; !private && (s == "time-sharing" || s == "mps") {
 		if r, err := strconv.Atoi(n.Labels["cloud.google.com/gke-max-shared-clients-per-gpu"]); err == nil && r > 1 {
 			ni.gpuReplicas = r
 		}
@@ -132,6 +164,9 @@ func (c *Collector) parseNodeLease(n *corev1.Node, renewed time.Time) *nodeInfo 
 			ni.markDown(since)
 		}
 	}
+	if private {
+		return ni
+	}
 	for _, t := range n.Spec.Taints {
 		for _, key := range c.opts.UnhealthyTaints {
 			if t.Key == key {
@@ -144,6 +179,20 @@ func (c *Collector) parseNodeLease(n *corev1.Node, renewed time.Time) *nodeInfo 
 		}
 	}
 	return ni
+}
+
+// replicasCorroborated reports whether GPU Feature Discovery's physical GPU
+// count agrees with time-slicing replicas: a time-sliced node advertises
+// every physical GPU replicas times (as nvidia.com/gpu, or renamed to
+// nvidia.com/gpu.shared). Replicas a label claims on a node whose devices
+// do not add up are not believed.
+func (n *nodeInfo) replicasCorroborated(labels map[string]string, replicas int) bool {
+	count, err := strconv.ParseInt(labels["nvidia.com/gpu.count"], 10, 64)
+	if err != nil || count <= 0 {
+		return false
+	}
+	want := count * int64(replicas)
+	return n.gpuCapacity == want || n.sharedCapacity == want
 }
 
 // deviceShare is the part of a physical GPU that one advertised GPU device
@@ -192,8 +241,14 @@ func (n *nodeInfo) deviceProfile() string {
 // physicalGPUs converts everything the node advertises (whole GPUs, MIG
 // slices, time-slicing replicas) to whole-GPU equivalents, the quantity a
 // dedicated node is billed for. Slices that are not partitioned out are not
-// advertised, so a partly carved GPU never counts as more than one.
+// advertised, so a partly carved GPU never counts as more than one. It is
+// never below gpuFloor.
 func (n *nodeInfo) physicalGPUs() float64 {
+	return max(n.advertisedGPUs(), n.gpuFloor)
+}
+
+// advertisedGPUs is physicalGPUs from what the node advertises now alone.
+func (n *nodeInfo) advertisedGPUs() float64 {
 	shared := 0.0
 	if n.sharedCapacity > 0 {
 		shared = float64(n.sharedCapacity) / float64(max(n.gpuReplicas, 1))

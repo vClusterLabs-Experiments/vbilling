@@ -11,6 +11,7 @@ import (
 	"github.com/vclusterlabs-experiments/vbilling/internal/config"
 	"github.com/vclusterlabs-experiments/vbilling/internal/destinations"
 	"github.com/vclusterlabs-experiments/vbilling/internal/discovery"
+	"github.com/vclusterlabs-experiments/vbilling/internal/kv"
 	"github.com/vclusterlabs-experiments/vbilling/internal/metrics"
 	"github.com/vclusterlabs-experiments/vbilling/internal/pause"
 	"github.com/vclusterlabs-experiments/vbilling/internal/pipeline"
@@ -276,7 +277,7 @@ func TestTenantAPIOutageWindowsAreFilledExactlyOnce(t *testing.T) {
 	h.now = h.now.Add(2 * time.Minute)
 	h.c.CollectDue(ctx) // W2, W3: still down
 	w1, w3 := t0.Truncate(time.Minute), t0.Truncate(time.Minute).Add(2*time.Minute)
-	if span, ok := h.c.gaps.Get(id); !ok || span != w1.Format(time.RFC3339)+"|"+w3.Format(time.RFC3339)+"|"+w1.Add(-time.Minute).Format(time.RFC3339) {
+	if span, ok := h.c.gaps.Get(id); !ok || span != w1.Add(-time.Minute).Format(time.RFC3339)+"/"+w3.Format(time.RFC3339) {
 		t.Fatalf("gap = %q, %v; want the failed windows W1..W3", span, ok)
 	}
 	if len(gc.fills) != 0 {
@@ -309,7 +310,7 @@ func TestTenantAPIOutageWindowsAreFilledExactlyOnce(t *testing.T) {
 		t.Fatalf("ledger has %d filled private-node events, want 3", n)
 	}
 	// A repeated fill (for example after a crash between append and clearing
-	// the gap) must not bill twice.
+	// the gap, here as v0.3.0 stored it) must not bill twice.
 	_ = h.c.gaps.Set(id, w1.Format(time.RFC3339)+"|"+w3.Format(time.RFC3339))
 	h.now = h.now.Add(time.Minute)
 	h.c.CollectDue(ctx)
@@ -326,9 +327,41 @@ func TestTenantAPIGapsSurviveRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	b := New(cfg, &fakeDisc{}, &fakeColl{}, nil, pipeline.NewTenantRegistry(), nil, nil)
-	if g, ok := parseGap(b.gaps, "vcluster-team-p-private", time.Minute); !ok || !g.last.Equal(time.Date(2026, 10, 5, 10, 2, 0, 0, time.UTC)) ||
-		!g.start.Equal(time.Date(2026, 10, 5, 9, 59, 0, 0, time.UTC)) {
+	if g, ok := parseGaps(b.gaps, "vcluster-team-p-private", time.Minute); !ok || len(g) != 1 || !g[0].end.Equal(time.Date(2026, 10, 5, 10, 2, 0, 0, time.UTC)) ||
+		!g[0].start.Equal(time.Date(2026, 10, 5, 9, 59, 0, 0, time.UTC)) {
 		t.Fatalf("gap after restart = %v, %v", g, ok)
+	}
+}
+
+// A gap holds the windows whose read failed, not the span from the first
+// failure to the last: a window committed in between, with the cluster's
+// own API read, is never filled again. Runs of windows merge.
+func TestTenantGapsHoldOnlyTheFailedWindows(t *testing.T) {
+	at := func(m int) time.Time { return t0.Truncate(time.Minute).Add(time.Duration(m) * time.Minute) }
+	w := func(m int) metrics.Window { return metrics.Window{Start: at(m - 1), End: at(m)} }
+	g := tenantGaps(nil).add([]metrics.Window{w(1)}).add([]metrics.Window{w(3), w(4)}).add([]metrics.Window{w(2)}).add([]metrics.Window{w(7)})
+	if len(g) != 2 || !g[0].start.Equal(at(0)) || !g[0].end.Equal(at(4)) || !g[1].start.Equal(at(6)) || !g[1].end.Equal(at(7)) {
+		t.Fatalf("merged gaps = %v, want 10:00-10:04 and 10:06-10:07", g)
+	}
+	g = tenantGaps(nil).add([]metrics.Window{w(1)}).add([]metrics.Window{w(3)})
+	store := kv.Memory()
+	_ = store.Set("c", g.String())
+	got, ok := parseGaps(store, "c", time.Minute)
+	if !ok || len(got) != 2 {
+		t.Fatalf("gaps %q read back as %v", g.String(), got)
+	}
+	missed := got.windows(time.Minute, at(-60))
+	if len(missed) != 2 || !missed[0].End.Equal(at(1)) || !missed[1].End.Equal(at(3)) {
+		t.Fatalf("windows to fill = %+v, want the two that failed, not the one between", missed)
+	}
+	if after := got.after(at(1)); len(after) != 1 || !after[0].end.Equal(at(3)) {
+		t.Fatalf("gaps after 10:01 = %v", after)
+	}
+	for _, bad := range []string{"", "nonsense", "2026-10-05T10:01:00Z/2026-10-05T10:00:00Z"} {
+		_ = store.Set("bad", bad)
+		if _, ok := parseGaps(store, "bad", time.Minute); ok {
+			t.Errorf("gap %q parsed", bad)
+		}
 	}
 }
 
