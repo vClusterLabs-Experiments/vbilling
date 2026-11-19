@@ -18,6 +18,7 @@ import (
 	"github.com/vclusterlabs-experiments/vbilling/internal/metrics"
 	"github.com/vclusterlabs-experiments/vbilling/internal/pause"
 	"github.com/vclusterlabs-experiments/vbilling/internal/pipeline"
+	"github.com/vclusterlabs-experiments/vbilling/internal/safeguard"
 	"github.com/vclusterlabs-experiments/vbilling/internal/spool"
 	"github.com/vclusterlabs-experiments/vbilling/internal/telemetry"
 	"github.com/vclusterlabs-experiments/vbilling/internal/usage"
@@ -64,6 +65,7 @@ type Controller struct {
 	offboarded map[string]map[string]bool // tenant -> destinations done offboarding it
 	off        offboarding                // where each departed tenant's usage ends (offboard.go)
 	held       heldUsage                  // optional: usage held from destinations until priced
+	safeguard  *safeguard.Checker         // optional: flags windows that bill more than exists
 	discovered bool
 	lastWindow time.Time
 	// lastUnrequested is the last logged count of pods without requests.
@@ -234,6 +236,7 @@ func (c *Controller) Run(ctx context.Context) error {
 	c.Reconcile(ctx)
 	c.CollectDue(ctx)
 	c.CollectPrometheusDue(ctx)
+	c.checkSafeguard()
 
 	reconcile := time.NewTicker(c.cfg.ReconcileInterval)
 	defer reconcile.Stop()
@@ -248,8 +251,20 @@ func (c *Controller) Run(ctx context.Context) error {
 		case <-collect.C:
 			c.CollectDue(ctx)
 			c.CollectPrometheusDue(ctx)
+			c.checkSafeguard()
 			collect.Reset(c.untilNextWindow())
 		}
+	}
+}
+
+// UseSafeguard checks, after every collection, that the windows committed
+// since (by any source) bill no more than exists. Health only: it never
+// holds delivery.
+func (c *Controller) UseSafeguard(s *safeguard.Checker) { c.safeguard = s }
+
+func (c *Controller) checkSafeguard() {
+	if c.safeguard != nil {
+		c.safeguard.Once()
 	}
 }
 

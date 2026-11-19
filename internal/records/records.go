@@ -464,8 +464,22 @@ func toFloat(v any) (float64, error) {
 	if math.IsNaN(f) || math.IsInf(f, 0) || f < 0 {
 		return 0, fmt.Errorf("%v must be a finite, non-negative number", f)
 	}
+	if f > maxRecordQuantity {
+		return 0, fmt.Errorf("%v is more than one request can use (at most %.0e of a metric per request): an encoding error, not usage", f, maxRecordQuantity)
+	}
 	return f, nil
 }
+
+// maxRecordQuantity is the most of one metric a single request may carry.
+// A record is one API call, and the largest per-request counts are tokens:
+// the longest context windows of today's models hold about ten million, so
+// a billion leaves a hundred times that for any per-request unit (tokens,
+// images, seconds of audio, characters). A larger value is an encoding
+// error, never usage: an unsigned count that wrapped below zero (4294967295,
+// 1.8e19), or a Unix timestamp in seconds (1.7e9) or milliseconds sent
+// where a quantity belongs. Count per-request bytes in GB, as the catalog's
+// own egress is.
+const maxRecordQuantity = 1e9
 
 // parseTime accepts RFC 3339 (with or without zone, UTC assumed) or a Unix
 // timestamp in seconds, milliseconds, microseconds or nanoseconds.

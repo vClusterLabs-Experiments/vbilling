@@ -38,6 +38,7 @@ import (
 	"github.com/vclusterlabs-experiments/vbilling/internal/platform"
 	"github.com/vclusterlabs-experiments/vbilling/internal/pricing"
 	"github.com/vclusterlabs-experiments/vbilling/internal/records"
+	"github.com/vclusterlabs-experiments/vbilling/internal/safeguard"
 	"github.com/vclusterlabs-experiments/vbilling/internal/spool"
 	"github.com/vclusterlabs-experiments/vbilling/internal/telemetry"
 	"github.com/vclusterlabs-experiments/vbilling/internal/tenantapi"
@@ -269,6 +270,7 @@ func main() {
 	ctrl.UsePrometheus(prom)
 	ctrl.UsePauses(pauses)
 	ctrl.UseHeld(held) // offboarding waits for usage held until priced
+	ctrl.UseSafeguard(safeguard.New(sp, sources, tel))
 	if prices != nil {
 		prices.SetReady(ctrl.Ready) // plans are known once tenants are discovered
 	}
