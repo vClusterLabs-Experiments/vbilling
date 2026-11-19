@@ -64,7 +64,9 @@ Adapter list (falls back to the deprecated single `adapter` value).
 
 {{/*
 Secret-backed env var. Uses the component's existingSecret when set,
-otherwise the chart-managed secret when an inline value is given.
+otherwise the chart-managed secret when an inline value is given. The
+chart's Secret always holds ingest-token (given or generated, see
+vbilling.ingestToken), as it always holds api-token.
 Args: dict "env" NAME "existing" SECRET "key" KEY "inline" VALUE "chartKey" KEY "root" $
 */}}
 {{- define "vbilling.secretEnv" -}}
@@ -75,7 +77,7 @@ Args: dict "env" NAME "existing" SECRET "key" KEY "inline" VALUE "chartKey" KEY 
       name: {{ .existing }}
       key: {{ .key }}
       optional: true
-{{- else if .inline }}
+{{- else if or .inline (eq .chartKey "ingest-token") }}
 - name: {{ .env }}
   valueFrom:
     secretKeyRef:
@@ -99,6 +101,33 @@ new token on every render: set api.token or api.existingSecret with them.
 {{- if $prev }}{{ $data = $prev.data | default dict }}{{ end -}}
 {{- if hasKey $data "api-token" -}}
 {{- index $data "api-token" | b64dec -}}
+{{- else -}}
+{{- randAlphaNum 48 -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Shared ingest token stored in the chart's Secret: api.ingestToken when set,
+else the token the Secret already holds (helm lookup, so upgrades keep it),
+else a new random one. It is never the API token: gateways keep it in their
+configuration. Tools that render without cluster access (helm template) get
+a new token on every render: set api.ingestToken or api.existingSecret with
+them.
+*/}}
+{{- define "vbilling.ingestToken" -}}
+{{- if .Values.api.ingestToken -}}
+{{- .Values.api.ingestToken -}}
+{{- else -}}
+{{- $prev := lookup "v1" "Secret" .Release.Namespace (include "vbilling.fullname" .) -}}
+{{- $data := dict -}}
+{{- if $prev }}{{ $data = $prev.data | default dict }}{{ end -}}
+{{- $old := "" -}}
+{{- if hasKey $data "ingest-token" }}{{ $old = index $data "ingest-token" | b64dec }}{{ end -}}
+{{- $api := .Values.api.token -}}
+{{- if and (not $api) (hasKey $data "api-token") }}{{ $api = index $data "api-token" | b64dec }}{{ end -}}
+{{- if and $old (ne $old $api) -}}
+{{- $old -}}
 {{- else -}}
 {{- randAlphaNum 48 -}}
 {{- end -}}

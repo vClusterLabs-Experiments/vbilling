@@ -170,6 +170,8 @@ func TestValidateIngestTokens(t *testing.T) {
 		"one token, two tenants": {"INGEST_TOKENS", "tok-a=acme, tok-b=globex, tok-a=initech"},
 		"one token listed twice": {"INGEST_TOKENS", "tok-a=acme,tok-a=acme"},
 		"bound equals shared":    {"INGEST_TOKENS", "ingest-secret=acme"},
+		// The ingest token sits in gateways; the API token is the operator's.
+		"ingest token is API token": {"INGEST_TOKEN", "admin-secret"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Setenv("API_TOKEN", "admin-secret")

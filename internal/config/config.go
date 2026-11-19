@@ -536,6 +536,13 @@ func (c *Config) Validate() error {
 		}
 		owner[tok] = tenant
 	}
+	// Gateways hold the shared ingest token in their configuration; the API
+	// token pauses tenants and exports everyone's usage. Without
+	// INGEST_TOKEN, vBilling generates a separate one (DATA_DIR/ingest-token).
+	if ing := secretEnv("INGEST_TOKEN"); ing != "" && ing == c.APIToken {
+		return fmt.Errorf("INGEST_TOKEN must not be the API token: gateways hold the ingest token, and the API token pauses tenants and exports all usage. " +
+			"Unset INGEST_TOKEN to have vBilling generate one in DATA_DIR/ingest-token")
+	}
 	if c.RecordsPullLiteLLMURL != "" {
 		if c.RecordsPullLiteLLMKey == "" {
 			return fmt.Errorf("LITELLM_URL needs LITELLM_API_KEY, a LiteLLM master or proxy admin key")

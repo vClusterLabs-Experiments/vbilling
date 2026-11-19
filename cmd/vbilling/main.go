@@ -341,13 +341,17 @@ func main() {
 	ctrl.UseKnownTenants(func(id string) bool { return recordsTenants[id] || enf.HasState(id) })
 
 	// The API is never open: without API_TOKEN, a token is generated in
-	// DATA_DIR (log its path, never the token).
-	tokenFile, err := api.PrepareTokens(cfg)
+	// DATA_DIR (log its path, never the token). Ingest has a token of its
+	// own, never the API token.
+	tokenFiles, err := api.PrepareTokens(cfg)
 	if err != nil {
 		log.Fatalf("API token: %v", err)
 	}
-	if tokenFile != "" {
-		log.Printf("API_TOKEN is not set: the API requires the token vBilling keeps in %s", tokenFile)
+	if tokenFiles.API != "" {
+		log.Printf("API_TOKEN is not set: the API requires the token vBilling keeps in %s", tokenFiles.API)
+	}
+	if tokenFiles.Ingest != "" {
+		log.Printf("INGEST_TOKEN is not set: gateways send usage with the token vBilling keeps in %s (never the API token)", tokenFiles.Ingest)
 	}
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,

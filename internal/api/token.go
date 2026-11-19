@@ -17,33 +17,63 @@ import (
 // generates when API_TOKEN is not set.
 const TokenFile = "api-token"
 
-// PrepareTokens makes sure the API is never open. When API_TOKEN is empty
-// it uses the token in DATA_DIR/api-token, creating the file with a random
-// token (mode 0600) on the first start, and returns the file's path (log
-// the path, never the token). INGEST_TOKEN defaults to that token, as it
-// defaults to API_TOKEN.
+// IngestTokenFile is the file in DATA_DIR that holds the shared ingest
+// token vBilling generates when INGEST_TOKEN is not set.
+const IngestTokenFile = "ingest-token"
+
+// TokenFiles are the token files PrepareTokens used: "" for a token that
+// was set. Log the paths, never the tokens.
+type TokenFiles struct {
+	API    string
+	Ingest string
+}
+
+// PrepareTokens makes sure the API is never open and that gateways never
+// need the API token. When API_TOKEN is empty it uses the token in
+// DATA_DIR/api-token, and when INGEST_TOKEN is empty the one in
+// DATA_DIR/ingest-token, creating each file with a random token (mode
+// 0600) on the first start.
+//
+// The shared ingest token is never the API token: gateways keep it in
+// their configuration, where whoever reads it could otherwise pause tenants
+// and export everyone's usage. config.Load still fills an unset
+// INGEST_TOKEN with API_TOKEN, as earlier versions did; Validate refuses an
+// INGEST_TOKEN set to the API token, so an equal value here is that
+// default and is replaced by the generated token.
 //
 // It refuses a tenant-bound ingest token (INGEST_TOKENS) that equals the
 // API token or the shared ingest token: the tenant holding it would have
 // the operator's access.
-func PrepareTokens(cfg *config.Config) (generatedPath string, err error) {
+func PrepareTokens(cfg *config.Config) (TokenFiles, error) {
+	var files TokenFiles
+	if cfg.IngestToken != "" && tokenOK(cfg.IngestToken, cfg.APIToken) {
+		cfg.IngestToken = "" // the API token by default, never used for ingest
+	}
 	if cfg.APIToken == "" {
 		path := filepath.Join(cfg.DataDir, TokenFile)
 		tok, err := loadOrCreateToken(path)
 		if err != nil {
-			return "", fmt.Errorf("API_TOKEN is not set and %s cannot be used: %w", path, err)
+			return TokenFiles{}, fmt.Errorf("API_TOKEN is not set and %s cannot be used: %w", path, err)
 		}
-		cfg.APIToken, generatedPath = tok, path
-		if cfg.IngestToken == "" {
-			cfg.IngestToken = tok
+		cfg.APIToken, files.API = tok, path
+	}
+	if cfg.IngestToken == "" {
+		path := filepath.Join(cfg.DataDir, IngestTokenFile)
+		tok, err := loadOrCreateToken(path)
+		if err != nil {
+			return TokenFiles{}, fmt.Errorf("INGEST_TOKEN is not set and %s cannot be used: %w", path, err)
 		}
+		if tokenOK(tok, cfg.APIToken) {
+			return TokenFiles{}, fmt.Errorf("%s holds the API token; delete it so vBilling generates an ingest token of its own", path)
+		}
+		cfg.IngestToken, files.Ingest = tok, path
 	}
 	for tok, tenant := range cfg.IngestTokens {
-		if tokenOK(tok, cfg.APIToken) || (cfg.IngestToken != "" && tokenOK(tok, cfg.IngestToken)) {
-			return "", fmt.Errorf("the INGEST_TOKENS token of tenant %s is also the API or shared ingest token; give each tenant its own token", tenant)
+		if tokenOK(tok, cfg.APIToken) || tokenOK(tok, cfg.IngestToken) {
+			return TokenFiles{}, fmt.Errorf("the INGEST_TOKENS token of tenant %s is also the API or shared ingest token; give each tenant its own token", tenant)
 		}
 	}
-	return generatedPath, nil
+	return files, nil
 }
 
 // loadOrCreateToken reads the token in path, or writes a new one there.
@@ -66,7 +96,7 @@ func loadOrCreateToken(path string) (string, error) {
 		return "", err
 	}
 	tok := base64.RawURLEncoding.EncodeToString(raw)
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".api-token-*") // created with mode 0600
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+"-*") // created with mode 0600
 	if err != nil {
 		return "", err
 	}

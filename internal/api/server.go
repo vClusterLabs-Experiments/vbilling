@@ -455,10 +455,11 @@ func (s *Server) pricingReport(w http.ResponseWriter, r *http.Request) {
 
 // ingestAuth checks an ingest token and its request rate. A token from
 // INGEST_TOKENS is bound to a tenant: everything sent with it is billed to
-// that tenant.
+// that tenant. The API token is never an ingest token (PrepareTokens gives
+// ingest a token of its own).
 func (s *Server) ingestAuth(w http.ResponseWriter, r *http.Request) (boundTenant string, ok bool) {
 	if s.cfg.IngestToken == "" && len(s.cfg.IngestTokens) == 0 {
-		writeErr(w, http.StatusForbidden, "ingest is disabled: set INGEST_TOKEN (or API_TOKEN), or INGEST_TOKENS for tokens bound to a tenant")
+		writeErr(w, http.StatusForbidden, "ingest is disabled: set INGEST_TOKEN, or INGEST_TOKENS for tokens bound to a tenant")
 		return "", false
 	}
 	got := bearer(r)
@@ -469,6 +470,11 @@ func (s *Server) ingestAuth(w http.ResponseWriter, r *http.Request) (boundTenant
 		if tokenOK(got, tok) {
 			return tenant, s.limitIngest(w, tok, true)
 		}
+	}
+	if s.cfg.APIToken != "" && tokenOK(got, s.cfg.APIToken) {
+		writeErr(w, http.StatusUnauthorized, "the API token is not an ingest token: send the ingest token "+
+			"(INGEST_TOKEN, DATA_DIR/ingest-token, or the chart Secret's ingest-token key)")
+		return "", false
 	}
 	writeErr(w, http.StatusUnauthorized, "missing or invalid bearer token")
 	return "", false
