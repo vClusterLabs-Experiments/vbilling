@@ -75,15 +75,16 @@ type Adapter struct {
 	now    func() time.Time
 
 	mu      sync.Mutex
-	metrics map[string]string // metric code -> billable metric ID vBilling created or adopted (provisioning)
-	known   map[string]bool   // tenants recorded as vBilling ingest aliases
-	warned  map[string]bool   // tenants told that their pinned customer is not used
+	metrics map[string]string      // metric code -> billable metric ID vBilling created or adopted (provisioning)
+	plans   map[string]*tenantPlan // tenant -> rate cards of its customer's contracts (price coverage)
+	known   map[string]bool        // tenants recorded as vBilling ingest aliases
+	warned  map[string]bool        // tenants told that their pinned customer is not used
 }
 
 // New builds the adapter (exported for tests). link may be nil.
 func New(c *Client, cfg *config.Config, state *kv.Store, link *stripe.Adapter) *Adapter {
 	return &Adapter{c: c, cfg: cfg, state: state, stripe: link, now: time.Now, metrics: map[string]string{},
-		known: map[string]bool{}, warned: map[string]bool{}}
+		plans: map[string]*tenantPlan{}, known: map[string]bool{}, warned: map[string]bool{}}
 }
 
 func (a *Adapter) Name() string { return "metronome" }
