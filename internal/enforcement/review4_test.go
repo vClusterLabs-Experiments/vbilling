@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -252,13 +253,15 @@ func TestReview4StripeHardCapIsNeverLiftedByAPayment(t *testing.T) {
 		}
 	}
 	if st := e.StateOf("acme"); st.State == Suspended {
-		t.Fatalf("two paid invoices, nothing owed at Stripe, and the hard-cap suspension stays (causes %+v): no payment can settle a Stripe "+
-			"alert cause, contrary to \"A paid invoice lifts it\" (docs/stripe.html)", st.Holds[HoldBilling].Causes)
+		t.Fatalf("two paid invoices, nothing owed at Stripe, and the hard-cap suspension stays (hold %+v): no payment can settle a Stripe "+
+			"alert cause, contrary to \"A paid invoice lifts it\" (docs/stripe.html)", st.Holds[HoldBilling])
 	}
 }
 
 // r4AskedReader is a billing platform read again that, like Stripe, answers
-// about what it is asked: each asked cause it still shows open.
+// with what it still shows open for the customer it is asked about.
+// (Adapted to v0.3.1's stateless read: it is asked about a customer, not
+// about recorded causes, and answers with all that customer still owes.)
 type r4AskedReader struct {
 	resolver
 	mu    sync.Mutex
@@ -266,16 +269,17 @@ type r4AskedReader struct {
 	asked [][]string
 }
 
-func (r *r4AskedReader) Owed(_ context.Context, _, _ string, causes []string) ([]string, error) {
+func (r *r4AskedReader) Owed(_ context.Context, tenant, customer string, _ func(string) bool) ([]string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.asked = append(r.asked, causes)
+	r.asked = append(r.asked, []string{tenant, customer})
 	var out []string
-	for _, c := range causes {
-		if r.open[c] {
+	for c, open := range r.open {
+		if open {
 			out = append(out, c)
 		}
 	}
+	sort.Strings(out)
 	return out, nil
 }
 
@@ -324,7 +328,10 @@ func TestReview4SuspensionFromAnEventWithoutACauseIsLiftedByAnyPayment(t *testin
 			}
 			if st := e.StateOf("acme"); st.State != Suspended || nsLabels(t, kube)[LabelSuspended] != "true" {
 				t.Fatalf("paying a small, unrelated invoice lifted the suspension for the overdue invoice in_big, which Stripe still shows open "+
-					"(state %s; causes recorded %+v; Stripe asked about %v)", st.State, e.StateOf("acme").Holds[HoldBilling].Causes, stripeAcct.asked)
+					"(state %s; hold %+v; Stripe asked about %v)", st.State, e.StateOf("acme").Holds[HoldBilling], stripeAcct.asked)
+			}
+			if len(stripeAcct.asked) == 0 {
+				t.Fatalf("the payment kept the suspension without reading Stripe again: the hold stays for the wrong reason")
 			}
 		})
 	}

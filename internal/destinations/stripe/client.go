@@ -249,26 +249,48 @@ type idObject interface{ objectID() string }
 func (m Meter) objectID() string        { return m.ID }
 func (p Price) objectID() string        { return p.ID }
 func (s Subscription) objectID() string { return s.ID }
+func (i Invoice) objectID() string      { return i.ID }
+
+// maxPages bounds a list read, as a safety net: 5,000 objects.
+const maxPages = 50
 
 // listAll pages through a v1 list endpoint (max 50 pages as a safety net).
 func listAll[T idObject](ctx context.Context, c *Client, path string, params url.Values) ([]T, error) {
+	out, _, err := listPages[T](ctx, c, path, params)
+	return out, err
+}
+
+// listEvery pages through a v1 list endpoint like listAll, and fails rather
+// than return part of the list: a read that decides whether a tenant owes
+// anything must see all of it.
+func listEvery[T idObject](ctx context.Context, c *Client, path string, params url.Values) ([]T, error) {
+	out, complete, err := listPages[T](ctx, c, path, params)
+	if err == nil && !complete {
+		return nil, fmt.Errorf("stripe GET %s: more than %d pages", path, maxPages)
+	}
+	return out, err
+}
+
+// listPages pages through a v1 list endpoint, up to maxPages pages, and
+// reports whether it reached the end.
+func listPages[T idObject](ctx context.Context, c *Client, path string, params url.Values) ([]T, bool, error) {
 	var out []T
 	if params == nil {
 		params = url.Values{}
 	}
 	params.Set("limit", "100")
-	for page := 0; page < 50; page++ {
+	for page := 0; page < maxPages; page++ {
 		var l list[T]
 		if err := c.do(ctx, http.MethodGet, path, params, "", &l); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		out = append(out, l.Data...)
 		if !l.HasMore || len(l.Data) == 0 {
-			return out, nil
+			return out, true, nil
 		}
 		params.Set("starting_after", l.Data[len(l.Data)-1].objectID())
 	}
-	return out, nil
+	return out, false, nil
 }
 
 // --- meters ---
@@ -437,6 +459,24 @@ func (c *Client) ListSubscriptions(ctx context.Context, customerID string) ([]Su
 	params.Set("customer", customerID)
 	params.Set("status", "all")
 	return listAll[Subscription](ctx, c, "/v1/subscriptions", params)
+}
+
+// EverySubscription lists every subscription of a customer, whatever its
+// status, and fails rather than return part of them.
+func (c *Client) EverySubscription(ctx context.Context, customerID string) ([]Subscription, error) {
+	params := url.Values{}
+	params.Set("customer", customerID)
+	params.Set("status", "all")
+	return listEvery[Subscription](ctx, c, "/v1/subscriptions", params)
+}
+
+// EveryInvoice lists every invoice of a customer in a status (draft, open,
+// paid, uncollectible, void), and fails rather than return part of them.
+func (c *Client) EveryInvoice(ctx context.Context, customerID, status string) ([]Invoice, error) {
+	params := url.Values{}
+	params.Set("customer", customerID)
+	params.Set("status", status)
+	return listEvery[Invoice](ctx, c, "/v1/invoices", params)
 }
 
 // CreateSubscription subscribes a customer to metered prices. A non-zero

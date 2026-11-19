@@ -4,10 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
-	"net/url"
 	"sort"
-	"strings"
+	"time"
 )
 
 // ObjectID is a field Stripe sends as an object's ID, or as the object
@@ -42,15 +40,13 @@ type Invoice struct {
 	Customer string `json:"customer"`
 	// Status: draft, open, paid, uncollectible or void.
 	Status string `json:"status"`
-}
-
-// GetInvoice reads an invoice.
-func (c *Client) GetInvoice(ctx context.Context, id string) (*Invoice, error) {
-	var inv Invoice
-	if err := c.do(ctx, http.MethodGet, "/v1/invoices/"+url.PathEscape(id), nil, "", &inv); err != nil {
-		return nil, err
-	}
-	return &inv, nil
+	// AttemptCount is how many times Stripe tried to collect it: above
+	// zero, a payment failed. Stripe always sends it; nil when an answer
+	// did not.
+	AttemptCount *int `json:"attempt_count"`
+	// DueDate is when an invoice sent for payment is due (Unix seconds);
+	// nil for one Stripe charges automatically.
+	DueDate *int64 `json:"due_date"`
 }
 
 // inArrears are the statuses of a subscription that still owes: Stripe
@@ -60,93 +56,77 @@ func inArrears(status string) bool {
 	return status == "past_due" || status == "unpaid" || status == "incomplete"
 }
 
-// stillOwed reports whether an invoice is still owed: finalized and not
-// paid (open), or written off by the merchant but never paid
-// (uncollectible).
-func stillOwed(inv *Invoice) bool { return inv.Status == "open" || inv.Status == "uncollectible" }
+// invoiceOwed says why an invoice is still owed, or "" when it is not. An
+// uncollectible invoice was written off unpaid. An open one is owed once
+// it is past its due date, or Stripe tried to charge it and the payment
+// failed; an open invoice that is neither (finalized, its first charge not
+// attempted yet) owes nothing yet. One whose attempts the answer did not
+// say is owed: nothing shows it was not tried.
+func invoiceOwed(inv Invoice, now time.Time) string {
+	switch {
+	case inv.Status == "uncollectible":
+		return "uncollectible"
+	case inv.Status != "open":
+		return ""
+	case inv.AttemptCount == nil:
+		return "open, its payment attempts unknown"
+	case *inv.AttemptCount > 0:
+		return fmt.Sprintf("open, payment failed (attempt %d)", *inv.AttemptCount)
+	case inv.DueDate != nil && *inv.DueDate > 0 && now.After(time.Unix(*inv.DueDate, 0)):
+		return "open, past due"
+	}
+	return ""
+}
 
-// Owed reads again what holds a tenant at Stripe. A payment does not say
-// whether it settled what suspended a tenant: paying a small, older
-// invoice sends invoice.paid while the subscription it belongs to stays
-// unpaid. So before a payment lowers a hold it did not settle itself,
-// vBilling asks Stripe:
+// Owed reads what a customer owes at Stripe now. A payment does not say
+// whether it settled what held a tenant: paying a small invoice sends
+// invoice.paid while an older one stays open, and Stripe marks a
+// subscription active again once its latest invoice is paid, whatever older
+// invoices still owe. So before a payment clears a billing hold, vBilling
+// reads the customer's whole standing. It owes nothing only when:
 //
-//   - every subscription of the tenant (by vBilling's metadata) and every
-//     subscription that caused the hold ("subscription:<id>") that is
-//     past_due, unpaid or incomplete still holds it; a subscription that
-//     caused the hold and has ended still holds it while its latest invoice
-//     is open or uncollectible;
-//   - a one-off invoice that caused the hold ("invoice:<id>") holds it
-//     while it is open or uncollectible;
-//   - anything else (a billing alert, an empty ID) cannot be read again
-//     and holds it.
+//   - none of its subscriptions, of any status and whoever created them,
+//     is past_due, unpaid or incomplete;
+//   - none of its open invoices is past due or was charged and failed
+//     (attempt_count above zero);
+//   - none of its invoices is uncollectible.
 //
-// Causes come back by the same key; other subscriptions in arrears come
-// back as "subscription:<id>". An error means Stripe could not be read.
-func (a *Adapter) Owed(ctx context.Context, tenant, customerID string, causes []string) ([]string, error) {
-	owed := map[string]bool{}
-	wanted := map[string]bool{} // subscriptions that caused the hold
-	var invoices []string
-	for _, cause := range causes {
-		kind, id, _ := strings.Cut(cause, ":")
-		switch {
-		case id == "":
-			owed[cause] = true
-		case kind == "subscription":
-			wanted[id] = true
-		case kind == "invoice":
-			invoices = append(invoices, id)
-		default:
-			owed[cause] = true
-		}
-	}
+// Every subscription (status=all) and every open and uncollectible invoice
+// is read, page by page. With no customerID, the customer is the one
+// vBilling bills the tenant as; a tenant it never mapped to a Stripe
+// customer owes nothing here. counts is not used: Stripe's usage alerts
+// have no standing to read. An error means Stripe could not be read, and
+// the webhook that asked is retried.
+func (a *Adapter) Owed(ctx context.Context, tenant, customerID string, _ func(string) bool) ([]string, error) {
 	if customerID == "" {
-		return nil, fmt.Errorf("no Stripe customer to read for tenant %s", tenant)
+		id, ok := a.state.Get("cus/" + tenant)
+		if !ok {
+			return nil, nil
+		}
+		customerID = id
 	}
-	subs, err := a.c.ListSubscriptions(ctx, customerID)
+	subs, err := a.c.EverySubscription(ctx, customerID)
 	if err != nil {
 		return nil, fmt.Errorf("subscriptions of customer %s: %w", customerID, err)
 	}
-	seen := map[string]bool{}
+	var owed []string
 	for _, s := range subs {
-		seen[s.ID] = true
-		if !wanted[s.ID] && s.Metadata[metaTenant] != tenant {
-			continue
+		if inArrears(s.Status) {
+			owed = append(owed, "subscription "+s.ID+" "+s.Status)
 		}
-		switch {
-		case inArrears(s.Status):
-			owed["subscription:"+s.ID] = true
-		case wanted[s.ID] && (s.Status == "canceled" || s.Status == "incomplete_expired") && s.LatestInvoice != "":
-			// Ended, perhaps for non-payment: its last invoice says.
-			inv, err := a.c.GetInvoice(ctx, string(s.LatestInvoice))
-			if err != nil {
-				return nil, fmt.Errorf("latest invoice %s of subscription %s: %w", s.LatestInvoice, s.ID, err)
-			}
-			if stillOwed(inv) {
-				owed["subscription:"+s.ID] = true
+	}
+	now := a.now()
+	for _, status := range []string{"open", "uncollectible"} {
+		invs, err := a.c.EveryInvoice(ctx, customerID, status)
+		if err != nil {
+			return nil, fmt.Errorf("%s invoices of customer %s: %w", status, customerID, err)
+		}
+		for _, inv := range invs {
+			if why := invoiceOwed(inv, now); why != "" {
+				owed = append(owed, "invoice "+inv.ID+" "+why)
 			}
 		}
 	}
-	for id := range wanted {
-		if !seen[id] {
-			owed["subscription:"+id] = true // not this customer's: nothing confirms it was paid
-		}
-	}
-	for _, id := range invoices {
-		inv, err := a.c.GetInvoice(ctx, id)
-		switch {
-		case IsCode(err, "resource_missing"):
-			owed["invoice:"+id] = true
-		case err != nil:
-			return nil, fmt.Errorf("invoice %s: %w", id, err)
-		case inv.Customer != "" && inv.Customer != customerID, stillOwed(inv):
-			owed["invoice:"+id] = true
-		}
-	}
-	out := make([]string, 0, len(owed))
-	for k := range owed {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out, nil
+	sort.Strings(owed)
+	return owed, nil
 }

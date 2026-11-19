@@ -17,8 +17,14 @@ import (
 //   - openapi-request-schemas.json: request bodies by endpoint name
 //   - openapi-pricing-schemas.json: request, response and query parameters
 //     of the read endpoints the price check uses, and of
-//     POST /v1/customer-alerts/get (get_customer_alert), which a payment
-//     reads before it lowers a billing hold
+//     POST /v1/customer-alerts/get (get_customer_alert)
+//
+// POST /v1/customer-alerts/list (list_customer_alerts), which a payment
+// reads before it clears a billing hold, lists the same CustomerAlert
+// objects get_customer_alert answers with: its schemas are built from that
+// one, with the request (ListCustomerAlertsPayload) and the list envelope
+// as docs.metronome.com documents them (api-reference/alerts/
+// get-all-threshold-notifications, listCustomerAlerts-v1).
 //
 // Validate implements the subset of JSON Schema they use, strictly: an
 // object schema that lists properties rejects unknown fields, so a misspelled
@@ -63,9 +69,49 @@ func load() error {
 		}
 		if err := json.Unmarshal(b, &pricing); err != nil {
 			loadErr = fmt.Errorf("openapi-pricing-schemas.json: %w", err)
+			return
 		}
+		list, err := listCustomerAlerts(pricing["get_customer_alert"])
+		if err != nil {
+			loadErr = fmt.Errorf("openapi-pricing-schemas.json: %w", err)
+			return
+		}
+		pricing["list_customer_alerts"] = list
 	})
 	return loadErr
+}
+
+// listCustomerAlerts builds the schemas of POST /v1/customer-alerts/list
+// from get_customer_alert's: its items are the CustomerAlert get answers
+// with as data.
+func listCustomerAlerts(get Endpoint) (Endpoint, error) {
+	props, _ := get.Response["properties"].(map[string]any)
+	item, ok := props["data"].(map[string]any)
+	if !ok {
+		return Endpoint{}, fmt.Errorf("get_customer_alert has no data schema to list")
+	}
+	statuses := []any{"enabled", "disabled", "archived", "ENABLED", "DISABLED", "ARCHIVED", "Enabled", "Disabled", "Archived"}
+	return Endpoint{
+		Path:   "/v1/customer-alerts/list",
+		Method: "POST",
+		Query:  map[string]any{"next_page": map[string]any{"type": "string"}},
+		Request: map[string]any{
+			"type":     "object",
+			"required": []any{"customer_id"},
+			"properties": map[string]any{
+				"customer_id":    map[string]any{"type": "string", "format": "uuid"},
+				"alert_statuses": map[string]any{"type": "array", "minItems": 1.0, "items": map[string]any{"type": "string", "enum": statuses}},
+			},
+		},
+		Response: map[string]any{
+			"type":     "object",
+			"required": []any{"data", "next_page"},
+			"properties": map[string]any{
+				"data":      map[string]any{"type": "array", "items": item},
+				"next_page": map[string]any{"type": "string", "nullable": true},
+			},
+		},
+	}, nil
 }
 
 // RequestSchema returns the vendored request body schema of an endpoint

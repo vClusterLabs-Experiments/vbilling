@@ -13,7 +13,8 @@
 //   - contracts listed per customer (the portal's, with prepaid commits);
 //   - usage aggregation (POST /v1/usage) per billable metric;
 //   - threshold notifications in alarm for a customer, as
-//     POST /v1/customer-alerts/get reports them;
+//     POST /v1/customer-alerts/get and POST /v1/customer-alerts/list
+//     report them;
 //   - signed webhooks, sent to any URL with Metronome's signature scheme.
 //
 // Every request body is validated against the request schemas vendored in
@@ -643,6 +644,8 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.usage(w, body)
 	case "POST /v1/customer-alerts/get":
 		s.customerAlert(w, r, body)
+	case "POST /v1/customer-alerts/list":
+		s.customerAlerts(w, r, body)
 	default:
 		s.t.Errorf("metronometest: vBilling called %s, which the fake does not implement", key)
 		s.errorf(w, http.StatusNotFound, "not implemented by the fake: %s", key)
@@ -1015,16 +1018,82 @@ func (s *Server) customerAlert(w http.ResponseWriter, r *http.Request, body []by
 		s.errorf(w, http.StatusNotFound, "threshold notification %s not found for customer %s", req.AlertID, req.CustomerID)
 		return
 	}
+	s.replyPricing(w, ep, "get_customer_alert", map[string]any{"data": a.json()})
+}
+
+// json is the CustomerAlert Metronome answers with: customer_status null
+// once the notification is archived.
+func (a *alertState) json() map[string]any {
 	var status any = a.status
 	state := "enabled"
 	if a.status == "" {
 		status, state = nil, "archived"
 	}
-	s.replyPricing(w, ep, "get_customer_alert", map[string]any{"data": map[string]any{
+	return map[string]any{
 		"customer_status": status,
 		"alert": map[string]any{"id": a.id, "name": a.name, "type": a.typ, "status": state, "threshold": a.threshold,
 			"updated_at": a.updated.UTC().Format(time.RFC3339)},
-	}})
+	}
+}
+
+// alertsPage is how many threshold notifications the fake answers
+// POST /v1/customer-alerts/list with per page: few, so paging is always
+// exercised.
+const alertsPage = 2
+
+// customerAlerts answers POST /v1/customer-alerts/list: "all threshold
+// notification configurations and their current statuses for a specific
+// customer" (docs.metronome.com, alerts/get-all-threshold-notifications),
+// only the enabled ones unless alert_statuses asks for archived ones too,
+// paged with next_page, and 404 for a customer the account does not have.
+func (s *Server) customerAlerts(w http.ResponseWriter, r *http.Request, body []byte) {
+	ep, ok := s.checkPricing(w, r, "list_customer_alerts", body)
+	if !ok {
+		return
+	}
+	var req struct {
+		CustomerID    string   `json:"customer_id"`
+		AlertStatuses []string `json:"alert_statuses"`
+	}
+	json.Unmarshal(body, &req)
+	if s.customerLocked(req.CustomerID) == nil {
+		s.errorf(w, http.StatusNotFound, "customer %s not found", req.CustomerID)
+		return
+	}
+	want := map[string]bool{"enabled": len(req.AlertStatuses) == 0}
+	for _, st := range req.AlertStatuses {
+		want[strings.ToLower(st)] = true
+	}
+	var matched []*alertState
+	for _, a := range s.alerts {
+		state := "enabled"
+		if a.status == "" {
+			state = "archived"
+		}
+		if a.customer == req.CustomerID && want[state] {
+			matched = append(matched, a)
+		}
+	}
+	sort.Slice(matched, func(i, j int) bool { return matched[i].id < matched[j].id })
+	from := 0
+	if p := r.URL.Query().Get("next_page"); p != "" {
+		n, err := strconv.Atoi(p)
+		if err != nil || n < 0 || n > len(matched) {
+			s.errorf(w, http.StatusBadRequest, "invalid next_page %q", p)
+			return
+		}
+		from = n
+	}
+	to := min(from+alertsPage, len(matched))
+	data := []map[string]any{}
+	for _, a := range matched[from:to] {
+		data = append(data, a.json())
+	}
+	var next any
+	if to < len(matched) {
+		next = strconv.Itoa(to)
+	}
+	s.replyPricing(w, ep, "list_customer_alerts", map[string]any{"data": data, "next_page": next})
 }
 
 // --- webhooks ---
@@ -1039,7 +1108,8 @@ type Notification struct {
 // Alert is a threshold notification ("alerts.<type>") for a customer, such
 // as alerts.low_remaining_commit_balance_reached for a prepaid commit wallet.
 // The notification is in alarm for the customer from then on, as
-// POST /v1/customer-alerts/get reports, until SetAlertStatus says otherwise.
+// POST /v1/customer-alerts/get and /list report, until SetAlertStatus says
+// otherwise. Its type is alertType without "alerts.".
 func (s *Server) Alert(alertType, customerID, alertName string, remaining, threshold float64) Notification {
 	s.mu.Lock()
 	defer s.mu.Unlock()
