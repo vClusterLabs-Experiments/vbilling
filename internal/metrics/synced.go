@@ -202,7 +202,9 @@ func (c *Collector) readSynced(ctx context.Context, targets []Target) (*syncedVi
 		}
 		e := &elsewhere{uncertain: map[string]int{}}
 		in, unsure := map[string]bool{}, map[string]bool{}
-		// mine decides an object outside the cluster's namespace.
+		// mine decides an object outside the cluster's namespace. A pod
+		// deleted with a namespace vBilling never read is not reported:
+		// nothing says it was this cluster's, and it no longer runs.
 		mine := func(ns string, deletedObj bool) bool {
 			if ns == cl.Namespace {
 				return false // its own namespace: metered there
@@ -213,8 +215,6 @@ func (c *Collector) readSynced(ctx context.Context, targets []Target) (*syncedVi
 				in[ns] = true
 				return true
 			case own == discovery.Uncertain && !(deletedObj && why == discovery.ReasonMissing):
-				// A pod deleted with a namespace vBilling never read: nothing
-				// says it was this cluster's, and it no longer runs.
 				e.uncertain[why]++
 				unsure[ns] = true
 			}

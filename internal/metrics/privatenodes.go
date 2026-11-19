@@ -191,9 +191,9 @@ const (
 	// every 60 seconds by default).
 	gpuRaiseAfter = 10 * time.Minute
 	// attributeFillAfterCreation: a node's zone, capacity type, SKU and
-	// instance type first seen empty are filled from labels set this long
-	// after its creation: the cloud controller manager and Karpenter label
-	// a node seconds after its kubelet registers it.
+	// instance type first seen empty are filled from labels read within
+	// this long of its creation: the cloud controller manager and Karpenter
+	// label a node seconds after its kubelet registers it.
 	attributeFillAfterCreation = 10 * time.Minute
 	// nodeHistoryRetention: a node not seen for this long is forgotten.
 	nodeHistoryRetention = 60 * 24 * time.Hour

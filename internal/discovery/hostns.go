@@ -88,8 +88,9 @@ const hostNamespaceGets = 32
 // objects outside their cluster's namespace) and the namespaces vCluster
 // control planes run in. It reads nothing without namespaces. A namespace
 // that does not exist is noted as such. An error means the namespaces
-// could not be read; a forbidden read is kept in the result instead
-// (Whose then reports ReasonUnread), so a caller can go on.
+// could not be read; a forbidden read is kept in the result instead (Err),
+// and Whose then attributes nothing outside a cluster's own namespace, so a
+// caller can go on.
 func ReadHostNamespaces(ctx context.Context, kube kubernetes.Interface, namespaces []string) (*HostNamespaces, error) {
 	h := &HostNamespaces{read: map[string]hostNamespace{}, planes: map[string]bool{}}
 	if len(namespaces) == 0 {
