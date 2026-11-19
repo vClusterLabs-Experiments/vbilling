@@ -65,7 +65,7 @@ type TenantCluster struct {
 	Paused bool
 	// Namesakes are the namespaces of the other vClusters on this control
 	// plane cluster with the same name, metered or not. NamesakesUnknown is
-	// set when discovery could not list them all. See SyncedHere.
+	// set when discovery could not list them all. See HostNamespaces.Whose.
 	Namesakes        []string
 	NamesakesUnknown bool
 }
@@ -74,17 +74,6 @@ type TenantCluster struct {
 // vcluster.loft.sh/managed-by may be another cluster's: another vCluster
 // has the name, or vBilling could not list every vCluster.
 func (c *TenantCluster) NameShared() bool { return len(c.Namesakes) > 0 || c.NamesakesUnknown }
-
-// SyncedHere reports whether an object in a namespace of the control plane
-// cluster that carries this cluster's name in vcluster.loft.sh/managed-by
-// (which vCluster's syncer sets and a tenant cannot) is this cluster's.
-// In its own namespace it is. In another one (vcluster.yaml
-// sync.toHost.namespaces syncs a cluster's pods, volumes and services to
-// namespaces of their own) the label holds only the cluster's name, so the
-// object is this cluster's only while no other vCluster has the name.
-func (c *TenantCluster) SyncedHere(namespace string) bool {
-	return namespace == c.Namespace || !c.External && !c.NameShared()
-}
 
 // AnnotationPaused is the annotation `vcluster pause` sets on a paused
 // cluster's StatefulSet or Deployment. vBilling marks its own pauses with

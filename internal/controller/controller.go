@@ -4,6 +4,8 @@ package controller
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log"
 	"path/filepath"
 	"sort"
@@ -14,6 +16,7 @@ import (
 	"github.com/vclusterlabs-experiments/vbilling/internal/config"
 	"github.com/vclusterlabs-experiments/vbilling/internal/destinations"
 	"github.com/vclusterlabs-experiments/vbilling/internal/discovery"
+	"github.com/vclusterlabs-experiments/vbilling/internal/health"
 	"github.com/vclusterlabs-experiments/vbilling/internal/kv"
 	"github.com/vclusterlabs-experiments/vbilling/internal/metrics"
 	"github.com/vclusterlabs-experiments/vbilling/internal/pause"
@@ -72,13 +75,18 @@ type Controller struct {
 	lastUnrequested int
 
 	// usageRead is the ledger sequence read through for recent usage
-	// (usageSince); usageStarted is false until the first reconcile.
+	// (usageSince); usageStarted is false until the first reconcile;
+	// usageThrough is whether the last reconcile read the ledger through.
 	usageRead    uint64
 	usageStarted bool
+	usageThrough bool
 
-	// gaps: tenant cluster external ID -> end of the first window its own
-	// API could not be read for. Persisted, so a restart still fills them.
+	// gaps: a cluster's external ID -> the windows its own API could not be
+	// read for (tenantGaps). Persisted, so a restart still fills them.
 	gaps *kv.Store
+	// gapsFailing: the last write of gaps failed (reported once it works).
+	gapsFailing bool
+	health      *health.Registry // optional: where gap writes are reported
 
 	prom    PromCollector
 	aliases map[string]string // gateway or external identity -> tenant ID
@@ -103,6 +111,9 @@ type Controller struct {
 // UsePauses tracks when clusters are paused, so capacity is not billed for
 // that time (PAUSE_KEEP_BILLING decides what keeps billing).
 func (c *Controller) UsePauses(p *pause.Store) { c.pauses = p }
+
+// UseHealth reports the controller's own sources (tenant-api-gaps).
+func (c *Controller) UseHealth(h *health.Registry) { c.health = h }
 
 // UseKnownTenants adds tenants vBilling knows without a cluster: those its
 // records configuration names (tenant maps, tenant-bound pulls) and those
@@ -472,13 +483,14 @@ func (c *Controller) Reconcile(ctx context.Context) {
 	}
 	// A tenant whose usage still arrives (gateway records, ingest, Prometheus)
 	// is not gone, whether or not it still has a cluster: it was last seen
-	// at the end of its latest window (never later than now).
-	for id, end := range using {
-		if end.After(now) {
-			end = now
+	// when its latest usage was appended to the ledger (never later than
+	// now), whatever window that usage is for.
+	for id, at := range using {
+		if at.After(now) {
+			at = now
 		}
-		if seen, known := c.lastSeen[id]; known && end.After(seen) {
-			c.lastSeen[id] = end
+		if seen, known := c.lastSeen[id]; known && at.After(seen) {
+			c.lastSeen[id] = at
 			delete(c.offboarded, id) // back before offboarding finished: start over next time
 		}
 	}
@@ -650,6 +662,14 @@ func (c *Controller) CollectDue(ctx context.Context) {
 		c.tel.Add("vbilling_collection_failures_total", "Failed metering runs (windows are retried).", nil, 1)
 		return
 	}
+	// The windows a cluster's own API missed are recorded before any is
+	// committed: a crash in between must not leave a window committed
+	// without its cluster's API read and nothing to fill it.
+	if err := c.recordGaps(failed, windows); err != nil {
+		log.Printf("[controller] record the windows clusters' own APIs missed: %v; %d window(s) are not committed and are read again", err, len(windows))
+		c.tel.Add("vbilling_collection_failures_total", "Failed metering runs (windows are retried).", nil, 1)
+		return
+	}
 	total := 0
 	for i, w := range windows {
 		n := ""
@@ -690,32 +710,98 @@ func (c *Controller) CollectDue(ctx context.Context) {
 	}
 }
 
-// fillTenantGaps records the windows whose read of a cluster's own API
-// failed in this run and, once it answers again, meters exactly those
-// windows. Those events go to the ledger as late events, deduplicated by
-// ID. A gap holds the failed windows themselves (tenantGaps), never one
-// committed with the cluster's API side in between: fill IDs are salted,
-// so a committed window filled again would bill twice. A fill repeated
-// after a crash gets the same IDs and is dropped as a duplicate. Windows
-// older than MAX_BACKFILL are not filled.
-func (c *Controller) fillTenantGaps(ctx context.Context, failed map[string][]metrics.Window, windows []metrics.Window, targets []metrics.Target) {
+// recordGaps records, before a run commits its windows, the windows each
+// cluster's own API missed in it (failed), so a window committed without
+// its cluster's API read is always that cluster's gap, even if vBilling
+// stops right after the commit. A gap recorded for windows whose commit
+// never happened (vBilling stopped, or a commit failed) is dropped here by
+// the next run, which reads those windows again: a gap never holds a window
+// that was committed with its cluster's API read. Gaps older than
+// MAX_BACKFILL are dropped. An error means a gap could not be saved: the
+// run must not commit (its windows are read again next time).
+func (c *Controller) recordGaps(failed map[string][]metrics.Window, windows []metrics.Window) error {
 	size := c.cfg.CollectionInterval
+	wm, _ := c.spool.Watermark(spool.SourceCollector)
 	earliest := windows[len(windows)-1].End.Add(-c.cfg.MaxBackfill)
-	for id, ws := range failed {
-		g, known := parseGaps(c.gaps, id, size)
-		if !known {
-			log.Printf("[controller] %s: tenant API unreachable from window %s, will fill once it answers", id, ws[0].End.Format(time.RFC3339))
-		}
-		if g = g.add(ws).after(earliest); len(g) == 0 {
-			_ = c.gaps.Delete(id)
-			continue
-		}
-		_ = c.gaps.Set(id, g.String())
+	ids := map[string]bool{}
+	for id := range c.gaps.WithPrefix("") {
+		ids[id] = true
 	}
+	for id := range failed {
+		ids[id] = true
+	}
+	sorted := make([]string, 0, len(ids))
+	for id := range ids {
+		sorted = append(sorted, id)
+	}
+	sort.Strings(sorted)
+	var errs []error
+	for _, id := range sorted {
+		g, known := parseGaps(c.gaps, id, size)
+		next := g.through(wm)
+		if ws := failed[id]; len(ws) > 0 {
+			if len(next) == 0 {
+				log.Printf("[controller] %s: tenant API unreachable from window %s, will fill once it answers", id, ws[0].End.Format(time.RFC3339))
+			}
+			next = next.add(ws)
+		}
+		next = next.after(earliest)
+		var err error
+		switch {
+		case len(next) == 0 && known:
+			err = c.gaps.Delete(id)
+		case len(next) > 0 && (!known || next.String() != g.String()):
+			err = c.gaps.Set(id, next.String())
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", id, err))
+		}
+	}
+	err := errors.Join(errs...)
+	c.reportGaps(err)
+	return err
+}
+
+// reportGaps reports whether tenant API gaps can be saved (reported when
+// they cannot, and once when they can again).
+func (c *Controller) reportGaps(err error) {
+	c.mu.Lock()
+	was := c.gapsFailing
+	c.gapsFailing = err != nil
+	c.mu.Unlock()
+	if c.health == nil {
+		return
+	}
+	switch {
+	case err != nil:
+		c.health.Fail("tenant-api-gaps", "tenant-api", "", fmt.Errorf("the windows clusters' own APIs missed cannot be saved, so no window is committed until they can: %w", err),
+			"check DATA_DIR (tenant-api-gaps.json): free space and permissions")
+	case was:
+		c.health.OK("tenant-api-gaps", "tenant-api", "", 0)
+	}
+}
+
+// fillTenantGaps meters, once a cluster's own API answers again, exactly
+// the windows it missed (recordGaps). Those events go to the ledger as late
+// events, deduplicated by ID. A gap holds the failed windows themselves
+// (tenantGaps), never one committed with the cluster's API side in
+// between: fill IDs are salted, so a committed window filled again would
+// bill twice. A fill repeated after a crash gets the same IDs and is
+// dropped as a duplicate. Windows older than MAX_BACKFILL are not filled.
+//
+// A gap an earlier version recorded ("first|last") is one span from the
+// first failed window to the last, which may hold windows committed with
+// the cluster's API read, or filled already: its windows are filled with
+// the unsalted IDs those versions gave, so what a billing platform or the
+// ledger already has is dropped as a duplicate, and an event an earlier
+// fill already gave a salted ID is left out.
+func (c *Controller) fillTenantGaps(ctx context.Context, failed map[string][]metrics.Window, windows []metrics.Window, targets []metrics.Target) {
 	filler, ok := c.coll.(tenantFiller)
 	if !ok {
 		return
 	}
+	size := c.cfg.CollectionInterval
+	earliest := windows[len(windows)-1].End.Add(-c.cfg.MaxBackfill)
 	for _, t := range targets {
 		id := t.Cluster.ExternalID()
 		g, ok := parseGaps(c.gaps, id, size)
@@ -724,74 +810,96 @@ func (c *Controller) fillTenantGaps(ctx context.Context, failed map[string][]met
 		}
 		missed := g.windows(size, earliest)
 		if len(missed) == 0 {
-			_ = c.gaps.Delete(id)
+			c.dropGap(id)
 			continue
 		}
 		byWindow, fst, _, err := c.collectAttributed(ctx, []metrics.Target{t}, missed, filler.CollectTenantAPI)
 		if err != nil || len(fst.TenantAPIFailed) > 0 {
 			continue // still unreachable: try again next window
 		}
+		legacy := g.legacyEnds(size)
 		var evs []usage.Event
 		for _, w := range missed {
-			evs = append(evs, byWindow[w.End]...)
+			for _, ev := range byWindow[w.End] {
+				salted := usage.DeriveIDWith(&ev, "fill")
+				if legacy[w.End] {
+					if c.spool.IngestedRecently(salted) {
+						continue // filled already, by a version that salted fills
+					}
+					salted = ev.ID
+				}
+				ev.ID = salted
+				if ev.Properties == nil {
+					ev.Properties = map[string]any{}
+				}
+				ev.Properties["filled"] = true
+				evs = append(evs, ev)
+			}
 		}
-		saltFill(evs)
 		accepted, dups, err := c.spool.AppendIngest(SourceTenantFill, evs)
 		if err != nil {
 			log.Printf("[controller] %s: fill %d window(s): %v", id, len(missed), err)
 			continue
 		}
-		_ = c.gaps.Delete(id)
+		c.dropGap(id)
 		log.Printf("[controller] %s: filled %d window(s) missed during a tenant API outage (%d events, %d already in the ledger)",
 			id, len(missed), len(accepted), len(dups))
 		c.tel.Add("vbilling_tenant_api_filled_windows_total", "Windows filled after a tenant API outage.", nil, float64(len(missed)))
 	}
 }
 
-// saltFill gives events filled after a tenant API outage IDs of their own,
-// as late records get. The window was committed with what the control plane
-// cluster shows, and a cluster's own volumes and load balancers are built
-// from the same template as that part's (tenant, metric, window, SKU,
-// resource ID, dimensions): unsalted, a fill event can carry the ID of a
-// committed one, and billing platforms drop it as a duplicate. A fill
-// repeated after a crash gets the same salted IDs, so AppendIngest still
-// deduplicates it.
-func saltFill(evs []usage.Event) {
-	for i := range evs {
-		evs[i].ID = usage.DeriveIDWith(&evs[i], "fill")
-		if evs[i].Properties == nil {
-			evs[i].Properties = map[string]any{}
-		}
-		evs[i].Properties["filled"] = true
+// dropGap forgets a filled gap. If that cannot be saved, the next fill
+// gives the same IDs and AppendIngest drops them as duplicates.
+func (c *Controller) dropGap(id string) {
+	err := c.gaps.Delete(id)
+	if err != nil {
+		log.Printf("[controller] %s: forget a filled tenant API gap: %v (filled again next time; the ledger drops the duplicates)", id, err)
+		c.reportGaps(err)
+		return
+	}
+	c.mu.Lock()
+	failing := c.gapsFailing
+	c.mu.Unlock()
+	if failing {
+		c.reportGaps(nil)
 	}
 }
 
 // gapSpan is a run of consecutive windows a cluster's own API missed, from
-// the first one's start to the last one's end.
-type gapSpan struct{ start, end time.Time }
+// the first one's start to the last one's end. legacy marks a span an
+// earlier version recorded (see fillTenantGaps).
+type gapSpan struct {
+	start, end time.Time
+	legacy     bool
+}
 
 // tenantGaps are the windows a cluster's own API missed, as runs in time
-// order. Stored as "start/end,start/end" (RFC 3339).
+// order. Stored as "start/end,start/end" (RFC 3339), a span from an earlier
+// version as "start/end/legacy".
 type tenantGaps []gapSpan
 
 func (g tenantGaps) String() string {
 	parts := make([]string, len(g))
 	for i, s := range g {
 		parts[i] = s.start.Format(time.RFC3339) + "/" + s.end.Format(time.RFC3339)
+		if s.legacy {
+			parts[i] += "/legacy"
+		}
 	}
 	return strings.Join(parts, ",")
 }
 
-// add returns the gaps with windows added, runs that touch merged.
+// add returns the gaps with windows added, runs that touch merged (a span
+// from an earlier version stays apart).
 func (g tenantGaps) add(ws []metrics.Window) tenantGaps {
 	all := append(tenantGaps(nil), g...)
 	for _, w := range ws {
 		all = append(all, gapSpan{start: w.Start.UTC(), end: w.End.UTC()})
 	}
-	sort.Slice(all, func(i, j int) bool { return all[i].start.Before(all[j].start) })
+	sort.SliceStable(all, func(i, j int) bool { return all[i].start.Before(all[j].start) })
 	var out tenantGaps
 	for _, s := range all {
-		if n := len(out); n > 0 && !s.start.After(out[n-1].end) {
+		if n := len(out); n > 0 && out[n-1].legacy == s.legacy && !s.start.After(out[n-1].end) {
 			if s.end.After(out[n-1].end) {
 				out[n-1].end = s.end
 			}
@@ -813,6 +921,21 @@ func (g tenantGaps) after(t time.Time) tenantGaps {
 	return out
 }
 
+// through keeps the windows that end at or before t: the committed ones.
+func (g tenantGaps) through(t time.Time) tenantGaps {
+	var out tenantGaps
+	for _, s := range g {
+		if !s.start.Before(t) {
+			continue
+		}
+		if s.end.After(t) {
+			s.end = t
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
 // windows returns the missed windows that end after earliest.
 func (g tenantGaps) windows(size time.Duration, earliest time.Time) []metrics.Window {
 	var out []metrics.Window
@@ -826,10 +949,23 @@ func (g tenantGaps) windows(size time.Duration, earliest time.Time) []metrics.Wi
 	return out
 }
 
+// legacyEnds are the ends of the windows of spans from earlier versions.
+func (g tenantGaps) legacyEnds(size time.Duration) map[time.Time]bool {
+	out := map[time.Time]bool{}
+	for _, s := range g {
+		if s.legacy {
+			for _, w := range windowsBetween(s.start, s.end, size, time.Time{}) {
+				out[w.End] = true
+			}
+		}
+	}
+	return out
+}
+
 // parseGaps reads a cluster's gaps. Earlier versions stored one span from
 // the first to the last failed window, "first|last|start", or "first|last"
 // (v0.3.0, whose first window was a whole window of the current size): it
-// is read as that span.
+// is read as that span, marked legacy.
 func parseGaps(store *kv.Store, id string, size time.Duration) (tenantGaps, bool) {
 	v, ok := store.Get(id)
 	if !ok {
@@ -847,7 +983,7 @@ func parseGaps(store *kv.Store, id string, size time.Duration) (tenantGaps, bool
 			times = append(times, t)
 		}
 		if len(times) == len(parts) && len(times) >= 2 && len(times) <= 3 && !times[1].Before(times[0]) {
-			s := gapSpan{start: times[0].Add(-size), end: times[1]}
+			s := gapSpan{start: times[0].Add(-size), end: times[1], legacy: true}
 			if len(times) == 3 && times[2].Before(times[0]) {
 				s.start = times[2]
 			}
@@ -855,14 +991,18 @@ func parseGaps(store *kv.Store, id string, size time.Duration) (tenantGaps, bool
 		}
 	} else {
 		for _, part := range strings.Split(v, ",") {
-			a, b, _ := strings.Cut(part, "/")
-			s, errS := time.Parse(time.RFC3339, a)
-			e, errE := time.Parse(time.RFC3339, b)
+			fields := strings.Split(part, "/")
+			if len(fields) < 2 || len(fields) > 3 || len(fields) == 3 && fields[2] != "legacy" {
+				g = nil
+				break
+			}
+			s, errS := time.Parse(time.RFC3339, fields[0])
+			e, errE := time.Parse(time.RFC3339, fields[1])
 			if errS != nil || errE != nil || !e.After(s) {
 				g = nil
 				break
 			}
-			g = append(g, gapSpan{start: s, end: e})
+			g = append(g, gapSpan{start: s, end: e, legacy: len(fields) == 3})
 		}
 	}
 	if len(g) == 0 {

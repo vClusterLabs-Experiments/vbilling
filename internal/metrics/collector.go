@@ -93,6 +93,15 @@ type Collector struct {
 	// nsForbidden: a cluster refused to list its namespaces (logged once;
 	// guarded by invMu).
 	nsForbidden bool
+
+	// hostMu guards the last read of the objects clusters synced to other
+	// namespaces (synced) and what vBilling remembers of namespaces: their
+	// labels as last read (hostSeen), and the namespaces clusters ran in
+	// (hostRan), when last seen. See readSynced.
+	hostMu   sync.Mutex
+	synced   *syncedView
+	hostSeen map[string]remembered
+	hostRan  map[string]time.Time
 }
 
 // UseGraveyard makes the collector bill pods and nodes deleted between
@@ -159,7 +168,8 @@ func NewCollector(kube kubernetes.Interface, mc metricsclient.Interface, opts Op
 		opts.PauseKeep, _ = pause.ParseKeep(pause.DefaultKeep)
 	}
 	c := &Collector{kube: kube, metrics: mc, opts: opts, excludedTenantNS: map[string]bool{}, lastInv: map[string]*tenantInventory{},
-		ownNodes: map[string]bool{}, nodeHistory: newPrivateNodeHistory(), syncedReported: map[string]bool{}}
+		ownNodes: map[string]bool{}, nodeHistory: newPrivateNodeHistory(), syncedReported: map[string]bool{},
+		hostSeen: map[string]remembered{}, hostRan: map[string]time.Time{}}
 	for _, ns := range opts.TenantExcludeNamespaces {
 		c.excludedTenantNS[ns] = true
 	}
@@ -362,17 +372,18 @@ func (c *Collector) collect(ctx context.Context, targets []Target, windows []Win
 		}
 		r.Retain(clusters)
 	}
-	var synced *syncedObjects // objects synced to other namespaces (synced.go)
+	targets = withNamesakes(targets)
+	var synced *syncedView // objects synced to other namespaces (synced.go)
 	if !onlyTenantAPI {
-		if synced, err = c.listSynced(ctx); err != nil {
+		if synced, err = c.readSynced(ctx, targets); err != nil {
 			return nil, st, err
 		}
 	}
-	for _, t := range withNamesakes(targets) {
+	for _, t := range targets {
 		// External tenant clusters have nothing on this control plane cluster.
 		var syncedOn map[string]bool
 		if !onlyTenantAPI && !t.Cluster.External {
-			on, err := c.collectTarget(ctx, t, nodes, dra, synced.of(t.Cluster), windows, accs, &st)
+			on, err := c.collectTarget(ctx, t, nodes, dra, synced.awayOf(t.Cluster), windows, accs, &st)
 			if err != nil {
 				return nil, st, fmt.Errorf("meter %s: %w", t.Cluster.ExternalID(), err)
 			}
@@ -411,7 +422,7 @@ func (c *Collector) collect(ctx context.Context, targets []Target, windows []Win
 // collectTarget meters what a cluster runs on the control plane cluster: in
 // its own namespace, and what it synced to other namespaces (away). It
 // returns the control plane cluster nodes its synced pods run on (hostViews).
-func (c *Collector) collectTarget(ctx context.Context, t Target, nodes map[string]*nodeInfo, dra *draIndex, away elsewhere,
+func (c *Collector) collectTarget(ctx context.Context, t Target, nodes map[string]*nodeInfo, dra *draIndex, away *elsewhere,
 	windows []Window, accs map[time.Time]*accumulator, st *Stats) (map[string]bool, error) {
 	cl := t.Cluster
 	ns := cl.Namespace
@@ -431,7 +442,7 @@ func (c *Collector) collectTarget(ctx context.Context, t Target, nodes map[strin
 	syncedNodes(syncedOn, pods, func(p *corev1.Pod) bool { return !controlPlaneObject(p.Labels, cl.Name) && owned(p.Labels) })
 	// Pods it synced to other namespaces: all of them are its workloads.
 	c.graveyard.SeenPods(away.pods, c.opts.Now())
-	if awayPods := withDeleted(away.pods, c.deletedElsewhere(cl)); len(awayPods) > 0 {
+	if awayPods := withDeleted(away.pods, away.gone); len(awayPods) > 0 {
 		pods = append(pods, awayPods...)
 		include = func(p *corev1.Pod) bool { return p.Namespace != ns || owned(p.Labels) }
 		syncedNodes(syncedOn, awayPods, func(*corev1.Pod) bool { return true })

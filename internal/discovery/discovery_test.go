@@ -143,10 +143,11 @@ func TestNamesakesAreEveryVClusterWithTheName(t *testing.T) {
 			t.Fatalf("scope %v: discovered %+v", scope, got)
 		}
 		gpu, web := got[0], got[1]
-		if len(gpu.Namesakes) != 1 || gpu.Namesakes[0] != "team-b" || !gpu.NameShared() || gpu.SyncedHere("gpu-x-ml") || !gpu.SyncedHere("team-a") {
+		if len(gpu.Namesakes) != 1 || gpu.Namesakes[0] != "team-b" || !gpu.NameShared() ||
+			whose(gpu, "gpu-x-ml") != Uncertain || whose(gpu, "team-a") != Owned || whose(gpu, "team-b") != NotOwned {
 			t.Errorf("scope %v: gpu %+v, want team-b's gpu as its namesake", scope, gpu)
 		}
-		if web.NameShared() || !web.SyncedHere("web-x-frontend") {
+		if web.NameShared() || whose(web, "web-x-frontend") != Owned {
 			t.Errorf("scope %v: web %+v, want its name unique", scope, web)
 		}
 	}
@@ -161,7 +162,64 @@ func TestNamesakesAreEveryVClusterWithTheName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || !got[0].NamesakesUnknown || got[0].SyncedHere("web-x-frontend") {
+	if len(got) != 1 || !got[0].NamesakesUnknown || whose(got[0], "web-x-frontend") != Uncertain {
 		t.Fatalf("namesakes unknown: %+v", got)
+	}
+}
+
+// whose decides for a namespace that exists without vCluster's labels.
+func whose(cl TenantCluster, namespace string) Ownership {
+	var h HostNamespaces
+	h.Note(namespace, true, nil)
+	own, _ := h.Whose(cl, namespace)
+	return own
+}
+
+// vCluster labels each namespace it syncs a cluster's objects into with the
+// cluster's name and namespace: those labels decide whose the objects there
+// are, whoever else has the name. A namespace another cluster runs in is
+// never another's, labels or not. Without labels, what sits where a cluster
+// ran is its leftover, and a name used twice, a namespace that is gone, or
+// one that could not be read tells nothing.
+func TestWhoseSyncedObjectsAre(t *testing.T) {
+	dev := TenantCluster{Name: "dev", Namespace: "team-a", Namesakes: []string{"team-b"}}
+	unique := TenantCluster{Name: "web", Namespace: "team-c"}
+	var h HostNamespaces
+	h.Note("dev-x-ml", true, map[string]string{LabelSyncedName: "dev", LabelSyncedNamespace: "team-a"})
+	h.Note("dev-x-data", true, map[string]string{LabelSyncedName: "dev", LabelSyncedNamespace: "team-b"})
+	h.Note("half", true, map[string]string{LabelSyncedName: "dev"})
+	h.Note("plain", true, nil)
+	h.Note("gone", false, nil)
+	h.Note("orphaned", true, map[string]string{LabelSyncedName: "dev", LabelSyncedNamespace: "team-a"})
+	h.NoteControlPlane("orphaned")
+	h.Note("deleted-dev", true, nil)
+	h.Note("reused", true, map[string]string{LabelSyncedName: "web", LabelSyncedNamespace: "team-c"})
+	h.UseClusters(func(ns string) bool { return ns == "team-d" }, func(ns string) bool { return ns == "deleted-dev" || ns == "reused" })
+	for _, tc := range []struct {
+		cl     TenantCluster
+		ns     string
+		want   Ownership
+		reason string
+	}{
+		{dev, "team-a", Owned, ""},
+		{dev, "dev-x-ml", Owned, ""},
+		{dev, "dev-x-data", NotOwned, ""},
+		{dev, "team-b", NotOwned, ""},
+		{dev, "team-d", NotOwned, ""},
+		{dev, "orphaned", Uncertain, ReasonOtherCluster},
+		{dev, "half", Uncertain, ReasonNameShared},
+		{dev, "plain", Uncertain, ReasonNameShared},
+		{unique, "plain", Owned, ""},
+		{unique, "half", Owned, ""},
+		{unique, "dev-x-ml", NotOwned, ""},
+		{unique, "gone", Uncertain, ReasonMissing},
+		{unique, "never-read", Uncertain, ReasonUnread},
+		{unique, "deleted-dev", NotOwned, ""},
+		{unique, "reused", Owned, ""},
+		{TenantCluster{Name: "dev", External: true}, "dev-x-ml", NotOwned, ""},
+	} {
+		if got, why := h.Whose(tc.cl, tc.ns); got != tc.want || why != tc.reason {
+			t.Errorf("%s/%s, object in %s: %v %q, want %v %q", tc.cl.Namespace, tc.cl.Name, tc.ns, got, why, tc.want, tc.reason)
+		}
 	}
 }

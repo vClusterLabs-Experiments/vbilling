@@ -116,7 +116,7 @@ func TestReview3PodsSyncedToAnotherHostNamespaceAreNeverBilled(t *testing.T) {
 	inCP := pod("trainer", "h100-1", withGPU("nvidia.com/gpu", 4)) // in team-a, the control plane namespace
 	elsewhere := pod("trainer-2", "h100-1", withGPU("nvidia.com/gpu", 4))
 	elsewhere.Namespace = "gpu-x-ml" // a host namespace the cluster's namespace syncing created
-	out := collect(t, Options{}, []runtime.Object{gpuNode, inCP, elsewhere}, latest())
+	out := collect(t, Options{}, []runtime.Object{gpuNode, inCP, elsewhere, syncedNamespace("gpu-x-ml", "gpu", ns)}, latest())
 	if got, _ := find(out[we], usage.MetricGPUHours); !near(got, usage.Round(8.0/60)) {
 		t.Fatalf("cluster gpu runs 8 GPUs (4 in its control plane namespace, 4 synced to gpu-x-ml) and is billed %v GPU-hours, want %v",
 			got, usage.Round(8.0/60))

@@ -24,16 +24,19 @@ type nodeInfo struct {
 	zone         string
 	region       string
 	capacityType string
-	instanceType string
-	sku          string // value of SKU_LABEL, if configured and present
-	gpuCapacity  int64  // devices of GPU_RESOURCES (nvidia.com/gpu, amd.com/gpu)
-	cpuCapacity  float64
-	memCapacity  float64 // bytes
-	gpuReplicas  int     // time-slicing replicas per physical GPU (1 = not shared)
-	labels       map[string]string
-	deletedAt    time.Time // set for nodes seen deleted (Auto Nodes scale-down); zero = present
-	draGPUs      float64   // whole GPUs the node offers through DRA ResourceSlices
-	externalIP   bool      // the node has an ExternalIP address
+	// capacityLabeled: a label gave the capacity type (without one it is
+	// on-demand).
+	capacityLabeled bool
+	instanceType    string
+	sku             string // value of SKU_LABEL, if configured and present
+	gpuCapacity     int64  // devices of GPU_RESOURCES (nvidia.com/gpu, amd.com/gpu)
+	cpuCapacity     float64
+	memCapacity     float64 // bytes
+	gpuReplicas     int     // time-slicing replicas per physical GPU (1 = not shared)
+	labels          map[string]string
+	deletedAt       time.Time // set for nodes seen deleted (Auto Nodes scale-down); zero = present
+	draGPUs         float64   // whole GPUs the node offers through DRA ResourceSlices
+	externalIP      bool      // the node has an ExternalIP address
 
 	// MIG and sharing. migProfile is set when every advertised GPU device is
 	// a MIG slice (NVIDIA "single" strategy, GKE GPU partitions). Under the
@@ -101,10 +104,10 @@ func (c *Collector) parseNodeAs(n *corev1.Node, renewed time.Time, private bool)
 		zone:         firstLabel(n.Labels, "topology.kubernetes.io/zone", "failure-domain.beta.kubernetes.io/zone"),
 		region:       firstLabel(n.Labels, "topology.kubernetes.io/region", "failure-domain.beta.kubernetes.io/region"),
 		instanceType: firstLabel(n.Labels, "node.kubernetes.io/instance-type", "beta.kubernetes.io/instance-type"),
-		capacityType: capacityType(n.Labels, c.opts.CapacityTypeLabel),
 		gpuReplicas:  1,
 		labels:       n.Labels,
 	}
+	ni.capacityType, ni.capacityLabeled = capacityTypeOf(n.Labels, c.opts.CapacityTypeLabel)
 	if v := firstLabel(n.Labels, gpuProductLabels...); v != "" {
 		ni.gpuType = normalizeGPUType(v)
 	}
@@ -330,10 +333,11 @@ func (n *nodeInfo) regionOr(fallback string, fromNode bool) string {
 	return fallback
 }
 
-// capacityType normalizes the many spot/preemptible label conventions.
-func capacityType(labels map[string]string, customKey string) string {
+// capacityTypeOf normalizes the many spot/preemptible label conventions,
+// and says whether a label gave the capacity type (on-demand without one).
+func capacityTypeOf(labels map[string]string, customKey string) (string, bool) {
 	if v := labels[customKey]; v != "" && customKey != "" {
-		return normalizeCapacity(v)
+		return normalizeCapacity(v), true
 	}
 	for _, key := range []string{
 		"karpenter.sh/capacity-type",
@@ -342,16 +346,16 @@ func capacityType(labels map[string]string, customKey string) string {
 		"node.kubernetes.io/lifecycle",
 	} {
 		if v := labels[key]; v != "" {
-			return normalizeCapacity(v)
+			return normalizeCapacity(v), true
 		}
 	}
 	if labels["cloud.google.com/gke-spot"] == "true" {
-		return usage.CapacitySpot
+		return usage.CapacitySpot, true
 	}
 	if labels["cloud.google.com/gke-preemptible"] == "true" {
-		return usage.CapacityPreemptible
+		return usage.CapacityPreemptible, true
 	}
-	return usage.CapacityOnDemand
+	return usage.CapacityOnDemand, false
 }
 
 func normalizeCapacity(v string) string {

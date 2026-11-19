@@ -87,7 +87,11 @@ func TestReview4PrometheusUsageOfPodsSyncedToOtherNamespacesIsBilled(t *testing.
 	defer srv.Close()
 	synced := pod("engine-0", "h100-1", withGPU("nvidia.com/gpu", 1), inNamespace("gpu-x-ml")) // managed-by=gpu
 	synced.UID = "engine-0"
-	kube := fake.NewSimpleClientset(node("h100-1", map[string]string{"nvidia.com/gpu.product": "NVIDIA-H100"}, 8, true), synced)
+	// vCluster labels the namespace it syncs into with the cluster's name and
+	// namespace. (Without a Namespace object, this fixture could not be told
+	// from the namesake's leftover in the test above.)
+	kube := fake.NewSimpleClientset(node("h100-1", map[string]string{"nvidia.com/gpu.product": "NVIDIA-H100"}, 8, true), synced,
+		syncedNamespace("gpu-x-ml", "gpu", ns))
 	c := NewCollector(kube, nil, Options{Region: "r1", PrometheusURL: srv.URL, GPUUtilQuery: "none", EgressQuery: "none",
 		PromMetrics: []PromMetric{tokens}, GPUResources: []string{"nvidia.com/gpu"}, Basis: "requests",
 		Now: func() time.Time { return we.Add(2 * time.Second) }})

@@ -87,3 +87,49 @@ func TestSuspensionAndPauseReachNamespacesAClusterSyncsTo(t *testing.T) {
 		t.Fatal("the pause stopped a pod that may be a namesake's")
 	}
 }
+
+// vCluster labels each namespace it syncs a cluster into with the
+// cluster's name and namespace: a cluster of the same name in another
+// project no longer stops a suspension or a pause from reaching them, and
+// the namesake's namespaces are left alone.
+func TestSuspensionAndPauseReachLabeledNamespacesDespiteANamesake(t *testing.T) {
+	ns := "vc-team-a"
+	labeled := func(name, cpNS string) *corev1.Namespace {
+		return &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name,
+			Labels: map[string]string{discovery.LabelSyncedName: "gpu", discovery.LabelSyncedNamespace: cpNS}}}
+	}
+	host := fake.NewSimpleClientset(
+		controlPlane("gpu", ns, 1, nil),
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}},
+		labeled("gpu-x-ml", ns), labeled("gpu-x-data", "vc-team-b"),
+		syncedPod("trainer", ns, "gpu"),
+		syncedPod("trainer-2", "gpu-x-ml", "gpu"),
+		syncedPod("theirs", "gpu-x-data", "gpu"),
+	)
+	cl := discovery.TenantCluster{Name: "gpu", Namespace: ns, Source: "statefulset", Namesakes: []string{"vc-team-b"}}
+	e := New(host, Options{Mode: "enforce", Now: func() time.Time { return now }, Pauses: pause.Memory(),
+		Clusters: func(string) []discovery.TenantCluster { return []discovery.TenantCluster{cl} }})
+	ctx := context.Background()
+	if err := e.Set(ctx, "acme", Suspended, "unpaid", "stripe", "customer.subscription.updated"); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]string{"gpu-x-ml": "true", "gpu-x-data": ""} {
+		n, err := host.CoreV1().Namespaces().Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n.Labels[LabelSuspended] != want {
+			t.Errorf("namespace %s: suspended label %q, want %q (labels %v)", name, n.Labels[LabelSuspended], want, n.Labels)
+		}
+	}
+	if err := e.Set(ctx, "acme", Paused, "wallet empty", "metronome", "alerts.low_remaining_credit_balance_reached"); err != nil {
+		t.Fatal(err)
+	}
+	e.Wait()
+	if pods := podNames(t, host, "gpu-x-ml"); len(pods) != 0 {
+		t.Fatalf("the pause left the cluster's pods in gpu-x-ml: %v", pods)
+	}
+	if pods := podNames(t, host, "gpu-x-data"); !pods["theirs"] {
+		t.Fatal("the pause stopped a pod of the namesake's namespace")
+	}
+}

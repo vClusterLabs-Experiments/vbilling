@@ -180,7 +180,7 @@ func TestPrivateNodeHistorySurvivesARestart(t *testing.T) {
 	if err := json.Unmarshal(readFile(t, path), &saved); err != nil {
 		t.Fatal(err)
 	}
-	if r := saved["uid-gpu-1"]; r.GPUs != 8 || r.GPUType != "NVIDIA-H100-80GB-HBM3" || r.Cluster != "vcluster-team-a-gpu" {
+	if r := saved["vcluster-team-a-gpu/gpu-1"]; r.GPUs != 8 || r.GPUType != "NVIDIA-H100-80GB-HBM3" || r.Cluster != "vcluster-team-a-gpu" {
 		t.Fatalf("saved history = %+v", saved)
 	}
 }

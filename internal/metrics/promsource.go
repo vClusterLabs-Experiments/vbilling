@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -135,8 +136,10 @@ func (p *PromSource) specs() []promMetricSpec {
 //     - the vCluster Platform labels with PROMETHEUS_PRESET=vcluster-platform,
 //     - SOURCE_LABEL="<name>" for clusters with their own nodes, whose pods
 //     never appear in the control plane cluster,
-//     - namespace="<namespace>" for clusters on shared nodes.
-func (p *PromSource) scope(ctx context.Context, t Target, size time.Duration) (*prometheusClient, queryVars, string, error) {
+//     - namespace="<namespace>" for clusters on shared nodes, or
+//     namespace=~"<namespace>|<synced>|..." for one that syncs objects to
+//     other namespaces (synced, see readSynced).
+func (p *PromSource) scope(ctx context.Context, t Target, size time.Duration, synced []string) (*prometheusClient, queryVars, string, error) {
 	cl := t.Cluster
 	vars := varsFor(t, size)
 	esc := func(s string) string { return strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(s) }
@@ -168,11 +171,34 @@ func (p *PromSource) scope(ctx context.Context, t Target, size time.Duration) (*
 			vars.Matchers = fmt.Sprintf(`%s="%s"`, p.opts.SourceLabel, esc(name))
 			how = "own nodes, selected by " + p.opts.SourceLabel + " label"
 		default:
-			vars.Matchers = fmt.Sprintf(`namespace="%s"`, esc(cl.Namespace))
+			vars.Matchers, vars.synced = namespaceMatcher(cl.Namespace, synced), synced
 			how = "shared nodes, selected by namespace"
+			if len(synced) > 0 {
+				how = "shared nodes, selected by its namespace and the namespaces it syncs to"
+			}
 		}
 	}
 	return p.c.promDefault, vars, how, nil
+}
+
+// namespaceMatcher selects the series of a cluster on shared nodes: in its
+// namespace, and in the namespaces it syncs objects to.
+func namespaceMatcher(own string, synced []string) string {
+	esc := strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace
+	if len(synced) == 0 {
+		return fmt.Sprintf(`namespace="%s"`, esc(own))
+	}
+	return fmt.Sprintf(`namespace=~"%s"`, esc(namespaceRegexp(own, synced)))
+}
+
+// namespaceRegexp matches exactly the namespaces given.
+func namespaceRegexp(own string, synced []string) string {
+	alts := make([]string, 0, 1+len(synced))
+	alts = append(alts, regexp.QuoteMeta(own))
+	for _, ns := range synced {
+		alts = append(alts, regexp.QuoteMeta(ns))
+	}
+	return strings.Join(alts, "|")
 }
 
 var errNoPrometheus = errors.New("no Prometheus for this cluster")
@@ -229,6 +255,22 @@ func (p *PromSource) holdShared(t Target, sharers []string, windows []Window, ou
 		}
 	}
 }
+
+// holdUnscoped skips a cluster on shared nodes while the namespaces it
+// syncs objects to cannot be read: selected by its own namespace alone, its
+// usage there would go unbilled unseen. Like holdShared it is not a failed
+// read and never holds the windows back; its counters keep their last read
+// and catch up once the namespaces can be read (up to maxCounterGap back).
+func (p *PromSource) holdUnscoped(t Target, why error) {
+	id := t.Cluster.ExternalID()
+	err := fmt.Errorf("the namespaces this cluster syncs objects to cannot be determined, so its Prometheus usage is not billed until they can: %w", why)
+	for _, m := range p.specs() {
+		p.health.Fail(health.Name("prometheus", m.Code, id), "prometheus", id, err, syncedHint)
+	}
+}
+
+const syncedHint = "see the synced-namespaces source: vCluster labels the namespaces it syncs a cluster's objects into, and vBilling reads them with list on pods, " +
+	"persistentvolumeclaims and services and get on namespaces (the chart's ClusterRole)"
 
 // noteHistory reports counter series that became visible with a count from
 // before vBilling could see them, which was not billed.
@@ -330,10 +372,28 @@ func (p *PromSource) Collect(ctx context.Context, targets []Target, windows []Wi
 	}
 	size := windows[0].End.Sub(windows[0].Start)
 	sharing := p.namespaceSharers(targets)
+	// Clusters on shared nodes are selected by namespace, and so are the
+	// objects they sync to other namespaces: read which those are (the
+	// collection's own read, when it is fresh).
+	var synced *syncedView
+	for _, t := range targets {
+		if p.bareNamespace(t) {
+			v, err := p.c.syncedFor(ctx, withNamesakes(targets), windows[len(windows)-1].End)
+			if err != nil {
+				v = &syncedView{err: err}
+			}
+			synced = v
+			break
+		}
+	}
 	attempts, failures := 0, 0
 	for _, t := range targets {
 		id := t.Cluster.ExternalID()
-		client, vars, how, err := p.scope(ctx, t, size)
+		var away *elsewhere
+		if p.bareNamespace(t) {
+			away = synced.awayOf(t.Cluster)
+		}
+		client, vars, how, err := p.scope(ctx, t, size, away.syncedNamespaces())
 		if errors.Is(err, errNoPrometheus) {
 			continue
 		}
@@ -343,6 +403,10 @@ func (p *PromSource) Collect(ctx context.Context, targets []Target, windows []Wi
 			// windows back): the windows commit without this cluster's
 			// Prometheus usage, and its counters catch up once scoped.
 			p.holdShared(t, others, windows, out)
+			continue
+		}
+		if bare && synced.err != nil {
+			p.holdUnscoped(t, synced.err) // likewise, until they can be read
 			continue
 		}
 		base := p.c.baseFor(t)
@@ -372,6 +436,10 @@ func (p *PromSource) Collect(ctx context.Context, targets []Target, windows []Wi
 			case merr != nil:
 				failures++
 				p.health.Fail(name, "prometheus", id, merr, how)
+			case away.uncertainCount() > 0:
+				// Read and billed where the cluster's objects are known to be;
+				// not where nothing tells whose they are.
+				p.health.Fail(name, "prometheus", id, fmt.Errorf("read %d series (%s); %s", n, how, away.why(t.Cluster)), syncedHint)
 			case n == 0:
 				p.health.Empty(name, "prometheus", id, "no series for "+id+" ("+how+")", emptyHint(m.PromMetric, vars, p.opts.SourceLabel))
 			default:
@@ -518,7 +586,7 @@ func (p *PromSource) counter(ctx context.Context, client *prometheusClient, m Pr
 				} else {
 					prev, samples = &samples[0], samples[1:]
 				}
-			case appeared(s) && evidence.startedSince(s, prevObserved):
+			case appeared(s) && evidence.startedSince(s, prevObserved, first.End.Sub(first.Start)):
 				// Its process started after the last read: everything it
 				// counted is usage since then, including samples taken while
 				// this cluster's Prometheus could not be read.
@@ -632,7 +700,7 @@ func (p *PromSource) startEvidence(ctx context.Context, client *prometheusClient
 
 // startedSince reports whether the evidence shows that the process behind s
 // started at or after since, read at the series' first sample. Without
-// evidence it reports false.
+// evidence it reports false. window is the length of a metering window.
 //
 // A series' own _created sample is strong evidence: it is when that counter
 // started. process_start_time_seconds is only when the process exposing it
@@ -641,7 +709,7 @@ func (p *PromSource) startEvidence(ctx context.Context, client *prometheusClient
 // hardware's or the kernel's whole count, under a new instance label. So it
 // counts only when the series' first value could have been counted since
 // that process started (countedSince).
-func (e *startEvidence) startedSince(s promSeries, since time.Time) bool {
+func (e *startEvidence) startedSince(s promSeries, since time.Time, window time.Duration) bool {
 	if e == nil || len(s.Samples) == 0 {
 		return false
 	}
@@ -650,12 +718,30 @@ func (e *startEvidence) startedSince(s promSeries, since time.Time) bool {
 		return !unixSeconds(smp.V).Before(since)
 	}
 	if job, inst := s.Labels["job"], s.Labels["instance"]; job != "" && inst != "" {
-		if smp, ok := nearest(e.process[job+"\x00"+inst], first); ok {
+		process := e.process[job+"\x00"+inst]
+		if smp, ok := nearest(process, first); ok {
 			started := unixSeconds(smp.V)
-			return !started.Before(since) && countedSince(s, started)
+			// The process's own series is scraped from the same target, as
+			// often as the counter.
+			near := window
+			if every := scrapeInterval(process); every > 0 {
+				near = 2 * every
+			}
+			return !started.Before(since) && countedSince(s, started, near)
 		}
 	}
 	return false
+}
+
+// scrapeInterval is the shortest gap between samples (0 with fewer than two).
+func scrapeInterval(samples []promSample) time.Duration {
+	var every time.Duration
+	for i := 1; i < len(samples); i++ {
+		if d := samples[i].T.Sub(samples[i-1].T); d > 0 && (every == 0 || d < every) {
+			every = d
+		}
+	}
+	return every
 }
 
 // startRateSlack is how much faster than its own average rate a counter may
@@ -667,19 +753,26 @@ const startRateSlack = 2
 // countedSince reports whether a series' first value could have been
 // counted since started: no more than startRateSlack times the series' own
 // average rate over the samples read, for the time from started to its
-// first sample. With one sample there is no rate to judge by, and a first
-// sample older than started is another process's: neither counts. The
+// first sample. A first sample older than started is another process's. The
 // bound is conservative: a burst larger than that before the first scrape
 // is billed from the first sample, losing at most that scrape interval,
 // whereas a wrong "from zero" bills a counter's whole history again.
-func countedSince(s promSeries, started time.Time) bool {
+//
+// With one sample there is no rate to judge by (a process started since the
+// last read and scraped once per window shows one): it counts when that
+// sample is the process's first scrape, within near (two scrape intervals,
+// or a window) of its start.
+func countedSince(s promSeries, started time.Time, near time.Duration) bool {
 	first := s.Samples[0]
 	if first.V <= 0 {
 		return true // nothing counted yet: from zero bills nothing twice
 	}
 	elapsed := first.T.Sub(started).Seconds()
-	if elapsed <= 0 || len(s.Samples) < 2 {
+	if elapsed <= 0 {
 		return false
+	}
+	if len(s.Samples) < 2 {
+		return first.T.Sub(started) <= near
 	}
 	var grown float64
 	prev := first
@@ -812,6 +905,12 @@ func (p *PromSource) gpuUtil(ctx context.Context, client *prometheusClient, t Ta
 			utilQ, countQ = platformQueries.util, platformQueries.count
 		case vars.Matchers != "" && !strings.HasPrefix(vars.Matchers, "namespace="):
 			utilQ, countQ = scopedGPUUtilQuery, scopedGPUCountQuery
+		case len(vars.synced) > 0:
+			// Its namespace and those it syncs to, as DCGM's namespace label
+			// or Prometheus' renamed one.
+			re := strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(namespaceRegexp(vars.Namespace, vars.synced))
+			utilQ = dcgmUtilQuery(`namespace=~"`+re+`"`, `exported_namespace=~"`+re+`"`)
+			countQ = dcgmCountQuery(`namespace=~"`+re+`"`, `exported_namespace=~"`+re+`"`)
 		default:
 			utilQ, countQ = defaultGPUUtilQuery, defaultGPUCountQuery
 		}

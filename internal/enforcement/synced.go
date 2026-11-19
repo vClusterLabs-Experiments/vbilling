@@ -10,7 +10,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/kubernetes"
 
 	"github.com/vclusterlabs-experiments/vbilling/internal/discovery"
 )
@@ -18,9 +17,10 @@ import (
 // With vcluster.yaml sync.toHost.namespaces, vCluster syncs a cluster's
 // pods to namespaces of the control plane cluster of their own, labeled
 // vcluster.loft.sh/managed-by with the cluster's name. A pause stops them
-// there, and a suspension labels those namespaces too, when the name says
-// whose they are (discovery.TenantCluster.SyncedHere), as metering bills
-// them.
+// there, and a suspension labels those namespaces too, when they are the
+// cluster's as metering decides (discovery.HostNamespaces.Whose): vCluster
+// labels each namespace it syncs into with the cluster's name and
+// namespace, so a cluster of the same name elsewhere changes nothing.
 
 // AnnotationSyncedFrom marks a namespace labeled because a cluster syncs
 // pods to it: its value is the cluster's ID, so the labels are lifted there
@@ -28,19 +28,11 @@ import (
 const AnnotationSyncedFrom = "vbilling.vcluster.com/synced-from"
 
 // syncedPods lists the pods a cluster synced to the control plane cluster:
-// in its namespace, and in the other namespaces its name says are its.
-func syncedPods(ctx context.Context, kube kubernetes.Interface, cl discovery.TenantCluster) ([]corev1.Pod, error) {
-	pods, err := kube.CoreV1().Pods("").List(ctx, metav1.ListOptions{LabelSelector: labelManagedBy + "=" + cl.Name})
-	if err != nil {
-		return nil, fmt.Errorf("list synced pods: %w", err)
-	}
-	var out []corev1.Pod
-	for _, p := range pods.Items {
-		if p.Labels[labelManagedBy] == cl.Name && cl.SyncedHere(p.Namespace) {
-			out = append(out, p)
-		}
-	}
-	return out, nil
+// in its namespace, and in the other namespaces that are its.
+func (e *Enforcer) syncedPods(ctx context.Context, cl discovery.TenantCluster) ([]corev1.Pod, error) {
+	return discovery.SyncedPodsOf(ctx, e.kube, cl, "", func(ns string) bool {
+		return e.opts.Neighbors != nil && len(e.opts.Neighbors(ns)) > 0
+	})
 }
 
 // reflectSynced labels the other namespaces a cluster's pods run in as its
@@ -51,15 +43,13 @@ func syncedPods(ctx context.Context, kube kubernetes.Interface, cl discovery.Ten
 func (e *Enforcer) reflectSynced(ctx context.Context, cl discovery.TenantCluster, ts TenantState) error {
 	id := cl.ExternalID()
 	targets := map[string]bool{}
-	if !cl.NameShared() {
-		pods, err := syncedPods(ctx, e.kube, cl)
-		if err != nil {
-			return err
-		}
-		for _, p := range pods {
-			if p.Namespace != cl.Namespace {
-				targets[p.Namespace] = true
-			}
+	pods, err := e.syncedPods(ctx, cl)
+	if err != nil {
+		return err
+	}
+	for _, p := range pods {
+		if p.Namespace != cl.Namespace {
+			targets[p.Namespace] = true
 		}
 	}
 	marked, err := e.kube.CoreV1().Namespaces().List(ctx, metav1.ListOptions{LabelSelector: LabelState})
