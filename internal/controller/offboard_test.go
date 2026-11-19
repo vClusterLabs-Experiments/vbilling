@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"strconv"
 	"testing"
 	"time"
 
@@ -73,8 +74,37 @@ func TestOffboardingWaitsForDeliveryAndHeldUsage(t *testing.T) {
 	}
 }
 
+// A ledger that grows by more than 100,000 records between two reconciles
+// (what one reconcile used to read at most) is still read through, so a
+// departed tenant is offboarded on time.
+func TestOffboardingKeepsUpWithABusyLedger(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	h.disc.clusters = []discovery.TenantCluster{cluster("team-a", "train", nil)}
+	h.c.Reconcile(ctx)
+	h.sp.Cursor("fake")
+	h.disc.clusters = nil
+	h.c.Reconcile(ctx)
+	h.now = t0.Add(61 * time.Minute)
+	evs := make([]usage.Event, 100_050) // another tenant's records, arriving before the reconcile
+	for i := range evs {
+		evs[i] = usage.Event{ID: "r" + strconv.Itoa(i), Tenant: "acme", Metric: usage.MetricNetworkEgressGB, Quantity: 1,
+			WindowStart: t0, WindowEnd: t0.Add(time.Minute)}
+	}
+	if _, err := h.sp.AppendBatch("records", evs); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.sp.Ack("fake", h.sp.Committed()); err != nil {
+		t.Fatal(err)
+	}
+	h.c.Reconcile(ctx)
+	if len(h.dest.removed) != 1 || h.dest.removed[0] != "vcluster-team-a-train" {
+		t.Fatalf("removed = %v, want the departed tenant offboarded although 100,050 records arrived since the last reconcile", h.dest.removed)
+	}
+}
+
 // A tenant without clusters stays while its usage arrives from any source,
-// and is offboarded OFFBOARD_GRACE after the end of its last window.
+// and is offboarded OFFBOARD_GRACE after its last usage arrived.
 func TestTenantIsOffboardedAGraceAfterItsLastUsage(t *testing.T) {
 	h := newHarness(t)
 	ctx := context.Background()

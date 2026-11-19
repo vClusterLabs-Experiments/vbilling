@@ -99,12 +99,15 @@ func newHarness(t *testing.T, mutate ...func(*config.Config)) *harness {
 	for _, m := range mutate {
 		m(cfg)
 	}
-	sp, err := spool.Open(t.TempDir(), spool.Options{NoSync: true})
+	h := &harness{disc: &fakeDisc{}, coll: &fakeColl{}, dest: &fakeDest{}, reg: pipeline.NewTenantRegistry(), now: t0}
+	// The ledger stamps records with the harness's time too: a tenant's
+	// usage was last seen when it was appended.
+	sp, err := spool.Open(t.TempDir(), spool.Options{NoSync: true, Now: func() time.Time { return h.now }})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { sp.Close() })
-	h := &harness{disc: &fakeDisc{}, coll: &fakeColl{}, dest: &fakeDest{}, sp: sp, reg: pipeline.NewTenantRegistry(), now: t0}
+	h.sp = sp
 	h.c = New(cfg, h.disc, h.coll, sp, h.reg, []destinations.Destination{h.dest}, nil)
 	h.c.now = func() time.Time { return h.now }
 	return h

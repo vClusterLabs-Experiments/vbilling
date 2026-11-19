@@ -72,9 +72,11 @@ type Controller struct {
 	lastUnrequested int
 
 	// usageRead is the ledger sequence read through for recent usage
-	// (usageSince); usageStarted is false until the first reconcile.
+	// (usageSince); usageStarted is false until the first reconcile;
+	// usageThrough is whether the last reconcile read the ledger through.
 	usageRead    uint64
 	usageStarted bool
+	usageThrough bool
 
 	// gaps: tenant cluster external ID -> end of the first window its own
 	// API could not be read for. Persisted, so a restart still fills them.
@@ -472,13 +474,14 @@ func (c *Controller) Reconcile(ctx context.Context) {
 	}
 	// A tenant whose usage still arrives (gateway records, ingest, Prometheus)
 	// is not gone, whether or not it still has a cluster: it was last seen
-	// at the end of its latest window (never later than now).
-	for id, end := range using {
-		if end.After(now) {
-			end = now
+	// when its latest usage was appended to the ledger (never later than
+	// now), whatever window that usage is for.
+	for id, at := range using {
+		if at.After(now) {
+			at = now
 		}
-		if seen, known := c.lastSeen[id]; known && end.After(seen) {
-			c.lastSeen[id] = end
+		if seen, known := c.lastSeen[id]; known && at.After(seen) {
+			c.lastSeen[id] = at
 			delete(c.offboarded, id) // back before offboarding finished: start over next time
 		}
 	}
