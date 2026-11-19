@@ -11,9 +11,10 @@ import (
 	"github.com/vclusterlabs-experiments/vbilling/internal/usage"
 )
 
-// Gate decides whether events may ship to a destination now. PRICE_CHECK=hold
-// installs one that holds the events of series the billing platform has no
-// price for.
+// Gate decides whether events may ship to a destination now. The pricing
+// service's gate holds the events of series the billing platform would not
+// count yet (in every PRICE_CHECK mode but off), and with PRICE_CHECK=hold
+// those it has no price for.
 type Gate interface {
 	// Decide returns one decision per event. It may block (bounded by ctx)
 	// to check series it has not seen before.
@@ -125,7 +126,7 @@ func (d *Dispatcher) park(ctx context.Context, dest destinations.Destination, ev
 		}
 		if added > 0 {
 			log.Printf("[pipeline] %s: holding %d event(s) (%s): %s", name, added, destinations.DescribeSeries(seriesOfEntry(hold[0])), hold[0].Reason)
-			d.tel.Add("vbilling_events_held_total", "Events held back from a destination until their series is priced (PRICE_CHECK=hold).", map[string]string{"destination": name}, float64(added))
+			d.tel.Add("vbilling_events_held_total", "Events held back from a destination until their series is priced (PRICE_CHECK=hold) or counted by the billing platform.", map[string]string{"destination": name}, float64(added))
 		}
 	}
 	if already > 0 {
@@ -292,7 +293,7 @@ func (d *Dispatcher) releaseExpired(ctx context.Context, dest destinations.Desti
 func (d *Dispatcher) publishHeld(name string) {
 	n := d.opts.Held.Count(name)
 	d.update(name, func(s *Status) { s.Held = uint64(n) })
-	d.tel.Set("vbilling_held_events", "Events held back from a destination until their series is priced (PRICE_CHECK=hold).", map[string]string{"destination": name}, float64(n))
+	d.tel.Set("vbilling_held_events", "Events held back from a destination until their series is priced (PRICE_CHECK=hold) or counted by the billing platform.", map[string]string{"destination": name}, float64(n))
 }
 
 // gateChanged returns the gate's change channel while a destination has

@@ -19,10 +19,10 @@ import (
 	"github.com/vclusterlabs-experiments/vbilling/internal/usage"
 )
 
-// HeldStore parks events a destination must not receive yet (PRICE_CHECK=hold:
-// the billing platform has no price for their series), durably, until they
-// are released. Each destination and series has its own append-only file,
-// in ledger order:
+// HeldStore parks events a destination must not receive yet (the billing
+// platform would not count them yet, or with PRICE_CHECK=hold has no price
+// for their series), durably, until they are released. Each destination and
+// series has its own append-only file, in ledger order:
 //
 //	<dir>/<destination>/<sha256(series)[:16]>.jsonl
 //

@@ -11,19 +11,50 @@ import (
 	"github.com/vclusterlabs-experiments/vbilling/internal/usage"
 )
 
-// Every usage row of a record carries its request ID, so a pushed
-// record's request ID is bounded, and a refusal does not echo it whole.
+// Every usage row of a record carries its request ID, so a request ID
+// longer than MaxRequestIDLen is stored as its hash, never refused (a
+// client can choose LiteLLM's call ID, and a refused record is billed
+// nowhere): pushed and pulled copies get the same ID and count once. An ID
+// that looks like such a hash is hashed too, so no other request can take
+// it.
 func TestPushedRequestIDsAreBounded(t *testing.T) {
 	r := newRig(t, Options{})
 	defer r.close()
 	at := t0.Add(-30 * time.Second)
-	res := r.post(t, Native, native(strings.Repeat("r", MaxRequestIDLen+1), "acme", at, 1, 0))
-	if res.Accepted != 0 || len(res.Rejected) != 1 || len(res.Rejected[0].ID) > MaxRequestIDLen+3 {
+	long := strings.Repeat("r", MaxRequestIDLen+1)
+	res := r.post(t, Native, native(long, "acme", at, 1, 0))
+	if res.Accepted != 1 || res.RejectedCount != 0 {
 		t.Fatalf("a %d-byte request ID: %+v", MaxRequestIDLen+1, res)
+	}
+	ids := storedRequestIDs(t, r)
+	if want := RequestID(long); !ids[want] || len(want) > MaxRequestIDLen || !strings.HasPrefix(want, "sha256:") {
+		t.Fatalf("stored request IDs %v, want %s", ids, want)
+	}
+	obj := map[string]any{}
+	_ = json.Unmarshal([]byte(native(long, "acme", at, 1, 0)), &obj)
+	if pres, err := r.in.ingestPulled(Native, Native, "", []map[string]any{obj}, nil); err != nil || pres.AlreadyStored != 1 {
+		t.Fatalf("the pulled copy of the same request: %+v %v, want it already stored", pres, err)
 	}
 	if res := r.post(t, Native, native(strings.Repeat("r", MaxRequestIDLen), "acme", at, 1, 0)); res.Accepted != 1 {
 		t.Fatalf("a %d-byte request ID: %+v", MaxRequestIDLen, res)
 	}
+	if res := r.post(t, Native, native(RequestID(long), "acme", at, 7, 0)); res.Accepted != 1 || res.AlreadyStored != 0 {
+		t.Fatalf("a request whose ID is the hash a long one is stored under must not count as that request: %+v", res)
+	}
+}
+
+// storedRequestIDs returns the request IDs of the records stored.
+func storedRequestIDs(t *testing.T, r *rig) map[string]bool {
+	t.Helper()
+	out := map[string]bool{}
+	if err := r.records.ScanRecords(t0.Add(-time.Hour), t0.Add(time.Hour), func(e *usage.Event, _ time.Time) error {
+		id, _ := e.Properties["request_id"].(string)
+		out[id] = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return out
 }
 
 // One push writes at most MaxStoredPerRequest to the records ledger: every

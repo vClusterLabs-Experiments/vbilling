@@ -43,7 +43,10 @@ type TokenFiles struct {
 //
 // It refuses a tenant-bound ingest token (INGEST_TOKENS) that equals the
 // API token or the shared ingest token: the tenant holding it would have
-// the operator's access.
+// the operator's access. It also refuses an INGEST_TOKEN equal to the API
+// token it reads from DATA_DIR/api-token: v0.3.0 defaulted the ingest token
+// to that generated token, so gateways may hold it, and an operator who
+// sets INGEST_TOKEN to what they send would hand them the API token.
 func PrepareTokens(cfg *config.Config) (TokenFiles, error) {
 	var files TokenFiles
 	if cfg.IngestToken != "" && tokenOK(cfg.IngestToken, cfg.APIToken) {
@@ -54,6 +57,12 @@ func PrepareTokens(cfg *config.Config) (TokenFiles, error) {
 		tok, err := loadOrCreateToken(path)
 		if err != nil {
 			return TokenFiles{}, fmt.Errorf("API_TOKEN is not set and %s cannot be used: %w", path, err)
+		}
+		// INGEST_TOKEN is set here: config.Load fills an unset one with
+		// API_TOKEN, which is unset too.
+		if cfg.IngestToken != "" && tokenOK(cfg.IngestToken, tok) {
+			return TokenFiles{}, fmt.Errorf("INGEST_TOKEN is the API token vBilling keeps in %s: gateways hold the ingest token, and the API token pauses tenants "+
+				"and exports all usage. Unset INGEST_TOKEN to have vBilling generate one in DATA_DIR/%s, or set API_TOKEN to another token", path, IngestTokenFile)
 		}
 		cfg.APIToken, files.API = tok, path
 	}

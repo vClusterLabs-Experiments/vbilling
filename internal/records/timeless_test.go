@@ -49,3 +49,34 @@ func TestRecordsWithoutATimeRetriedAcrossAWindowBoundaryCountOnce(t *testing.T) 
 		})
 	}
 }
+
+// Only stored rows are remembered: a record without a time that is refused
+// leaves no arrival behind, so a later copy that is stored is dated when it
+// arrives, and a refused request costs no memory once it is answered.
+func TestRecordsWithoutATimeThatAreRefusedLeaveNoArrival(t *testing.T) {
+	r := newRig(t, Options{})
+	defer r.close()
+	r.clk.set(t0.Add(10 * time.Second))
+	bad := `{"id":"req-1","tenant":"acme","usage":{"tokens_out":100,"no_such_metric":1},"sku":"llama"}`
+	if res := r.post(t, Native, bad); res.Accepted != 0 || res.RejectedCount != 1 {
+		t.Fatalf("a record with an unknown metric: %+v", res)
+	}
+	if n, p := len(r.in.arrivals.first), len(r.in.arrivals.pending); n != 0 || p != 0 {
+		t.Fatalf("a refused record left %d arrival(s) and %d pending", n, p)
+	}
+	r.clk.set(t0.Add(70 * time.Second)) // the next window
+	if res := r.post(t, Native, timeless("req-1", "acme", 100)); res.Accepted != 1 {
+		t.Fatalf("the fixed record: %+v", res)
+	}
+	if n := len(r.in.arrivals.first); n != 1 {
+		t.Fatalf("%d arrival(s) remembered, want the stored row's", n)
+	}
+	for m := 2; m <= 3; m++ {
+		r.tickAt(t, t0.Add(time.Duration(m)*time.Minute+30*time.Second))
+	}
+	for _, e := range r.ledgerEvents(t) {
+		if e.Metric == "tokens_out" && !e.WindowStart.Equal(t0.Add(time.Minute)) {
+			t.Errorf("the stored record is billed in the window from %s, want the one it arrived in, %s", e.WindowStart, t0.Add(time.Minute))
+		}
+	}
+}

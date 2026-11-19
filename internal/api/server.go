@@ -19,6 +19,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -72,6 +73,8 @@ type Server struct {
 	clients *clientNames // client names per ingest token
 	skus    *skuQuota    // new SKUs per source, tenant and day
 	priced  pricedSKUs   // SKUs the price check found priced
+
+	timeouts serverTimeouts // see HTTPServer
 }
 
 // WithCrossChecks enables GET /api/v1/crosscheck.
@@ -99,7 +102,7 @@ func (s *Server) WithPricing(p *pricing.Service) *Server { s.pricing = p; return
 func New(cfg *config.Config, sp *spool.Spool, disp *pipeline.Dispatcher, tenants *pipeline.TenantRegistry,
 	ctrl Controller, enf *enforcement.Enforcer, tel *telemetry.Registry, version string) *Server {
 	s := &Server{cfg: cfg, spool: sp, disp: disp, tenants: tenants, ctrl: ctrl, enf: enf, tel: tel, version: version, now: time.Now, started: time.Now(),
-		limiter: newRateLimiter(time.Now), clients: newClientNames()}
+		limiter: newRateLimiter(time.Now), clients: newClientNames(), timeouts: defaultTimeouts}
 	s.skus = newSKUQuota(func() time.Time { return s.now() })
 	s.skus.priced = s.priced.has
 	return s
@@ -117,19 +120,19 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/status", s.auth(s.status))
 	mux.HandleFunc("GET /api/v1/catalog", s.auth(s.catalog))
 	mux.HandleFunc("GET /api/v1/tenants", s.auth(s.listTenants))
-	mux.HandleFunc("GET /api/v1/usage", s.auth(s.usage))
-	mux.HandleFunc("GET /api/v1/events", s.auth(s.exportEvents))
+	mux.HandleFunc("GET /api/v1/usage", s.auth(s.longRoute(s.usage)))
+	mux.HandleFunc("GET /api/v1/events", s.auth(s.exportEvents)) // streams: rollingDeadline
 	mux.HandleFunc("POST /api/v1/events", s.ingest)
 	mux.HandleFunc("POST /api/v1/records", s.ingestRecords)
 	mux.HandleFunc("GET /api/v1/sources", s.auth(s.sources))
-	mux.HandleFunc("GET /api/v1/crosscheck", s.auth(s.crossCheck))
+	mux.HandleFunc("GET /api/v1/crosscheck", s.auth(s.longRoute(s.crossCheck)))
 	mux.HandleFunc("GET /api/v1/pricing", s.auth(s.pricingReport))
-	mux.HandleFunc("POST /api/v1/pricing/check", s.auth(s.pricingReport))
-	mux.HandleFunc("GET /api/v1/reconcile", s.auth(s.reconcile))
-	mux.HandleFunc("GET /api/v1/ledger/verify", s.auth(s.verify))
+	mux.HandleFunc("POST /api/v1/pricing/check", s.auth(s.longRoute(s.pricingReport)))
+	mux.HandleFunc("GET /api/v1/reconcile", s.auth(s.longRoute(s.reconcile)))
+	mux.HandleFunc("GET /api/v1/ledger/verify", s.auth(s.longRoute(s.verify)))
 	mux.HandleFunc("GET /api/v1/destinations", s.auth(s.listDestinations))
 	mux.HandleFunc("GET /api/v1/destinations/{name}/dead-letters", s.auth(s.deadLetters))
-	mux.HandleFunc("POST /api/v1/destinations/{name}/dead-letters/replay", s.auth(s.replayDeadLetters))
+	mux.HandleFunc("POST /api/v1/destinations/{name}/dead-letters/replay", s.auth(s.longRoute(s.replayDeadLetters)))
 	mux.HandleFunc("POST /api/v1/destinations/{name}/cursor", s.auth(s.setCursor))
 	mux.HandleFunc("GET /api/v1/billing-states", s.auth(s.billingStates))
 	mux.HandleFunc("PUT /api/v1/billing-states/{tenant}", s.auth(s.setBillingState))
@@ -461,13 +464,15 @@ func (s *Server) pricingReport(w http.ResponseWriter, r *http.Request) {
 // ingestCaller is who sent an ingest request.
 type ingestCaller struct {
 	bound string // the tenant a tenant-bound token is bound to; "" for the shared token
-	key   string // the token's key in the rate limiter and the client names
+	key   string // the token's ID (records.TokenID): rate limiter, client names, SKU caps, record IDs
 }
 
-// skuSource is the SKU cap the caller's usage counts against.
+// skuSource is the SKU cap the caller's usage counts against: each
+// tenant-bound token has its own, so a tenant's own token never uses up
+// what the operator's gateway reports with another token bound to it.
 func (c ingestCaller) skuSource() string {
 	if c.bound != "" {
-		return records.SKUSourceBound
+		return records.SKUSourceToken(c.key)
 	}
 	return records.SKUSourceShared
 }
@@ -547,7 +552,11 @@ func (s *Server) ingestRecords(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, "vBilling is starting and has not discovered tenants yet; retry in a few seconds")
 		return
 	}
-	res, err := s.records.IngestPush(format, records.Push{Client: client, Bound: caller.bound, Known: known}, body)
+	push := records.Push{Client: client, Bound: caller.bound, Known: known}
+	if caller.bound != "" {
+		push.Token = caller.key // records sent with a bound token get IDs of the token's own
+	}
+	res, err := s.records.IngestPush(format, push, body)
 	var unknown records.ErrUnknownFormat
 	var tooLarge records.ErrTooLarge
 	switch {
@@ -731,7 +740,9 @@ func (s *Server) exportEvents(w http.ResponseWriter, r *http.Request) {
 	enc := json.NewEncoder(w)
 	n := 0
 	errStop := errors.New("limit reached")
+	extend := s.rollingDeadline(w) // an export streams for as long as it takes
 	err = s.spool.ScanAll(from, to, func(e *usage.Event) error {
+		extend()
 		if e.WindowStart.Before(from) || !e.WindowStart.Before(to) || !keep(e) {
 			return nil
 		}
@@ -785,7 +796,8 @@ func reservedID(id string) bool {
 // They reach dashboards, exports and billing platforms.
 func valueProblems(e *usage.Event) []string {
 	var out []string
-	for _, f := range []struct{ name, v string }{{"sku", e.SKU}, {"region", e.Region}, {"project", e.Project}, {"resource_id", e.ResourceID}} {
+	for _, f := range []struct{ name, v string }{{"sku", e.SKU}, {"region", e.Region}, {"project", e.Project}, {"resource_id", e.ResourceID},
+		{"unit", e.Unit}} {
 		if err := usage.CheckValue(f.v); err != nil {
 			out = append(out, f.name+" "+err.Error())
 		}
@@ -808,6 +820,56 @@ func valueProblems(e *usage.Event) []string {
 	}
 	return out
 }
+
+// propertyKeyRe is what the name of an ingested event's property must
+// match, like a dimension key.
+var propertyKeyRe = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
+
+// ownProperties are the properties vBilling sets on ingested events itself.
+var ownProperties = map[string]bool{"client_event_id": true}
+
+// propertyProblems checks an ingested event's properties, as sent. They are
+// informational, but exports show them and billing platforms receive them
+// next to the event's own values: Lago takes them as event properties,
+// where one named sku would price usage the SKU cap and the price check
+// never saw. A property is a string checked like any value, a number or a
+// boolean, under a name like a dimension key that is not one of the
+// usage's own properties.
+func propertyProblems(e *usage.Event) []string {
+	if len(e.Properties) > usage.MaxDimensions {
+		return []string{fmt.Sprintf("%d properties, more than %d", len(e.Properties), usage.MaxDimensions)}
+	}
+	keys := make([]string, 0, len(e.Properties))
+	for k := range e.Properties {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var out []string
+	for _, k := range keys {
+		switch {
+		case !propertyKeyRe.MatchString(k):
+			out = append(out, fmt.Sprintf("property name %.64q must match %s", k, propertyKeyRe))
+			continue
+		case usage.ReservedDimension(k) || ownProperties[k]:
+			out = append(out, fmt.Sprintf("property %s is the name of a property vBilling sets itself; rename it", k))
+			continue
+		}
+		switch v := e.Properties[k].(type) {
+		case string:
+			if err := usage.CheckValue(v); err != nil {
+				out = append(out, fmt.Sprintf("property %s %v", k, err))
+			}
+		case bool, float64:
+		default:
+			out = append(out, fmt.Sprintf("property %s must be a string, a number or a boolean", k))
+		}
+	}
+	return out
+}
+
+// maxRejections bounds the refused events an ingest answer lists;
+// rejected_count counts them all.
+const maxRejections = records.MaxRejections
 
 // ingest accepts usage from custom emitters: inference gateways (tokens),
 // Slurm accounting, storage or network exporters. Events need a declared
@@ -863,6 +925,7 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 	}
 	var valid []usage.Event
 	var rejected []rejection
+	rejectedCount := 0
 	var warnings []string
 	derived := map[string]bool{}  // IDs vBilling derived because the event had none
 	legacy := map[string]string{} // derived ID -> the ID v0.3.0 gave the same event
@@ -882,16 +945,22 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 			}
 			e.Tenant = bound
 		}
+		problems = append(problems, propertyProblems(&e)...)
 		noID := e.ID == ""
 		switch {
 		case noID:
 		case bound != "":
 			// A tenant chooses its own IDs, so two tenants may pick the same
-			// one: scope it to the tenant and client, as record IDs are.
-			if e.Properties == nil {
-				e.Properties = map[string]any{}
+			// one: scope it to the tenant and client, as record IDs are. The
+			// id as sent is kept, so it is checked like any value.
+			if err := usage.CheckValue(e.ID); err != nil {
+				problems = append(problems, "id "+err.Error())
+			} else {
+				if e.Properties == nil {
+					e.Properties = map[string]any{}
+				}
+				e.Properties["client_event_id"] = e.ID
 			}
-			e.Properties["client_event_id"] = e.ID
 			e.ID = TenantEventID(bound, client, e.ID)
 		case reservedID(e.ID):
 			problems = append(problems, fmt.Sprintf("id %q starts with a prefix vBilling reserves for the IDs it derives (%s)",
@@ -930,7 +999,9 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 			problems = append(problems, err.Error())
 		}
 		if len(problems) > 0 {
-			rejected = append(rejected, rejection{Index: i, ID: e.ID, Error: strings.Join(problems, "; ")})
+			if rejectedCount++; len(rejected) < maxRejections {
+				rejected = append(rejected, rejection{Index: i, ID: e.ID, Error: strings.Join(problems, "; ")})
+			}
 			continue
 		}
 		valid = append(valid, e)
@@ -981,7 +1052,8 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 	if len(accepted) > 0 { // a series per client only once it stored usage
 		s.tel.Add("vbilling_ingested_events_total", "Events accepted through the ingest API.", map[string]string{"client": client}, float64(len(accepted)))
 	}
-	out := map[string]any{"accepted": len(accepted), "duplicates": len(dups), "rejected": rejected, "ids": accepted}
+	// rejected lists the first maxRejections refused events.
+	out := map[string]any{"accepted": len(accepted), "duplicates": len(dups), "rejected": rejected, "rejected_count": rejectedCount, "ids": accepted}
 	silent := 0
 	for _, id := range dups {
 		if derived[id] {

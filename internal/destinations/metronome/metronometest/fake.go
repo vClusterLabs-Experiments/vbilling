@@ -101,6 +101,8 @@ type BillableMetric struct {
 	PropertyFilters []PropertyFilter `json:"property_filters,omitempty"`
 	GroupKeys       [][]string       `json:"group_keys,omitempty"`
 	ArchivedAt      string           `json:"archived_at,omitempty"`
+	// SQL is the query of a SQL billable metric; the fake does not run it.
+	SQL string `json:"sql,omitempty"`
 
 	seq int // when it was created, in the fake's order of changes
 }
@@ -430,8 +432,8 @@ func (s *Server) attachLocked(c *Customer) {
 }
 
 func (m *BillableMetric) matches(e *Event) bool {
-	if m.ArchivedAt != "" {
-		return false
+	if m.ArchivedAt != "" || m.SQL != "" {
+		return false // the fake does not run SQL billable metrics
 	}
 	if f := m.EventTypeFilter; f != nil {
 		if len(f.InValues) > 0 && !contains(f.InValues, e.EventType) {

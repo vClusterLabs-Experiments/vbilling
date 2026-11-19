@@ -163,8 +163,10 @@ func main() {
 	// A full ledger volume stops every commit: report it long before.
 	go diskspace.Watch(ctx, map[string]string{"ledger-volume": cfg.DataDir, "archive-volume": cfg.ArchiveDir}, sources, tel)
 	tenants := pipeline.NewTenantRegistry()
-	// Events held until their billing platform prices them (PRICE_CHECK=hold).
-	// Always opened, so whatever an earlier run held is released.
+	// Events held until their billing platform counts them (Metronome: a
+	// billable metric, unless PRICE_CHECK=off) or prices them
+	// (PRICE_CHECK=hold). Always opened, so whatever an earlier run held is
+	// released.
 	held, err := pipeline.OpenHeld(filepath.Join(cfg.DataDir, "held"), false)
 	if err != nil {
 		log.Fatalf("open held events: %v", err)
@@ -300,6 +302,7 @@ func main() {
 		AllowUnkeyed:         cfg.RecordsAllowUnkeyed,
 		RejectUnknownTenants: cfg.RecordsRejectUnknown,
 		Region:               cfg.Region,
+		BoundTokens:          cfg.IngestTokens, // pinned pulls use the record IDs of the tenant's bound token
 	}
 	// The aggregator must exist before the API accepts records: it raises the
 	// records ledger's clock past every window already committed.
@@ -337,6 +340,9 @@ func main() {
 			if lb := time.Duration(spec.Lookback); lb > cfg.RecordsRetention-2*time.Hour {
 				log.Fatalf("RECORDS_PULL_FILE: pull %s: lookback %s must be at most RECORDS_RETENTION minus 2h (%s)", spec.Name, lb, cfg.RecordsRetention-2*time.Hour)
 			}
+			if err := ingester.CheckPin(spec.Tenant); err != nil {
+				log.Fatalf("RECORDS_PULL_FILE: pull %s: %v", spec.Name, err)
+			}
 			pullers = append(pullers, records.NewPuller(ingester, spec, state, ctrl.Ready, sources, tel))
 			log.Printf("Records: pulling %s (format %s, client %q) every %s, lookback %s", spec.Name, spec.Format, spec.Client,
 				time.Duration(spec.Interval), time.Duration(spec.Lookback))
@@ -363,12 +369,8 @@ func main() {
 	}
 	apiServer := api.New(cfg, sp, disp, tenants, ctrl, enf, tel, version).WithHealth(sources).WithPauses(pauses).WithRecords(ingester).WithCrossChecks(checks).WithPricing(prices)
 	go apiServer.Run(ctx) // the SKUs tenants have in the ledger and those billing platforms price
-	srv := &http.Server{
-		Addr:              cfg.ListenAddr,
-		Handler:           apiServer.Handler(),
-		ReadHeaderTimeout: 10 * time.Second,
-		MaxHeaderBytes:    api.MaxHeaderBytes,
-	}
+	// Read, write and idle timeouts; the raw export streams past them.
+	srv := apiServer.HTTPServer(cfg.ListenAddr)
 
 	var wg sync.WaitGroup
 	wg.Add(6)

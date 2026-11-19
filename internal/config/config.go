@@ -547,6 +547,22 @@ func (c *Config) Validate() error {
 		if c.RecordsPullLiteLLMKey == "" {
 			return fmt.Errorf("LITELLM_URL needs LITELLM_API_KEY, a LiteLLM master or proxy admin key")
 		}
+		// A pinned pull stores its rows under the record IDs of the tenant's
+		// bound token, so that what the LiteLLM pushed with that token counts
+		// once. It cannot tell which of two tokens the LiteLLM uses, and a
+		// copy sent with the other would replace the LiteLLM's records.
+		if pin := c.RecordsPullLiteLLMTenant; pin != "" {
+			n := 0
+			for _, tenant := range c.IngestTokens {
+				if tenant == pin {
+					n++
+				}
+			}
+			if n > 1 {
+				return fmt.Errorf("LITELLM_TENANT=%s, but INGEST_TOKENS binds %d tokens to %s: the pinned pull stores its rows under the record IDs of the tenant's bound token "+
+					"and cannot tell which one this LiteLLM pushes with. Bind only the LiteLLM's token to %s, or unset LITELLM_TENANT", pin, n, pin, pin)
+			}
+		}
 		if c.RecordsPullLiteLLMInterval < 10*time.Second {
 			return fmt.Errorf("RECORDS_PULL_LITELLM_INTERVAL %s must be at least 10s", c.RecordsPullLiteLLMInterval)
 		}

@@ -48,7 +48,8 @@ type PullSpec struct {
 	// pushed and pulled copies to count once.
 	Client string `json:"client,omitempty"`
 	// Tenant bills every row to one tenant, like a tenant-bound ingest
-	// token. Set it when the push uses such a token.
+	// token. Set it when the push uses such a token: the pull stores rows
+	// under the record IDs of the tenant's bound token (Ingester.CheckPin).
 	Tenant string `json:"tenant,omitempty"`
 	// URL of the log, with placeholders: {{from}} and {{to}} (the time
 	// range, in TimeFormat), {{page}}, {{offset}}, {{limit}} and {{cursor}}.
@@ -261,9 +262,9 @@ func (p *Puller) Run(ctx context.Context) {
 	t := time.NewTicker(time.Duration(p.spec.Interval))
 	defer t.Stop()
 	for {
-		if res, err := p.Pull(ctx); err == nil && (res.Accepted > 0 || len(res.Rejected) > 0) {
+		if res, err := p.Pull(ctx); err == nil && (res.Accepted > 0 || res.RejectedCount > 0) {
 			log.Printf("[records] pull %s read %d rows (%s to %s): %d new, %d already stored, %d skipped, %d rejected",
-				p.spec.Name, res.Rows, res.From.Format(time.RFC3339), res.To.Format(time.RFC3339), res.Accepted, res.AlreadyStored, res.Skipped, len(res.Rejected))
+				p.spec.Name, res.Rows, res.From.Format(time.RFC3339), res.To.Format(time.RFC3339), res.Accepted, res.AlreadyStored, res.Skipped, res.RejectedCount)
 		}
 		select {
 		case <-ctx.Done():
@@ -289,7 +290,7 @@ func (p *Puller) Pull(ctx context.Context) (PullResult, error) {
 		return res, err
 	}
 	p.tel.Set("vbilling_records_pull_last_success_timestamp_seconds", "When the last pull of a gateway's own request logs succeeded.", labels, float64(p.now().Unix()))
-	if len(res.Rejected) > 0 && res.Accepted == 0 && res.AlreadyStored == 0 {
+	if res.RejectedCount > 0 && res.Accepted == 0 && res.AlreadyStored == 0 {
 		p.health.Fail(p.name, "records", p.spec.Client, fmt.Errorf("every row was rejected: %s", res.Rejected[0].Error),
 			"check that the pull's format maps this log's rows (records.formats)")
 		return res, nil

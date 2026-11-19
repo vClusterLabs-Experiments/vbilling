@@ -32,7 +32,8 @@ type LiteLLMPullOptions struct {
 	Client string
 	// Tenant bills every pulled request to one tenant, like a tenant-bound
 	// ingest token. It must equal the push token's tenant when the push
-	// uses one, because the bound tenant is part of every record ID.
+	// uses one: the pull stores rows under the record IDs of the tenant's
+	// bound token (Ingester.CheckPin).
 	Tenant string
 	// Interval between pulls (default 5m).
 	Interval time.Duration
@@ -131,9 +132,9 @@ func (p *LiteLLMPuller) Run(ctx context.Context) {
 	t := time.NewTicker(p.opts.Interval)
 	defer t.Stop()
 	for {
-		if res, err := p.Pull(ctx); err == nil && (res.Accepted > 0 || res.NoCallID > 0 || len(res.Rejected) > 0) {
+		if res, err := p.Pull(ctx); err == nil && (res.Accepted > 0 || res.NoCallID > 0 || res.RejectedCount > 0) {
 			log.Printf("[records] pulled %d LiteLLM spend log rows (%s to %s): %d new, %d already stored, %d skipped, %d rejected",
-				res.Rows, res.From.Format(time.RFC3339), res.To.Format(time.RFC3339), res.Accepted, res.AlreadyStored, res.Skipped+res.NoCallID, len(res.Rejected))
+				res.Rows, res.From.Format(time.RFC3339), res.To.Format(time.RFC3339), res.Accepted, res.AlreadyStored, res.Skipped+res.NoCallID, res.RejectedCount)
 		}
 		select {
 		case <-ctx.Done():
@@ -248,7 +249,12 @@ func (r *PullResult) add(o Result) {
 	r.UsageRows += o.UsageRows
 	r.Skipped += o.Skipped
 	r.DuplicatesInBatch += o.DuplicatesInBatch
-	r.Rejected = append(r.Rejected, o.Rejected...)
+	r.RejectedCount += o.RejectedCount
+	for _, rej := range o.Rejected {
+		if len(r.Rejected) < MaxRejections {
+			r.Rejected = append(r.Rejected, rej)
+		}
+	}
 	for _, t := range o.UnknownTenants {
 		if !containsString(r.UnknownTenants, t) {
 			r.UnknownTenants = append(r.UnknownTenants, t)

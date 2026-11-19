@@ -13,7 +13,10 @@ import (
 
 // A push in the litellm format under another identity than the LiteLLM
 // pull's (LITELLM_TENANT, LITELLM_CLIENT) is stored twice, once per record
-// ID: its source turns failing with a hint naming the setting.
+// ID: its source turns failing with a hint naming the setting, when the push
+// can be the pulled LiteLLM. A push with another tenant's token is that
+// tenant's own LiteLLM (fourth review): it is never flagged, since pinning
+// the pull to that tenant would bill it every request of the pulled one.
 func TestLiteLLMPushThatThePullCannotMatchIsFlagged(t *testing.T) {
 	r := newRig(t, Options{Settle: 20 * time.Second})
 	defer r.close()
@@ -46,8 +49,10 @@ func TestLiteLLMPushThatThePullCannotMatchIsFlagged(t *testing.T) {
 			t.Errorf("%s: %s", s.Name, s.Status)
 		}
 	}
+	if hint, flagged := hints["records/litellm/acme/litellm-pull"]; flagged {
+		t.Errorf("acme's own LiteLLM is flagged (hint %q)", hint)
+	}
 	for name, setting := range map[string]string{
-		"records/litellm/acme/litellm-pull":      "LITELLM_TENANT=acme",
 		"records/litellm/litellm-pull":           "LITELLM_TENANT",
 		"records/litellm-eu/globex/litellm-pull": "LITELLM_CLIENT=litellm-eu",
 	} {
