@@ -11,12 +11,13 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
-	"sigs.k8s.io/yaml"
+	"gopkg.in/yaml.v2"
 
 	"github.com/vclusterlabs-experiments/vbilling/internal/usage"
 )
@@ -41,50 +42,97 @@ import (
 //	      per: 1000000
 //	      sku: {qwen2.5-7b-instruct: "0.60"}
 type PriceCard struct {
-	Currency string                          `json:"currency,omitempty"`
-	Interval string                          `json:"interval,omitempty"`
-	Plans    map[string]map[string]CardPrice `json:"plans"`
+	Currency string                          `json:"currency,omitempty" yaml:"currency,omitempty"`
+	Interval string                          `json:"interval,omitempty" yaml:"interval,omitempty"`
+	Plans    map[string]map[string]CardPrice `json:"plans" yaml:"plans"`
 }
 
 // CardPrice is one metric's prices in a plan: Amount for usage without a
 // SKU, SKU for usage per SKU (each its own meter, see splitMetersBy).
 type CardPrice struct {
-	Amount CardAmount            `json:"amount,omitempty"`
-	Name   string                `json:"name,omitempty"`
-	Per    int64                 `json:"per,omitempty"`
-	SKU    map[string]CardAmount `json:"sku,omitempty"`
-	Names  map[string]string     `json:"names,omitempty"`
+	Amount CardAmount            `json:"amount,omitempty" yaml:"amount,omitempty"`
+	Name   string                `json:"name,omitempty" yaml:"name,omitempty"`
+	Per    int64                 `json:"per,omitempty" yaml:"per,omitempty"`
+	SKU    map[string]CardAmount `json:"sku,omitempty" yaml:"sku,omitempty"`
+	Names  map[string]string     `json:"names,omitempty" yaml:"names,omitempty"`
 }
 
-// CardAmount is a non-negative decimal amount. YAML numbers are accepted;
-// quoting keeps every digit.
+// CardAmount is a non-negative decimal amount, kept as written: a YAML or
+// JSON number is read as its literal text, never through a float, so
+// 2.4999999 stays 2.4999999.
 type CardAmount string
+
+var decimalAmount = regexp.MustCompile(`^[0-9]+(\.[0-9]+)?$`)
+
+func parseCardAmount(s string) (CardAmount, error) {
+	s = strings.TrimSpace(s)
+	if !decimalAmount.MatchString(s) {
+		return "", fmt.Errorf("amount %q must be a non-negative decimal such as 2.49 (no exponent, sign or separators)", s)
+	}
+	return CardAmount(s), nil
+}
 
 func (a *CardAmount) UnmarshalJSON(b []byte) error {
 	b = bytes.TrimSpace(b)
-	var s string
+	s := string(b) // a JSON number: its literal text
 	if len(b) > 0 && b[0] == '"' {
 		if err := json.Unmarshal(b, &s); err != nil {
 			return err
 		}
-	} else {
-		f, err := strconv.ParseFloat(string(b), 64)
-		if err != nil {
-			return fmt.Errorf("amount %s is not a number", b)
-		}
-		s = strconv.FormatFloat(f, 'f', -1, 64)
 	}
-	r, ok := new(big.Rat).SetString(s)
-	if !ok || r.Sign() < 0 || strings.ContainsAny(s, "eE/") {
-		return fmt.Errorf("amount %q must be a non-negative decimal such as \"2.49\"", s)
+	v, err := parseCardAmount(s)
+	if err != nil {
+		return err
 	}
-	*a = CardAmount(s)
+	*a = v
+	return nil
+}
+
+// UnmarshalYAML reads a scalar's literal text: a YAML number decoded into a
+// string keeps every digit it was written with.
+func (a *CardAmount) UnmarshalYAML(unmarshal func(any) error) error {
+	var s string
+	if err := unmarshal(&s); err != nil {
+		return err
+	}
+	v, err := parseCardAmount(s)
+	if err != nil {
+		return err
+	}
+	*a = v
 	return nil
 }
 
 // zeroDecimal lists Stripe's currencies without minor units.
 var zeroDecimal = map[string]bool{"bif": true, "clp": true, "djf": true, "gnf": true, "jpy": true, "kmf": true, "krw": true,
 	"mga": true, "pyg": true, "rwf": true, "ugx": true, "vnd": true, "vuv": true, "xaf": true, "xof": true, "xpf": true}
+
+// threeDecimal lists Stripe's currencies with 1000 minor units per main
+// unit. Stripe's support article on the UAE says "We also support charges
+// in the following three-decimal currencies" and names exactly these:
+// https://support.stripe.com/questions/which-payments-methods-and-products-are-available-in-the-uae
+// https://docs.stripe.com/currencies lists them as presentment currencies;
+// as of 2026-11-19 that page no longer carries its three-decimal section
+// (#three-decimal), only its description still mentions "three-decimal
+// currency support". That section asked for charge amounts ending in 0 (a
+// multiple of 10 minor units). unit_amount_decimal is not a charge: it is
+// a price per unit, up to 12 decimals of a minor unit, which Stripe
+// multiplies by the metered quantity and rounds when it invoices. So the
+// card's amount is converted exactly and never rounded here; if Stripe
+// refused one, creating the price would fail at startup, loudly, instead
+// of billing another price.
+var threeDecimal = map[string]bool{"bhd": true, "jod": true, "kwd": true, "omr": true, "tnd": true}
+
+// minorUnits is how many minor units make one main unit of a currency.
+func minorUnits(currency string) int64 {
+	switch c := strings.ToLower(currency); {
+	case zeroDecimal[c]:
+		return 1
+	case threeDecimal[c]:
+		return 1000
+	}
+	return 100
+}
 
 // unitAmountDecimal converts an amount in main units per `per` units to
 // Stripe's unit_amount_decimal: minor units per unit, at most 12 decimals.
@@ -97,9 +145,7 @@ func unitAmountDecimal(amount CardAmount, per int64, currency string) (string, e
 		per = 1
 	}
 	r.Quo(r, new(big.Rat).SetInt64(per))
-	if !zeroDecimal[strings.ToLower(currency)] {
-		r.Mul(r, big.NewRat(100, 1))
-	}
+	r.Mul(r, big.NewRat(minorUnits(currency), 1))
 	s := r.FloatString(12)
 	back, _ := new(big.Rat).SetString(s)
 	if back.Cmp(r) != 0 {
@@ -118,6 +164,9 @@ func LoadPriceCard(path, defaultCurrency string) (*PriceCard, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Decoded from YAML directly, not through JSON: sigs.k8s.io/yaml turns an
+	// unquoted amount into a string with float32 precision (1.23456789 became
+	// 1.2345679) before CardAmount saw it.
 	var pc PriceCard
 	if err := yaml.UnmarshalStrict(b, &pc); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)

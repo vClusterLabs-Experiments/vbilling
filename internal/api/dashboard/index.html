@@ -155,7 +155,8 @@ th .est { color: var(--warning); }
 
   <section class="card">
     <h2>Usage by tenant</h2>
-    <p class="desc">Every metric in the catalog that has usage, unrated, from the vBilling ledger. Expand a tenant for its SKUs.
+    <p class="desc">Every metric in the catalog that has usage, unrated, from the vBilling ledger and its archive, each event counted once. Expand a tenant for its SKUs.
+      "Of which" rows are the part of a tenant's usage a billing platform refused for good (dead letters) or that is held until priced: not billed there (yet).
       <span class="est">&#8776;</span> marks estimates (PromQL queries); everything else is measured exactly. Prices and invoices come from your billing platform.</p>
     <div class="scroll"><table id="usage"><thead></thead><tbody></tbody></table></div>
   </section>
@@ -412,13 +413,26 @@ async function loadUsage() {
     if (!m.has(key)) m.set(key, new Map());
     m.get(key).set(metric, (m.get(key).get(metric) || 0) + q);
   };
+  const undelivered = new Map(); // tenant -> kind and destination -> {kind, dest, vals: metric -> quantity}
   let gpu = 0;
+  // Parts of the totals a destination refused for good or holds until priced.
+  const addUndelivered = (kind, t, m, perDest) => {
+    for (const [d, q] of Object.entries(perDest || {})) {
+      if (!undelivered.has(t)) undelivered.set(t, new Map());
+      const k = kind + "\u0000" + d, byDest = undelivered.get(t);
+      if (!byDest.has(k)) byDest.set(k, { kind, dest: d, vals: new Map() });
+      const vals = byDest.get(k).vals;
+      vals.set(m, (vals.get(m) || 0) + q);
+    }
+  };
   for (const r of u.rows) {
     const t = r.tenant, m = r.metric, sku = r.sku || "";
     add(totals, t, m, r.quantity);
     if (!bySku.has(t)) bySku.set(t, new Map());
     add(bySku.get(t), sku, m, r.quantity);
     if (m === "vcluster_gpu_hours") gpu += r.quantity;
+    addUndelivered("dead", t, m, r.dead_lettered);
+    addUndelivered("held", t, m, r.held);
   }
   $("#t-gpu").textContent = fmt(gpu);
   $("#t-gpu-sub").textContent = own({ "24h": "last 24 hours", "7d": "last 7 days", mtd: "month to date" }, range, "");
@@ -436,9 +450,13 @@ async function loadUsage() {
     const open = expanded.has(t);
     const toggle = skus.length > 1 || (skus.length === 1 && skus[0] !== "")
       ? el("button", { class: "toggle", "data-tenant": t, "aria-expanded": String(open), "aria-label": "SKUs of " + t }, open ? DOWN : RIGHT) : null;
-    const main = el("tr", null, el("td", null, toggle, tenantCell(t)), cells(totals.get(t)));
-    if (!open) return [main];
-    return [main, ...skus.map((sku) => el("tr", { class: "sku" }, el("td", null, sku || "no SKU"), cells(bySku.get(t).get(sku))))];
+    const out = [el("tr", null, el("td", null, toggle, tenantCell(t)), cells(totals.get(t)))];
+    if (open) out.push(...skus.map((sku) => el("tr", { class: "sku" }, el("td", null, sku || "no SKU"), cells(bySku.get(t).get(sku)))));
+    const parts = [...(undelivered.get(t) || new Map()).values()].sort((x, y) => (x.kind + x.dest).localeCompare(y.kind + y.dest));
+    out.push(...parts.map((x) => el("tr", { class: "sku" },
+      el("td", null, (x.kind === "dead" ? "of which dead-lettered at " : "of which held from ") + x.dest + (x.kind === "held" ? " until priced" : "")),
+      cells(x.vals))));
+    return out;
   });
   $("#usage tbody").replaceChildren(...(rows.length ? rows : [emptyRow(1, "No usage in this range yet.")]));
 

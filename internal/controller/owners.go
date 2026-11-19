@@ -68,11 +68,15 @@ type ownerRun struct {
 }
 
 // ownerRuns splits windows into runs wherever a cluster's owner changed.
-// Without owner history, or without a move in the range, it is one run.
+// Without owner history, or without a move in the range, it is one run. A
+// window of another length (the partial window that realigns an old
+// watermark with the grid) is a run of its own: Prometheus queries take
+// the window length from a run's first window.
 func (c *Controller) ownerRuns(targets []metrics.Target, windows []metrics.Window) []ownerRun {
 	var runs []ownerRun
 	for _, w := range windows {
 		ts, sig := c.targetsFor(targets, w.End)
+		sig += "\x02" + w.End.Sub(w.Start).String()
 		if n := len(runs); n > 0 && runs[n-1].sig == sig {
 			runs[n-1].windows = append(runs[n-1].windows, w)
 			continue

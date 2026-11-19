@@ -197,7 +197,7 @@ func TestUsageLineItemsAndCSV(t *testing.T) {
 		t.Fatalf("rows: %+v", resp.Rows)
 	}
 	code, body = e.get(t, "/api/v1/usage?format=csv&group_by=tenant,day")
-	if code != 200 || !strings.HasPrefix(body, "tenant,day,metric,unit,quantity,events\n") || !strings.Contains(body, "acme,2026-10-05,vcluster_gpu_hours,gpu-hours,15.99999996,120") {
+	if code != 200 || !strings.HasPrefix(body, "tenant,day,metric,unit,quantity,events,dead_lettered,held\n") || !strings.Contains(body, "acme,2026-10-05,vcluster_gpu_hours,gpu-hours,15.99999996,120,,") {
 		t.Fatalf("csv: %d\n%s", code, body)
 	}
 	code, body = e.get(t, "/api/v1/events?format=csv&limit=3")

@@ -5,10 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -174,6 +177,89 @@ func (p *PromSource) scope(ctx context.Context, t Target, size time.Duration) (*
 
 var errNoPrometheus = errors.New("no Prometheus for this cluster")
 
+// namespaceScoped reports whether the namespace row of scope applies to a
+// cluster when it has no prometheus-matchers: shared or dedicated nodes,
+// read through PROMETHEUS_URL without the vCluster Platform preset.
+func (p *PromSource) namespaceScoped(t Target) bool {
+	return t.Cluster.Meta("prometheus-url") == "" && p.c.promDefault != nil &&
+		p.c.opts.PrometheusPreset != PresetVClusterPlatform && !p.hasOwnNodes(t)
+}
+
+// bareNamespace reports whether a cluster's series are selected by
+// namespace="<namespace>" alone.
+func (p *PromSource) bareNamespace(t Target) bool {
+	return p.namespaceScoped(t) && t.Cluster.Meta("prometheus-matchers") == ""
+}
+
+// namespaceSharers lists, per control plane cluster namespace, the clusters
+// whose series would be scoped by that namespace. vCluster can run several
+// clusters in one namespace, and the namespace alone cannot tell their
+// series apart: each one would be billed every series in it.
+func (p *PromSource) namespaceSharers(targets []Target) map[string][]string {
+	out := map[string][]string{}
+	for _, t := range targets {
+		if p.namespaceScoped(t) {
+			out[t.Cluster.Namespace] = append(out[t.Cluster.Namespace], t.Cluster.Name)
+		}
+	}
+	return out
+}
+
+// holdShared skips a cluster whose namespace other clusters share and that
+// no operator scoped with prometheus-matchers. None of its Prometheus usage
+// is billed meanwhile: its sources fail with a hint, and each counter
+// remembers when this began, so once the cluster is scoped its usage since
+// then is billed (up to maxCounterGap back), as after a partial outage.
+func (p *PromSource) holdShared(t Target, sharers []string, windows []Window, out []PromWindow) {
+	id := t.Cluster.ExternalID()
+	sorted := append([]string(nil), sharers...)
+	sort.Strings(sorted)
+	err := fmt.Errorf("clusters %s share namespace %s on the control plane cluster, so namespace=%q selects every one's series: this cluster's Prometheus usage is not billed until it is scoped",
+		strings.Join(sorted, ", "), t.Cluster.Namespace, t.Cluster.Namespace)
+	hint := "set vbilling.vcluster.com/prometheus-matchers on every cluster in this namespace to labels only its own series carry; " +
+		"its counters then catch up on the usage since this began, up to 24 hours back"
+	for _, m := range p.specs() {
+		p.health.Fail(health.Name("prometheus", m.Code, id), "prometheus", id, err, hint)
+		if m.Counter == "" {
+			continue
+		}
+		key := m.Code + "|" + id
+		if _, held := p.store.sharedSince(key); !held {
+			out[0].shared[key] = windows[0].Start
+		}
+	}
+}
+
+// noteHistory reports counter series that became visible with a count from
+// before vBilling could see them, which was not billed.
+func (p *PromSource) noteHistory(m PromMetric, id string, historic []map[string]string) {
+	msg := fmt.Sprintf("%d series appeared with history; billed from its first sample (for example %s)", len(historic), describeLabels(historic[0]))
+	log.Printf("[prometheus] %s/%s: %s", m.Code, id, msg)
+	name := strings.TrimSuffix(m.Counter, "{{selector}}")
+	if i := strings.IndexByte(name, '{'); i >= 0 {
+		name = name[:i]
+	}
+	p.health.Set(health.Name("prometheus", m.Code, id, "history"), "prometheus", id, health.OK, msg,
+		"nothing showed that its process started after vBilling last read the metric (no "+strings.TrimSuffix(name, "_total")+
+			"_created series, no process_start_time_seconds for its job and instance), so its count before the first sample is treated as history: "+
+			"a scrape or relabel made it visible. A new pod without that evidence is billed from its first scrape")
+}
+
+func describeLabels(l map[string]string) string {
+	keys := make([]string, 0, len(l))
+	for k := range l {
+		if k != "__name__" {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, k+"="+strconv.Quote(l[k]))
+	}
+	return "{" + strings.Join(parts, ",") + "}"
+}
+
 func (p *PromSource) clientFor(ctx context.Context, t Target, raw string) (*prometheusClient, error) {
 	if ns, svc, prefix, ok := parseTenantService(raw); ok {
 		if p.c.tenants == nil {
@@ -216,6 +302,10 @@ type PromWindow struct {
 	Events  []usage.Event
 	updates map[string]counterSample // counter baselines after this window
 	seen    map[string]time.Time     // metric|cluster observed through this window
+	// shared marks metric|cluster keys not read since then because the
+	// cluster shares its namespace (see holdShared); unshared ends that.
+	shared   map[string]time.Time
+	unshared []string
 }
 
 // ErrPrometheusUnavailable means every read of a run failed (Prometheus is
@@ -232,18 +322,27 @@ func (p *PromSource) Collect(ctx context.Context, targets []Target, windows []Wi
 	out := make([]PromWindow, len(windows))
 	accs := map[time.Time]*accumulator{}
 	for i, w := range windows {
-		out[i] = PromWindow{Window: w, updates: map[string]counterSample{}, seen: map[string]time.Time{}}
+		out[i] = PromWindow{Window: w, updates: map[string]counterSample{}, seen: map[string]time.Time{}, shared: map[string]time.Time{}}
 		accs[w.End] = newAccumulator(w)
 	}
 	if len(windows) == 0 {
 		return out, nil
 	}
 	size := windows[0].End.Sub(windows[0].Start)
+	sharing := p.namespaceSharers(targets)
 	attempts, failures := 0, 0
 	for _, t := range targets {
 		id := t.Cluster.ExternalID()
 		client, vars, how, err := p.scope(ctx, t, size)
 		if errors.Is(err, errNoPrometheus) {
+			continue
+		}
+		bare := err == nil && p.bareNamespace(t)
+		if others := sharing[t.Cluster.Namespace]; bare && len(others) > 1 {
+			// Not a failed read (nothing is down, so it never holds the
+			// windows back): the windows commit without this cluster's
+			// Prometheus usage, and its counters catch up once scoped.
+			p.holdShared(t, others, windows, out)
 			continue
 		}
 		base := p.c.baseFor(t)
@@ -261,7 +360,11 @@ func (p *PromSource) Collect(ctx context.Context, targets []Target, windows []Wi
 			case m.builtin == "gpu-util":
 				n, merr = p.gpuUtil(ctx, client, t, vars, windows, accs, base)
 			case m.Counter != "":
-				n, merr = p.counter(ctx, client, m.PromMetric, id, vars, windows, out, accs, base)
+				var historic []map[string]string
+				n, historic, merr = p.counter(ctx, client, m.PromMetric, id, vars, !bare, windows, out, accs, base)
+				if merr == nil && len(historic) > 0 {
+					p.noteHistory(m.PromMetric, id, historic)
+				}
 			default:
 				n, merr = p.query(ctx, client, m.PromMetric, vars, windows, accs, base)
 			}
@@ -324,18 +427,34 @@ func emptyHint(m PromMetric, v queryVars, sourceLabel string) string {
 const maxCounterGap = 24 * time.Hour
 
 // counter bills the exact increase of every matching series per window.
-func (p *PromSource) counter(ctx context.Context, client *prometheusClient, m PromMetric, cluster string, vars queryVars, windows []Window,
-	out []PromWindow, accs map[time.Time]*accumulator, base baseFn) (int, error) {
+// ownScope is false when the cluster's series are selected by its namespace
+// alone. It returns the series that became visible with history.
+func (p *PromSource) counter(ctx context.Context, client *prometheusClient, m PromMetric, cluster string, vars queryVars, ownScope bool, windows []Window,
+	out []PromWindow, accs map[time.Time]*accumulator, base baseFn) (int, []map[string]string, error) {
 	first, last := windows[0], windows[len(windows)-1]
 	selector := expand(m.Counter, vars)
 	key := m.Code + "|" + cluster
 	prevObserved, observedBefore := p.store.observed(key)
+	// unsharedBare: the cluster shared its namespace and is selected by the
+	// namespace again because the other clusters left it. What appeared
+	// there meanwhile may be theirs, so none of it counts from before now.
+	unsharedBare := false
+	sharedFrom, wasShared := p.store.sharedSince(key)
+	if wasShared {
+		switch {
+		case !ownScope:
+			unsharedBare = true
+		case !observedBefore:
+			// Scoped by an operator since: its usage while the namespace was
+			// shared catches up, as after a partial outage.
+			prevObserved, observedBefore = sharedFrom, true
+		}
+	}
 	from := first.Start.Add(-p.opts.Lookback)
 	if observedBefore && prevObserved.Before(first.Start) && first.Start.Sub(prevObserved) <= maxCounterGap {
 		// This cluster's Prometheus failed while other sources succeeded,
 		// so windows were committed without it. Read back to its last
-		// successful read: a series that appeared since counts from zero,
-		// and one that existed then does not.
+		// successful read and bill everything since.
 		if back := prevObserved.Add(-p.opts.Lookback); back.Before(from) {
 			from = back
 		}
@@ -343,10 +462,31 @@ func (p *PromSource) counter(ctx context.Context, client *prometheusClient, m Pr
 	// Whether the samples read reach the last successful read, so a series
 	// whose first sample is newer really appeared after it.
 	reachesPrev := observedBefore && !from.After(prevObserved)
+	// A series without a baseline starts from its last sample at or before
+	// since: usage after it is billed.
+	since := first.Start
+	if reachesPrev {
+		since = prevObserved
+	}
 	series, err := client.QueryRaw(ctx, selector, last.End.Sub(from), last.End)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
+	appeared := func(s promSeries) bool {
+		return reachesPrev && len(s.Samples) > 0 && s.Samples[0].T.After(prevObserved)
+	}
+	var evidence *startEvidence
+	for _, s := range series {
+		if _, ok := p.store.baseline(key + "|" + fingerprint(s.Labels)); !ok && appeared(s) && !unsharedBare {
+			if evidence, err = p.startEvidence(ctx, client, selector, vars.Matchers, last.End.Sub(from), last.End); err != nil {
+				// Decide with the evidence or not at all: the counter keeps
+				// its baselines and catches up on the next read.
+				return 0, nil, fmt.Errorf("read when its processes started: %w", err)
+			}
+			break
+		}
+	}
+	var historic []map[string]string
 	for _, s := range series {
 		sk := key + "|" + fingerprint(s.Labels)
 		var prev *promSample
@@ -354,27 +494,44 @@ func (p *PromSource) counter(ctx context.Context, client *prometheusClient, m Pr
 			prev = &promSample{T: time.UnixMilli(b.T).UTC(), V: b.V}
 		}
 		samples := s.Samples
-		if prev == nil {
-			// No baseline. A series that appeared after we last read this
-			// metric is new: it counts from zero, including samples taken
-			// while this cluster's Prometheus could not be read. Otherwise
-			// start from the last sample at or before the first window; on
-			// the very first read its history is not billed.
-			idx := -1
-			for i, smp := range samples {
-				if !smp.T.After(first.Start) {
-					idx = i
+		if prev == nil && len(samples) > 0 {
+			// No baseline. On the very first read a series' history is not
+			// billed: it starts from its last sample at or before the first
+			// window. A series that appeared after the last read counts from
+			// zero only with evidence that its process started after that
+			// read; vBilling cannot tell a new process from one a new scrape,
+			// a relabel or a changed label set made visible, whose first
+			// sample carries everything it counted before.
+			upTo := func(t time.Time) int {
+				idx := -1
+				for i, smp := range samples {
+					if !smp.T.After(t) {
+						idx = i
+					}
 				}
+				return idx
 			}
 			switch {
-			case len(samples) > 0 && reachesPrev && samples[0].T.After(prevObserved):
+			case appeared(s) && unsharedBare:
+				if i := upTo(first.Start); i >= 0 {
+					prev, samples = &samples[i], samples[i+1:]
+				} else {
+					prev, samples = &samples[0], samples[1:]
+				}
+			case appeared(s) && evidence.startedSince(s, prevObserved):
+				// Its process started after the last read: everything it
+				// counted is usage since then, including samples taken while
+				// this cluster's Prometheus could not be read.
 				prev = &promSample{T: prevObserved, V: 0}
-			case idx >= 0:
-				prev = &samples[idx]
-				samples = samples[idx+1:]
-			case len(samples) > 0:
-				prev = &samples[0]
-				samples = samples[1:]
+			case appeared(s):
+				prev, samples = &samples[0], samples[1:]
+				historic = append(historic, s.Labels)
+			default:
+				if i := upTo(since); i >= 0 {
+					prev, samples = &samples[i], samples[i+1:]
+				} else {
+					prev, samples = &samples[0], samples[1:]
+				}
 			}
 		}
 		incs := make([]float64, len(windows))
@@ -424,7 +581,116 @@ func (p *PromSource) counter(ctx context.Context, client *prometheusClient, m Pr
 	for i, w := range windows {
 		out[i].seen[key] = w.End
 	}
-	return len(series), nil
+	if wasShared {
+		// Read: the shared period is over (only now, so a failed read keeps
+		// the point to catch up from).
+		out[0].unshared = append(out[0].unshared, key)
+	}
+	return len(series), historic, nil
+}
+
+// startEvidence tells when the process behind a counter series started:
+// the series' own <name>_created sample (OpenMetrics; prometheus_client,
+// which vLLM uses, exposes one for every counter and label set), else the
+// process_start_time_seconds of the job and instance it was scraped from.
+type startEvidence struct {
+	created map[string][]promSample // by series labels without the name
+	process map[string][]promSample // by job and instance
+}
+
+func (p *PromSource) startEvidence(ctx context.Context, client *prometheusClient, counter, matchers string, rng time.Duration, at time.Time) (*startEvidence, error) {
+	ev := &startEvidence{created: map[string][]promSample{}, process: map[string][]promSample{}}
+	if sel, ok := createdSelector(counter); ok {
+		series, err := client.QueryRaw(ctx, sel, rng, at)
+		if err != nil {
+			return nil, err
+		}
+		for _, s := range series {
+			ev.created[labelKey(s.Labels)] = s.Samples
+		}
+	}
+	if matchers == "" {
+		matchers = noopMatcher
+	}
+	series, err := client.QueryRaw(ctx, "process_start_time_seconds{"+matchers+"}", rng, at)
+	if err != nil {
+		return nil, err
+	}
+	for _, s := range series {
+		job, inst := s.Labels["job"], s.Labels["instance"]
+		if job == "" || inst == "" {
+			continue
+		}
+		k := job + "\x00" + inst
+		ev.process[k] = append(ev.process[k], s.Samples...)
+	}
+	for _, smp := range ev.process {
+		sort.Slice(smp, func(i, j int) bool { return smp[i].T.Before(smp[j].T) })
+	}
+	return ev, nil
+}
+
+// startedSince reports whether the evidence shows that the process behind s
+// started at or after since, read at the series' first sample. Without
+// evidence it reports false.
+func (e *startEvidence) startedSince(s promSeries, since time.Time) bool {
+	if e == nil || len(s.Samples) == 0 {
+		return false
+	}
+	first := s.Samples[0].T
+	if smp, ok := nearest(e.created[labelKey(s.Labels)], first); ok {
+		return !unixSeconds(smp.V).Before(since)
+	}
+	if job, inst := s.Labels["job"], s.Labels["instance"]; job != "" && inst != "" {
+		if smp, ok := nearest(e.process[job+"\x00"+inst], first); ok {
+			return !unixSeconds(smp.V).Before(since)
+		}
+	}
+	return false
+}
+
+// createdSelector turns a counter selector into the selector of its
+// _created series: name_total{...} becomes name_created{...}.
+func createdSelector(sel string) (string, bool) {
+	name, rest := sel, ""
+	if i := strings.IndexByte(sel, '{'); i >= 0 {
+		name, rest = sel[:i], sel[i:]
+	}
+	if name = strings.TrimSpace(name); name == "" {
+		return "", false
+	}
+	return strings.TrimSuffix(name, "_total") + "_created" + rest, true
+}
+
+// nearest returns the sample taken at or last before at, else the first one.
+func nearest(samples []promSample, at time.Time) (promSample, bool) {
+	if len(samples) == 0 {
+		return promSample{}, false
+	}
+	best := 0
+	for i, smp := range samples {
+		if !smp.T.After(at) {
+			best = i
+		}
+	}
+	return samples[best], true
+}
+
+func unixSeconds(v float64) time.Time {
+	sec, frac := math.Modf(v)
+	return time.Unix(int64(sec), int64(frac*1e9)).UTC()
+}
+
+// labelKey identifies a series by its labels without the metric name, so a
+// counter and its _created series match.
+func labelKey(labels map[string]string) string {
+	l := make(map[string]string, len(labels))
+	for k, v := range labels {
+		if k != "__name__" {
+			l[k] = v
+		}
+	}
+	return fingerprint(l)
 }
 
 // query evaluates an estimate at every window end.
@@ -551,7 +817,7 @@ func promGPUModel(labels map[string]string) string {
 // restart. That is what makes counters exactly-once across restarts.
 func (p *PromSource) Commit(results []PromWindow, commit func(w Window, evs []usage.Event) error) error {
 	for _, r := range results {
-		next := p.store.next(r.updates, r.seen)
+		next := p.store.next(r.updates, r.seen, r.shared, r.unshared)
 		if err := p.store.stage(r.Window.End, next); err != nil {
 			return fmt.Errorf("persist counter baselines: %w", err)
 		}
@@ -575,15 +841,22 @@ type counterState struct {
 	WindowEnd time.Time                `json:"window_end"`
 	Series    map[string]counterSample `json:"series"`
 	Observed  map[string]time.Time     `json:"observed"`
+	// Shared: metric|cluster -> start of the first window it was not read
+	// because the cluster shares its namespace (see holdShared).
+	Shared map[string]time.Time `json:"shared,omitempty"`
 }
 
 func (s counterState) clone() counterState {
-	out := counterState{WindowEnd: s.WindowEnd, Series: make(map[string]counterSample, len(s.Series)), Observed: make(map[string]time.Time, len(s.Observed))}
+	out := counterState{WindowEnd: s.WindowEnd, Series: make(map[string]counterSample, len(s.Series)),
+		Observed: make(map[string]time.Time, len(s.Observed)), Shared: make(map[string]time.Time, len(s.Shared))}
 	for k, v := range s.Series {
 		out.Series[k] = v
 	}
 	for k, v := range s.Observed {
 		out.Observed[k] = v
+	}
+	for k, v := range s.Shared {
+		out.Shared[k] = v
 	}
 	return out
 }
@@ -649,7 +922,16 @@ func (s *counterStore) observed(key string) (time.Time, bool) {
 	return v, ok
 }
 
-func (s *counterStore) next(updates map[string]counterSample, seen map[string]time.Time) counterState {
+// sharedSince returns when a metric of a cluster stopped being read because
+// the cluster shares its namespace.
+func (s *counterStore) sharedSince(key string) (time.Time, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v, ok := s.cur.Shared[key]
+	return v, ok
+}
+
+func (s *counterStore) next(updates map[string]counterSample, seen, shared map[string]time.Time, unshared []string) counterState {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	n := s.cur.clone()
@@ -658,6 +940,12 @@ func (s *counterStore) next(updates map[string]counterSample, seen map[string]ti
 	}
 	for k, v := range seen {
 		n.Observed[k] = v
+	}
+	for k, v := range shared {
+		n.Shared[k] = v
+	}
+	for _, k := range unshared {
+		delete(n.Shared, k)
 	}
 	return n
 }
@@ -702,6 +990,13 @@ func (s *counterStore) prune(cutoff time.Time) {
 	for k, v := range s.cur.Series {
 		if v.T < ms {
 			delete(s.cur.Series, k)
+		}
+	}
+	// A cluster still sharing its namespace is marked again; one that left
+	// is forgotten.
+	for k, v := range s.cur.Shared {
+		if v.Before(cutoff) {
+			delete(s.cur.Shared, k)
 		}
 	}
 }

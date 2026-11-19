@@ -1,6 +1,10 @@
 # vBilling Helm values. Every value maps to an environment variable; see
 # docs/configuration.html for the full reference.
 
+# Always 1 (0 stops vBilling). vBilling runs as one instance: it holds the
+# Lease "vbilling" in its namespace while it meters, and a second instance
+# would wait, not Ready. Restarts are safe: the ledger and backfill resume
+# where it stopped.
 replicaCount: 1
 
 image:

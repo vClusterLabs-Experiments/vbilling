@@ -24,6 +24,19 @@ func UsageStart(ctx context.Context) (time.Time, bool) {
 	return t, ok && !t.IsZero()
 }
 
+// lateRecordLead is how far before its first usage a tenant with no
+// creation time is subscribed. Such a tenant has no cluster: it only sends
+// gateway records, and records arrive late. A gateway retries a failed
+// push, and pulls read request logs an hour back (the LiteLLM pull, and
+// every pull by default). A late record is billed as an adjustment dated
+// by its request, before the usage its subscription was created for, and a
+// subscription that started after it never invoices it: Stripe would get
+// it dead-lettered, Lago ignores it. Starting earlier still would cover
+// pulls with longer lookbacks, but would also charge base fees and flat
+// prices for time with no usage, so later stragglers stay visible as dead
+// letters (Stripe) instead.
+const lateRecordLead = time.Hour
+
 // SubscriptionStart is when a billing platform subscription created now
 // should start. Billing platforms count usage from a subscription's start,
 // and a subscription created when the first usage is delivered starts after
@@ -33,8 +46,12 @@ func UsageStart(ctx context.Context) (time.Time, bool) {
 // earlier UTC day than today: an old tenant that is new to the billing
 // platform starts its billing cycle today, not at some date it had no usage
 // to show for. Usage from earlier days (backfill, held usage) does move it:
-// that usage must count. Zero means "now".
+// that usage must count. A tenant with no creation time starts
+// lateRecordLead before its usage, at the hour. Zero means "now".
 func SubscriptionStart(created, usageStart, now time.Time) time.Time {
+	if created.IsZero() && !usageStart.IsZero() {
+		usageStart = usageStart.Add(-lateRecordLead).Truncate(time.Hour)
+	}
 	var start time.Time
 	if !created.IsZero() && created.Before(now) {
 		// Usage is dated by its window's start, and windows divide an hour:

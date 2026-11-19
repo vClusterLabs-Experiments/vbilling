@@ -1,11 +1,15 @@
 package records
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
 
+	"k8s.io/client-go/kubernetes/fake"
+
 	"github.com/vclusterlabs-experiments/vbilling/internal/health"
+	"github.com/vclusterlabs-experiments/vbilling/internal/lease"
 	"github.com/vclusterlabs-experiments/vbilling/internal/usage"
 )
 
@@ -57,51 +61,93 @@ func TestReview2RecordsSurviveACollectionIntervalChange(t *testing.T) {
 	}
 }
 
-// TestReview2TwoReplicasSplitRecordsKeepTheFullTotal: the README says two
-// replicas (each with its own PVC) are safe because both compute the same
-// deterministic IDs. That holds for Kubernetes usage, which both replicas
-// measure in full. Records are pushed to the Service, so each replica
-// receives a share of a window's requests. Each replica's aggregator then
-// commits a base event with the same ID (the ID excludes the quantity) but
-// only its own share as the quantity. Stripe (identifier), Metronome and
-// Lago (transaction_id) keep the first copy of an ID, so a share is never
-// invoiced.
+// TestReview2TwoReplicasSplitRecordsKeepTheFullTotal: the review ran two
+// replicas, each with its own ledger, behind one Service. The gateway's
+// posts split between them, both committed their share of a window under
+// the same event ID (the ID excludes the quantity), and billing platforms
+// keep one copy of an ID: a share was never invoiced.
+//
+// v0.3.1 does not tolerate a split, it prevents one. vBilling runs as one
+// instance: a process takes the vbilling Lease before it takes records,
+// aggregates, delivers or enforces (cmd/vbilling holdLease), a second one
+// waits without being Ready, and the chart refuses replicaCount above 1.
+// This runs two processes the way the binary does: B starts while A holds
+// the Lease and never aggregates or commits anything, every request of the
+// window reaches A, and A bills all 1000 tokens. B takes over only once A
+// released the Lease.
 func TestReview2TwoReplicasSplitRecordsKeepTheFullTotal(t *testing.T) {
+	kube := fake.NewSimpleClientset()
+	leaseOpts := func(id string) lease.Options {
+		return lease.Options{Namespace: "vbilling-system", Identity: id, LeaseDuration: 2 * time.Second,
+			RenewDeadline: 1500 * time.Millisecond, RetryPeriod: 200 * time.Millisecond, Logf: func(string, ...any) {}}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	a := newRig(t, Options{})
 	defer a.close()
 	b := newRig(t, Options{})
 	defer b.close()
 
-	// 10 requests for one tenant in the window 10:00-10:01, 100 output
-	// tokens each. The Service load-balances the gateway's posts: requests
-	// 0-2 reach replica A, 3-9 reach replica B.
-	for i := 0; i < 10; i++ {
-		r := a
-		if i >= 3 {
-			r = b
-		}
-		r.clk.set(t0.Add(time.Duration(i+1) * time.Second))
-		r.post(t, Native, native(fmt.Sprintf("req-%d", i), "tenant-a", t0.Add(time.Duration(i)*time.Second), 0, 100))
+	heldA, err := lease.Acquire(ctx, kube, leaseOpts("a"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	// Both replicas commit the window once it settles.
-	for _, r := range []*rig{a, b} {
-		r.clk.set(t0.Add(2 * time.Minute))
-		if err := r.agg.Tick(); err != nil {
-			t.Fatal(err)
+	// B starts. Like cmd/vbilling, it runs its aggregator (and its API,
+	// which takes records) only once it holds the Lease.
+	bRunning, bDone := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(bDone)
+		heldB, err := lease.Acquire(ctx, kube, leaseOpts("b"))
+		if err != nil {
+			return
 		}
+		defer heldB.Release()
+		close(bRunning)
+		b.clk.set(t0.Add(2 * time.Minute))
+		if err := b.agg.Tick(); err != nil {
+			t.Error(err)
+		}
+	}()
+
+	// 10 requests for one tenant in the window 10:00-10:01, 100 output
+	// tokens each. B is not Ready, so the Service sends every post to A.
+	for i := 0; i < 10; i++ {
+		a.clk.set(t0.Add(time.Duration(i+1) * time.Second))
+		a.post(t, Native, native(fmt.Sprintf("req-%d", i), "tenant-a", t0.Add(time.Duration(i)*time.Second), 0, 100))
+	}
+	a.clk.set(t0.Add(2 * time.Minute))
+	if err := a.agg.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	// Longer than two lease durations: A renews, B keeps waiting.
+	select {
+	case <-bRunning:
+		t.Fatal("a second instance started while the first holds the Lease")
+	case <-time.After(4500 * time.Millisecond):
+	}
+	if wm, ok := b.ledger.Watermark(SourceBase); ok || b.ledger.Committed() != 0 {
+		t.Fatalf("the waiting instance committed to its ledger (watermark %s, seq %d)", wm, b.ledger.Committed())
+	}
+	if got := total(a.ledgerEvents(t), "tokens_out"); got != 1000 {
+		t.Fatalf("the instance holding the Lease billed %v output tokens, want 1000 (10 requests x 100)", got)
 	}
 
-	// A billing platform deduplicates on the event ID and keeps the first
-	// copy it receives: replica A delivers first.
+	// A stops; only now does B take over.
+	heldA.Release()
+	select {
+	case <-bRunning:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the second instance did not take over the released Lease")
+	}
+	<-bDone
+	// What billing platforms keep after deduplicating on event IDs: one
+	// instance committed the window, in full.
 	kept := map[string]usage.Event{}
 	for _, r := range []*rig{a, b} {
 		for id, e := range r.ledgerEvents(t) {
-			if e.Metric != "tokens_out" {
-				continue
-			}
 			if prev, dup := kept[id]; dup {
 				if prev.Quantity != e.Quantity {
-					t.Errorf("replicas committed event %s with different quantities (%v and %v): a billing platform keeps only the first", id, prev.Quantity, e.Quantity)
+					t.Errorf("both instances committed event %s (%v and %v)", id, prev.Quantity, e.Quantity)
 				}
 				continue
 			}
@@ -109,6 +155,6 @@ func TestReview2TwoReplicasSplitRecordsKeepTheFullTotal(t *testing.T) {
 		}
 	}
 	if got := total(kept, "tokens_out"); got != 1000 {
-		t.Errorf("billed %v output tokens after the platform's dedupe, want 1000 (10 requests x 100)", got)
+		t.Errorf("billed %v output tokens after the platform's dedupe, want 1000", got)
 	}
 }

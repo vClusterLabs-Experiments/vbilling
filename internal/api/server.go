@@ -585,17 +585,24 @@ func (s *Server) usage(w http.ResponseWriter, r *http.Request) {
 	}
 	rows := map[string]*agg{}
 	total := 0
-	err = s.spool.Scan(from, to, func(e *usage.Event) error {
-		if e.WindowStart.Before(from) || !e.WindowStart.Before(to) || !keep(e) {
-			return nil
-		}
+	groupKey := func(e *usage.Event) string {
 		vals := make([]string, len(groupBy))
 		for i, k := range groupBy {
 			vals[i] = field(e, k)
 		}
-		key := strings.Join(append(vals, e.Metric), "\x00")
+		return strings.Join(append(vals, e.Metric), "\x00")
+	}
+	repeated, err := s.scanUsage(from, to, func(e *usage.Event) error {
+		if e.WindowStart.Before(from) || !e.WindowStart.Before(to) || !keep(e) {
+			return nil
+		}
+		key := groupKey(e)
 		a, ok := rows[key]
 		if !ok {
+			vals := make([]string, len(groupBy))
+			for i, k := range groupBy {
+				vals[i] = field(e, k)
+			}
 			a = &agg{group: vals, metric: e.Metric, unit: e.Unit}
 			rows[key] = a
 		}
@@ -608,6 +615,9 @@ func (s *Server) usage(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "scan ledger: %v", err)
 		return
 	}
+	// Parts of those totals a destination refused for good or holds until
+	// priced, by destination: not billed there (yet).
+	und := s.undeliveredUsage(from, to, keep, groupKey)
 	keys := make([]string, 0, len(rows))
 	for k := range rows {
 		keys = append(keys, k)
@@ -618,10 +628,11 @@ func (s *Server) usage(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/csv")
 		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="usage-%s-%s.csv"`, from.Format("20060102"), to.Format("20060102")))
 		cw := csv.NewWriter(w)
-		cw.Write(append(append([]string{}, groupBy...), "metric", "unit", "quantity", "events"))
+		cw.Write(append(append([]string{}, groupBy...), "metric", "unit", "quantity", "events", "dead_lettered", "held"))
 		for _, k := range keys {
 			a := rows[k]
-			cw.Write(append(append([]string{}, a.group...), a.metric, a.unit, strconv.FormatFloat(usage.Round(a.quantity), 'f', -1, 64), strconv.Itoa(a.events)))
+			cw.Write(append(append([]string{}, a.group...), a.metric, a.unit, strconv.FormatFloat(usage.Round(a.quantity), 'f', -1, 64), strconv.Itoa(a.events),
+				destinationsCSV(und.dead[k]), destinationsCSV(und.held[k])))
 		}
 		cw.Flush()
 		return
@@ -633,10 +644,17 @@ func (s *Server) usage(w http.ResponseWriter, r *http.Request) {
 		for i, g := range groupBy {
 			row[g] = a.group[i]
 		}
+		if d := byDestination(und.dead[k]); d != nil {
+			row["dead_lettered"] = d
+		}
+		if h := byDestination(und.held[k]); h != nil {
+			row["held"] = h
+		}
 		out = append(out, row)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"from": from, "to": to, "group_by": groupBy, "events": total, "rows": out,
-		"note": "Unrated usage from the vBilling ledger; prices and invoices come from your billing backend."})
+	writeJSON(w, http.StatusOK, map[string]any{"from": from, "to": to, "group_by": groupBy, "events": total, "repeated_ids": repeated, "rows": out,
+		"note": "Unrated usage from the vBilling ledger (and its archive), each event ID counted once. dead_lettered and held are the parts of a row's quantity " +
+			"a destination refused for good or holds until priced, by destination. Prices and invoices come from your billing backend."})
 }
 
 // --- raw export ---
@@ -667,7 +685,7 @@ func (s *Server) exportEvents(w http.ResponseWriter, r *http.Request) {
 	enc := json.NewEncoder(w)
 	n := 0
 	errStop := errors.New("limit reached")
-	err = s.spool.Scan(from, to, func(e *usage.Event) error {
+	err = s.spool.ScanAll(from, to, func(e *usage.Event) error {
 		if e.WindowStart.Before(from) || !e.WindowStart.Before(to) || !keep(e) {
 			return nil
 		}
@@ -990,7 +1008,9 @@ func (s *Server) reconcileOne(ctx context.Context, d destinations.Destination, r
 	// all of that tenant's usage of the metric. Summing only the filtered
 	// events (one SKU, one tenant cluster) would mismatch by construction.
 	selected := map[key]bool{}
-	err := s.spool.Scan(from, to, func(e *usage.Event) error {
+	// Each event ID once, as billing platforms keep one copy; dead letters
+	// are parked once per event ID.
+	_, err := s.scanUsage(from, to, func(e *usage.Event) error {
 		if in(e) {
 			k := key{e.Tenant, e.Metric}
 			ledger[k] += e.Quantity
