@@ -84,14 +84,16 @@ type SKUGate func(tenant, sku string) (stored string, overflow bool)
 // before records are ingested.
 func (in *Ingester) UseSKUGate(g SKUGate) { in.skuGate = g }
 
-// recordValues checks a pushed record's SKU and dimension values, which
-// reach dashboards, exports and billing platforms.
+// recordValues checks a pushed record's values and dimensions, which reach
+// dashboards, exports and billing platforms.
 func recordValues(rec *Record) string {
-	if err := usage.CheckValue(rec.SKU); err != nil {
-		return "sku " + err.Error()
+	for _, f := range []struct{ name, v string }{{"sku", rec.SKU}, {"region", rec.Region}, {"project", rec.Project}, {"tenant_cluster", rec.TenantCluster}} {
+		if err := usage.CheckValue(f.v); err != nil {
+			return f.name + " " + err.Error()
+		}
 	}
-	if err := usage.CheckValue(rec.TenantCluster); err != nil {
-		return "tenant_cluster " + err.Error()
+	if len(rec.Dimensions) > usage.MaxDimensions {
+		return fmt.Sprintf("%d dimensions, more than %d", len(rec.Dimensions), usage.MaxDimensions)
 	}
 	keys := make([]string, 0, len(rec.Dimensions))
 	for k := range rec.Dimensions {
@@ -99,6 +101,9 @@ func recordValues(rec *Record) string {
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
+		if usage.ReservedDimension(k) {
+			return fmt.Sprintf("dimension %s is the name of a property of the usage itself; rename it", k)
+		}
 		if err := usage.CheckValue(rec.Dimensions[k]); err != nil {
 			return fmt.Sprintf("dimension %s %v", k, err)
 		}
@@ -107,12 +112,27 @@ func recordValues(rec *Record) string {
 }
 
 // makeSafe repairs a pulled record's values instead of refusing it: the
-// request was served, and dropping its usage would be worse.
+// request was served, and dropping its usage would be worse. Dimensions
+// named after a property of the usage itself are dropped, and so are those
+// past usage.MaxDimensions (in key order).
 func makeSafe(rec *Record) {
 	rec.SKU = usage.SafeValue(rec.SKU)
+	rec.Region = usage.SafeValue(rec.Region)
+	rec.Project = usage.SafeValue(rec.Project)
 	rec.TenantCluster = usage.SafeValue(rec.TenantCluster)
-	for k, v := range rec.Dimensions {
-		rec.Dimensions[k] = usage.SafeValue(v)
+	keys := make([]string, 0, len(rec.Dimensions))
+	for k := range rec.Dimensions {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	kept := 0
+	for _, k := range keys {
+		if usage.ReservedDimension(k) || kept == usage.MaxDimensions {
+			delete(rec.Dimensions, k)
+			continue
+		}
+		rec.Dimensions[k] = usage.SafeValue(rec.Dimensions[k])
+		kept++
 	}
 }
 

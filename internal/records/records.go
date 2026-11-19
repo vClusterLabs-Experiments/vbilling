@@ -201,6 +201,14 @@ func LoadFormats(path string, litellm bool) (Formats, error) {
 				}
 			}
 		}
+		if len(m.Dimensions) > usage.MaxDimensions {
+			return nil, fmt.Errorf("%s: format %q has %d dimensions, more than %d", path, name, len(m.Dimensions), usage.MaxDimensions)
+		}
+		for k := range m.Dimensions {
+			if usage.ReservedDimension(k) {
+				return nil, fmt.Errorf("%s: format %q: dimension %q is the name of a property of the usage itself (value, unit, sku, region, project, resource_id, source, window_start, window_end, schema_version, accuracy, estimate); rename it", path, name, k)
+			}
+		}
 		m.TimePrecision = time.Duration(m.TimeRound)
 		f[name] = m
 	}

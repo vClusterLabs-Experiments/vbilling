@@ -634,11 +634,11 @@ func (s *Server) usage(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/csv")
 		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="usage-%s-%s.csv"`, from.Format("20060102"), to.Format("20060102")))
 		cw := csv.NewWriter(w)
-		cw.Write(append(append([]string{}, groupBy...), "metric", "unit", "quantity", "events", "dead_lettered", "held"))
+		cw.Write(csvRow(append(append([]string{}, groupBy...), "metric", "unit", "quantity", "events", "dead_lettered", "held")...))
 		for _, k := range keys {
 			a := rows[k]
-			cw.Write(append(append([]string{}, a.group...), a.metric, a.unit, strconv.FormatFloat(usage.Round(a.quantity), 'f', -1, 64), strconv.Itoa(a.events),
-				destinationsCSV(und.dead[k]), destinationsCSV(und.held[k])))
+			cw.Write(csvRow(append(append([]string{}, a.group...), a.metric, a.unit, strconv.FormatFloat(usage.Round(a.quantity), 'f', -1, 64), strconv.Itoa(a.events),
+				destinationsCSV(und.dead[k]), destinationsCSV(und.held[k]))...))
 		}
 		cw.Flush()
 		return
@@ -661,6 +661,16 @@ func (s *Server) usage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"from": from, "to": to, "group_by": groupBy, "events": total, "repeated_ids": repeated, "rows": out,
 		"note": "Unrated usage from the vBilling ledger (and its archive), each event ID counted once. dead_lettered and held are the parts of a row's quantity " +
 			"a destination refused for good or holds until priced, by destination. Prices and invoices come from your billing backend."})
+}
+
+// csvRow escapes every cell that a spreadsheet would read as a formula
+// (usage.CSVCell): tenants, IDs, SKUs and dimensions come from tenants and
+// gateways.
+func csvRow(cells ...string) []string {
+	for i, c := range cells {
+		cells[i] = usage.CSVCell(c)
+	}
+	return cells
 }
 
 // --- raw export ---
@@ -705,8 +715,8 @@ func (s *Server) exportEvents(w http.ResponseWriter, r *http.Request) {
 				dims = append(dims, k+"="+v)
 			}
 			sort.Strings(dims)
-			return cw.Write([]string{e.ID, e.Tenant, e.Metric, strconv.FormatFloat(e.Quantity, 'f', -1, 64), e.Unit,
-				e.WindowStart.Format(time.RFC3339), e.WindowEnd.Format(time.RFC3339), e.Region, e.Project, e.SKU, e.ResourceID, strings.Join(dims, ";"), e.Source})
+			return cw.Write(csvRow(e.ID, e.Tenant, e.Metric, strconv.FormatFloat(e.Quantity, 'f', -1, 64), e.Unit,
+				e.WindowStart.Format(time.RFC3339), e.WindowEnd.Format(time.RFC3339), e.Region, e.Project, e.SKU, e.ResourceID, strings.Join(dims, ";"), e.Source))
 		}
 		return enc.Encode(e)
 	})
@@ -741,12 +751,17 @@ func reservedID(id string) bool {
 	return false
 }
 
-// valueProblems checks the SKU and dimension values of an ingested event.
+// valueProblems checks the values and dimensions of an ingested event.
 // They reach dashboards, exports and billing platforms.
 func valueProblems(e *usage.Event) []string {
 	var out []string
-	if err := usage.CheckValue(e.SKU); err != nil {
-		out = append(out, "sku "+err.Error())
+	for _, f := range []struct{ name, v string }{{"sku", e.SKU}, {"region", e.Region}, {"project", e.Project}, {"resource_id", e.ResourceID}} {
+		if err := usage.CheckValue(f.v); err != nil {
+			out = append(out, f.name+" "+err.Error())
+		}
+	}
+	if len(e.Dimensions) > usage.MaxDimensions {
+		return append(out, fmt.Sprintf("%d dimensions, more than %d", len(e.Dimensions), usage.MaxDimensions))
 	}
 	keys := make([]string, 0, len(e.Dimensions))
 	for k := range e.Dimensions {
@@ -754,6 +769,9 @@ func valueProblems(e *usage.Event) []string {
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
+		if usage.ReservedDimension(k) {
+			out = append(out, fmt.Sprintf("dimension %s is the name of a property of the event itself; rename it", k))
+		}
 		if err := usage.CheckValue(e.Dimensions[k]); err != nil {
 			out = append(out, fmt.Sprintf("dimension %s %v", k, err))
 		}

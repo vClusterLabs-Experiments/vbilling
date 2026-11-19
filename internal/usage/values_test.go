@@ -30,6 +30,33 @@ func TestCheckValueRefusesMarkupAndControlCharacters(t *testing.T) {
 	}
 }
 
+// Values that pass CheckValue can still start a spreadsheet formula, so
+// CSV cells are escaped on their own.
+func TestCSVCellEscapesFormulas(t *testing.T) {
+	for in, want := range map[string]string{
+		"=HYPERLINK(\"x\")": "'=HYPERLINK(\"x\")", "+1": "'+1", "-2": "'-2", "@SUM(A1)": "'@SUM(A1)", "\tx": "'\tx", "\rx": "'\rx",
+		"": "", "acme": "acme", "NVIDIA-H100": "NVIDIA-H100", "0.5": "0.5", "a=b": "a=b",
+	} {
+		if got := CSVCell(in); got != want {
+			t.Errorf("CSVCell(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestReservedDimensions(t *testing.T) {
+	for _, k := range []string{"value", "unit", "sku", "region", "project", "resource_id", "source", "window_start", "window_end",
+		"schema_version", "accuracy", "estimate"} {
+		if !ReservedDimension(k) {
+			t.Errorf("%s must be reserved", k)
+		}
+	}
+	for _, k := range []string{DimTenantCluster, DimGPUType, DimNode, "model", "endpoint"} {
+		if ReservedDimension(k) {
+			t.Errorf("%s is an ordinary dimension", k)
+		}
+	}
+}
+
 func TestSafeValueKeepsValidValuesAndRepairsTheRest(t *testing.T) {
 	if got := SafeValue("NVIDIA-H100"); got != "NVIDIA-H100" {
 		t.Fatalf("a valid value changed: %q", got)
