@@ -145,10 +145,11 @@ prometheus:
 
 platform:
   cluster: "" # vCluster Platform cluster name of this control plane cluster (multi-cluster setups)
-  # tenantSource: platform. Owners come from Platform Tenants, Projects and
-  # VirtualClusterInstances; clusters with their own nodes are reached through
-  # the Platform proxy with the same access key (a vbilling-kubeconfig Secret
-  # still overrides it per cluster). See docs/private-nodes.html#platform.
+  # tenantSource: platform. Owners and vbilling.vcluster.com/ settings come
+  # from Platform Tenants and Projects only (settings on a cluster's workload,
+  # namespace or instance are ignored); clusters with their own nodes are
+  # reached only through the Platform proxy with the same access key
+  # (vbilling-kubeconfig Secrets are not read). See docs/security.html.
   url: "" # e.g. https://platform.example.com
   accessKey: "" # prefer existingSecret
   existingSecret: "" # Secret with key access-key

@@ -245,8 +245,8 @@ func main() {
 			Retention:     retention,
 		}
 		if owners != nil && cfg.PlatformProxy {
-			topts.Platform = owners // the vbilling-kubeconfig Secret still overrides it per cluster
-			log.Printf("Tenant APIs: clusters bound to vCluster Platform are reached through its proxy at %s", owners.Client().Host())
+			topts.Platform = owners // the only route: kubeconfig Secrets are not read in Platform mode
+			log.Printf("Tenant APIs: clusters are reached only through the vCluster Platform proxy at %s", owners.Client().Host())
 		}
 		mgr := tenantapi.New(ctx, kube, topts)
 		coll.UseTenantAPI(mgr)

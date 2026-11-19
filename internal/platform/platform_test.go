@@ -240,8 +240,8 @@ func TestPlatform412TenantOwnsProjects(t *testing.T) {
 		t.Fatalf("train-1: tenant %s plan %q email %q name %q exclude %q project %s binding %+v",
 			tr.TenantID(discovery.TenantPerPlatform), tr.Meta("plan"), tr.Meta("email"), tr.Meta("display-name"), tr.Meta("exclude"), tr.Project, tr.Platform)
 	}
-	if tr.Meta("prometheus-url") != "http://prom.vc-train-1:9090" {
-		t.Errorf("per-cluster settings stay on the cluster: %q", tr.Meta("prometheus-url"))
+	if tr.Meta("prometheus-url") != "" {
+		t.Errorf("a metering setting on the workload must not survive the binding: %q", tr.Meta("prometheus-url"))
 	}
 	if in := got["infer-1"]; in.TenantID(discovery.TenantPerPlatform) != "tenant-acme" || in.Platform.InstancePhase != "Sleeping" {
 		t.Errorf("infer-1: %+v", in.Platform)

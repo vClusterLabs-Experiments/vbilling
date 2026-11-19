@@ -72,22 +72,20 @@ func (b *PlatformBinding) Same(o *PlatformBinding) bool {
 	return b.InstanceUID == o.InstanceUID && b.Project == o.Project && b.Tenant == o.Tenant && b.TenantID() == o.TenantID()
 }
 
-// AccountSettings are the vbilling.vcluster.com/ settings that decide who is
-// billed and at what price. For a cluster bound to vCluster Platform they
-// come only from the Tenant or Project: workload, namespace and
-// VirtualClusterInstance metadata can be set by the people who create
-// clusters (vcluster.yaml sets workload labels), so it never decides them.
-var AccountSettings = map[string]bool{
-	"tenant": true, "project": true, "display-name": true, "email": true, "currency": true,
-	"plan": true, "tenant-class": true, "cost-center": true, "aliases": true, "exclude": true,
-	"stripe-customer-id": true, "metronome-customer-id": true,
-}
+// stateAnnotations are the workload annotations vBilling writes itself to
+// mark its own pauses. They are state, not settings, so binding a cluster
+// to its Platform owner keeps them.
+var stateAnnotations = map[string]bool{AnnotationPausedBy: true, AnnotationPausedAt: true, AnnotationPausedReplicas: true}
 
-// ApplyPlatform binds c to b: tenant, project, instance and account
-// settings come from the Platform objects, and account settings found on
-// the workload or namespace are dropped. Other settings (for example
-// prometheus-url) stay per cluster; the Tenant or Project only supplies
-// defaults for them.
+// ApplyPlatform binds c to b. Tenant, project, instance and every
+// vbilling.vcluster.com/ setting come from the Platform objects: the
+// settings of the Tenant, else the Project, plus the operator's own
+// configuration. Settings found on the cluster's workload, namespace or
+// VirtualClusterInstance are dropped, whatever they are: the people who
+// create clusters write that metadata (vcluster.yaml sets workload labels
+// and annotations), and they must never choose who pays, at what price, or
+// how their usage is read (prometheus-url, prometheus-matchers,
+// prometheus-source).
 func (c *TenantCluster) ApplyPlatform(b PlatformBinding) {
 	c.Platform = &b
 	c.Project = b.Project
@@ -95,24 +93,23 @@ func (c *TenantCluster) ApplyPlatform(b PlatformBinding) {
 	if b.InstanceDisplayName != "" {
 		c.DisplayName = b.InstanceDisplayName
 	}
-	c.Labels = dropAccountSettings(c.Labels)
-	c.Annotations = dropAccountSettings(c.Annotations)
+	c.Labels = dropSettings(c.Labels)
+	c.Annotations = dropSettings(c.Annotations)
 	for k, v := range b.Settings {
 		if k == "project" {
 			continue // the Platform project is the project
 		}
-		key := AnnotationPrefix + k
-		if AccountSettings[k] || (c.Annotations[key] == "" && c.Labels[key] == "") {
-			c.Annotations[key] = v
-		}
+		c.Annotations[AnnotationPrefix+k] = v
 	}
 	c.Annotations[AnnotationPrefix+"display-name"] = b.AccountDisplayName()
 }
 
-func dropAccountSettings(m map[string]string) map[string]string {
+// dropSettings returns m without vbilling.vcluster.com/ settings, keeping
+// vBilling's own state annotations.
+func dropSettings(m map[string]string) map[string]string {
 	out := make(map[string]string, len(m))
 	for k, v := range m {
-		if s, ok := strings.CutPrefix(k, AnnotationPrefix); ok && AccountSettings[s] {
+		if strings.HasPrefix(k, AnnotationPrefix) && !stateAnnotations[k] {
 			continue
 		}
 		out[k] = v
