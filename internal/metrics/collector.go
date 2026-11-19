@@ -83,6 +83,10 @@ type Collector struct {
 	// ownNodes records whether each cluster has nodes of its own that
 	// metering bills (OwnNodes).
 	ownNodes map[string]bool
+
+	// nodeHistory is what vBilling first saw of each node of a cluster's
+	// own, and the most GPUs it had (privateNodeHistory).
+	nodeHistory *privateNodeHistory
 }
 
 // UseGraveyard makes the collector bill pods and nodes deleted between
@@ -149,7 +153,7 @@ func NewCollector(kube kubernetes.Interface, mc metricsclient.Interface, opts Op
 		opts.PauseKeep, _ = pause.ParseKeep(pause.DefaultKeep)
 	}
 	c := &Collector{kube: kube, metrics: mc, opts: opts, excludedTenantNS: map[string]bool{}, lastInv: map[string]*tenantInventory{},
-		ownNodes: map[string]bool{}}
+		ownNodes: map[string]bool{}, nodeHistory: newPrivateNodeHistory()}
 	for _, ns := range opts.TenantExcludeNamespaces {
 		c.excludedTenantNS[ns] = true
 	}
@@ -354,15 +358,19 @@ func (c *Collector) collect(ctx context.Context, targets []Target, windows []Win
 	}
 	for _, t := range targets {
 		// External tenant clusters have nothing on this control plane cluster.
+		var syncedOn map[string]bool
 		if !onlyTenantAPI && !t.Cluster.External {
-			if err := c.collectTarget(ctx, t, nodes, dra, windows, accs, &st); err != nil {
+			on, err := c.collectTarget(ctx, t, nodes, dra, windows, accs, &st)
+			if err != nil {
 				return nil, st, fmt.Errorf("meter %s: %w", t.Cluster.ExternalID(), err)
 			}
+			syncedOn = on
 		}
 		if c.tenants != nil {
-			c.collectTenant(ctx, t, nodes, windows, accs, &st)
+			c.collectTenant(ctx, t, nodes, syncedOn, windows, accs, &st)
 		}
 	}
+	c.saveNodeHistory()
 	for _, w := range windows {
 		var evs []usage.Event
 		for _, ev := range accs[w.End].list() {
@@ -388,7 +396,9 @@ func (c *Collector) collect(ctx context.Context, targets []Target, windows []Win
 	return out, st, nil
 }
 
-func (c *Collector) collectTarget(ctx context.Context, t Target, nodes map[string]*nodeInfo, dra *draIndex, windows []Window, accs map[time.Time]*accumulator, st *Stats) error {
+// collectTarget meters what a cluster runs on the control plane cluster. It
+// returns the control plane cluster nodes its synced pods run on (hostViews).
+func (c *Collector) collectTarget(ctx context.Context, t Target, nodes map[string]*nodeInfo, dra *draIndex, windows []Window, accs map[time.Time]*accumulator, st *Stats) (map[string]bool, error) {
 	cl := t.Cluster
 	ns := cl.Namespace
 	extID := cl.ExternalID()
@@ -397,11 +407,13 @@ func (c *Collector) collectTarget(ctx context.Context, t Target, nodes map[strin
 
 	podList, err := c.kube.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{})
 	if err != nil {
-		return fmt.Errorf("list pods: %w", err)
+		return nil, fmt.Errorf("list pods: %w", err)
 	}
 	c.graveyard.SeenPods(podList.Items, c.opts.Now())
 	pods := withDeleted(podList.Items, c.graveyard.Pods(ns))
 	owned := ownedFilter(entryLabels(pods), cl.Name, c.opts.MeterControlPlane)
+	syncedOn := map[string]bool{}
+	syncedNodes(syncedOn, pods, func(p *corev1.Pod) bool { return !isControlPlane(p.Labels, cl.Name) && owned(p.Labels) })
 
 	// Dedicated nodes: billed whole, so pods on them are not billed again.
 	dedicated := map[string]*nodeInfo{}
@@ -433,14 +445,14 @@ func (c *Collector) collectTarget(ctx context.Context, t Target, nodes map[strin
 	// Storage: bound PVCs synced from the tenant cluster, per storage class.
 	pvcs, err := c.kube.CoreV1().PersistentVolumeClaims(ns).List(ctx, metav1.ListOptions{})
 	if err != nil {
-		return fmt.Errorf("list pvcs: %w", err)
+		return nil, fmt.Errorf("list pvcs: %w", err)
 	}
 	meterVolumes(pvcs.Items, ownedFilter(pvcLabels(pvcs.Items), cl.Name, c.opts.MeterControlPlane), windows, accs, base, c.clip(t, pause.KeepStorage))
 
 	// Load balancers with an assigned address.
 	svcs, err := c.kube.CoreV1().Services(ns).List(ctx, metav1.ListOptions{})
 	if err != nil {
-		return fmt.Errorf("list services: %w", err)
+		return nil, fmt.Errorf("list services: %w", err)
 	}
 	meterLoadBalancers(svcs.Items, func(svc *corev1.Service) bool {
 		return !isControlPlane(svc.Labels, cl.Name) || c.opts.MeterControlPlane
@@ -467,7 +479,7 @@ func (c *Collector) collectTarget(ctx context.Context, t Target, nodes map[strin
 		}
 	}
 
-	return nil
+	return syncedOn, nil
 }
 
 // podUsage returns current CPU cores and memory bytes per pod name.

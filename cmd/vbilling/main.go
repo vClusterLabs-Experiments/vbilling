@@ -224,6 +224,11 @@ func main() {
 	coll.UseDynamic(dynamicClient)
 	coll.UsePauses(pauses)
 	coll.UseHealth(sources)
+	// What vBilling first saw of each node of a cluster's own, and the most
+	// GPUs it had: a relabel inside the cluster never lowers its bill.
+	if err := coll.UsePrivateNodeHistory(filepath.Join(cfg.DataDir, "private-nodes.json")); err != nil {
+		log.Fatalf("private node history: %v", err)
+	}
 	prom, err := coll.NewPromSource(metrics.PromOptions{
 		SourceLabel: cfg.PromSourceLabel,
 		Lookback:    cfg.PromLookback,

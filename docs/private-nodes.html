@@ -326,9 +326,10 @@
 
       <h2 id="fairness">Downtime</h2>
       <p>If a dedicated node is NotReady, or carries a taint listed in <code>UNHEALTHY_NODE_TAINTS</code>, its node-hours stop and its GPUs are recorded as <code>vcluster_gpu_downtime_hours</code> (informational, never invoiced), from the moment the condition or taint appeared. A node that stops reporting (a preempted spot VM, a host that loses power) is marked Unknown only after the node controller's grace period, 40 to 50 seconds. For such a node the downtime starts at its last proof of life instead: the later of its last status heartbeat and its last Lease renewal, which the reader role above may <code>get</code>. On GCP, a preempted A100 spot node was billed until its last heartbeat, not the 59 seconds more until the Unknown mark.</p>
+      <p>A cluster's own node (<a href="#private">below</a>) is down only while its Ready condition is False or Unknown, dated the same way. Taints on it are ignored: whoever runs the cluster writes them, and a taint can carry an effect that evicts nothing.</p>
 
       <h2 id="private">Private Nodes, Auto Nodes and Standalone</h2>
-      <p>With Private Nodes, vCluster syncs nothing to the control plane cluster: the nodes, their pods and their volumes exist only in the cluster. vBilling meters these clusters through their own API. Every node the cluster's API reports that the control plane cluster does not have (and that is not one of vCluster's placeholder nodes, labeled <code>vcluster.loft.sh/fake-node</code>) is a private node, billed like a dedicated node with <code>billing_mode=private_node</code>. The cluster's volumes and load balancers are billed as well. Shared clusters are never billed twice, even when vBilling can read their API.</p>
+      <p>With Private Nodes, vCluster syncs nothing to the control plane cluster: the nodes, their pods and their volumes exist only in the cluster. vBilling meters these clusters through their own API. Every node the cluster's API reports is a private node, billed like a dedicated node with <code>billing_mode=private_node</code>, unless it is a control plane cluster node seen through the cluster: a node with the same name as a control plane cluster node that either reports the same machine (<code>status.nodeInfo.systemUUID</code> or <code>machineID</code>, as vCluster's copy of a synced node does), or runs pods this cluster synced (vCluster's placeholder node, which it creates only for those). A node's own labels never decide, <code>vcluster.loft.sh/fake-node</code> included. The cluster's volumes and load balancers are billed as well. Shared clusters are never billed twice, even when vBilling can read their API.</p>
       <p>vBilling reads one Secret per cluster, <code>vbilling-kubeconfig</code> in its namespace, and its RBAC is pinned to that name. Let vCluster write it with a read-only service account:</p>
       <div class="code-block"><code>exportKubeConfig:
   additionalSecrets:
@@ -365,12 +366,25 @@ experimental:
           <tbody>
             <tr><td><code>PRIVATE_NODE_BILLING=node</code> (default)</td><td>Each private node is billed whole: node-hours, whole GPUs, CPU and memory capacity.</td></tr>
             <tr><td><code>PRIVATE_NODE_BILLING=usage</code></td><td>The pods on private nodes are billed instead, like shared usage (namespaces in <code>TENANT_EXCLUDE_NAMESPACES</code>, default <code>kube-system</code>, are skipped).</td></tr>
-            <tr><td><code>vbilling.vcluster.com/billable=false</code> node label</td><td>Exempts a node, for example hardware the tenant owns. Works for dedicated nodes too.</td></tr>
           </tbody>
         </table>
       </div>
+      <p>The <code>vbilling.vcluster.com/billable=false</code> label exempts only dedicated nodes of the control plane cluster, which the operator labels. On a cluster's own nodes it is ignored.</p>
       <p><strong>Outages.</strong> If a cluster's API cannot be read, everything else is still metered and the gap is recorded under <code>DATA_DIR</code>. As soon as the API answers, exactly the missed windows are metered and appended as late events, deduplicated by ID, up to <code>MAX_BACKFILL</code>.</p>
       <p><strong>Scale-down.</strong> Nodes deleted between two windows (Auto Nodes scaling down, a machine removed) are billed until the second they were deleted. A deletion noticed only after a watch reconnects is dated to the last time vBilling saw the node, never later.</p>
+
+      <h3 id="private-first-seen">A node bills as vBilling first saw it</h3>
+      <p>A cluster's admins are cluster admins inside it, so every label, taint and status of the cluster's own nodes is theirs to write. Nothing they change later lowers what a node bills:</p>
+      <ul>
+        <li>Its GPU model, instance type, SKU (<code>SKU_LABEL</code>), capacity type and zone stay as vBilling first saw them, per node (by its UID). A GPU model first seen as unknown, before GPU Feature Discovery labeled the node, is taken from the first label that names one.</li>
+        <li>It is billed for no fewer GPUs than it had while it lived: vBilling keeps the most physical GPUs two reads at least 30 seconds apart both saw, in <code>DATA_DIR/private-nodes.json</code>. A node that later advertises fewer, or whose GPUs stop being allocatable, still bills them.</li>
+        <li>Time-slicing replicas divide its advertised GPUs only when GPU Feature Discovery's <code>nvidia.com/gpu.count</code> adds up with them (advertised devices equal physical GPUs times replicas). GKE's time-sharing labels are ignored there.</li>
+      </ul>
+      <p>A change is logged, and the source <code>private-nodes/&lt;cluster ID&gt;</code> in <code>GET /api/v1/sources</code> turns <code>diverged</code> and names the node and what changed, until the node is back as it was. To bill a node differently on purpose, replace it (a new node object starts over).</p>
+      <div class="callout callout-info">
+        <div class="callout-icon">i</div>
+        <div><strong>Known limit.</strong> vBilling reads a cluster's own nodes from inside the cluster, so it trusts what it sees there the first time. A tenant with root on its own node can stop its kubelet (the node then reads as down), or set the node's labels before vBilling first sees it. For untrusted tenants, bill their nodes from your machine inventory (vMetal or Auto Nodes) through the ingest API, and keep this metering as a cross-check.</div>
+      </div>
 
       <h2 id="platform">vCluster Platform mode</h2>
       <p>With <code>TENANT_SOURCE=platform</code> (Helm <code>tenantSource: platform</code>), vBilling takes billing identity from vCluster Platform objects instead of labels and annotations, and reaches clusters with their own nodes through the Platform proxy instead of an exported kubeconfig. Nothing has to be added to clusters, their namespaces or their vcluster.yaml.</p>
@@ -658,7 +672,7 @@ ENFORCEMENT_RULES=<span class="string">"alerts.low_remaining_commit_balance_reac
       </div>
 
       <h2 id="whole-gpus">Whole GPUs, however they are carved</h2>
-      <p>Dedicated and private nodes are billed for physical GPUs. MIG slices (mixed or single strategy, GKE GPU partitions) and time-slicing replicas (NVIDIA or GKE time-sharing) are converted back: a node exposing 56 MIG slices of 1g.10gb, or 32 time-sliced devices with 4 replicas, bills 8 GPUs. GPUs offered only through DRA ResourceSlices count too.</p>
+      <p>Dedicated and private nodes are billed for physical GPUs. MIG slices (mixed or single strategy, GKE GPU partitions) and time-slicing replicas (NVIDIA or GKE time-sharing) are converted back: a node exposing 56 MIG slices of 1g.10gb, or 32 time-sliced devices with 4 replicas, bills 8 GPUs. GPUs offered only through DRA ResourceSlices count too. On a cluster's own nodes, time-slicing replicas count only when GPU Feature Discovery's GPU count adds up with them, and a node never bills fewer GPUs than it had (<a href="#private-first-seen">A node bills as vBilling first saw it</a>).</p>
 
       <h2 id="gpu-detection">GPU model detection</h2>
       <p>The first label present wins: <code>nvidia.com/gpu.product</code>, <code>nvidia.com/gpu.machine</code>, <code>amd.com/gpu.product-name</code>, <code>cloud.google.com/gke-accelerator</code>, <code>k8s.amazonaws.com/accelerator</code>, <code>accelerator</code>. Spaces are replaced with dashes (<code>NVIDIA H100 80GB HBM3</code> becomes <code>NVIDIA-H100-80GB-HBM3</code>). The <code>-SHARED</code> and <code>-MIG-&lt;profile&gt;</code> suffixes GPU Feature Discovery adds are removed, so the SKU is always the base GPU; DRA devices use their <code>productName</code> attribute.</p>
