@@ -122,8 +122,17 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /webhooks/metronome", s.metronomeWebhook)
 
 	sub, _ := fs.Sub(dashboardFS, "dashboard")
-	mux.Handle("GET /", http.FileServer(http.FS(sub)))
-	return mux
+	mux.Handle("GET /", dashboardHeaders(http.FileServer(http.FS(sub))))
+	return noSniff(mux)
+}
+
+// noSniff stops browsers from reading a response as anything but its
+// declared type.
+func noSniff(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		h.ServeHTTP(w, r)
+	})
 }
 
 // --- helpers ---
