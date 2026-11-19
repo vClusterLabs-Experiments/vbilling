@@ -283,7 +283,7 @@
 
       <div class="callout callout-warn">
         <div class="callout-icon">!</div>
-        <div><strong>Not yet run against a live Metronome account.</strong> The adapter is tested against an in-process fake Metronome that checks every request body against Metronome's published OpenAPI schemas, and its webhook verification against Metronome's documented test vector (see <a href="#verified">What is verified</a>). No sandbox run has been done yet. Run your loop in a Metronome sandbox before you invoice from it.</div>
+        <div><strong>Not yet run against a live Metronome account.</strong> The adapter is tested against an in-process fake Metronome that checks every request body against Metronome's published OpenAPI schemas, and its webhook verification against Metronome's documented test vector (see <a href="#verified">What is verified</a>). No sandbox run has been done yet; it is planned in issue <a href="https://github.com/vClusterLabs-Experiments/vbilling/issues/15">#15</a>. Run your loop in a Metronome sandbox before you invoice from it.</div>
       </div>
 
       <h2 id="modes">Two modes</h2>
@@ -583,7 +583,7 @@ enforcement:
         <li><strong>The loop.</strong> A test runs the default mode end to end against the fake: the portal creates a customer with an identity alias and a compute alias and a contract with a prepaid commit; vBilling delivers an hour of ledger usage under the compute alias and creates nothing; price coverage reads the customer's contract; a signed <code>alerts.low_remaining_commit_balance_reached</code> webhook pauses the tenant through a rule, and a signed <code>payment_gate.payment_status</code> <code>paid</code> webhook resumes it once the notification is <code>ok</code> again (delivered while it is still in alarm, it gets a 500), both through vBilling's webhook handler; and reconciliation against <code>/v1/usage</code> matches the ledger.</li>
         <li><strong>Webhook signatures</strong> are checked against Metronome's documented test vector.</li>
       </ul>
-      <p><strong>Not verified:</strong> nothing has run against a live Metronome account or sandbox yet. The fake follows Metronome's documentation, so what the documentation does not pin down is untested: how fast threshold notifications fire, how usage that arrives before its customer is attributed in practice, Metronome's error responses, and rate and contract edge cases. Run the loop in a sandbox before you invoice from it.</p>
+      <p><strong>Not verified:</strong> nothing has run against a live Metronome account or sandbox yet. The fake follows Metronome's documentation, so what the documentation does not pin down is untested: how fast threshold notifications fire, how usage that arrives before its customer is attributed in practice, Metronome's error responses, and rate and contract edge cases. Run the loop in a sandbox before you invoice from it. A sandbox run is planned in issue <a href="https://github.com/vClusterLabs-Experiments/vbilling/issues/15">#15</a>.</p>
 
       <h2 id="troubleshooting">Troubleshooting</h2>
       <h3>The pod exits at startup</h3>

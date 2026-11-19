@@ -420,7 +420,7 @@
         <li>A node's history is kept by cluster and node name, so deleting and recreating the Node object changes nothing. Its GPU count never drops while the node exists, and its SKU, capacity type and GPU model stay as vBilling first saw them; attributes the node showed empty are filled only during its first 10 minutes. A change shows as <code>diverged</code> in source health.</li>
         <li>A pause stops billing only after a verified drain (see <a href="private-nodes.html#pause">Pausing a tenant</a>).</li>
       </ul>
-      <p>What vBilling cannot see: a tenant with root on its own node can mark it not Ready while workloads keep running, or set labels before vBilling first sees the node or during its first 10 minutes. For untrusted tenants, bill these nodes from your machine inventory (for example vMetal or Auto Nodes) through the ingest API, and power paused nodes off.</p>
+      <p>What vBilling cannot see: a tenant with root on its own node can mark it not Ready while workloads keep running, or set labels before vBilling first sees the node or during its first 10 minutes. For untrusted tenants, bill these nodes from your machine inventory (for example vMetal or Auto Nodes) through the ingest API, and power paused nodes off. Both are planned with vMetal: billing from its inventory (<a href="https://github.com/vClusterLabs-Experiments/vbilling/issues/18">#18</a>) and powering paused nodes off (<a href="https://github.com/vClusterLabs-Experiments/vbilling/issues/16">#16</a>).</p>
 
       <h2 id="operators">What operators must do</h2>
       <ol>
