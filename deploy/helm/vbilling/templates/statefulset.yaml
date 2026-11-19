@@ -54,14 +54,10 @@ spec:
               value: {{ .Values.region | quote }}
             - name: CLUSTER_NAME
               value: {{ .Values.clusterName | quote }}
-            - name: DEFAULT_TENANT_CLASS
-              value: {{ .Values.tenantClass | quote }}
             - name: TENANT_SOURCE
               value: {{ .Values.tenantSource | quote }}
             - name: DATA_DIR
               value: /var/lib/vbilling
-            - name: RETENTION
-              value: {{ .Values.persistence.retention | quote }}
             {{- if .Values.persistence.archive.enabled }}
             - name: POD_NAME
               valueFrom:
@@ -78,22 +74,8 @@ spec:
               value: {{ .Values.billing.currency | quote }}
             - name: PRICE_CHECK
               value: {{ (.Values.billing.priceCheck).mode | default "warn" | quote }}
-            - name: PRICE_CHECK_INTERVAL
-              value: {{ (.Values.billing.priceCheck).interval | default "10m" | quote }}
-            - name: PRICE_CHECK_LOOKBACK
-              value: {{ (.Values.billing.priceCheck).lookback | default "24h" | quote }}
-            - name: PRICE_CHECK_MAX_HOLD
-              value: {{ (.Values.billing.priceCheck).maxHold | default "28d" | quote }}
-            - name: COLLECTION_INTERVAL
-              value: {{ .Values.billing.collectionInterval | quote }}
             - name: COLLECTION_DELAY
               value: {{ .Values.billing.collectionDelay | default "5s" | quote }}
-            - name: RECONCILE_INTERVAL
-              value: {{ .Values.billing.reconcileInterval | quote }}
-            - name: MAX_BACKFILL
-              value: {{ .Values.billing.maxBackfill | quote }}
-            - name: OFFBOARD_GRACE
-              value: {{ .Values.billing.offboardGrace | quote }}
             - name: CPU_MEMORY_BASIS
               value: {{ .Values.metering.cpuMemoryBasis | quote }}
             - name: METER_CONTROL_PLANE
@@ -110,8 +92,6 @@ spec:
               value: {{ join "," .Values.metering.unhealthyNodeTaints | default "none" | quote }}
             - name: VCLUSTER_NODE_LABEL
               value: {{ .Values.metering.dedicatedNodeLabel | quote }}
-            - name: REGION_FROM_NODE
-              value: {{ .Values.metering.regionFromNode | quote }}
             {{- if kindIs "string" .Values.metering.customMetrics }}
             - name: CUSTOM_METRICS
               value: {{ .Values.metering.customMetrics | quote }}
@@ -127,31 +107,15 @@ spec:
             - name: CROSS_CHECKS
               value: {{ $c := list }}{{ range .Values.crossChecks }}{{ $c = append $c (printf "%s=%s:%v%%" .primary .secondary (.tolerancePercent | default 1)) }}{{ end }}{{ join "," $c | quote }}
             {{- end }}
-            - name: RECORDS_SETTLE
-              value: {{ .Values.records.settle | quote }}
-            - name: RECORDS_RETENTION
-              value: {{ .Values.records.retention | quote }}
-            - name: RECORDS_ALLOW_UNKEYED
-              value: {{ .Values.records.allowUnkeyed | quote }}
             - name: RECORDS_UNKNOWN_TENANTS
               value: {{ .Values.records.unknownTenants | quote }}
             - name: RECORDS_LITELLM
               value: {{ .Values.records.litellm | quote }}
-            - name: RECORDS_ARCHIVE
-              value: {{ and .Values.records.archive .Values.persistence.archive.enabled | quote }}
             {{- with .Values.records.pullLiteLLM }}
             {{- if .url }}
-            - name: RECORDS_PULL_LITELLM_URL
+            - name: LITELLM_URL
               value: {{ .url | quote }}
-            - name: RECORDS_PULL_LITELLM_CLIENT
-              value: {{ .client | default "litellm" | quote }}
-            - name: RECORDS_PULL_LITELLM_TENANT
-              value: {{ .tenant | quote }}
-            - name: RECORDS_PULL_LITELLM_INTERVAL
-              value: {{ .interval | quote }}
-            - name: RECORDS_PULL_LITELLM_LOOKBACK
-              value: {{ .lookback | quote }}
-            {{- include "vbilling.secretEnv" (dict "env" "RECORDS_PULL_LITELLM_KEY" "existing" .existingSecret "key" "litellm-key" "inline" .key "chartKey" "litellm-key" "root" $) | nindent 12 }}
+            {{- include "vbilling.secretEnv" (dict "env" "LITELLM_API_KEY" "existing" .existingSecret "key" "litellm-key" "inline" .key "chartKey" "litellm-key" "root" $) | nindent 12 }}
             {{- end }}
             {{- end }}
             {{- if .Values.records.formats }}
@@ -170,20 +134,8 @@ spec:
               valueFrom:
                 secretKeyRef: {name: {{ .secret | quote }}, key: {{ .key | quote }}}
             {{- end }}
-            - name: WATCH_DELETIONS
-              value: {{ .Values.metering.watchDeletions | quote }}
-            - name: DRA_GPU_DRIVERS
-              value: {{ join "," .Values.metering.draGPUDrivers | default "none" | quote }}
-            - name: TENANT_API
-              value: {{ .Values.tenantAPI.enabled | quote }}
-            - name: TENANT_KUBECONFIG_SECRET
-              value: {{ .Values.tenantAPI.secretName | quote }}
-            - name: TENANT_ADMIN_FALLBACK
-              value: {{ .Values.tenantAPI.adminFallback | quote }}
             - name: PRIVATE_NODE_BILLING
               value: {{ .Values.tenantAPI.privateNodeBilling | quote }}
-            - name: TENANT_EXCLUDE_NAMESPACES
-              value: {{ join "," .Values.tenantAPI.excludeNamespaces | default "none" | quote }}
             {{- if .Values.tenantAPI.externalClustersSecret }}
             - name: TENANT_CLUSTERS_FILE
               value: /etc/vbilling/tenants/clusters.yaml
@@ -195,12 +147,6 @@ spec:
               value: {{ required "platform.url is required when tenantSource is platform" .Values.platform.url | quote }}
             - name: PLATFORM_INSECURE
               value: {{ .Values.platform.insecure | quote }}
-            - name: PLATFORM_REFRESH
-              value: {{ .Values.platform.refresh | quote }}
-            - name: PLATFORM_ORPHAN_GRACE
-              value: {{ .Values.platform.orphanGrace | quote }}
-            - name: PLATFORM_PROXY
-              value: {{ .Values.platform.proxy | quote }}
             {{- if .Values.platform.caSecret }}
             - name: PLATFORM_CA_FILE
               value: /etc/vbilling/platform-ca/ca.crt
@@ -219,8 +165,6 @@ spec:
               value: {{ ((.Values.enforcement).gateway).litellm | default false | quote }}
             - name: PAUSE_KEEP_BILLING
               value: {{ .Values.enforcement.pause.keepBilling | quote }}
-            - name: PAUSE_DRAIN_TIMEOUT
-              value: {{ .Values.enforcement.pause.drainTimeout | quote }}
             {{- with .Values.enforcement.pause.keepNamespaces }}
             - name: PAUSE_KEEP_NAMESPACES
               value: {{ . | quote }}
@@ -248,8 +192,6 @@ spec:
             {{- end }}
             - name: PROMETHEUS_SOURCE_LABEL
               value: {{ .Values.prometheus.sourceLabel | quote }}
-            - name: PROMETHEUS_LOOKBACK
-              value: {{ .Values.prometheus.lookback | quote }}
             {{- include "vbilling.secretEnv" (dict "env" "API_TOKEN" "existing" .Values.api.existingSecret "key" "api-token" "inline" .Values.api.token "chartKey" "api-token" "root" .) | nindent 12 }}
             {{- include "vbilling.secretEnv" (dict "env" "INGEST_TOKEN" "existing" .Values.api.existingSecret "key" "ingest-token" "inline" .Values.api.ingestToken "chartKey" "ingest-token" "root" .) | nindent 12 }}
             {{- include "vbilling.secretEnv" (dict "env" "INGEST_TOKENS" "existing" .Values.api.existingSecret "key" "ingest-tokens" "inline" .Values.api.tenantIngestTokens "chartKey" "ingest-tokens" "root" .) | nindent 12 }}
@@ -266,19 +208,12 @@ spec:
             {{- end }}
             {{- include "vbilling.secretEnv" (dict "env" "LAGO_API_KEY" "existing" .Values.lago.existingSecret "key" "api-key" "inline" .Values.lago.apiKey "chartKey" "lago-api-key" "root" .) | nindent 12 }}
             {{- end }}
-            {{- if or (has "stripe" $adapters) .Values.metronome.stripeLink }}
+            {{- $metronomeProvision := and (has "metronome" $adapters) (or .Values.metronome.provision .Values.metronome.stripeLink) }}
+            {{- if or (has "stripe" $adapters) (and $metronomeProvision (or .Values.stripe.apiKey .Values.stripe.existingSecret)) }}
             - name: STRIPE_API_BASE
               value: {{ .Values.stripe.apiBase | quote }}
-            - name: STRIPE_API_VERSION
-              value: {{ .Values.stripe.apiVersion | quote }}
-            - name: STRIPE_SPLIT_METERS_BY
-              value: {{ join "," .Values.stripe.splitMetersBy | default "none" | quote }}
             - name: STRIPE_AUTO_SUBSCRIBE
               value: {{ .Values.stripe.autoSubscribe | quote }}
-            - name: STRIPE_MAX_RPS
-              value: {{ .Values.stripe.maxRPS | quote }}
-            - name: STRIPE_CANCEL_ON_REMOVE
-              value: {{ .Values.stripe.cancelOnRemove | quote }}
             {{- if .Values.stripe.priceCard }}
             - name: STRIPE_PRICE_CARD
               value: /etc/vbilling/files/stripe-price-card.yaml
@@ -289,12 +224,10 @@ spec:
             {{- if has "metronome" $adapters }}
             - name: METRONOME_API_BASE
               value: {{ .Values.metronome.apiBase | quote }}
+            - name: METRONOME_PROVISION
+              value: {{ or .Values.metronome.provision .Values.metronome.stripeLink | quote }}
             - name: METRONOME_RATE_CARD
               value: {{ .Values.metronome.rateCard | quote }}
-            - name: METRONOME_STRIPE_LINK
-              value: {{ .Values.metronome.stripeLink | quote }}
-            - name: METRONOME_STRIPE_COLLECTION_METHOD
-              value: {{ .Values.metronome.stripeCollectionMethod | quote }}
             {{- include "vbilling.secretEnv" (dict "env" "METRONOME_API_TOKEN" "existing" .Values.metronome.existingSecret "key" "api-token" "inline" .Values.metronome.apiToken "chartKey" "metronome-api-token" "root" .) | nindent 12 }}
             {{- end }}
             {{- include "vbilling.secretEnv" (dict "env" "METRONOME_WEBHOOK_SECRET" "existing" .Values.metronome.existingSecret "key" "webhook-secret" "inline" .Values.metronome.webhookSecret "chartKey" "metronome-webhook-secret" "root" .) | nindent 12 }}

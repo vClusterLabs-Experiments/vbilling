@@ -23,20 +23,12 @@ rules:
   - apiGroups: ["resource.k8s.io"]
     resources: ["resourceclaims", "resourceslices"]
     verbs: ["get", "list"]
-  {{- if .Values.tenantAPI.enabled }}
-  # Tenant clusters with their own nodes: only the read-only kubeconfig
-  # vCluster exports for vBilling.
+  # Clusters with their own nodes: only the read-only kubeconfig vCluster
+  # exports for vBilling (the Secret name is fixed).
   - apiGroups: [""]
     resources: ["secrets"]
-    resourceNames: [{{ .Values.tenantAPI.secretName | quote }}]
+    resourceNames: ["vbilling-kubeconfig"]
     verbs: ["get"]
-  {{- if .Values.tenantAPI.adminFallback }}
-  # tenantAPI.adminFallback: tenant clusters' admin kubeconfigs (vc-<name>).
-  - apiGroups: [""]
-    resources: ["secrets"]
-    verbs: ["get"]
-  {{- end }}
-  {{- end }}
   # Usage-based CPU and memory from metrics-server.
   - apiGroups: ["metrics.k8s.io"]
     resources: ["pods"]
