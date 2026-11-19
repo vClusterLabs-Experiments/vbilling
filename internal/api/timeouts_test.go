@@ -65,6 +65,9 @@ func TestLongRoutesGetTheLongWriteDeadline(t *testing.T) {
 // timeout arrives whole. Both ends keep small socket buffers, as a slow link
 // does: a large receive buffer opens its window only after long reads, and
 // a single write would then wait longer than this test's short timeout.
+// A write that blocks cannot move its own deadline, so the timeout leaves
+// room for a loaded test machine to stall the reader: about 1.5s, since the
+// deadline is moved at most a quarter of the timeout late.
 func TestExportStreamsPastTheWriteTimeout(t *testing.T) {
 	e := setup(t)
 	const n = 2000
@@ -80,7 +83,7 @@ func TestExportStreamsPastTheWriteTimeout(t *testing.T) {
 	if err := e.sp.AppendWindow(spool.SourceCollector, time.Time{}, evs, ""); err != nil {
 		t.Fatal(err)
 	}
-	e.server.timeouts.write = 300 * time.Millisecond
+	e.server.timeouts.write = 2 * time.Second
 	hs := e.server.HTTPServer("")
 	ts := httptest.NewUnstartedServer(hs.Handler)
 	ts.Config.ReadHeaderTimeout, ts.Config.ReadTimeout, ts.Config.WriteTimeout, ts.Config.IdleTimeout = hs.ReadHeaderTimeout, hs.ReadTimeout, hs.WriteTimeout, hs.IdleTimeout
@@ -119,9 +122,9 @@ func TestExportStreamsPastTheWriteTimeout(t *testing.T) {
 		if err != nil {
 			t.Fatalf("the export broke off after %s and %d bytes: %v", time.Since(start), body.Len(), err)
 		}
-		time.Sleep(10 * time.Millisecond) // a client that reads slowly
+		time.Sleep(40 * time.Millisecond) // a client that reads slowly
 	}
-	if took := time.Since(start); took < 3*e.server.timeouts.write {
+	if took := time.Since(start); took < e.server.timeouts.write*3/2 {
 		t.Fatalf("test setup: the export took %s, not longer than the write timeout %s", took, e.server.timeouts.write)
 	}
 	if lines := bytes.Count(body.Bytes(), []byte("\n")); lines != n {
