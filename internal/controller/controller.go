@@ -624,7 +624,7 @@ func (c *Controller) CollectDue(ctx context.Context) {
 	targets := c.targets()
 
 	started := time.Now()
-	byWindow, st, err := c.collectAttributed(ctx, targets, windows, c.coll.Collect)
+	byWindow, st, failed, err := c.collectAttributed(ctx, targets, windows, c.coll.Collect)
 	if err != nil {
 		log.Printf("[controller] metering failed for %d window(s), will retry: %v", len(windows), err)
 		c.tel.Add("vbilling_collection_failures_total", "Failed metering runs (windows are retried).", nil, 1)
@@ -646,7 +646,7 @@ func (c *Controller) CollectDue(ctx context.Context) {
 		c.lastWindow = w.End
 		c.mu.Unlock()
 	}
-	c.fillTenantGaps(ctx, st, windows, targets)
+	c.fillTenantGaps(ctx, failed, windows, targets)
 	if len(windows) > 1 {
 		log.Printf("[controller] backfilled %d window(s) after a gap", len(windows)-1)
 		c.tel.Add("vbilling_backfilled_windows_total", "Windows metered after a gap (restart or outage).", nil, float64(len(windows)-1))
@@ -670,23 +670,25 @@ func (c *Controller) CollectDue(ctx context.Context) {
 	}
 }
 
-// fillTenantGaps records tenant clusters whose own API failed in this run
-// and, once it answers again, meters the windows it missed. Those events go
-// to the ledger as late events, deduplicated by ID. A gap is the span of
-// failed windows only (see tenantGap), so a fill repeated after a crash
-// never touches windows that were committed normally. Windows older than
-// MAX_BACKFILL are not filled.
-func (c *Controller) fillTenantGaps(ctx context.Context, st metrics.Stats, windows []metrics.Window, targets []metrics.Target) {
-	failed := map[string]bool{}
+// fillTenantGaps records the windows whose read of a cluster's own API
+// failed in this run and, once it answers again, meters exactly those
+// windows. Those events go to the ledger as late events, deduplicated by
+// ID. A gap holds the failed windows themselves (tenantGaps), never one
+// committed with the cluster's API side in between: fill IDs are salted,
+// so a committed window filled again would bill twice. A fill repeated
+// after a crash gets the same IDs and is dropped as a duplicate. Windows
+// older than MAX_BACKFILL are not filled.
+func (c *Controller) fillTenantGaps(ctx context.Context, failed map[string][]metrics.Window, windows []metrics.Window, targets []metrics.Target) {
 	size := c.cfg.CollectionInterval
-	first, last := windows[0].End, windows[len(windows)-1].End
-	for _, id := range st.TenantAPIFailed {
-		failed[id] = true
-		g := tenantGap{first: first, last: last, start: windows[0].Start}
-		if prev, ok := parseGap(c.gaps, id, size); ok {
-			g.first, g.start = prev.first, prev.start
-		} else {
-			log.Printf("[controller] %s: tenant API unreachable from window %s, will fill once it answers", id, first.Format(time.RFC3339))
+	earliest := windows[len(windows)-1].End.Add(-c.cfg.MaxBackfill)
+	for id, ws := range failed {
+		g, known := parseGaps(c.gaps, id, size)
+		if !known {
+			log.Printf("[controller] %s: tenant API unreachable from window %s, will fill once it answers", id, ws[0].End.Format(time.RFC3339))
+		}
+		if g = g.add(ws).after(earliest); len(g) == 0 {
+			_ = c.gaps.Delete(id)
+			continue
 		}
 		_ = c.gaps.Set(id, g.String())
 	}
@@ -694,24 +696,18 @@ func (c *Controller) fillTenantGaps(ctx context.Context, st metrics.Stats, windo
 	if !ok {
 		return
 	}
-	earliest := last.Add(-c.cfg.MaxBackfill)
 	for _, t := range targets {
 		id := t.Cluster.ExternalID()
-		g, ok := parseGap(c.gaps, id, size)
-		if !ok || failed[id] {
+		g, ok := parseGaps(c.gaps, id, size)
+		if !ok || len(failed[id]) > 0 {
 			continue
 		}
-		var missed []metrics.Window
-		for _, w := range windowsBetween(g.start, g.last, size, time.Time{}) {
-			if w.End.After(earliest) {
-				missed = append(missed, w)
-			}
-		}
+		missed := g.windows(size, earliest)
 		if len(missed) == 0 {
 			_ = c.gaps.Delete(id)
 			continue
 		}
-		byWindow, fst, err := c.collectAttributed(ctx, []metrics.Target{t}, missed, filler.CollectTenantAPI)
+		byWindow, fst, _, err := c.collectAttributed(ctx, []metrics.Target{t}, missed, filler.CollectTenantAPI)
 		if err != nil || len(fst.TenantAPIFailed) > 0 {
 			continue // still unreachable: try again next window
 		}
@@ -750,38 +746,108 @@ func saltFill(evs []usage.Event) {
 	}
 }
 
-// tenantGap is the span of windows a cluster's own API missed: from start
-// (the first window's start) to last (the last window's end). first is the
-// first window's end. Stored as "first|last|start".
-type tenantGap struct{ first, last, start time.Time }
+// gapSpan is a run of consecutive windows a cluster's own API missed, from
+// the first one's start to the last one's end.
+type gapSpan struct{ start, end time.Time }
 
-func (g tenantGap) String() string {
-	return g.first.Format(time.RFC3339) + "|" + g.last.Format(time.RFC3339) + "|" + g.start.Format(time.RFC3339)
+// tenantGaps are the windows a cluster's own API missed, as runs in time
+// order. Stored as "start/end,start/end" (RFC 3339).
+type tenantGaps []gapSpan
+
+func (g tenantGaps) String() string {
+	parts := make([]string, len(g))
+	for i, s := range g {
+		parts[i] = s.start.Format(time.RFC3339) + "/" + s.end.Format(time.RFC3339)
+	}
+	return strings.Join(parts, ",")
 }
 
-// parseGap reads a gap. One written without a start (v0.3.0) began with a
-// whole window of the current size.
-func parseGap(store *kv.Store, id string, size time.Duration) (tenantGap, bool) {
+// add returns the gaps with windows added, runs that touch merged.
+func (g tenantGaps) add(ws []metrics.Window) tenantGaps {
+	all := append(tenantGaps(nil), g...)
+	for _, w := range ws {
+		all = append(all, gapSpan{start: w.Start.UTC(), end: w.End.UTC()})
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].start.Before(all[j].start) })
+	var out tenantGaps
+	for _, s := range all {
+		if n := len(out); n > 0 && !s.start.After(out[n-1].end) {
+			if s.end.After(out[n-1].end) {
+				out[n-1].end = s.end
+			}
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+// after drops the runs that end at or before t.
+func (g tenantGaps) after(t time.Time) tenantGaps {
+	var out tenantGaps
+	for _, s := range g {
+		if s.end.After(t) {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// windows returns the missed windows that end after earliest.
+func (g tenantGaps) windows(size time.Duration, earliest time.Time) []metrics.Window {
+	var out []metrics.Window
+	for _, s := range g {
+		for _, w := range windowsBetween(s.start, s.end, size, time.Time{}) {
+			if w.End.After(earliest) {
+				out = append(out, w)
+			}
+		}
+	}
+	return out
+}
+
+// parseGaps reads a cluster's gaps. Earlier versions stored one span from
+// the first to the last failed window, "first|last|start", or "first|last"
+// (v0.3.0, whose first window was a whole window of the current size): it
+// is read as that span.
+func parseGaps(store *kv.Store, id string, size time.Duration) (tenantGaps, bool) {
 	v, ok := store.Get(id)
 	if !ok {
-		return tenantGap{}, false
+		return nil, false
 	}
-	parts := strings.Split(v, "|")
-	var times []time.Time
-	for _, p := range parts {
-		t, err := time.Parse(time.RFC3339, p)
-		if err != nil {
-			break
+	var g tenantGaps
+	if strings.Contains(v, "|") {
+		parts := strings.Split(v, "|")
+		var times []time.Time
+		for _, p := range parts {
+			t, err := time.Parse(time.RFC3339, p)
+			if err != nil {
+				break
+			}
+			times = append(times, t)
 		}
-		times = append(times, t)
+		if len(times) == len(parts) && len(times) >= 2 && len(times) <= 3 && !times[1].Before(times[0]) {
+			s := gapSpan{start: times[0].Add(-size), end: times[1]}
+			if len(times) == 3 && times[2].Before(times[0]) {
+				s.start = times[2]
+			}
+			g = tenantGaps{s}
+		}
+	} else {
+		for _, part := range strings.Split(v, ",") {
+			a, b, _ := strings.Cut(part, "/")
+			s, errS := time.Parse(time.RFC3339, a)
+			e, errE := time.Parse(time.RFC3339, b)
+			if errS != nil || errE != nil || !e.After(s) {
+				g = nil
+				break
+			}
+			g = append(g, gapSpan{start: s, end: e})
+		}
 	}
-	if len(times) != len(parts) || len(times) < 2 || len(times) > 3 || times[1].Before(times[0]) {
+	if len(g) == 0 {
 		_ = store.Delete(id)
-		return tenantGap{}, false
-	}
-	g := tenantGap{first: times[0], last: times[1], start: times[0].Add(-size)}
-	if len(times) == 3 && times[2].Before(g.first) {
-		g.start = times[2]
+		return nil, false
 	}
 	return g, true
 }

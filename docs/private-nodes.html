@@ -370,7 +370,7 @@ experimental:
         </table>
       </div>
       <p>The <code>vbilling.vcluster.com/billable=false</code> label exempts only dedicated nodes of the control plane cluster, which the operator labels. On a cluster's own nodes it is ignored.</p>
-      <p><strong>Outages.</strong> If a cluster's API cannot be read, everything else is still metered and the gap is recorded under <code>DATA_DIR</code>. As soon as the API answers, exactly the missed windows are metered and appended as late events, deduplicated by ID, up to <code>MAX_BACKFILL</code>.</p>
+      <p><strong>Outages.</strong> If a cluster's API cannot be read, everything else is still metered and the windows it missed are recorded under <code>DATA_DIR</code>. As soon as the API answers, exactly those windows are metered and appended as late events, deduplicated by ID, up to <code>MAX_BACKFILL</code>. An API that fails, answers and fails again has only its failed windows filled: a window read in between is never billed again.</p>
       <p><strong>Scale-down.</strong> Nodes deleted between two windows (Auto Nodes scaling down, a machine removed) are billed until the second they were deleted. A deletion noticed only after a watch reconnects is dated to the last time vBilling saw the node, never later.</p>
 
       <h3 id="private-first-seen">A node bills as vBilling first saw it</h3>
