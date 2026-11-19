@@ -16,7 +16,9 @@ import (
 //
 //   - openapi-request-schemas.json: request bodies by endpoint name
 //   - openapi-pricing-schemas.json: request, response and query parameters
-//     of the read endpoints the price check uses
+//     of the read endpoints the price check uses, and of
+//     POST /v1/customer-alerts/get (get_customer_alert), which a payment
+//     reads before it lowers a billing hold
 //
 // Validate implements the subset of JSON Schema they use, strictly: an
 // object schema that lists properties rejects unknown fields, so a misspelled

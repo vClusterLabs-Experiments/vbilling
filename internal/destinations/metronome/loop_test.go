@@ -150,8 +150,19 @@ func TestPrepaidLoopOnAnAccountThePortalOwns(t *testing.T) {
 			t.Fatalf("%s: %s, tenant state %s, want %s", n.Type, body, enf.StateOf(tenant).State, want)
 		}
 	}
-	deliver(f.Alert("alerts.low_remaining_commit_balance_reached", cus, "Prepaid balance low", 12.5, 50), enforcement.Paused)
-	deliver(f.PaymentStatus(cus, contract, "paid"), enforcement.Active)
+	alert := f.Alert("alerts.low_remaining_commit_balance_reached", cus, "Prepaid balance low", 12.5, 50)
+	deliver(alert, enforcement.Paused)
+	// The top-up arrives before Metronome evaluated the alert again: it is
+	// answered 500, and Metronome delivers it again.
+	topUp := f.PaymentStatus(cus, contract, "paid")
+	if status, body, err := f.SendWebhook(srv.URL+"/webhooks/metronome", secret, topUp); err != nil || status != http.StatusInternalServerError {
+		t.Fatalf("top-up while the alert is in alarm: %d %s %v, want a 500", status, body, err)
+	}
+	if st := enf.StateOf(tenant).State; st != enforcement.Paused {
+		t.Fatalf("state %s, want paused while the alert is in alarm", st)
+	}
+	f.SetAlertStatus(alert.Properties["alert_id"].(string), "ok")
+	deliver(topUp, enforcement.Active)
 
 	// 5. Reconciliation of the closed day.
 	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/v1/reconcile?destination=metronome&from="+day.Format("2006-01-02")+

@@ -19,7 +19,7 @@ import (
 
 // stripeAt sends a Stripe event created at the given time.
 func stripeAt(e *Enforcer, id, typ, status string, created time.Time) error {
-	body := []byte(fmt.Sprintf(`{"id":%q,"type":%q,"created":%d,"data":{"object":{"customer":"cus_acme","status":%q}}}`, id, typ, created.Unix(), status))
+	body := []byte(fmt.Sprintf(`{"id":%q,"type":%q,"created":%d,"data":{"object":{%s,"customer":"cus_acme","status":%q}}}`, id, typ, created.Unix(), stripeObject(typ), status))
 	_, err := e.HandleStripe(context.Background(), body, stripe.SignatureHeader(body, "whsec_test", now))
 	return err
 }
@@ -54,10 +54,13 @@ func TestWebhooksApplyInTheOrderTheyHappened(t *testing.T) {
 }
 
 // Only a payment or an active subscription lowers the billing hold; any
-// other signal can only raise it.
+// other signal can only raise it. A payment that does not settle the hold
+// itself lowers it once the platform, read again, shows nothing owed.
 func TestOnlyPositiveSignalsLowerTheBillingHold(t *testing.T) {
 	rules, _ := ParseRules("alerts.low_remaining_commit_balance_reached=paused")
 	e, _, _ := setup(t, "observe", rules)
+	stripeAcct := readable(e, "stripe")
+	readable(e, "metronome")
 	at := now
 	next := func() time.Time { at = at.Add(time.Minute); return at }
 	step := func(id, typ, status string, want State) {
@@ -75,6 +78,9 @@ func TestOnlyPositiveSignalsLowerTheBillingHold(t *testing.T) {
 	step("e4", "billing.alert.triggered", "", Suspended)
 	step("e5", "customer.subscription.updated", "active", Active)
 	step("e6", "customer.subscription.deleted", "", Suspended)
+	stripeAcct.still("subscription:sub_acme") // its last invoice is still open
+	step("e7a", "invoice.payment_succeeded", "", Suspended)
+	stripeAcct.still()
 	step("e7", "invoice.payment_succeeded", "", Active)
 	step("e8", "invoice.payment_failed", "", Delinquent)
 	step("e9", "customer.subscription.updated", "unpaid", Suspended)

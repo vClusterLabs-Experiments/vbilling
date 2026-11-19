@@ -254,8 +254,9 @@ func (g *review2FlakyGateway) Apply(context.Context, string, bool) error {
 func TestReview2RetriedStaleWebhookMustNotUndoAPayment(t *testing.T) {
 	ctx := context.Background()
 	at := now
+	// Stripe, read again when the payment arrives, shows nothing owed.
 	e := New(nil, Options{Mode: "enforce", StripeWebhookSecret: "whsec_test", Gateway: &review2FlakyGateway{},
-		Resolvers: map[string]destinations.CustomerResolver{"stripe": resolver{"cus_acme": "acme"}},
+		Resolvers: map[string]destinations.CustomerResolver{"stripe": &account{resolver: resolver{"cus_acme": "acme"}}},
 		Now:       func() time.Time { return at }})
 	send := func(id, typ, status string, created time.Time) error {
 		body := []byte(fmt.Sprintf(`{"id":%q,"type":%q,"created":%d,"data":{"object":{"customer":"cus_acme","status":%q}}}`, id, typ, created.Unix(), status))
@@ -372,6 +373,7 @@ func TestReview2LaterAlertMustNotResumeAnEmptyWallet(t *testing.T) {
 func TestSameSecondEventsApplyInArrivalOrder(t *testing.T) {
 	rules, _ := ParseRules("alerts.low_remaining_commit_balance_reached=paused")
 	m, _, _ := setup(t, "observe", rules)
+	readable(m, "metronome") // the top-up brought the balance back: the alert is ok again
 	date := now.Truncate(time.Second).Format(http.TimeFormat)
 	send := func(body string) {
 		t.Helper()

@@ -109,8 +109,15 @@ type Signal struct {
 	EventAt time.Time `json:"event_at"`
 	// Positive is true for a payment that succeeded, a paid invoice or an
 	// active subscription: the only signals that lower or clear the billing
-	// hold.
+	// hold, and only as far as they settle what caused it (see Cause).
 	Positive bool `json:"positive,omitempty"`
+	// Object is what the event is about at the billing platform: the cause
+	// a raising signal records, or what a positive one settles.
+	// "subscription:<id>", "invoice:<id>" (an invoice outside any
+	// subscription; a subscription's invoice counts as its subscription when
+	// it fails), "alert:<id>" (a threshold or billing alert), or
+	// "payment:<id>" (a Metronome payment gate).
+	Object string `json:"object,omitempty"`
 }
 
 // TenantState is the current standing of one tenant: the most severe of
@@ -140,6 +147,71 @@ type Hold struct {
 	Source    string    `json:"source"`
 	EventType string    `json:"event_type"`
 	Since     time.Time `json:"since"`
+	// Causes are what the billing webhooks that set or raised a billing
+	// hold were about, each with the state it asked for. A positive webhook
+	// lowers the hold only as far as the causes it settles allow. A hold set
+	// through the API, or recorded before v0.3.1, has none.
+	Causes []Cause `json:"causes,omitempty"`
+}
+
+// Cause is one thing a tenant owes at its billing platform, as a webhook
+// reported it.
+type Cause struct {
+	Provider string `json:"provider"` // stripe, metronome
+	Customer string `json:"customer,omitempty"`
+	// Object is what is owed or in alarm (Signal.Object).
+	Object    string    `json:"object"`
+	State     State     `json:"state"`
+	Reason    string    `json:"reason,omitempty"`
+	EventType string    `json:"event_type,omitempty"`
+	At        time.Time `json:"at"` // when the billing platform says it happened
+}
+
+func (c Cause) key() string { return c.Provider + "\x00" + c.Customer + "\x00" + c.Object }
+
+// maxCauses bounds a hold's causes, as a safety net: each object is kept
+// once, and a customer's failed Metronome payments are kept as one (any
+// later successful payment settles them all). Past it the oldest of the
+// least severe go.
+const maxCauses = 100
+
+// addCause records a cause on a hold's list: one entry per object, at the
+// most severe state reported for it and the time of the newest report.
+func addCause(causes []Cause, c *Cause) []Cause {
+	if c == nil {
+		return causes
+	}
+	out := append([]Cause(nil), causes...)
+	kind, _, _ := strings.Cut(c.Object, ":")
+	for i, old := range out {
+		same := old.key() == c.key()
+		if okind, _, _ := strings.Cut(old.Object, ":"); kind == "payment" && okind == "payment" && old.Provider == c.Provider && old.Customer == c.Customer {
+			same = true // fungible: one entry per customer
+		}
+		if !same {
+			continue
+		}
+		next := *c
+		if severity[old.State] > severity[c.State] {
+			next.State, next.Reason, next.EventType = old.State, old.Reason, old.EventType
+		}
+		if old.At.After(next.At) {
+			next.At = old.At
+		}
+		out[i] = next
+		return out
+	}
+	out = append(out, *c)
+	if over := len(out) - maxCauses; over > 0 {
+		sort.SliceStable(out, func(i, j int) bool {
+			if severity[out[i].State] != severity[out[j].State] {
+				return severity[out[i].State] < severity[out[j].State]
+			}
+			return out[i].At.Before(out[j].At)
+		})
+		out = out[over:]
+	}
+	return out
 }
 
 // HoldBilling is the hold billing webhooks set and clear.
@@ -248,6 +320,41 @@ type AliasResolver interface {
 type TenantKnower interface {
 	KnowsTenant(alias string) bool
 }
+
+// ArrearsReader is implemented by customer resolvers that can read a
+// billing customer's standing again (Stripe, Metronome). A positive webhook
+// that does not itself settle every cause of a tenant's billing hold lowers
+// the hold only as far as this read confirms.
+type ArrearsReader interface {
+	// Owed returns what still holds a tenant at the billing platform: each
+	// of causes (Cause.Object) it still shows unpaid or in alarm, or cannot
+	// read again, under the same key, and anything else of the tenant's it
+	// shows in arrears, described. With no causes (a hold set by an operator
+	// or an older version), anything it returns keeps the hold. An error
+	// means the platform could not be read.
+	Owed(ctx context.Context, tenant, customerID string, causes []string) ([]string, error)
+}
+
+// The billing adapters are the customer resolvers (cmd/vbilling wires
+// them): they must stay readable again, and Metronome's must list aliases.
+var (
+	_ ArrearsReader = (*stripe.Adapter)(nil)
+	_ ArrearsReader = (*metronome.Adapter)(nil)
+	_ AliasResolver = (*metronome.Adapter)(nil)
+	_ TenantKnower  = (*metronome.Adapter)(nil)
+)
+
+// settleRetry is how long a payment that a Metronome threshold notification
+// still in alarm keeps from lowering a hold is answered with an error, so
+// Metronome delivers it again: Metronome evaluates a notification again
+// when a commit changes, and notifies "within minutes", so the read can
+// trail the payment. After that the payment is applied, and the hold stays.
+const settleRetry = time.Hour
+
+// ErrNotSettled is returned for a payment that a threshold notification
+// still in alarm keeps from lowering a billing hold, within settleRetry of
+// the payment (the provider retries it).
+var ErrNotSettled = errors.New("payment does not settle the billing hold yet")
 
 // Enforcer is safe for concurrent use.
 type Enforcer struct {
@@ -362,28 +469,44 @@ func (e *Enforcer) HandleStripe(ctx context.Context, body []byte, sigHeader stri
 		Type    string `json:"type"`
 		Created int64  `json:"created"`
 		Data    struct {
-			Object struct {
-				Customer     string `json:"customer"`
-				Status       string `json:"status"`
-				AttemptCount int    `json:"attempt_count"`
-			} `json:"object"`
+			Object json.RawMessage `json:"object"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(body, &ev); err != nil {
 		return Signal{}, fmt.Errorf("decode: %w", err)
 	}
+	var obj struct {
+		ID           string `json:"id"`
+		Customer     string `json:"customer"`
+		Status       string `json:"status"`
+		AttemptCount int    `json:"attempt_count"`
+	}
+	var fields map[string]json.RawMessage
+	if len(ev.Data.Object) > 0 {
+		if err := json.Unmarshal(ev.Data.Object, &obj); err != nil {
+			return Signal{}, fmt.Errorf("decode: %w", err)
+		}
+		_ = json.Unmarshal(ev.Data.Object, &fields)
+	}
 	now := e.opts.Now().UTC()
-	sig := Signal{ID: "stripe:" + ev.ID, Source: "stripe", Type: ev.Type, CustomerID: ev.Data.Object.Customer, At: now, EventAt: now}
+	sig := Signal{ID: "stripe:" + ev.ID, Source: "stripe", Type: ev.Type, CustomerID: obj.Customer, At: now, EventAt: now}
 	if ev.Created > 0 {
 		sig.EventAt = time.Unix(ev.Created, 0).UTC()
 	}
 	switch ev.Type {
 	case "invoice.payment_failed":
-		sig.State, sig.Reason = Delinquent, fmt.Sprintf("invoice payment failed (attempt %d)", ev.Data.Object.AttemptCount)
+		sig.State, sig.Reason = Delinquent, fmt.Sprintf("invoice payment failed (attempt %d)", obj.AttemptCount)
+		// A subscription's invoice that fails puts the subscription in
+		// arrears: paying that invoice alone may not bring it back.
+		if sub := invoiceSubscription(fields); sub != "" {
+			sig.Object = "subscription:" + sub
+		} else {
+			sig.Object = "invoice:" + obj.ID
+		}
 	case "invoice.paid", "invoice.payment_succeeded":
-		sig.State, sig.Reason, sig.Positive = Active, "invoice paid", true
+		sig.State, sig.Reason, sig.Positive, sig.Object = Active, "invoice paid", true, "invoice:"+obj.ID
 	case "customer.subscription.created", "customer.subscription.updated", "customer.subscription.resumed":
-		switch ev.Data.Object.Status {
+		switch obj.Status {
 		case "past_due":
 			sig.State = Delinquent
 		case "unpaid", "canceled", "incomplete_expired":
@@ -391,14 +514,47 @@ func (e *Enforcer) HandleStripe(ctx context.Context, body []byte, sigHeader stri
 		case "active", "trialing":
 			sig.State, sig.Positive = Active, true
 		}
-		sig.Reason = "subscription " + ev.Data.Object.Status
+		sig.Reason, sig.Object = "subscription "+obj.Status, "subscription:"+obj.ID
 	case "customer.subscription.deleted":
-		sig.State, sig.Reason = Suspended, "subscription deleted"
+		sig.State, sig.Reason, sig.Object = Suspended, "subscription deleted", "subscription:"+obj.ID
 	case "billing.alert.triggered":
-		sig.State, sig.Reason = Warning, "usage alert triggered"
+		sig.State, sig.Reason, sig.Object = Warning, "usage alert triggered", "alert:"+idOf(fields["alert"])
 	}
 	err := e.apply(ctx, &sig)
 	return sig, err
+}
+
+// invoiceSubscription returns the subscription an invoice belongs to:
+// "subscription" up to API version 2025-03-31, then
+// parent.subscription_details.subscription.
+func invoiceSubscription(fields map[string]json.RawMessage) string {
+	if id := idOf(fields["subscription"]); id != "" {
+		return id
+	}
+	var parent struct {
+		SubscriptionDetails struct {
+			Subscription json.RawMessage `json:"subscription"`
+		} `json:"subscription_details"`
+	}
+	if json.Unmarshal(fields["parent"], &parent) != nil {
+		return ""
+	}
+	return idOf(parent.SubscriptionDetails.Subscription)
+}
+
+// idOf reads a field Stripe sends as an ID, or as the object when expanded.
+func idOf(raw json.RawMessage) string {
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+	var o struct {
+		ID string `json:"id"`
+	}
+	if json.Unmarshal(raw, &o) == nil {
+		return o.ID
+	}
+	return ""
 }
 
 // HandleMetronome verifies and applies a Metronome webhook. Events are
@@ -432,12 +588,14 @@ func (e *Enforcer) HandleMetronome(ctx context.Context, body []byte, date, signa
 	} else if t, err := http.ParseTime(date); err == nil {
 		sig.EventAt = t.UTC()
 	}
+	str := func(k string) string { v, _ := ev.Properties[k].(string); return v }
 	switch {
 	case strings.HasPrefix(ev.Type, "alerts."):
 		sig.State, sig.Reason = Warning, strings.ReplaceAll(strings.TrimPrefix(ev.Type, "alerts."), "_", " ")
-		if name, ok := ev.Properties["alert_name"].(string); ok && name != "" {
+		if name := str("alert_name"); name != "" {
 			sig.Reason = name
 		}
+		sig.Object = "alert:" + str("alert_id")
 	case ev.Type == "payment_gate.payment_status":
 		switch ev.Properties["payment_status"] {
 		case "failed":
@@ -445,6 +603,7 @@ func (e *Enforcer) HandleMetronome(ctx context.Context, body []byte, date, signa
 		case "paid":
 			sig.State, sig.Reason, sig.Positive = Active, "threshold billing payment succeeded", true
 		}
+		sig.Object = "payment:" + str("invoice_id")
 	}
 	err := e.apply(ctx, &sig)
 	return sig, err
@@ -484,12 +643,33 @@ func (e *Enforcer) apply(ctx context.Context, sig *Signal) error {
 		return err
 	}
 	sig.Tenants, sig.Tenant = tenants, strings.Join(tenants, ",")
+	// What a positive signal settles is decided before anything is stored:
+	// a billing platform that cannot be read again fails the whole event,
+	// which the provider retries.
+	plans := map[string]settlement{}
+	if sig.Positive {
+		reads := map[string]readResult{}
+		for _, tenant := range tenants {
+			s, err := e.settlement(ctx, tenant, sig, reads)
+			if err != nil {
+				return err
+			}
+			plans[tenant] = s
+		}
+	}
+	var cause *Cause
+	if !sig.Positive && sig.Object != "" {
+		cause = &Cause{Provider: sig.Source, Customer: sig.CustomerID, Object: sig.Object, State: sig.State,
+			Reason: sig.Reason, EventType: sig.Type, At: sig.EventAt.UTC()}
+	}
 	type change struct{ prev, ts TenantState }
 	var changed []change
 	var stale []string
 	for _, tenant := range tenants {
+		p := plans[tenant]
 		ts, prev, res, err := e.store(tenant, update{hold: HoldBilling, state: sig.State, reason: sig.Reason,
-			source: sig.Source, eventType: sig.Type, webhook: true, positive: sig.Positive, at: sig.EventAt})
+			source: sig.Source, eventType: sig.Type, webhook: true, positive: sig.Positive, at: sig.EventAt,
+			cause: cause, settled: p.settled, clear: p.clear, owed: p.owed, unread: p.unread, object: sig.Object})
 		if err != nil {
 			return err // not marked applied: the provider retries it
 		}
@@ -515,6 +695,137 @@ func (e *Enforcer) apply(ctx context.Context, sig *Signal) error {
 		errs = append(errs, e.reflectState(ctx, c.prev, c.ts, sig.Source, sig.Type))
 	}
 	return errors.Join(errs...)
+}
+
+// settlement is what a positive signal may lower a tenant's billing hold
+// by.
+type settlement struct {
+	settled map[string]bool // causes (Cause.key) the signal settles, or a read confirmed paid
+	clear   bool            // a hold without causes: its platform confirmed nothing is owed
+	owed    []string        // what else still holds the tenant, as the platforms said
+	unread  []string        // platforms that cannot be read again: their causes stay
+}
+
+// readResult is one ArrearsReader answer, shared by the tenants of one
+// customer.
+type readResult struct {
+	owed []string
+	err  error
+}
+
+// settlesItself reports whether a positive signal settles a cause by
+// itself: it is about the same object (the subscription that is active
+// again, the invoice that was paid); it is a Metronome payment and the cause
+// a failed one of the same customer (a failed payment-gated top-up grants
+// nothing and leaves nothing owed); or the cause is only a warning of the
+// same platform (a budget or usage alert that no rule made blocking: not a
+// debt, and it blocks nothing). The cause must not be newer than the signal
+// (by the second, as events are ordered).
+func settlesItself(sig *Signal, c Cause) bool {
+	if c.Provider != sig.Source || c.At.Truncate(time.Second).After(sig.EventAt.Truncate(time.Second)) {
+		return false
+	}
+	kind, id, _ := strings.Cut(c.Object, ":")
+	skind, sid, _ := strings.Cut(sig.Object, ":")
+	switch {
+	case c.State == Warning:
+		return true
+	case kind == "payment" && skind == "payment":
+		return c.Customer == sig.CustomerID
+	}
+	return id != "" && kind == skind && id == sid
+}
+
+// settlement decides how far a positive signal may lower a tenant's billing
+// hold: the causes it settles itself, and, when any are left (or the hold's
+// causes are unknown), what the billing platforms show when read again
+// (ArrearsReader). A platform that cannot be read is an error: nothing is
+// lowered on a guess. reads shares answers between the tenants of one
+// customer.
+func (e *Enforcer) settlement(ctx context.Context, tenant string, sig *Signal, reads map[string]readResult) (settlement, error) {
+	cur, held := e.StateOf(tenant).Holds[HoldBilling]
+	if !held || orActive(cur.State) == Active {
+		return settlement{}, nil
+	}
+	s := settlement{settled: map[string]bool{}}
+	type group struct {
+		provider, customer string
+		causes             []Cause
+	}
+	groups := map[string]*group{}
+	var order []string
+	add := func(provider, customer string, c *Cause) {
+		k := provider + "\x00" + customer
+		g := groups[k]
+		if g == nil {
+			g = &group{provider: provider, customer: customer}
+			groups[k] = g
+			order = append(order, k)
+		}
+		if c != nil {
+			g.causes = append(g.causes, *c)
+		}
+	}
+	for _, c := range cur.Causes {
+		if settlesItself(sig, c) {
+			s.settled[c.key()] = true
+			continue
+		}
+		add(c.Provider, c.Customer, &c)
+	}
+	if len(cur.Causes) == 0 {
+		add(sig.Source, sig.CustomerID, nil) // set by an operator or an older version: ask the signal's platform
+	}
+	sort.Strings(order)
+	var pending []string
+	for _, k := range order {
+		g := groups[k]
+		reader, ok := e.opts.Resolvers[g.provider].(ArrearsReader)
+		if !ok {
+			s.unread = append(s.unread, g.provider)
+			continue
+		}
+		objects := make([]string, 0, len(g.causes))
+		for _, c := range g.causes {
+			if !slices.Contains(objects, c.Object) {
+				objects = append(objects, c.Object)
+			}
+		}
+		sort.Strings(objects)
+		rk := strings.Join(append([]string{g.provider, g.customer, tenant}, objects...), "\x00")
+		res, ok := reads[rk]
+		if !ok {
+			res.owed, res.err = reader.Owed(ctx, tenant, g.customer, objects)
+			reads[rk] = res
+		}
+		if res.err != nil {
+			return settlement{}, fmt.Errorf("read %s customer %s again before lowering the billing hold of tenant %s: %w", g.provider, g.customer, tenant, res.err)
+		}
+		owed := map[string]bool{}
+		for _, o := range res.owed {
+			owed[o] = true
+			if !slices.Contains(objects, o) {
+				s.owed = append(s.owed, g.provider+": "+o)
+			}
+		}
+		for _, c := range g.causes {
+			if !owed[c.Object] {
+				s.settled[c.key()] = true
+				continue
+			}
+			if kind, _, _ := strings.Cut(c.Object, ":"); kind == "alert" && c.Provider == "metronome" && sig.Source == "metronome" {
+				pending = append(pending, c.Object)
+			}
+		}
+		if len(g.causes) == 0 && len(res.owed) == 0 {
+			s.clear = true
+		}
+	}
+	if len(pending) > 0 && e.opts.Now().Sub(sig.EventAt) < settleRetry {
+		return settlement{}, fmt.Errorf("%w: tenant %s: Metronome still shows %s in alarm for customer %s (retried until %s)", ErrNotSettled,
+			tenant, strings.Join(pending, ", "), sig.CustomerID, sig.EventAt.Add(settleRetry).UTC().Format(time.RFC3339))
+	}
+	return s, nil
 }
 
 // tenantsFor resolves a billing customer to the tenants its signals apply
@@ -638,6 +949,15 @@ type update struct {
 	// hold, unless it is positive.
 	webhook, positive bool
 	at                time.Time // when the platform says it happened
+	// A raising webhook records what it is about.
+	cause *Cause
+	// A positive webhook lowers the hold only as far as these allow
+	// (settlement).
+	settled map[string]bool
+	clear   bool
+	owed    []string
+	unread  []string
+	object  string
 }
 
 // storeResult says what store did with an update.
@@ -666,6 +986,13 @@ func (e *Enforcer) store(tenant string, u update) (ts, prev TenantState, res sto
 	e.mu.Unlock()
 	now := e.opts.Now().UTC()
 	at := now
+	holds := map[string]Hold{}
+	for k, v := range prev.Holds {
+		holds[k] = v
+	}
+	var causes []Cause // the hold's causes once the update is applied
+	kept := ""         // why the update leaves the hold's state as it is
+	advance := true    // whether the hold's newest event time moves to this one
 	if u.webhook {
 		if !u.at.IsZero() {
 			at = u.at.UTC()
@@ -679,22 +1006,45 @@ func (e *Enforcer) store(tenant string, u update) (ts, prev TenantState, res sto
 			return prev, prev, storeResult{outStale, fmt.Sprintf("the event happened at %s, before the newest one applied to the %s hold (%s)",
 				at.Format(time.RFC3339), u.hold, last.Format(time.RFC3339))}, nil
 		}
-		if cur := orActive(prev.Holds[u.hold].State); !u.positive && severity[u.state] < severity[cur] {
-			return prev, prev, storeResult{outKept, fmt.Sprintf("%s is less severe than its %s; only a payment or an active subscription lowers it", u.state, cur)}, nil
+		cur, held := holds[u.hold]
+		curState := orActive(cur.State)
+		switch {
+		case u.positive && held && curState != Active:
+			next, left, top, why := settle(cur, u, at)
+			if next == curState {
+				kept = why
+				cur.Causes = left
+				holds[u.hold] = cur
+				break
+			}
+			u.state, causes = next, left
+			if top != nil {
+				u.reason, u.source, u.eventType = top.Reason, top.Provider, top.EventType
+			}
+		case u.positive:
+		case severity[u.state] < severity[curState]:
+			// A lesser signal: the hold stays, and what it reports is still
+			// owed. It does not move the hold's event time, so a payment
+			// that happened before it still applies.
+			kept = fmt.Sprintf("%s is less severe than its %s; only a payment or an active subscription lowers it", u.state, curState)
+			cur.Causes = addCause(cur.Causes, u.cause)
+			holds[u.hold] = cur
+			advance = false
+		default:
+			causes = addCause(cur.Causes, u.cause)
 		}
 	}
-	holds := map[string]Hold{}
-	for k, v := range prev.Holds {
-		holds[k] = v
-	}
-	if u.state == Active {
-		delete(holds, u.hold)
-	} else {
-		h := Hold{State: u.state, Reason: u.reason, Source: u.source, EventType: u.eventType, Since: now}
-		if old, ok := holds[u.hold]; ok && old.State == u.state {
-			h.Since = old.Since
+	if kept == "" {
+		if u.state == Active {
+			delete(holds, u.hold)
+		} else {
+			// An operator's change replaces the hold, causes and all.
+			h := Hold{State: u.state, Reason: u.reason, Source: u.source, EventType: u.eventType, Since: now, Causes: causes}
+			if old, ok := holds[u.hold]; ok && old.State == u.state {
+				h.Since = old.Since
+			}
+			holds[u.hold] = h
 		}
-		holds[u.hold] = h
 	}
 	ts = effective(tenant, holds)
 	if len(holds) == 0 {
@@ -710,7 +1060,7 @@ func (e *Enforcer) store(tenant string, u update) (ts, prev TenantState, res sto
 	for k, v := range prev.EventTimes {
 		ts.EventTimes[k] = v
 	}
-	if at.After(ts.EventTimes[u.hold]) {
+	if advance && at.After(ts.EventTimes[u.hold]) {
 		ts.EventTimes[u.hold] = at
 	}
 	b, err := json.Marshal(ts)
@@ -723,7 +1073,64 @@ func (e *Enforcer) store(tenant string, u update) (ts, prev TenantState, res sto
 	e.mu.Lock()
 	e.states[tenant] = ts
 	e.mu.Unlock()
+	if kept != "" {
+		return ts, prev, storeResult{outKept, kept}, nil
+	}
 	return ts, prev, storeResult{}, nil
+}
+
+// settle decides how far a positive webhook lowers a hold: to the most
+// severe of the causes it leaves, or off when it leaves none. A hold whose
+// causes are unknown is lowered only if its platform confirmed nothing is
+// owed, and anything else a platform still shows owed keeps the hold as it
+// is. It returns the state, the causes left, the one the state comes from,
+// and why the hold stays when it does.
+func settle(cur Hold, u update, at time.Time) (State, []Cause, *Cause, string) {
+	curState := orActive(cur.State)
+	var left []Cause
+	for _, c := range cur.Causes {
+		if u.settled[c.key()] && !c.At.Truncate(time.Second).After(at.Truncate(time.Second)) {
+			continue
+		}
+		left = append(left, c)
+	}
+	still := func(what []string) string {
+		if len(u.unread) > 0 {
+			what = append(what, "and "+strings.Join(u.unread, ", ")+" cannot be read again")
+		}
+		return strings.Join(what, ", ")
+	}
+	switch {
+	case len(cur.Causes) == 0 && !u.clear:
+		why := "what set it is not recorded (an operator, or a version before v0.3.1)"
+		if len(u.owed) > 0 || len(u.unread) > 0 {
+			why += "; still held by " + still(u.owed)
+		} else {
+			why += ", and the billing platform did not confirm nothing is owed"
+		}
+		return curState, nil, nil, why
+	case len(cur.Causes) == 0:
+		return u.state, nil, nil, ""
+	case len(u.owed) > 0:
+		return curState, left, nil, "still held by " + still(u.owed)
+	case len(left) == 0:
+		return u.state, nil, nil, ""
+	}
+	top := left[0]
+	for _, c := range left[1:] {
+		if severity[c.State] > severity[top.State] || severity[c.State] == severity[top.State] && c.At.After(top.At) {
+			top = c
+		}
+	}
+	next := curState
+	if severity[top.State] < severity[next] {
+		next = top.State
+	}
+	what := make([]string, 0, len(left))
+	for _, c := range left {
+		what = append(what, c.Object+" ("+string(c.State)+")")
+	}
+	return next, left, &top, u.object + " does not settle " + still(what)
 }
 
 // reflectState reports a stored state and reflects it on the tenant's
