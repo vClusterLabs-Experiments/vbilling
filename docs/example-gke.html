@@ -408,10 +408,11 @@ unset -f stripe_test
 kubectl -n vbilling rollout restart statefulset/vbilling</code></div>
 
       <h2 id="check">7. Check it</h2>
-      <div class="code-block"><code><span class="cmd">kubectl</span> -n vbilling port-forward svc/vbilling 8080:8080 &amp;
-<span class="comment"># dashboard: http://localhost:8080/</span>
-<span class="cmd">curl</span> -s "localhost:8080/api/v1/events?from=$(date -u +%Y-%m-%dT%H:00:00Z)" | head
-<span class="cmd">curl</span> -s "localhost:8080/api/v1/reconcile?from=&lt;start&gt;&amp;to=&lt;end&gt;"   <span class="comment">  # ledger vs Stripe, per tenant and metric</span></code></div>
+      <div class="code-block"><code><span class="cmd">export</span> VBILLING_TOKEN=$(<span class="cmd">kubectl</span> <span class="flag">-n</span> vbilling get secret vbilling <span class="flag">-o</span> jsonpath=<span class="string">'{.data.api-token}'</span> | base64 <span class="flag">-d</span>)  <span class="comment"># the API token the chart generated</span>
+<span class="cmd">kubectl</span> -n vbilling port-forward svc/vbilling 8080:8080 &amp;
+<span class="comment"># dashboard: http://localhost:8080/ (it asks for the token)</span>
+<span class="cmd">curl</span> <span class="flag">-H</span> <span class="string">"Authorization: Bearer $VBILLING_TOKEN"</span> -s "localhost:8080/api/v1/events?from=$(date -u +%Y-%m-%dT%H:00:00Z)" | head
+<span class="cmd">curl</span> <span class="flag">-H</span> <span class="string">"Authorization: Bearer $VBILLING_TOKEN"</span> -s "localhost:8080/api/v1/reconcile?from=&lt;start&gt;&amp;to=&lt;end&gt;"   <span class="comment">  # ledger vs Stripe, per tenant and metric</span></code></div>
       <p>One 30 second window:</p>
       <div class="config-table-wrap">
         <table class="config-table">

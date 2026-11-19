@@ -385,11 +385,11 @@ def verify(body: bytes, header: str, secret: str, tolerance: int = 300) -&gt; bo
         <div><strong>Deduplicate on <code>id</code>.</strong> A batch can arrive twice: after a timeout, a restart before the cursor was saved, a dead-letter replay or a cursor rewind. A usage event keeps its ID for the same window, so upsert on it. Tenant and catalog IDs carry a timestamp: keep the latest. Return 2xx for types you ignore. A catalog event your endpoint rejects with 400, 413 or 422 is logged and skipped; any other failure holds delivery to the endpoint until the catalog event is accepted.</div>
       </div>
       <p>Dead letters stay on the ledger volume until a replay clears them. Add <code>-H "Authorization: Bearer $API_TOKEN"</code> when the API is protected:</p>
-      <div class="code-block"><code><span class="cmd">curl</span> -s localhost:8080/api/v1/destinations/webhook/dead-letters \
+      <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-H</span> <span class="string">"Authorization: Bearer $VBILLING_TOKEN"</span> -s localhost:8080/api/v1/destinations/webhook/dead-letters \
   | jq <span class="string">'.dead_letters[] | {reason, id: .event.id}'</span>
-<span class="cmd">curl</span> -s -X POST localhost:8080/api/v1/destinations/webhook/dead-letters/replay
+<span class="cmd">curl</span> <span class="flag">-H</span> <span class="string">"Authorization: Bearer $VBILLING_TOKEN"</span> -s -X POST localhost:8080/api/v1/destinations/webhook/dead-letters/replay
 <span class="comment"># send the retained ledger (the last 7 days) to a new endpoint</span>
-<span class="cmd">curl</span> -s -X POST localhost:8080/api/v1/destinations/webhook/cursor -d <span class="string">'{"seq": 0}'</span></code></div>
+<span class="cmd">curl</span> <span class="flag">-H</span> <span class="string">"Authorization: Bearer $VBILLING_TOKEN"</span> -s -X POST localhost:8080/api/v1/destinations/webhook/cursor -d <span class="string">'{"seq": 0}'</span></code></div>
 
       <h2 id="ingest">Ingest API</h2>
       <p>Usage vBilling cannot measure itself, such as inference tokens from a model gateway or Slurm accounting, goes in through <code>POST /api/v1/events</code>. Accepted events are committed to the same ledger as collector events and fan out to every adapter, the webhook and your own adapter included. Declare the metric, enable ingest with a token, and send closed windows:</p>
@@ -397,7 +397,7 @@ def verify(body: bytes, header: str, secret: str, tolerance: int = 300) -&gt; bo
   <span class="flag">--set</span> metering.customMetrics=<span class="string">'inference_output_tokens:tokens:model'</span> \
   <span class="flag">--set</span> api.existingSecret=vbilling-api   <span class="comment"># keys: api-token, ingest-token</span>
 
-<span class="cmd">curl</span> -X POST localhost:8080/api/v1/events -H <span class="string">"Authorization: Bearer $INGEST_TOKEN"</span> \
+<span class="cmd">curl</span> <span class="flag">-H</span> <span class="string">"Authorization: Bearer $VBILLING_TOKEN"</span> -X POST localhost:8080/api/v1/events -H <span class="string">"Authorization: Bearer $INGEST_TOKEN"</span> \
   -H <span class="string">"X-VBilling-Client: model-gateway"</span> -d <span class="string">'{"events": [{
     "tenant": "acme-ai", "metric": "inference_output_tokens", "quantity": 1250000,
     "window_start": "2026-10-05T10:00:00Z", "window_end": "2026-10-05T10:01:00Z",

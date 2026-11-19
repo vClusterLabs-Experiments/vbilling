@@ -401,11 +401,11 @@
       </div>
       <p>Check delivery, list dead letters and replay them (add your API token as a bearer token):</p>
       <div class="code-block"><code><span class="cmd">kubectl</span> <span class="flag">-n</span> vbilling-system port-forward svc/vbilling 8080
-<span class="cmd">curl</span> <span class="flag">-s</span> localhost:8080/api/v1/destinations | jq <span class="string">'.destinations[] | select(.name == "metronome")'</span>
-<span class="cmd">curl</span> <span class="flag">-s</span> localhost:8080/api/v1/destinations/metronome/dead-letters | jq
-<span class="cmd">curl</span> <span class="flag">-s -X POST</span> localhost:8080/api/v1/destinations/metronome/dead-letters/replay</code></div>
+<span class="cmd">curl</span> <span class="flag">-H</span> <span class="string">"Authorization: Bearer $VBILLING_TOKEN"</span> <span class="flag">-s</span> localhost:8080/api/v1/destinations | jq <span class="string">'.destinations[] | select(.name == "metronome")'</span>
+<span class="cmd">curl</span> <span class="flag">-H</span> <span class="string">"Authorization: Bearer $VBILLING_TOKEN"</span> <span class="flag">-s</span> localhost:8080/api/v1/destinations/metronome/dead-letters | jq
+<span class="cmd">curl</span> <span class="flag">-H</span> <span class="string">"Authorization: Bearer $VBILLING_TOKEN"</span> <span class="flag">-s -X POST</span> localhost:8080/api/v1/destinations/metronome/dead-letters/replay</code></div>
       <p>Adding Metronome to a running vBilling starts delivery at the next committed window. To send the retained ledger as well, rewind its cursor; transaction IDs keep the overlap from counting twice:</p>
-      <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-s -X POST</span> localhost:8080/api/v1/destinations/metronome/cursor <span class="flag">-d</span> <span class="string">'{"seq": 0}'</span></code></div>
+      <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-H</span> <span class="string">"Authorization: Bearer $VBILLING_TOKEN"</span> <span class="flag">-s -X POST</span> localhost:8080/api/v1/destinations/metronome/cursor <span class="flag">-d</span> <span class="string">'{"seq": 0}'</span></code></div>
 
       <h2 id="billable-metrics">Billable metrics as configuration</h2>
       <p><code>vbilling metronome billable-metrics</code> prints the billable metrics vBilling's events need, as a JSON array of bodies for Metronome's <code>POST /v1/billable-metrics/create</code>: one per billable metric, the SUM of <code>value</code>, filtered on the event type and requiring <code>value</code> and every group-key property, with one compound group key. It does not call Metronome. Run it in vBilling's pod, so custom metrics are included, and add the entries to the configuration Finance applies to Metronome:</p>
@@ -514,7 +514,7 @@ enforcement:
         </table>
       </div>
       <p>Checks run at startup, every 10 minutes, within seconds of a new series appearing in the ledger, and on <code>POST /api/v1/pricing/check</code>. Gaps show in <code>GET /api/v1/pricing</code>, as <code>unpriced</code> entries in <code>GET /api/v1/sources?kind=pricing</code> with the hint, in the dashboard's Price coverage tile, and as <code>vbilling_unpriced_series{destination="metronome"}</code>:</p>
-      <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-s</span> <span class="string">'localhost:8080/api/v1/pricing?destination=metronome'</span> | jq <span class="string">'.destinations[].series[] | select(.status != "priced")'</span></code></div>
+      <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-H</span> <span class="string">"Authorization: Bearer $VBILLING_TOKEN"</span> <span class="flag">-s</span> <span class="string">'localhost:8080/api/v1/pricing?destination=metronome'</span> | jq <span class="string">'.destinations[].series[] | select(.status != "priced")'</span></code></div>
       <p>With <code>PRICE_CHECK=hold</code>, events of an <code>unpriced</code> series wait in vBilling until the rate exists, then ship in ledger order (see <a href="troubleshooting.html#unpriced-usage">Unpriced usage</a>). Metronome accepts usage up to 34 days old, so usage held longer than 28 days is released without a rate and the <code>pricing/metronome/...</code> source turns <code>failing</code>.</p>
       <p>The check reads, and the adapter's tests validate its requests and fixtures against the schemas of these pages:</p>
       <ul>
@@ -528,7 +528,7 @@ enforcement:
 
       <h2 id="reconcile">Reconciliation</h2>
       <p><code>GET /api/v1/reconcile?destination=metronome</code> recomputes each tenant's usage from the ledger and compares it with what Metronome's usage API (<code>POST /v1/usage</code>) recorded for the tenant's customer, found by ingest alias, on a billable metric that sums the value of every event of the type (one without filters on values, such as vBilling's definition). Metronome reports whole UTC days only, so <code>from</code> and <code>to</code> must be UTC midnights (<code>YYYY-MM-DD</code> works). Without them, the previous full UTC day is checked. Narrow it with <code>tenant</code> or <code>metric</code>; each row compares all of that tenant's usage of the metric, because Metronome reports totals per customer.</p>
-      <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-s</span> <span class="string">'localhost:8080/api/v1/reconcile?destination=metronome&amp;from=2026-11-18&amp;to=2026-11-19'</span> | jq
+      <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-H</span> <span class="string">"Authorization: Bearer $VBILLING_TOKEN"</span> <span class="flag">-s</span> <span class="string">'localhost:8080/api/v1/reconcile?destination=metronome&amp;from=2026-11-18&amp;to=2026-11-19'</span> | jq
 <span class="output">{
   "from": "2026-11-18T00:00:00Z",
   "to": "2026-11-19T00:00:00Z",
@@ -595,7 +595,7 @@ enforcement:
       <h3>Dead letters older than 34 days</h3>
       <p><code>older than Metronome's 34-day ingest window</code> comes from a cursor rewind or an outage longer than Metronome accepts backdated events. Metronome cannot take them. They stay in the dead-letter list, and reconciliation reports them as <code>dead_lettered</code>.</p>
       <h3>A series is unpriced</h3>
-      <p><code>[pricing] metronome: vcluster_private_node_hours sku=gpu-b200-8 (plan ...) is unpriced: ...</code> and the <code>pricing/metronome/...</code> source name the billable metric, product or rate card, and the hint names what to add. Add it in Metronome, then run <code>curl -s -X POST localhost:8080/api/v1/pricing/check</code> or wait for the next check.</p>
+      <p><code>[pricing] metronome: vcluster_private_node_hours sku=gpu-b200-8 (plan ...) is unpriced: ...</code> and the <code>pricing/metronome/...</code> source name the billable metric, product or rate card, and the hint names what to add. Add it in Metronome, then run <code>curl <span class="flag">-H</span> <span class="string">"Authorization: Bearer $VBILLING_TOKEN"</span> -s -X POST localhost:8080/api/v1/pricing/check</code> or wait for the next check.</p>
       <h3>Reconciliation fails or reads 0</h3>
       <p><code>metronome reconciliation needs whole UTC days (got ... to ...)</code> means <code>from</code> or <code>to</code> is not a UTC midnight. A recorded total of 0 means no customer holds the tenant's alias yet, or no billable metric sums every event of the type: the log says which.</p>
     </main>

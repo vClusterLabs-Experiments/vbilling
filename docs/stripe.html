@@ -323,7 +323,7 @@
 <span class="output">[stripe] created meter vcluster_gpu_hours (mtr_...)</span>
 <span class="output">[stripe] created customer cus_... for tenant vcluster-team-a-team-a</span>
 <span class="cmd">kubectl</span> <span class="flag">-n</span> vbilling-system port-forward svc/vbilling 8080 &amp;
-<span class="cmd">curl</span> <span class="flag">-s</span> localhost:8080/api/v1/status | jq <span class="string">'.destinations'</span></code></div>
+<span class="cmd">curl</span> <span class="flag">-H</span> <span class="string">"Authorization: Bearer $VBILLING_TOKEN"</span> <span class="flag">-s</span> localhost:8080/api/v1/status | jq <span class="string">'.destinations'</span></code></div>
       <p>For CI, run <a href="https://github.com/stripe/stripe-mock" target="_blank">stripe-mock</a> and set <code>stripe.apiBase</code> to it: every request is validated against Stripe's OpenAPI spec, as in <code>scripts/e2e-kind.sh</code>.</p>
 
       <h3 id="settings">Settings</h3>
@@ -486,13 +486,13 @@
         <div>Stripe enforces identifier uniqueness for at least 24 hours and accepts events up to 35 days old. vBilling never resends acknowledged events, and dead-letters events older than 35 days minus an hour of margin. Do not rewind the Stripe destination's cursor by more than 24 hours, or Stripe may count those events again; rewinding is meant for a newly added destination, which starts at the end of the ledger: <code>POST /api/v1/destinations/stripe/cursor</code> with <code>{"seq": 0}</code> sends it the retained ledger.</div>
       </div>
       <p>After fixing what caused a rejection (often by upgrading vBilling), replay the parked events. Events Stripe still rejects stay parked (<code>still_rejected</code>). With <code>API_TOKEN</code> set, add <code>-H "Authorization: Bearer $API_TOKEN"</code>.</p>
-      <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-s</span> localhost:8080/api/v1/destinations/stripe/dead-letters | jq
-<span class="cmd">curl</span> <span class="flag">-s -X POST</span> localhost:8080/api/v1/destinations/stripe/dead-letters/replay
+      <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-H</span> <span class="string">"Authorization: Bearer $VBILLING_TOKEN"</span> <span class="flag">-s</span> localhost:8080/api/v1/destinations/stripe/dead-letters | jq
+<span class="cmd">curl</span> <span class="flag">-H</span> <span class="string">"Authorization: Bearer $VBILLING_TOKEN"</span> <span class="flag">-s -X POST</span> localhost:8080/api/v1/destinations/stripe/dead-letters/replay
 <span class="output">{"replayed":12}</span></code></div>
 
       <h2 id="reconcile">Reconciliation</h2>
       <p><code>GET /api/v1/reconcile</code> recomputes each tenant's usage per metric from the ledger, subtracts what was dead-lettered, and compares it with Stripe's meter event summaries for the tenant's customer, summed over every split meter of the metric. A row matches within 0.1%. The default range is the previous full UTC day; <code>from</code> and <code>to</code> take RFC 3339 times or dates. <code>tenant</code> and <code>metric</code> narrow it down; <code>sku</code>, <code>region</code>, <code>project</code> and <code>cluster</code> pick the tenants and metrics with such usage, and each row still compares all of that tenant's usage of the metric, because Stripe reports totals per customer.</p>
-      <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-s</span> <span class="string">'localhost:8080/api/v1/reconcile?destination=stripe&amp;from=2026-10-05&amp;to=2026-10-06'</span> | jq
+      <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-H</span> <span class="string">"Authorization: Bearer $VBILLING_TOKEN"</span> <span class="flag">-s</span> <span class="string">'localhost:8080/api/v1/reconcile?destination=stripe&amp;from=2026-10-05&amp;to=2026-10-06'</span> | jq
 <span class="output">{
   "from": "2026-10-05T00:00:00Z",
   "to": "2026-10-06T00:00:00Z",
@@ -562,7 +562,7 @@ spec:
       </div>
       <p>In <code>enforce</code> mode with <code>enforcement.gateway.litellm=true</code>, a suspended or paused tenant's LiteLLM teams are also blocked, which is how a tenant that only buys tokens is stopped. See <a href="usage-sources.html#gateway-enforcement">Stopping a suspended tenant at the gateway</a>.</p>
       <p>Override a mapping with <code>enforcement.rules</code> (<code>ENFORCEMENT_RULES</code>), for example <code>invoice.payment_failed=suspended</code> to suspend on the first failed payment, or <code>billing.alert.triggered=suspended</code> to turn a Stripe usage alert into a hard cap. Operators can also set a state by hand:</p>
-      <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-s -X PUT</span> localhost:8080/api/v1/billing-states/acme-ai <span class="flag">-d</span> <span class="string">'{"state": "active", "reason": "paid by bank transfer"}'</span></code></div>
+      <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-H</span> <span class="string">"Authorization: Bearer $VBILLING_TOKEN"</span> <span class="flag">-s -X PUT</span> localhost:8080/api/v1/billing-states/acme-ai <span class="flag">-d</span> <span class="string">'{"state": "active", "reason": "paid by bank transfer"}'</span></code></div>
 
       <h2 id="offboarding">Offboarding</h2>
       <p>When a tenant has been gone for <code>billing.offboardGrace</code> (default 1h), vBilling offboards it. The Stripe customer and its subscription stay, so final usage is still invoiced. With <code>stripe.cancelOnRemove=true</code>, the subscription is set to cancel at the end of the period.</p>

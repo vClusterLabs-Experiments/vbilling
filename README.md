@@ -223,6 +223,8 @@ vBilling creates one meter per metric (and per SKU as it sees them). Attach mete
 
 **Metronome rating, Stripe payments**
 
+With `metronome.provision=true`, vBilling sets Metronome up: billable metrics, a customer per tenant, a contract on the rate card, and a linked Stripe customer. If your own portal already creates customers and contracts, leave it off: vBilling then only sends usage, keyed on the tenant ID as the customer's ingest alias.
+
 ```bash
 kubectl -n vbilling-system create secret generic vbilling-metronome --from-file=api-token=./metronome-token
 kubectl -n vbilling-system create secret generic vbilling-stripe --from-file=api-key=./stripe-live-key
@@ -230,12 +232,12 @@ kubectl -n vbilling-system create secret generic vbilling-webhook --from-file=se
 helm upgrade --install vbilling deploy/helm/vbilling -n vbilling-system \
   --set adapters='{metronome,webhook}' \
   --set metronome.existingSecret=vbilling-metronome --set metronome.rateCard=payg-aud \
-  --set metronome.stripeLink=true --set stripe.existingSecret=vbilling-stripe \
+  --set metronome.provision=true --set stripe.existingSecret=vbilling-stripe \
   --set webhook.url=https://data.example.com/usage --set webhook.existingSecret=vbilling-webhook \
   --set region=ap-southeast-2
 ```
 
-In Metronome, add products on the vBilling billable metrics with `pricing_group_key: ["region","sku","capacity_type","billing_mode"]` and `presentation_group_key: ["tenant_cluster"]` (together they must form the metric's group key) to price H100 differently from L40S, one region differently from another, and spot or preemptible at a flat discount. Rate cards carry the currency.
+In Metronome, add products on vBilling's billable metrics (`vbilling metronome billable-metrics` prints them for your catalog) with `pricing_group_key: ["region","sku","capacity_type","billing_mode"]` and `presentation_group_key: ["tenant_cluster"]` (together they must form the metric's group key) to price H100 differently from L40S, one region differently from another, and spot or preemptible at a flat discount. Rate cards carry the currency.
 
 **Shared and private GPU nodes on GKE**: [`examples/gke-gpu`](examples/gke-gpu) is a complete setup, from an empty project to Stripe invoices: a time-sliced L4 cluster, an A100 joined as a vCluster private node, DCGM through Prometheus, and the manifests, values and commands for each step. Also on the [docs site](https://vclusterlabs-experiments.github.io/vbilling/example-gke.html).
 
@@ -244,10 +246,11 @@ In Metronome, add products on the vBilling billable metrics with `pricing_group_
 Then:
 
 ```bash
+export VBILLING_TOKEN=$(kubectl -n vbilling-system get secret vbilling -o jsonpath='{.data.api-token}' | base64 -d)
 kubectl -n vbilling-system port-forward svc/vbilling 8080
-# dashboard: http://localhost:8080/
-curl -s localhost:8080/api/v1/status | jq '.destinations'           # delivery health
-curl -s 'localhost:8080/api/v1/usage?group_by=tenant,sku' | jq      # line items
+# dashboard: http://localhost:8080/ (it asks for the token)
+curl -H "Authorization: Bearer $VBILLING_TOKEN" -s localhost:8080/api/v1/status | jq '.destinations'           # delivery health
+curl -H "Authorization: Bearer $VBILLING_TOKEN" -s 'localhost:8080/api/v1/usage?group_by=tenant,sku' | jq      # line items
 ```
 
 ![vBilling dashboard](docs/images/dashboard.jpg)
@@ -346,7 +349,7 @@ Prompt and completion tokens become `inference_input_tokens` and `inference_outp
 Declare metrics in `metering.customMetrics` (a list of `code`, `name`, `unit`, `description`, `groupKeys`, `billable`) or with `CUSTOM_METRICS="code:unit[:key|key],..."`, and push closed windows with a bearer token:
 
 ```bash
-curl -X POST localhost:8080/api/v1/events -H "Authorization: Bearer $INGEST_TOKEN" -H "X-VBilling-Client: model-gateway" -d '{
+curl -H "Authorization: Bearer $VBILLING_TOKEN" -X POST localhost:8080/api/v1/events -H "Authorization: Bearer $INGEST_TOKEN" -H "X-VBilling-Client: model-gateway" -d '{
   "events": [{"tenant": "acme", "metric": "inference_output_tokens", "quantity": 1250000,
               "window_start": "2026-10-05T10:00:00Z", "window_end": "2026-10-05T10:01:00Z",
               "dimensions": {"model": "llama-3.3-70b"}}]}'

@@ -369,6 +369,8 @@
               <tr><td><code>capacity_type</code></td><td>Capacity type of the node</td></tr>
               <tr><td><code>billing_mode</code></td><td>shared, dedicated_node or private_node</td></tr>
               <tr><td><code>namespace</code></td><td>Namespace inside the cluster (with METER_BY_NAMESPACE)</td></tr>
+              <tr><td><code>vcpus</code>, <code>memory_gib</code>, <code>gpu_count</code>, <code>public_ip</code></td><td>Dedicated and private node-hour events: the node's CPU cores, memory in GiB, physical GPUs, and whether it has an external IP, so a billing platform can price an instance by its shape. Not group keys</td></tr>
+              <tr><td><code>accuracy</code></td><td><code>estimate</code> on events of estimated metrics, sent to Metronome and webhooks</td></tr>
             </tbody>
           </table>
         </div>

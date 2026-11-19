@@ -310,7 +310,7 @@
             </tr>
             <tr>
               <td><code>PLATFORM_ACCESS_KEY</code></td>
-              <td>Access key of a Platform user with a global role that reads Projects, Tenants and VirtualClusterInstances and may <code>use</code> instances. From a Secret.</td>
+              <td>Access key of a Platform user with a global role that reads Projects, Tenants and VirtualClusterInstances and may <code>use</code> instances. From a Secret. With <code>TENANT_SOURCE=platform</code>, clusters with their own nodes are reached only through the Platform proxy with this key, and <code>vbilling.vcluster.com/</code> settings come only from Tenants and Projects.</td>
               <td class="td-default">(none)</td>
             </tr>
             <tr>
@@ -505,12 +505,12 @@
             </tr>
             <tr>
               <td><code>API_TOKEN</code></td>
-              <td>Bearer token for <code>/api/*</code>. Empty leaves the API unauthenticated (keep the Service internal).</td>
-              <td class="td-default">(none)</td>
+              <td>Bearer token for every endpoint except <code>/healthz</code> and <code>/readyz</code>: the API, the dashboard's data, <code>/metrics</code>. The API is never open: without a token vBilling generates one into <code>DATA_DIR/api-token</code> (mode 0600) and logs the file's path. The chart generates one into its Secret unless <code>api.token</code> or <code>api.existingSecret</code> is set. See <a href="security.html">Security</a>.</td>
+              <td class="td-default">(generated)</td>
             </tr>
             <tr>
               <td><code>INGEST_TOKEN</code></td>
-              <td>Bearer token for <code>POST /api/v1/events</code> and <code>POST /api/v1/records</code>; defaults to <code>API_TOKEN</code>. Ingest is disabled without a token.</td>
+              <td>Bearer token for <code>POST /api/v1/events</code> and <code>POST /api/v1/records</code>; defaults to <code>API_TOKEN</code>. Give gateways this token, never the API token.</td>
               <td class="td-default">(none)</td>
             </tr>
             <tr>
@@ -1037,7 +1037,7 @@
   <span class="flag">-n</span> vbilling-system <span class="flag">--create-namespace</span> \
   <span class="flag">--set</span> adapters=<span class="string">'{metronome,webhook}'</span> \
   <span class="flag">--set</span> metronome.existingSecret=metronome-credentials \
-  <span class="flag">--set</span> metronome.rateCard=payg-aud <span class="flag">--set</span> metronome.stripeLink=true \
+  <span class="flag">--set</span> metronome.rateCard=payg-aud <span class="flag">--set</span> metronome.provision=true \
   <span class="flag">--set</span> stripe.existingSecret=stripe-credentials \
   <span class="flag">--set</span> webhook.url=https://data.example.com/usage \
   <span class="flag">--set</span> region=ap-southeast-2 <span class="flag">--set</span> api.existingSecret=vbilling-api</code></div>
@@ -1181,7 +1181,7 @@ Private Node Hours:    <span class="string">$0.50</span>   <span class="comment"
 
       <h2 id="stripe-metronome-pricing">Stripe and Metronome Pricing</h2>
       <p><strong>Stripe:</strong> vBilling creates a Billing Meter per metric and, because Stripe meters cannot price on dimensions, a meter per SKU as new SKUs appear (for example <code>vcluster_gpu_hours__nvidia_h100_80gb_hbm3</code>). Create a metered price on each meter you charge for. To subscribe new tenants automatically, tag the prices <code>metadata[vbilling_plan]=vcluster-standard</code> (or the tenant's <code>plan</code> annotation) and enable <code>stripe.autoSubscribe</code>.</p>
-      <p><strong>Metronome:</strong> vBilling creates SUM billable metrics named <code>&lt;Metric&gt; [&lt;code&gt;]</code>, each with one compound group key: <code>region, sku, capacity_type, billing_mode, tenant_cluster</code> for GPU hours. On your rate card, add a usage product per metric with <code>pricing_group_key</code> set to the dimensions you price on and <code>presentation_group_key: [tenant_cluster]</code> for invoice lines per cluster; together the two must form the metric's group key (for GPU hours, <code>pricing_group_key: [region, sku, capacity_type, billing_mode]</code>). Rate cards carry the currency, so use one rate card per currency. Point <code>metronome.rateCard</code> or a tenant's <code>plan</code> annotation at it.</p>
+      <p><strong>Metronome:</strong> vBilling's billable metrics are SUM metrics on <code>value</code>, one per metric code (with <code>METRONOME_PROVISION=true</code> vBilling creates them, named <code>&lt;Metric&gt; [&lt;code&gt;]</code>; otherwise <code>vbilling metronome billable-metrics</code> prints them for your catalog), each with one compound group key: <code>region, sku, capacity_type, billing_mode, tenant_cluster</code> for GPU hours. On your rate card, add a usage product per metric with <code>pricing_group_key</code> set to the dimensions you price on and <code>presentation_group_key: [tenant_cluster]</code> for invoice lines per cluster; together the two must form the metric's group key (for GPU hours, <code>pricing_group_key: [region, sku, capacity_type, billing_mode]</code>). Rate cards carry the currency, so use one rate card per currency. Point <code>metronome.rateCard</code> or a tenant's <code>plan</code> annotation at it.</p>
 
 
     </main>

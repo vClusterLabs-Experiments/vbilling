@@ -359,7 +359,7 @@
           <thead><tr><th>Adapter</th><th>Secret keys</th><th>Helm values</th></tr></thead>
           <tbody>
             <tr><td><code>stripe</code></td><td><code>api-key</code>, <code>webhook-secret</code></td><td><code>stripe.existingSecret</code></td></tr>
-            <tr><td><code>metronome</code></td><td><code>api-token</code>, <code>webhook-secret</code></td><td><code>metronome.existingSecret</code>, <code>metronome.rateCard</code></td></tr>
+            <tr><td><code>metronome</code></td><td><code>api-token</code>, <code>webhook-secret</code></td><td><code>metronome.existingSecret</code>, <code>metronome.provision</code></td></tr>
             <tr><td><code>lago</code></td><td><code>api-key</code></td><td><code>lago.existingSecret</code>, <code>lago.apiURL</code></td></tr>
             <tr><td><code>webhook</code></td><td><code>secret</code></td><td><code>webhook.existingSecret</code>, <code>webhook.url</code></td></tr>
             <tr><td><code>noop</code></td><td></td><td>None: logs every event instead of sending it, for a dry run</td></tr>
@@ -391,11 +391,12 @@ ADAPTERS=noop DATA_DIR=./data <span class="cmd">./bin/vbilling</span></code></di
 [controller] starting (adapters=[stripe], window=1m0s, reconcile=30s, region=us-east-1)
 API listening on :8080
 [controller] window 10:18:00: ... events for 3 tenant cluster(s) (...)</span></code></div>
-      <div class="code-block"><code><span class="cmd">kubectl</span> <span class="flag">-n</span> vbilling-system port-forward svc/vbilling 8080
-<span class="comment"># dashboard: http://localhost:8080/</span>
-<span class="cmd">curl</span> <span class="flag">-s</span> localhost:8080/api/v1/status | jq <span class="string">'.destinations'</span>                  <span class="comment"># delivery health per adapter</span>
-<span class="cmd">curl</span> <span class="flag">-s</span> <span class="string">'localhost:8080/api/v1/usage?group_by=tenant,sku'</span> | jq     <span class="comment"># line items from the ledger</span>
-<span class="cmd">curl</span> <span class="flag">-s</span> localhost:8080/api/v1/reconcile | jq <span class="string">'.results[] | {destination, ok}'</span>   <span class="comment"># Stripe and Metronome</span></code></div>
+      <div class="code-block"><code><span class="cmd">export</span> VBILLING_TOKEN=$(<span class="cmd">kubectl</span> <span class="flag">-n</span> vbilling-system get secret vbilling <span class="flag">-o</span> jsonpath=<span class="string">'{.data.api-token}'</span> | base64 <span class="flag">-d</span>)  <span class="comment"># the API token the chart generated</span>
+<span class="cmd">kubectl</span> <span class="flag">-n</span> vbilling-system port-forward svc/vbilling 8080
+<span class="comment"># dashboard: http://localhost:8080/ (it asks for the token)</span>
+<span class="cmd">curl</span> <span class="flag">-H</span> <span class="string">"Authorization: Bearer $VBILLING_TOKEN"</span> <span class="flag">-s</span> localhost:8080/api/v1/status | jq <span class="string">'.destinations'</span>                  <span class="comment"># delivery health per adapter</span>
+<span class="cmd">curl</span> <span class="flag">-H</span> <span class="string">"Authorization: Bearer $VBILLING_TOKEN"</span> <span class="flag">-s</span> <span class="string">'localhost:8080/api/v1/usage?group_by=tenant,sku'</span> | jq     <span class="comment"># line items from the ledger</span>
+<span class="cmd">curl</span> <span class="flag">-H</span> <span class="string">"Authorization: Bearer $VBILLING_TOKEN"</span> <span class="flag">-s</span> localhost:8080/api/v1/reconcile | jq <span class="string">'.results[] | {destination, ok}'</span>   <span class="comment"># Stripe and Metronome</span></code></div>
 
       <div class="callout callout-success">
         <div class="callout-icon">&#10003;</div>
