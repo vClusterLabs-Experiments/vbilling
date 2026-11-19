@@ -23,11 +23,11 @@ import (
 // (discovery.TenantCluster.SyncedHere).
 
 // syncedObjects are the objects vCluster synced, on the whole control plane
-// cluster, read once per collection.
+// cluster, by the cluster name they carry, read once per collection.
 type syncedObjects struct {
-	pods     []corev1.Pod
-	pvcs     []corev1.PersistentVolumeClaim
-	services []corev1.Service
+	pods     map[string][]corev1.Pod
+	pvcs     map[string][]corev1.PersistentVolumeClaim
+	services map[string][]corev1.Service
 }
 
 // listSynced reads every object that carries vcluster.loft.sh/managed-by.
@@ -42,7 +42,17 @@ func (c *Collector) listSynced(ctx context.Context) (*syncedObjects, error) {
 			var svcs *corev1.ServiceList
 			if svcs, err = c.kube.CoreV1().Services("").List(ctx, opts); err == nil {
 				c.reportSynced(nil)
-				return &syncedObjects{pods: pods.Items, pvcs: pvcs.Items, services: svcs.Items}, nil
+				s := &syncedObjects{pods: map[string][]corev1.Pod{}, pvcs: map[string][]corev1.PersistentVolumeClaim{}, services: map[string][]corev1.Service{}}
+				for _, p := range pods.Items {
+					s.pods[p.Labels[LabelManagedBy]] = append(s.pods[p.Labels[LabelManagedBy]], p)
+				}
+				for _, p := range pvcs.Items {
+					s.pvcs[p.Labels[LabelManagedBy]] = append(s.pvcs[p.Labels[LabelManagedBy]], p)
+				}
+				for _, svc := range svcs.Items {
+					s.services[svc.Labels[LabelManagedBy]] = append(s.services[svc.Labels[LabelManagedBy]], svc)
+				}
+				return s, nil
 			}
 		}
 	}
@@ -86,26 +96,26 @@ func (s *syncedObjects) of(cl discovery.TenantCluster) elsewhere {
 		}
 		return 1
 	}
-	for i := range s.pods {
-		switch whose(s.pods[i].ObjectMeta) {
+	for _, p := range s.pods[cl.Name] {
+		switch whose(p.ObjectMeta) {
 		case 1:
-			out.pods = append(out.pods, s.pods[i])
+			out.pods = append(out.pods, p)
 		case -1:
 			out.ambiguous++
 		}
 	}
-	for i := range s.pvcs {
-		switch whose(s.pvcs[i].ObjectMeta) {
+	for _, p := range s.pvcs[cl.Name] {
+		switch whose(p.ObjectMeta) {
 		case 1:
-			out.pvcs = append(out.pvcs, s.pvcs[i])
+			out.pvcs = append(out.pvcs, p)
 		case -1:
 			out.ambiguous++
 		}
 	}
-	for i := range s.services {
-		switch whose(s.services[i].ObjectMeta) {
+	for _, svc := range s.services[cl.Name] {
+		switch whose(svc.ObjectMeta) {
 		case 1:
-			out.services = append(out.services, s.services[i])
+			out.services = append(out.services, svc)
 		case -1:
 			out.ambiguous++
 		}
