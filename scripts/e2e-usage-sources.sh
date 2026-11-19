@@ -280,12 +280,12 @@ check "source health reports the Prometheus counter as ok" counter_ok
 
 step "Enforcement inside the tenant's cluster"
 B="http://$API/api/v1/billing-states/acme"
-curl -fsS -X PUT "$B" -d '{"state":"suspended","reason":"e2e unpaid"}' >/dev/null
+curl -fsS -H "Authorization: Bearer $TOKEN" -X PUT "$B" -d '{"state":"suspended","reason":"e2e unpaid"}' >/dev/null
 check "a suspended tenant cannot start pods in its own cluster" "wait_for 30 'refused blocked vbilling-suspended'"
-curl -fsS -X PUT "$B" -d '{"state":"suspended","reason":"e2e review","hold":"abuse"}' >/dev/null
-curl -fsS -X PUT "$B" -d '{"state":"active","reason":"invoice paid"}' >/dev/null
+curl -fsS -H "Authorization: Bearer $TOKEN" -X PUT "$B" -d '{"state":"suspended","reason":"e2e review","hold":"abuse"}' >/dev/null
+curl -fsS -H "Authorization: Bearer $TOKEN" -X PUT "$B" -d '{"state":"active","reason":"invoice paid"}' >/dev/null
 check "a payment does not lift an operator's hold" "wait_for 30 \"refused still-blocked 'abuse: e2e review'\""
-curl -fsS -X PUT "$B" -d '{"state":"active","reason":"reviewed","hold":"abuse"}' >/dev/null
+curl -fsS -H "Authorization: Bearer $TOKEN" -X PUT "$B" -d '{"state":"active","reason":"reviewed","hold":"abuse"}' >/dev/null
 check "lifting the last hold allows pods again" "wait_for 30 'allowed allowed'"
 
 echo; echo "$pass passed, $fail failed"

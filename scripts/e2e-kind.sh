@@ -135,11 +135,11 @@ sleep 5
 
 step "metering"
 WIN=$(api "/api/v1/events?metric=vcluster_gpu_hours" | jq -s -r '[.[] | .window_start] | unique | .[-1]')
-WEND=$(date -u -j -v+20S -f "%Y-%m-%dT%H:%M:%SZ" "$WIN" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "$WIN + 20 seconds" +%Y-%m-%dT%H:%M:%SZ)
+WEND=$(date -u -j -v+60S -f "%Y-%m-%dT%H:%M:%SZ" "$WIN" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "$WIN + 60 seconds" +%Y-%m-%dT%H:%M:%SZ)
 q() { api "/api/v1/usage?from=$WIN&to=$WEND&group_by=tenant,sku,billing_mode&metric=vcluster_gpu_hours" | jq -r "[.rows[] | select($1) | .quantity] | add // 0"; }
-check "acme H100: 2 pods x 2 GPUs x 20s = 0.022222222 GPU-hours" '[ "$(q '"'"'.tenant=="acme" and .sku=="NVIDIA-H100-80GB-HBM3"'"'"')" = "0.022222222" ]'
-check "acme L40S (spot): 1 GPU x 20s = 0.005555556" '[ "$(q '"'"'.tenant=="acme" and .sku=="NVIDIA-L40S"'"'"')" = "0.005555556" ]'
-check "Globex dedicated node: 8 GPUs x 20s = 0.044444444, billing_mode=dedicated_node" '[ "$(q '"'"'.tenant=="vcluster-team-b-team-b" and .billing_mode=="dedicated_node"'"'"')" = "0.044444444" ]'
+check "acme H100: 2 pods x 2 GPUs x 60s = 0.066666667 GPU-hours" '[ "$(q '"'"'.tenant=="acme" and .sku=="NVIDIA-H100-80GB-HBM3"'"'"')" = "0.066666667" ]'
+check "acme L40S (spot): 1 GPU x 60s = 0.016666667" '[ "$(q '"'"'.tenant=="acme" and .sku=="NVIDIA-L40S"'"'"')" = "0.016666667" ]'
+check "Globex dedicated node: 8 GPUs x 60s = 0.133333333, billing_mode=dedicated_node" '[ "$(q '"'"'.tenant=="vcluster-team-b-team-b" and .billing_mode=="dedicated_node"'"'"')" = "0.133333333" ]'
 check "Globex pod on its own dedicated node is not billed again as shared" '[ "$(q '"'"'.tenant=="vcluster-team-b-team-b" and .billing_mode=="shared"'"'"')" = "0" ]'
 check "two tenant clusters roll up into one customer" '[ "$(api /api/v1/tenants | jq "[.tenants[] | select(.id==\"acme\") | .clusters | length] | .[0]")" = "2" ]'
 
