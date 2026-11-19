@@ -514,6 +514,27 @@ func (c *Config) Validate() error {
 		if tok == "" || tenant == "" {
 			return fmt.Errorf("INGEST_TOKENS entries must be token=tenant")
 		}
+		// INGEST_TOKEN is unset here only when API_TOKEN is too; Load
+		// fills it with API_TOKEN otherwise, so this also covers that one.
+		if c.IngestToken != "" && tok == c.IngestToken {
+			return fmt.Errorf("the INGEST_TOKENS token of tenant %s is also the shared ingest token (INGEST_TOKEN, or API_TOKEN when it is unset): "+
+				"give each tenant its own token", tenant)
+		}
+	}
+	// The token map keeps the last tenant of a token listed twice, so read
+	// the list as written: one token for two tenants would bill everything
+	// the first tenant's gateway sends to the second.
+	owner := map[string]string{}
+	for _, kv := range envList("INGEST_TOKENS", nil) {
+		tok, tenant, _ := strings.Cut(kv, "=")
+		tok, tenant = strings.TrimSpace(tok), strings.TrimSpace(tenant)
+		if prev, dup := owner[tok]; dup && tok != "" {
+			if prev == tenant {
+				return fmt.Errorf("INGEST_TOKENS lists the token of tenant %s twice", tenant)
+			}
+			return fmt.Errorf("INGEST_TOKENS gives one token to tenants %s and %s: give each tenant its own token", prev, tenant)
+		}
+		owner[tok] = tenant
 	}
 	if c.RecordsPullLiteLLMURL != "" {
 		if c.RecordsPullLiteLLMKey == "" {

@@ -161,3 +161,39 @@ func TestLiteLLMPinSettings(t *testing.T) {
 		t.Fatalf("pin settings: %q %q", c.RecordsPullLiteLLMTenant, c.RecordsPullLiteLLMClient)
 	}
 }
+
+// Every ingest token belongs to exactly one tenant or to the operator, and
+// the shared ingest token is never the API token.
+func TestValidateIngestTokens(t *testing.T) {
+	t.Setenv("ADAPTERS", "noop")
+	for name, env := range map[string][2]string{
+		"one token, two tenants": {"INGEST_TOKENS", "tok-a=acme, tok-b=globex, tok-a=initech"},
+		"one token listed twice": {"INGEST_TOKENS", "tok-a=acme,tok-a=acme"},
+		"bound equals shared":    {"INGEST_TOKENS", "ingest-secret=acme"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("API_TOKEN", "admin-secret")
+			t.Setenv("INGEST_TOKEN", "ingest-secret")
+			t.Setenv(env[0], env[1])
+			if err := Load().Validate(); err == nil {
+				t.Fatalf("%s=%s accepted", env[0], env[1])
+			}
+		})
+	}
+	// Without INGEST_TOKEN, Load fills it with the API token (vBilling then
+	// generates a token of its own): a tenant's token equal to the API token
+	// is refused as well.
+	t.Run("bound equals API token", func(t *testing.T) {
+		t.Setenv("API_TOKEN", "admin-secret")
+		t.Setenv("INGEST_TOKENS", "admin-secret=acme")
+		if err := Load().Validate(); err == nil {
+			t.Fatal("accepted")
+		}
+	})
+	t.Setenv("API_TOKEN", "admin-secret")
+	t.Setenv("INGEST_TOKEN", "ingest-secret")
+	t.Setenv("INGEST_TOKENS", "tok-a=acme,tok-b=acme,tok-c=globex")
+	if err := Load().Validate(); err != nil {
+		t.Fatalf("separate tokens, two of them for one tenant: %v", err)
+	}
+}
