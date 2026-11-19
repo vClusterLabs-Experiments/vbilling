@@ -480,26 +480,23 @@ func (c *Controller) CollectDue(ctx context.Context) {
 	}
 	size := c.cfg.CollectionInterval
 	latestEnd := c.latestDue()
-	firstEnd := latestEnd
+	start := latestEnd.Add(-size) // first run ever: the last closed window only
 	note := ""
 	if wm, ok := c.spool.Watermark(spool.SourceCollector); ok {
 		if !latestEnd.After(wm) {
 			return
 		}
-		firstEnd = wm.Add(size)
+		start = wm
 		// The oldest window we backfill starts MAX_BACKFILL before the latest end.
-		if earliest := latestEnd.Add(-c.cfg.MaxBackfill).Truncate(size).Add(size); firstEnd.Before(earliest) {
-			gap := earliest.Sub(firstEnd)
+		if earliest := latestEnd.Add(-c.cfg.MaxBackfill).Truncate(size); start.Before(earliest) {
+			gap := earliest.Sub(start)
 			note = "gap: " + gap.String() + " older than MAX_BACKFILL not metered"
 			log.Printf("[controller] %d window(s) before %s are older than MAX_BACKFILL=%s and will not be metered",
-				int(gap/size), earliest.Add(-size).Format(time.RFC3339), c.cfg.MaxBackfill)
-			firstEnd = earliest
+				int(gap/size), earliest.Format(time.RFC3339), c.cfg.MaxBackfill)
+			start = earliest
 		}
 	}
-	var windows []metrics.Window
-	for end := firstEnd; !end.After(latestEnd); end = end.Add(size) {
-		windows = append(windows, metrics.Window{Start: end.Add(-size), End: end, Latest: end.Equal(latestEnd)})
-	}
+	windows := windowsBetween(start, latestEnd, size, latestEnd)
 
 	targets := c.targets()
 
@@ -553,38 +550,38 @@ func (c *Controller) CollectDue(ctx context.Context) {
 // fillTenantGaps records tenant clusters whose own API failed in this run
 // and, once it answers again, meters the windows it missed. Those events go
 // to the ledger as late events, deduplicated by ID. A gap is the span of
-// failed windows only (first|last window end), so a fill repeated after a
-// crash never touches windows that were committed normally. Windows older
-// than MAX_BACKFILL are not filled.
+// failed windows only (see tenantGap), so a fill repeated after a crash
+// never touches windows that were committed normally. Windows older than
+// MAX_BACKFILL are not filled.
 func (c *Controller) fillTenantGaps(ctx context.Context, st metrics.Stats, windows []metrics.Window, targets []metrics.Target) {
 	failed := map[string]bool{}
+	size := c.cfg.CollectionInterval
 	first, last := windows[0].End, windows[len(windows)-1].End
 	for _, id := range st.TenantAPIFailed {
 		failed[id] = true
-		from := first
-		if g, ok := parseGap(c.gaps, id); ok {
-			from = g[0]
+		g := tenantGap{first: first, last: last, start: windows[0].Start}
+		if prev, ok := parseGap(c.gaps, id, size); ok {
+			g.first, g.start = prev.first, prev.start
 		} else {
 			log.Printf("[controller] %s: tenant API unreachable from window %s, will fill once it answers", id, first.Format(time.RFC3339))
 		}
-		_ = c.gaps.Set(id, from.Format(time.RFC3339)+"|"+last.Format(time.RFC3339))
+		_ = c.gaps.Set(id, g.String())
 	}
 	filler, ok := c.coll.(tenantFiller)
 	if !ok {
 		return
 	}
-	size := c.cfg.CollectionInterval
 	earliest := last.Add(-c.cfg.MaxBackfill)
 	for _, t := range targets {
 		id := t.Cluster.ExternalID()
-		g, ok := parseGap(c.gaps, id)
+		g, ok := parseGap(c.gaps, id, size)
 		if !ok || failed[id] {
 			continue
 		}
 		var missed []metrics.Window
-		for end := g[0]; !end.After(g[1]); end = end.Add(size) {
-			if end.After(earliest) {
-				missed = append(missed, metrics.Window{Start: end.Add(-size), End: end})
+		for _, w := range windowsBetween(g.start, g.last, size, time.Time{}) {
+			if w.End.After(earliest) {
+				missed = append(missed, w)
 			}
 		}
 		if len(missed) == 0 {
@@ -630,20 +627,57 @@ func saltFill(evs []usage.Event) {
 	}
 }
 
-// parseGap reads a "first|last" window-end span.
-func parseGap(store *kv.Store, id string) ([2]time.Time, bool) {
+// tenantGap is the span of windows a cluster's own API missed: from start
+// (the first window's start) to last (the last window's end). first is the
+// first window's end. Stored as "first|last|start".
+type tenantGap struct{ first, last, start time.Time }
+
+func (g tenantGap) String() string {
+	return g.first.Format(time.RFC3339) + "|" + g.last.Format(time.RFC3339) + "|" + g.start.Format(time.RFC3339)
+}
+
+// parseGap reads a gap. One written without a start (v0.3.0) began with a
+// whole window of the current size.
+func parseGap(store *kv.Store, id string, size time.Duration) (tenantGap, bool) {
 	v, ok := store.Get(id)
 	if !ok {
-		return [2]time.Time{}, false
+		return tenantGap{}, false
 	}
-	a, b, found := strings.Cut(v, "|")
-	from, err1 := time.Parse(time.RFC3339, a)
-	to, err2 := time.Parse(time.RFC3339, b)
-	if !found || err1 != nil || err2 != nil || to.Before(from) {
+	parts := strings.Split(v, "|")
+	var times []time.Time
+	for _, p := range parts {
+		t, err := time.Parse(time.RFC3339, p)
+		if err != nil {
+			break
+		}
+		times = append(times, t)
+	}
+	if len(times) != len(parts) || len(times) < 2 || len(times) > 3 || times[1].Before(times[0]) {
 		_ = store.Delete(id)
-		return [2]time.Time{}, false
+		return tenantGap{}, false
 	}
-	return [2]time.Time{from, to}, true
+	g := tenantGap{first: times[0], last: times[1], start: times[0].Add(-size)}
+	if len(times) == 3 && times[2].Before(g.first) {
+		g.start = times[2]
+	}
+	return g, true
+}
+
+// windowsBetween splits start to end into windows on the grid of size, the
+// last one marked Latest when it ends at latest. A start off the grid, the
+// watermark of an install that used another window size, first gets one
+// partial window up to the grid, so every later window lines up again.
+func windowsBetween(start, end time.Time, size time.Duration, latest time.Time) []metrics.Window {
+	var out []metrics.Window
+	for s := start; s.Before(end); {
+		e := s.Truncate(size).Add(size)
+		if e.After(end) {
+			e = end
+		}
+		out = append(out, metrics.Window{Start: s, End: e, Latest: e.Equal(latest)})
+		s = e
+	}
+	return out
 }
 
 // targets resolves every known cluster to its billing identity.
@@ -674,22 +708,19 @@ func (c *Controller) CollectPrometheusDue(ctx context.Context) {
 	}
 	size := c.cfg.CollectionInterval
 	latestEnd := c.latestDue()
-	firstEnd := latestEnd
+	start := latestEnd.Add(-size)
 	if wm, ok := c.spool.Watermark(metrics.SourcePrometheus); ok {
 		if !latestEnd.After(wm) {
 			return
 		}
-		firstEnd = wm.Add(size)
-		if earliest := latestEnd.Add(-c.cfg.MaxBackfill).Truncate(size).Add(size); firstEnd.Before(earliest) {
+		start = wm
+		if earliest := latestEnd.Add(-c.cfg.MaxBackfill).Truncate(size); start.Before(earliest) {
 			log.Printf("[controller] Prometheus windows before %s are older than MAX_BACKFILL=%s; counters bill that usage in the first window read",
-				earliest.Add(-size).Format(time.RFC3339), c.cfg.MaxBackfill)
-			firstEnd = earliest
+				earliest.Format(time.RFC3339), c.cfg.MaxBackfill)
+			start = earliest
 		}
 	}
-	var windows []metrics.Window
-	for end := firstEnd; !end.After(latestEnd); end = end.Add(size) {
-		windows = append(windows, metrics.Window{Start: end.Add(-size), End: end, Latest: end.Equal(latestEnd)})
-	}
+	windows := windowsBetween(start, latestEnd, size, latestEnd)
 	// Windows read after the fact bill each cluster's owner during them,
 	// as Kubernetes backfill does. Each run of windows with the same owners
 	// is read and committed before the next one is read: counters bill

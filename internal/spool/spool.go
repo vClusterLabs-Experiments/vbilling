@@ -504,6 +504,12 @@ func (s *Spool) Clock() time.Time {
 // ScanRecords visits committed event records whose window overlaps
 // [from, to), with the time each was appended.
 func (s *Spool) ScanRecords(from, to time.Time, fn func(ev *usage.Event, at time.Time) error) error {
+	return s.ScanRecordsSeq(from, to, func(ev *usage.Event, at time.Time, _ uint64) error { return fn(ev, at) })
+}
+
+// ScanRecordsSeq is ScanRecords with each record's sequence number, which
+// orders appends even when the clock gave two of them the same time.
+func (s *Spool) ScanRecordsSeq(from, to time.Time, fn func(ev *usage.Event, at time.Time, seq uint64) error) error {
 	committed, segs := s.snapshot()
 	for i := range segs {
 		sg := &segs[i]
@@ -521,7 +527,7 @@ func (s *Spool) ScanRecords(from, to time.Time, fn func(ev *usage.Event, at time
 			}
 			e := r.Event
 			if e.WindowEnd.After(from) && e.WindowStart.Before(to) {
-				if cbErr = fn(e, r.At); cbErr != nil {
+				if cbErr = fn(e, r.At, r.Seq); cbErr != nil {
 					return false
 				}
 			}
@@ -540,6 +546,11 @@ func (s *Spool) ScanRecords(from, to time.Time, fn func(ev *usage.Event, at time
 // ScanAppended visits committed event records appended in [from, to),
 // whatever their window. Late-arriving usage is found this way.
 func (s *Spool) ScanAppended(from, to time.Time, fn func(ev *usage.Event, at time.Time) error) error {
+	return s.ScanAppendedSeq(from, to, func(ev *usage.Event, at time.Time, _ uint64) error { return fn(ev, at) })
+}
+
+// ScanAppendedSeq is ScanAppended with each record's sequence number.
+func (s *Spool) ScanAppendedSeq(from, to time.Time, fn func(ev *usage.Event, at time.Time, seq uint64) error) error {
 	committed, segs := s.snapshot()
 	for i := range segs {
 		sg := &segs[i]
@@ -551,7 +562,7 @@ func (s *Spool) ScanAppended(from, to time.Time, fn func(ev *usage.Event, at tim
 			if r.Type != TypeEvent || r.Event == nil || r.At.Before(from) || !r.At.Before(to) {
 				return true
 			}
-			if cbErr = fn(r.Event, r.At); cbErr != nil {
+			if cbErr = fn(r.Event, r.At, r.Seq); cbErr != nil {
 				return false
 			}
 			return true

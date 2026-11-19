@@ -276,7 +276,7 @@ func TestTenantAPIOutageWindowsAreFilledExactlyOnce(t *testing.T) {
 	h.now = h.now.Add(2 * time.Minute)
 	h.c.CollectDue(ctx) // W2, W3: still down
 	w1, w3 := t0.Truncate(time.Minute), t0.Truncate(time.Minute).Add(2*time.Minute)
-	if span, ok := h.c.gaps.Get(id); !ok || span != w1.Format(time.RFC3339)+"|"+w3.Format(time.RFC3339) {
+	if span, ok := h.c.gaps.Get(id); !ok || span != w1.Format(time.RFC3339)+"|"+w3.Format(time.RFC3339)+"|"+w1.Add(-time.Minute).Format(time.RFC3339) {
 		t.Fatalf("gap = %q, %v; want the failed windows W1..W3", span, ok)
 	}
 	if len(gc.fills) != 0 {
@@ -326,7 +326,8 @@ func TestTenantAPIGapsSurviveRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	b := New(cfg, &fakeDisc{}, &fakeColl{}, nil, pipeline.NewTenantRegistry(), nil, nil)
-	if g, ok := parseGap(b.gaps, "vcluster-team-p-private"); !ok || !g[1].Equal(time.Date(2026, 10, 5, 10, 2, 0, 0, time.UTC)) {
+	if g, ok := parseGap(b.gaps, "vcluster-team-p-private", time.Minute); !ok || !g.last.Equal(time.Date(2026, 10, 5, 10, 2, 0, 0, time.UTC)) ||
+		!g.start.Equal(time.Date(2026, 10, 5, 9, 59, 0, 0, time.UTC)) {
 		t.Fatalf("gap after restart = %v, %v", g, ok)
 	}
 }
