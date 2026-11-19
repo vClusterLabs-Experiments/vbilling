@@ -260,7 +260,7 @@ func serveWhileWaiting(o Options, holder func() string) func() {
 		}
 		http.Error(w, msg+"; this one does not meter or accept usage", http.StatusServiceUnavailable)
 	})
-	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second, MaxHeaderBytes: 64 << 10}
 	go func() { _ = srv.Serve(ln) }()
 	return func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

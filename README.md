@@ -349,7 +349,7 @@ Prompt and completion tokens become `inference_input_tokens` and `inference_outp
 Declare metrics in `metering.customMetrics` (a list of `code`, `name`, `unit`, `description`, `groupKeys`, `billable`) or with `CUSTOM_METRICS="code:unit[:key|key],..."`, and push closed windows with a bearer token:
 
 ```bash
-curl -H "Authorization: Bearer $VBILLING_TOKEN" -X POST localhost:8080/api/v1/events -H "Authorization: Bearer $INGEST_TOKEN" -H "X-VBilling-Client: model-gateway" -d '{
+curl -X POST localhost:8080/api/v1/events -H "Authorization: Bearer $INGEST_TOKEN" -H "X-VBilling-Client: model-gateway" -d '{
   "events": [{"tenant": "acme", "metric": "inference_output_tokens", "quantity": 1250000,
               "window_start": "2026-10-05T10:00:00Z", "window_end": "2026-10-05T10:01:00Z",
               "dimensions": {"model": "llama-3.3-70b"}}]}'
@@ -496,6 +496,7 @@ v0.3.1 closes the issues a second independent review found in v0.3.0: tenants ca
 **Act on these:**
 
 - **API token.** Every endpoint except `/healthz` and `/readyz` needs it, including the dashboard and `/metrics`. Without `api.token` or `api.existingSecret` the chart generates one and keeps it across upgrades. Tools that render with `helm template` (Argo CD) must set one of them, or the token changes on every render.
+- **Ingest token.** Gateways send `INGEST_TOKEN` (the chart generates it, key `ingest-token`) or a tenant-bound token. The API token is refused at ingest, so a gateway that sent it under v0.3.0 must switch.
 - **Metronome.** vBilling no longer creates billable metrics, customers or contracts unless `metronome.provision=true` (`metronome.stripeLink=true` still implies it). A customer pinned with `metronome-customer-id` needs the tenant ID as an ingest alias.
 - **vCluster Platform mode.** `vbilling.vcluster.com/` settings on a cluster's StatefulSet, namespace or VirtualClusterInstance (`prometheus-url` and the others) are ignored: put them on the Tenant or Project. Clusters are reached only through the Platform proxy.
 - **One replica.** The chart refuses `replicaCount` above 1. A second instance waits on a Lease instead of metering.
@@ -506,7 +507,7 @@ v0.3.1 closes the issues a second independent review found in v0.3.0: tenants ca
 - **Pause.** Capacity stops billing once vBilling has verified the cluster's workloads are gone; a pause it cannot verify still stops the control plane and keeps billing the cluster's own nodes. Pods get at most 30 seconds of grace. Pauses made by v0.3.0 keep their spans until the cluster runs again: resume and pause to verify them.
 - **Billing holds.** Billing webhooks only raise a hold; a payment or an active subscription lowers it. Events apply in the order they happened, and a retried older event is ignored. `PUT /api/v1/billing-states` still sets anything.
 - **Suspension inside clusters.** Only `kube-system` is exempt; the `enforcement-exempt` namespace label no longer works.
-- **Ingest.** SKU and dimension values with markup or control characters are refused. Per-token rate limits apply, and a tenant's 101st distinct SKU in a UTC day is billed as `sku-limit-exceeded`. LiteLLM requests bill to the key's team only; keys without a team are refused.
+- **Ingest.** SKU, dimension, region, project and resource values with markup or control characters are refused, and so are dimensions named like an event's own properties (`value`, `sku`, `region` and the others). `X-VBilling-Client` must be a short plain name, with at most 16 names per tenant-bound token and 64 for the shared token. Per-token rate limits apply, and a records push that would write more than 64 MiB gets 413. A source's 101st new, unpriced SKU for a tenant in a UTC day is billed as `sku-limit-exceeded` and fails its health source. LiteLLM requests bill to the key's team only; keys without a team are refused.
 - **Counters.** A Prometheus series that appears with history (for example, a ServiceMonitor added for a running engine) is billed from its first sample, unless its start time shows it is new.
 - **Volume health.** The ledger volume, and the archive volume when set, report in source health and fail at 85% full: a full ledger volume stops every commit.
 - **Node-hour events.** They carry `vcpus`, `memory_gib`, `gpu_count` and `public_ip`, so their IDs differ from v0.3.0's. Committed windows are never sent again, so nothing is billed twice.

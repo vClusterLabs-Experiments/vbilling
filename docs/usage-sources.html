@@ -408,7 +408,7 @@
         <li>The body is one record, a JSON array, <code>{"records": [...]}</code> or NDJSON, up to 16 MiB.</li>
         <li><code>?format=</code> (or the <code>X-VBilling-Format</code> header) picks the payload format: <code>vbilling</code> (the default), <code>litellm</code>, or a <a href="#custom-mapping">mapping</a> of your own.</li>
         <li><code>X-VBilling-Client</code> names the emitter and defaults to the format name. It is part of each record's identity, so two emitters never deduplicate each other's request IDs. Keep it stable for one emitter, or its retries are not recognized as retries.</li>
-        <li>Ingest needs a token: <code>INGEST_TOKEN</code> (or <code>API_TOKEN</code>), or a tenant-bound token from <code>INGEST_TOKENS</code>.</li>
+        <li>Ingest needs <code>INGEST_TOKEN</code> (generated into the chart's Secret, key <code>ingest-token</code>, when unset) or a tenant-bound token from <code>INGEST_TOKENS</code>. The API token is refused here: a gateway never needs it.</li>
       </ul>
 
       <h3 id="responses">Responses and retries</h3>

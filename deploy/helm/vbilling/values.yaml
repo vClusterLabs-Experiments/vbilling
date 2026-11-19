@@ -215,7 +215,7 @@ api:
   # its Secret and keeps it across upgrades (helm lookup). Tools that render
   # with helm template cannot look it up: set token or existingSecret there.
   token: ""
-  ingestToken: "" # enables POST /api/v1/events and /api/v1/records (defaults to token)
+  ingestToken: "" # for POST /api/v1/events and /api/v1/records; generated when empty, never the API token
   # Ingest tokens bound to one tenant ({tenant: token}): usage sent with such
   # a token is always billed to that tenant, so a gateway inside a tenant's
   # cluster can never report usage for another tenant.

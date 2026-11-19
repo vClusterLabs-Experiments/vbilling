@@ -397,13 +397,13 @@ def verify(body: bytes, header: str, secret: str, tolerance: int = 300) -&gt; bo
   <span class="flag">--set</span> metering.customMetrics=<span class="string">'inference_output_tokens:tokens:model'</span> \
   <span class="flag">--set</span> api.existingSecret=vbilling-api   <span class="comment"># keys: api-token, ingest-token</span>
 
-<span class="cmd">curl</span> <span class="flag">-H</span> <span class="string">"Authorization: Bearer $VBILLING_TOKEN"</span> -X POST localhost:8080/api/v1/events -H <span class="string">"Authorization: Bearer $INGEST_TOKEN"</span> \
+<span class="cmd">curl</span> -X POST localhost:8080/api/v1/events -H <span class="string">"Authorization: Bearer $INGEST_TOKEN"</span> \
   -H <span class="string">"X-VBilling-Client: model-gateway"</span> -d <span class="string">'{"events": [{
     "tenant": "acme-ai", "metric": "inference_output_tokens", "quantity": 1250000,
     "window_start": "2026-10-05T10:00:00Z", "window_end": "2026-10-05T10:01:00Z",
     "dimensions": {"model": "llama-3.3-70b"}}]}'</span></code></div>
       <ul>
-        <li>Ingest is off until <code>INGEST_TOKEN</code> (or <code>API_TOKEN</code>) is set. Up to 5,000 events or 10 MiB per request, as <code>{"events": [...]}</code> or a bare array.</li>
+        <li>Ingest takes <code>INGEST_TOKEN</code> or a tenant-bound token, never the API token. Without <code>INGEST_TOKEN</code>, vBilling generates one into <code>DATA_DIR/ingest-token</code>, and the chart into its Secret (key <code>ingest-token</code>). Up to 5,000 events or 10 MiB per request, as <code>{"events": [...]}</code> or a bare array.</li>
         <li>The metric must be built in or declared in <code>metering.customMetrics</code> (or <code>CUSTOM_METRICS</code>, <code>code:unit[:group_key|group_key]</code>). Custom metrics are billable unless declared with <code>billable: false</code>, so billing adapters create them at bootstrap. See <a href="metrics.html#custom-metrics">Custom metrics</a>.</li>
         <li><code>window_end</code> may be at most 5 minutes in the future and <code>window_start</code> at most 34 days old. <code>region</code> defaults to <code>REGION</code>, and <code>source</code> becomes <code>ingest:&lt;X-VBilling-Client&gt;</code>.</li>
         <li>Send a stable <code>id</code>, or let vBilling derive one from the event's identity, which excludes the quantity. An ID seen in the last 48 hours is reported as a duplicate and dropped, so send each window once, after it closes.</li>
