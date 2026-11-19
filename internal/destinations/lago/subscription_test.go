@@ -26,7 +26,9 @@ func subscriptionAt(t *testing.T, f *fakeLago) string {
 
 // Lago counts usage from a subscription's start. The subscription is created
 // when the tenant's first usage is delivered, after that usage's window
-// started, so without subscription_at the first window is never billed.
+// started, so without subscription_at the first window is never billed. A
+// tenant that only sends gateway records starts an hour earlier, at the
+// hour, so records that arrive late for the minutes before are counted too.
 func TestSubscriptionStartsAtTheFirstDeliveredWindow(t *testing.T) {
 	f := newFakeLago(t)
 	a := newTestAdapter(t, f, nil)
@@ -34,11 +36,20 @@ func TestSubscriptionStartsAtTheFirstDeliveredWindow(t *testing.T) {
 	a.now = func() time.Time { return now }
 	first := time.Date(2026, 11, 18, 4, 28, 0, 0, time.UTC)
 	ctx := destinations.WithUsageStart(context.Background(), first)
-	if err := a.EnsureTenant(ctx, usage.Tenant{ID: "acme-ai"}); err != nil {
+	if err := a.EnsureTenant(ctx, usage.Tenant{ID: "acme-ai", CreatedAt: time.Date(2026, 11, 18, 4, 28, 30, 0, time.UTC)}); err != nil {
 		t.Fatal(err)
 	}
-	if got := subscriptionAt(t, f); got != "2026-11-18T04:28:00Z" {
-		t.Fatalf("subscription_at %q, want the first window's start", got)
+	if got := subscriptionAt(t, f); got != "2026-11-18T04:00:00Z" {
+		t.Fatalf("subscription_at %q, want the hour the cluster was created in", got)
+	}
+	g := newFakeLago(t)
+	b := newTestAdapter(t, g, nil)
+	b.now = a.now
+	if err := b.EnsureTenant(ctx, usage.Tenant{ID: "tokens-co"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := subscriptionAt(t, g); got != "2026-11-18T03:00:00Z" {
+		t.Fatalf("subscription_at %q for a tenant that only sends records, want an hour before its first window, at the hour", got)
 	}
 }
 
@@ -50,7 +61,8 @@ func TestSubscriptionStart(t *testing.T) {
 		created, usage time.Time
 		want           string
 	}{
-		{"ingest-only tenant: the first window", time.Time{}, at("2026-11-18T04:28:00Z"), "2026-11-18T04:28:00Z"},
+		// Its records can arrive late (retries, pulls an hour back).
+		{"ingest-only tenant: an hour before its first window", time.Time{}, at("2026-11-18T04:28:00Z"), "2026-11-18T03:00:00Z"},
 		// The hour it was created in, so its first window (01:17:00, or
 		// 01:15:00 with 5-minute windows, for a 01:17:42 creation) is in.
 		{"cluster created earlier today", at("2026-11-18T01:15:00Z"), at("2026-11-18T04:28:00Z"), "2026-11-18T01:00:00Z"},
