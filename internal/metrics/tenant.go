@@ -79,6 +79,7 @@ func (c *Collector) collectTenant(ctx context.Context, t Target, hostNodes map[s
 	}
 	if t.Cluster.Paused {
 		if _, err := c.tenants.Conn(ctx, t.Cluster); errors.Is(err, ErrNoTenantAPI) {
+			c.noteOwnNodes(id, false)
 			return // metered from the control plane cluster only
 		}
 		inv, ok := c.pausedInventory(id)
@@ -105,6 +106,7 @@ func (c *Collector) collectTenant(ctx context.Context, t Target, hostNodes map[s
 	}
 	conn, err := c.tenants.Conn(ctx, t.Cluster)
 	if errors.Is(err, ErrNoTenantAPI) {
+		c.noteOwnNodes(id, false) // nothing inside it is metered
 		return
 	}
 	if err == nil {
@@ -145,27 +147,51 @@ type tenantInventory struct {
 	Services []corev1.Service               `json:"services"`
 	// Leases: last renewal of each node whose kubelet went silent.
 	Leases map[string]time.Time `json:"leases,omitempty"`
-	// Pods and the time each deleted one was deleted (by UID), saved by
-	// Freeze with PRIVATE_NODE_BILLING=usage: the window a pause cuts in
-	// two still bills its workloads up to the pause.
+	// Pods and the time each deleted one was deleted (by UID), read with
+	// the rest when PRIVATE_NODE_BILLING=usage: metered from a stored
+	// inventory, a paused cluster bills its workloads as they were when it
+	// was read, whoever paused it.
 	Pods        []corev1.Pod         `json:"pods,omitempty"`
 	PodsDeleted map[string]time.Time `json:"podsDeleted,omitempty"`
 }
 
-// podEntries returns a stored inventory's pods with their deletion times.
-// A pod that was terminating when it was saved ends at its deletion
-// deadline at the latest.
-func (inv *tenantInventory) podEntries() []podEntry {
+// podEntries returns an inventory's pods with their deletion times. From
+// a stored inventory, a pod that was terminating when it was saved ends at
+// its deletion deadline at the latest.
+func (inv *tenantInventory) podEntries(stored bool) []podEntry {
 	out := make([]podEntry, 0, len(inv.Pods))
 	for i := range inv.Pods {
 		p := &inv.Pods[i]
 		e := podEntry{pod: p, deletedAt: inv.PodsDeleted[string(p.UID)]}
-		if e.deletedAt.IsZero() && p.DeletionTimestamp != nil {
+		if stored && e.deletedAt.IsZero() && p.DeletionTimestamp != nil {
 			e.deletedAt = p.DeletionTimestamp.Time
 		}
 		out = append(out, e)
 	}
 	return out
+}
+
+// readPods adds a cluster's pods to its inventory, with those deleted since
+// the last read and when they were deleted.
+func (c *Collector) readPods(ctx context.Context, conn *TenantConn, inv *tenantInventory) error {
+	list, err := conn.Kube.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("list pods: %w", err)
+	}
+	conn.Graveyard.SeenPods(list.Items, c.opts.Now())
+	pods := list.Items
+	var deleted map[string]time.Time
+	for _, e := range withDeleted(list.Items, conn.Graveyard.Pods("")) {
+		if !e.deletedAt.IsZero() {
+			if deleted == nil {
+				deleted = map[string]time.Time{}
+			}
+			pods = append(pods, *e.pod)
+			deleted[string(e.pod.UID)] = e.deletedAt
+		}
+	}
+	inv.Pods, inv.PodsDeleted = pods, deleted
+	return nil
 }
 
 func readTenantInventory(ctx context.Context, kube kubernetes.Interface, at time.Time) (*tenantInventory, error) {
@@ -215,6 +241,13 @@ func (c *Collector) collectTenantAPI(ctx context.Context, t Target, conn *Tenant
 		return err
 	}
 	conn.Graveyard.SeenNodes(inv.Nodes, c.opts.Now())
+	if c.opts.PrivateNodeBilling == "usage" {
+		// Kept with the rest: if the cluster is paused by anyone else
+		// before the next read, its workloads bill from this inventory.
+		if err := c.readPods(ctx, conn, inv); err != nil {
+			return err
+		}
+	}
 	c.invMu.Lock()
 	c.lastInv[t.Cluster.ExternalID()] = inv
 	c.invMu.Unlock()
@@ -248,6 +281,7 @@ func (c *Collector) meterTenant(ctx context.Context, t Target, conn *TenantConn,
 		}
 	}
 	c.prom.noteOwnNodes(t.Cluster.ExternalID(), len(private) > 0)
+	c.noteOwnNodes(t.Cluster.ExternalID(), len(private) > 0)
 	if len(private) == 0 {
 		return nil // a shared tenant cluster: everything is metered from the control plane cluster
 	}
@@ -261,34 +295,24 @@ func (c *Collector) meterTenant(ctx context.Context, t Target, conn *TenantConn,
 	}
 
 	if c.opts.PrivateNodeBilling == "usage" {
-		if conn.Kube == nil {
-			// A paused cluster: its pods as saved right before the pause.
-			// Their usage ends at the pause (workloadPauses), so the window
-			// the pause cuts in two still bills the part before it.
-			include := func(p *corev1.Pod) bool {
-				_, onPrivate := private[p.Spec.NodeName]
-				return onPrivate && !c.excludedTenantNS[p.Namespace]
-			}
-			c.meterPods(inv.podEntries(), include, func(p *corev1.Pod) string { return p.Namespace },
-				private, nil, dra, windows, accs, st, base, nil, "private_node", c.workloadPauses(t))
-		} else {
-			podList, err := conn.Kube.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
-			if err != nil {
-				return fmt.Errorf("list pods: %w", err)
-			}
-			conn.Graveyard.SeenPods(podList.Items, c.opts.Now())
-			pods := withDeleted(podList.Items, conn.Graveyard.Pods(""))
-			var usageByPod map[string][2]float64
-			if latest := windows[len(windows)-1]; latest.Latest && c.opts.Basis != "requests" && conn.Metrics != nil {
-				usageByPod = podUsage(ctx, conn.Metrics, "")
-			}
-			include := func(p *corev1.Pod) bool {
-				_, onPrivate := private[p.Spec.NodeName]
-				return onPrivate && !c.excludedTenantNS[p.Namespace]
-			}
-			c.meterPods(pods, include, func(p *corev1.Pod) string { return p.Namespace },
-				private, nil, dra, windows, accs, st, base, usageByPod, "private_node", c.workloadPauses(t))
+		// Live, the pods collectTenantAPI just read. Paused (conn.Kube is
+		// nil), the pods as last read: saved right before vBilling's own
+		// pause, or at the last collection before a pause anyone else made.
+		// Only a pause vBilling verified ends their usage (workloadPauses),
+		// so the window it cuts in two still bills the part before it; after
+		// any other pause they keep billing, because nothing confirms they
+		// stopped.
+		live := conn.Kube != nil
+		var usageByPod map[string][2]float64
+		if latest := windows[len(windows)-1]; live && latest.Latest && c.opts.Basis != "requests" && conn.Metrics != nil {
+			usageByPod = podUsage(ctx, conn.Metrics, "")
 		}
+		include := func(p *corev1.Pod) bool {
+			_, onPrivate := private[p.Spec.NodeName]
+			return onPrivate && !c.excludedTenantNS[p.Namespace]
+		}
+		c.meterPods(inv.podEntries(!live), include, func(p *corev1.Pod) string { return p.Namespace },
+			private, nil, dra, windows, accs, st, base, usageByPod, "private_node", c.workloadPauses(t))
 	} else {
 		for name, n := range private {
 			if n.labels[LabelBillable] == "false" {
@@ -316,6 +340,7 @@ func (c *Collector) Freeze(ctx context.Context, cl discovery.TenantCluster) erro
 	}
 	conn, err := c.tenants.Conn(ctx, cl)
 	if errors.Is(err, ErrNoTenantAPI) {
+		c.noteOwnNodes(cl.ExternalID(), false) // nothing inside it is metered
 		return nil
 	}
 	if err != nil {
@@ -326,23 +351,51 @@ func (c *Collector) Freeze(ctx context.Context, cl discovery.TenantCluster) erro
 		return err
 	}
 	if c.opts.PrivateNodeBilling == "usage" {
-		pods, err := conn.Kube.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
-		if err != nil {
-			return fmt.Errorf("list pods: %w", err)
-		}
-		conn.Graveyard.SeenPods(pods.Items, c.opts.Now())
-		inv.Pods = pods.Items
-		for _, e := range withDeleted(pods.Items, conn.Graveyard.Pods("")) {
-			if !e.deletedAt.IsZero() {
-				if inv.PodsDeleted == nil {
-					inv.PodsDeleted = map[string]time.Time{}
-				}
-				inv.Pods = append(inv.Pods, *e.pod)
-				inv.PodsDeleted[string(e.pod.UID)] = e.deletedAt
-			}
+		if err := c.readPods(ctx, conn, inv); err != nil {
+			return err
 		}
 	}
+	// Whether it has nodes of its own, as of right now: a pause vBilling
+	// cannot drain stops their billing only if it has none (OwnNodes).
+	// The rules are meterTenant's: a node of the control plane cluster, or
+	// a placeholder vCluster made for one, is metered there.
+	host := map[string]bool{}
+	if !conn.External {
+		nodes, err := c.kube.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+		if err != nil {
+			return fmt.Errorf("list control plane cluster nodes: %w", err)
+		}
+		for _, n := range nodes.Items {
+			host[n.Name] = true
+		}
+	}
+	own := false
+	for i := range inv.Nodes {
+		n := &inv.Nodes[i]
+		own = own || !host[n.Name] && n.Labels[LabelFakeNode] != "true"
+	}
+	c.noteOwnNodes(cl.ExternalID(), own)
 	return c.storeInventory(cl.ExternalID(), inv)
+}
+
+// noteOwnNodes records whether a cluster has nodes of its own that
+// metering bills (OwnNodes).
+func (c *Collector) noteOwnNodes(id string, has bool) {
+	c.invMu.Lock()
+	defer c.invMu.Unlock()
+	c.ownNodes[id] = has
+}
+
+// OwnNodes reports whether metering bills nodes of a cluster's own (nodes
+// that joined the cluster rather than the control plane cluster's), as of
+// the last time it read the cluster's API or saved its inventory: has is
+// false for a cluster whose API it has no credentials for, since nothing
+// inside it is metered. known is false until it has read the cluster once.
+func (c *Collector) OwnNodes(cl discovery.TenantCluster) (has, known bool) {
+	c.invMu.Lock()
+	defer c.invMu.Unlock()
+	has, known = c.ownNodes[cl.ExternalID()]
+	return has, known
 }
 
 func (c *Collector) storeInventory(id string, inv *tenantInventory) error {

@@ -19,9 +19,10 @@
 // Suspension stops growth, not service: running workloads keep running.
 // Pausing (state "paused", enforce mode) stops service: each of the tenant's
 // clusters is paused the way `vcluster pause` does it, after its own nodes
-// are drained, and billing for capacity stops (see package pause). The
-// tenant cannot restart it: its control plane is stopped, and vBilling
-// pauses it again if anything else resumes it. Clearing the hold resumes it.
+// are drained, and billing for capacity stops once vBilling verified its
+// workloads are gone (see pauseCluster and package pause). The tenant
+// cannot restart it: its control plane is stopped, and vBilling pauses it
+// again if anything else resumes it. Clearing the hold resumes it.
 package enforcement
 
 import (
@@ -154,17 +155,28 @@ type Options struct {
 	// set, enforce mode also installs an admission policy inside the
 	// cluster. The credentials need create, update and delete on
 	// validatingadmissionpolicies and validatingadmissionpolicybindings.
+	// It returns nil and no error for a cluster vBilling has no
+	// credentials for.
 	TenantClient func(ctx context.Context, cl discovery.TenantCluster) (kubernetes.Interface, error)
 
 	// Pausing (state paused, enforce mode).
 	Pauses *pause.Store // pause spans, so capacity is not billed while paused
 	// Freeze stores a cluster's inventory right before its control plane
-	// stops, to meter its volumes from while paused.
+	// stops, to meter its volumes from while paused. Set it only when
+	// metering reads clusters' own APIs (TENANT_API): without it, nothing
+	// on a cluster's own nodes is billed.
 	Freeze func(ctx context.Context, cl discovery.TenantCluster) error
+	// OwnNodes reports whether metering bills nodes of a cluster's own
+	// (known is false when it cannot tell). A pause that cannot drain them
+	// (no TenantClient) is verified only for a cluster that has none.
+	OwnNodes func(cl discovery.TenantCluster) (has, known bool)
 	// OnPause tells metering a cluster was paused or resumed.
 	OnPause func(id string, paused bool)
-	// DrainTimeout bounds the wait for workloads on a cluster's own nodes
-	// to stop before its control plane is stopped (default 2m).
+	// DrainTimeout bounds each wait of a pause: for the workloads on a
+	// cluster's own nodes and its synced pods to stop before what is left
+	// is deleted without a grace period, and for its control plane to stop
+	// (default 2m). A drain that keeps failing for that long stops the
+	// control plane anyway.
 	DrainTimeout time.Duration
 	// KeepNamespaces are the namespaces whose DaemonSets (node
 	// infrastructure) keep running while a cluster is paused
@@ -194,6 +206,11 @@ type Enforcer struct {
 	wmu                        sync.Mutex
 	workers                    map[string]*worker
 	status                     map[string]PauseStatus
+	// Pause bookkeeping per cluster (see pause.go), under wmu.
+	failing    map[string]time.Time // first failed drain of a streak
+	checked    map[string]ownCheck  // what the last pause pass found on its own nodes
+	stopped    map[string]time.Time // last time its control plane was seen stopped
+	verifiedAt map[string]time.Time // external clusters: last pass that found nothing running
 }
 
 func New(kube kubernetes.Interface, opts Options) *Enforcer {
@@ -208,7 +225,8 @@ func New(kube kubernetes.Interface, opts Options) *Enforcer {
 	}
 	e := &Enforcer{kube: kube, opts: opts, seen: destinations.NewSentCache(10_000), states: map[string]TenantState{},
 		resumeTimeout: 10 * time.Minute, resumeEvery: 5 * time.Second,
-		workers: map[string]*worker{}, status: map[string]PauseStatus{}}
+		workers: map[string]*worker{}, status: map[string]PauseStatus{},
+		failing: map[string]time.Time{}, checked: map[string]ownCheck{}, stopped: map[string]time.Time{}, verifiedAt: map[string]time.Time{}}
 	for tenant, raw := range opts.State.WithPrefix("state/") {
 		var ts TenantState
 		if json.Unmarshal([]byte(raw), &ts) == nil {
@@ -440,6 +458,9 @@ func (e *Enforcer) converge(ctx context.Context, tenant string, cl discovery.Ten
 	}
 	if e.opts.Mode != "enforce" {
 		return errors.Join(errs...)
+	}
+	if ts.State != Paused {
+		e.clearFailing(cl.ExternalID()) // a later pause starts its retries afresh
 	}
 	if e.needsWorker(ctx, cl, ts) {
 		e.kick(tenant, cl) // pausing or resuming, in the background

@@ -57,9 +57,11 @@ type TenantCluster struct {
 	// Platform is the cluster's owner in vCluster Platform when
 	// TENANT_SOURCE=platform resolved one. It decides the tenant.
 	Platform *PlatformBinding
-	// Paused is true while the control plane is paused: by vBilling
-	// (vbilling.vcluster.com/paused-by) or by `vcluster pause`
-	// (loft.sh/paused).
+	// Paused is true while the control plane is really down: scaled to zero
+	// replicas with none of them ready, whoever stopped it (vBilling,
+	// `vcluster pause`, an operator, vCluster Platform's sleep mode). An
+	// annotation alone never makes a cluster paused: whoever writes
+	// vcluster.yaml writes the workload's annotations.
 	Paused bool
 }
 
@@ -67,7 +69,9 @@ type TenantCluster struct {
 // cluster's StatefulSet or Deployment. vBilling marks its own pauses with
 // the other three instead: `vcluster connect` resumes a cluster that
 // carries loft.sh/paused, while it refuses one that is only scaled down, so
-// connecting to debug never lifts a billing pause by accident.
+// connecting to debug never lifts a billing pause by accident. These marks
+// say who paused a cluster and how to resume it; they never decide whether
+// it is paused (see TenantCluster.Paused) or since when.
 const (
 	AnnotationPaused         = "loft.sh/paused"
 	AnnotationPausedBy       = AnnotationPrefix + "paused-by"
@@ -75,9 +79,10 @@ const (
 	AnnotationPausedReplicas = AnnotationPrefix + "paused-replicas"
 )
 
-// pausedBy reports whether workload annotations mark a paused cluster.
-func pausedBy(ann map[string]string) bool {
-	return ann[AnnotationPaused] == "true" || ann[AnnotationPausedBy] == "vbilling"
+// down reports whether a control plane is really stopped: no replicas
+// wanted (an unset count means one) and none ready.
+func down(replicas *int32, ready int32) bool {
+	return replicas != nil && *replicas == 0 && ready == 0
 }
 
 // ExternalID is the stable tenant-cluster identifier (v0.1 compatible).
@@ -239,7 +244,7 @@ func (d *Discoverer) fromWorkloads(ctx context.Context) ([]TenantCluster, error)
 			seen[key] = true
 			out = append(out, TenantCluster{
 				Name: s.Name, Namespace: s.Namespace, UID: string(s.UID), CreatedAt: s.CreationTimestamp.Time,
-				Ready: s.Status.ReadyReplicas > 0, Source: "statefulset", Paused: pausedBy(s.Annotations),
+				Ready: s.Status.ReadyReplicas > 0, Source: "statefulset", Paused: down(s.Spec.Replicas, s.Status.ReadyReplicas),
 				Labels: copyMap(s.Labels), Annotations: copyMap(s.Annotations),
 			})
 		}
@@ -255,7 +260,7 @@ func (d *Discoverer) fromWorkloads(ctx context.Context) ([]TenantCluster, error)
 			seen[key] = true
 			out = append(out, TenantCluster{
 				Name: dep.Name, Namespace: dep.Namespace, UID: string(dep.UID), CreatedAt: dep.CreationTimestamp.Time,
-				Ready: dep.Status.ReadyReplicas > 0, Source: "deployment", Paused: pausedBy(dep.Annotations),
+				Ready: dep.Status.ReadyReplicas > 0, Source: "deployment", Paused: down(dep.Spec.Replicas, dep.Status.ReadyReplicas),
 				Labels: copyMap(dep.Labels), Annotations: copyMap(dep.Annotations),
 			})
 		}

@@ -353,24 +353,14 @@ func main() {
 			}
 		}
 	}()
-	go func() {
-		// Converge clusters created or unreachable during a state change,
-		// and pause again at once any cluster of a paused tenant that runs.
-		t := time.NewTicker(2 * time.Minute)
-		defer t.Stop()
-		guard := time.NewTicker(15 * time.Second)
-		defer guard.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return // a pause cut short here is finished at the next start
-			case <-t.C:
-				enf.Resync(ctx)
-			case <-guard.C:
-				enf.Guard(ctx)
-			}
-		}
-	}()
+	// Converge clusters created or unreachable during a state change, and
+	// pause again at once any cluster of a paused tenant that runs. Each
+	// loop has its own goroutine: slow cluster APIs or gateway calls in a
+	// resync never hold up the guard, and a woken paused cluster is stopped
+	// within 15 seconds. A pause cut short at shutdown is finished at the
+	// next start.
+	go every(ctx, 2*time.Minute, enf.Resync)
+	go every(ctx, 15*time.Second, enf.Guard)
 	go func() {
 		defer wg.Done()
 		compactLoop(ctx, recSpool, nil)
@@ -518,7 +508,7 @@ func newEnforcer(cfg *config.Config, kube kubernetes.Interface, ctrl *controller
 		}
 		log.Printf("Enforcement inside clusters: on (needs write access to admission policies in each cluster)")
 	}
-	return enforcement.New(kube, enforcement.Options{
+	opts := enforcement.Options{
 		TenantClient:           tenantClient,
 		Mode:                   cfg.EnforcementMode,
 		StripeWebhookSecret:    cfg.StripeWebhookSecret,
@@ -529,12 +519,31 @@ func newEnforcer(cfg *config.Config, kube kubernetes.Interface, ctrl *controller
 		State:                  state,
 		Telemetry:              tel,
 		Pauses:                 pauses,
-		Freeze:                 coll.Freeze,
 		OnPause:                ctrl.SetPaused,
 		DrainTimeout:           cfg.PauseDrainTimeout,
 		KeepNamespaces:         cfg.PauseKeepNamespaces,
 		Gateway:                gw,
-	})
+	}
+	if tenantMgr != nil {
+		// Metering reads clusters' own APIs, so it bills their own nodes: a
+		// pause verifies they are empty before it stops billing them.
+		opts.Freeze, opts.OwnNodes = coll.Freeze, coll.OwnNodes
+	}
+	return enforcement.New(kube, opts)
+}
+
+// every runs f every interval until ctx ends.
+func every(ctx context.Context, interval time.Duration, f func(context.Context)) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			f(ctx)
+		}
+	}
 }
 
 // newPlatformResolver sets up TENANT_SOURCE=platform: tenant identity from

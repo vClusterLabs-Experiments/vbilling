@@ -80,6 +80,11 @@ type Controller struct {
 	owners      Owners // optional: past owners of clusters (TENANT_SOURCE=platform)
 
 	pauses *pause.Store // pause spans; nil = pauses are not tracked
+
+	// shared are external IDs that more than one discovered cluster maps
+	// to (see sharedIDs); sharedWarned is what was last logged about them.
+	shared       map[string]bool
+	sharedWarned string
 }
 
 // UsePauses tracks when clusters are paused, so capacity is not billed for
@@ -91,6 +96,9 @@ func (c *Controller) UsePauses(p *pause.Store) { c.pauses = p }
 func (c *Controller) SetPaused(id string, paused bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.shared[id] {
+		return // two clusters answer to this ID: discovery tells them apart
+	}
 	for i := range c.clusters {
 		if c.clusters[i].ExternalID() == id {
 			c.clusters[i].Paused = paused
@@ -100,10 +108,20 @@ func (c *Controller) SetPaused(id string, paused bool) {
 
 type pauseForgetter interface{ ForgetPaused(id string) }
 
-// observePauses records pauses seen in discovery: ones vBilling did not
-// make (vcluster pause, an operator) and resumes made outside vBilling.
-// vBilling's own pauses start at their paused-at annotation, to the second.
-func (c *Controller) observePauses(clusters []discovery.TenantCluster, now time.Time) {
+// observePauses records pauses vBilling did not make, and ends the pause
+// of any cluster that runs again, whoever paused it.
+//
+// A cluster is paused only while its control plane is really down
+// (discovery.TenantCluster.Paused); annotations never pause billing, and a
+// paused-at annotation never dates a pause, since whoever writes
+// vcluster.yaml can write both. vBilling's own pauses are recorded by its
+// enforcer, from the moment it verified the cluster's workloads were gone,
+// so a cluster it marked is left to it here. Any other pause (vcluster
+// pause, an operator, vCluster Platform's sleep mode, the tenant scaling
+// its control plane down) is recorded from when discovery sees it, as
+// external: it stops the control plane's hours only, because vBilling
+// cannot verify the cluster's nodes and workloads stopped.
+func (c *Controller) observePauses(clusters []discovery.TenantCluster, shared map[string]bool, now time.Time) {
 	if c.pauses == nil {
 		return
 	}
@@ -113,26 +131,22 @@ func (c *Controller) observePauses(clusters []discovery.TenantCluster, now time.
 			continue // no control plane here to see paused: vBilling's enforcer records its pauses
 		}
 		id := cl.ExternalID()
+		if shared[id] {
+			continue // two clusters answer to this ID: neither gets a pause span
+		}
 		_, open := c.pauses.Current(id)
 		switch {
-		case cl.Paused && !open:
-			at, by := now, "external"
-			if cl.Annotations[discovery.AnnotationPausedBy] == "vbilling" {
-				by = "vbilling"
-				if t, err := time.Parse(time.RFC3339Nano, cl.Annotations[discovery.AnnotationPausedAt]); err == nil && !t.After(now) {
-					at = t
-				}
-			}
-			if _, err := c.pauses.Begin(id, at, by); err != nil {
+		case cl.Paused && !open && cl.Annotations[discovery.AnnotationPausedBy] != pause.ByVBilling:
+			if _, err := c.pauses.Begin(id, now, pause.ByExternal); err != nil {
 				log.Printf("[controller] %s: record pause: %v", id, err)
 			} else {
-				log.Printf("[controller] %s: paused since %s (%s)", id, at.UTC().Format(time.RFC3339), by)
+				log.Printf("[controller] %s: paused outside vBilling since %s: its control plane stops billing, its nodes and workloads keep billing", id, now.UTC().Format(time.RFC3339))
 			}
 		case !cl.Paused && open:
 			if _, err := c.pauses.End(id, now); err != nil {
 				log.Printf("[controller] %s: record resume: %v", id, err)
 			} else {
-				log.Printf("[controller] %s: resumed", id)
+				log.Printf("[controller] %s: runs again, billed from %s", id, now.UTC().Format(time.RFC3339))
 			}
 		}
 		if !cl.Paused && forget != nil {
@@ -141,6 +155,43 @@ func (c *Controller) observePauses(clusters []discovery.TenantCluster, now time.
 	}
 	// Pauses that ended before any window that can still be metered.
 	_ = c.pauses.Prune(now.Add(-c.cfg.MaxBackfill - time.Hour))
+}
+
+// sharedIDs returns the external IDs more than one cluster maps to.
+// vcluster-<namespace>-<name> is not unique (namespace a-b with cluster c
+// and namespace a with cluster b-c are both vcluster-a-b-c), and the ID
+// is the cluster's identity in the ledger, so it cannot change. Pause
+// state, saved inventories and tenant API gaps are kept by it too: for a
+// shared ID vBilling keeps no pause span, so neither cluster stops billing
+// because of the other's pause.
+func sharedIDs(clusters []discovery.TenantCluster) map[string]bool {
+	seen := map[string]int{}
+	for i := range clusters {
+		seen[clusters[i].ExternalID()]++
+	}
+	out := map[string]bool{}
+	for id, n := range seen {
+		if n > 1 {
+			out[id] = true
+		}
+	}
+	return out
+}
+
+func (c *Controller) warnSharedIDs(shared map[string]bool) {
+	ids := make([]string, 0, len(shared))
+	for id := range shared {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	msg := strings.Join(ids, ", ")
+	c.mu.Lock()
+	changed := msg != c.sharedWarned
+	c.sharedWarned = msg
+	c.mu.Unlock()
+	if changed && msg != "" {
+		log.Printf("[controller] WARNING: more than one cluster has the ID %s (vcluster-<namespace>-<name>): they are metered under one ID, and pausing them never stops their billing. Rename one of them", msg)
+	}
 }
 
 // UsePrometheus enables Prometheus-read usage.
@@ -340,10 +391,13 @@ func (c *Controller) Reconcile(ctx context.Context) {
 		}
 	}
 	c.warnAliasConflicts(aliases, ambiguous)
-	c.observePauses(clusters, now)
+	shared := sharedIDs(clusters)
+	c.warnSharedIDs(shared)
+	c.observePauses(clusters, shared, now)
 	c.mu.Lock()
 	c.aliases = aliases
 	c.ambiguous = ambiguous
+	c.shared = shared
 	c.clusters = clusters
 	c.discovered = true
 	for _, t := range tenants {
@@ -630,11 +684,15 @@ func parseGap(store *kv.Store, id string) ([2]time.Time, bool) {
 // targets resolves every known cluster to its billing identity.
 func (c *Controller) targets() []metrics.Target {
 	src := discovery.TenantSource(c.cfg.TenantSource)
+	c.mu.Lock()
+	shared := c.shared
+	c.mu.Unlock()
 	var targets []metrics.Target
 	for _, cl := range c.Clusters() {
 		t, _ := c.tenants.Get(cl.TenantID(src))
 		target := metrics.Target{Cluster: cl, Tenant: t.ID, Project: cl.Project, TenantClass: t.Class}
-		if c.pauses != nil {
+		if c.pauses != nil && !shared[cl.ExternalID()] {
+			// A shared ID's spans could be either cluster's: neither is clipped.
 			target.Paused = c.pauses.Spans(cl.ExternalID())
 		}
 		targets = append(targets, target)
