@@ -353,9 +353,11 @@ func main() {
 	if tokenFiles.Ingest != "" {
 		log.Printf("INGEST_TOKEN is not set: gateways send usage with the token vBilling keeps in %s (never the API token)", tokenFiles.Ingest)
 	}
+	apiServer := api.New(cfg, sp, disp, tenants, ctrl, enf, tel, version).WithHealth(sources).WithPauses(pauses).WithRecords(ingester).WithCrossChecks(checks).WithPricing(prices)
+	go apiServer.Run(ctx) // the SKUs tenants have in the ledger and those billing platforms price
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           api.New(cfg, sp, disp, tenants, ctrl, enf, tel, version).WithHealth(sources).WithPauses(pauses).WithRecords(ingester).WithCrossChecks(checks).WithPricing(prices).Handler(),
+		Handler:           apiServer.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		MaxHeaderBytes:    api.MaxHeaderBytes,
 	}

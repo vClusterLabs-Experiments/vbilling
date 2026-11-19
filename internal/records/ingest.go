@@ -98,10 +98,28 @@ type Ingester struct {
 	arrivals *arrivals
 }
 
-// SKUGate returns the SKU a tenant's usage is stored under: sku itself, or
-// a replacement (overflow true) once the tenant brought in too many
-// distinct SKUs.
-type SKUGate func(tenant, sku string) (stored string, overflow bool)
+// SKUGate bounds the new SKUs usage brings in, per source (SKUSource...)
+// and tenant.
+type SKUGate interface {
+	// Admit returns the SKU a usage row is stored under: sku itself, or a
+	// replacement (overflow true) once the source brought in too many new
+	// SKUs for the tenant.
+	Admit(source, tenant, sku string) (stored string, overflow bool)
+	// Overflowed reports that n usage rows of one request or pull, now
+	// stored, carry the replacement.
+	Overflowed(source, tenant string, n int)
+}
+
+// SKU sources: what usage came in with. Each counts new SKUs on its own, so
+// what a tenant sends with its own token never uses up what the operator's
+// gateway or pulls report for it.
+const (
+	SKUSourceShared = "shared" // the shared ingest token
+	SKUSourceBound  = "bound"  // a token bound to the tenant
+)
+
+// SKUSourcePull is the SKU source of the pulls of client's request log.
+func SKUSourcePull(client string) string { return "pull:" + client }
 
 // UseSKUGate applies g to every usage row stored, pushed or pulled. Set it
 // before records are ingested.
@@ -524,17 +542,21 @@ func (in *Ingester) ingest(c ingestCall, objs []map[string]any) (Result, error) 
 	for _, r := range recs {
 		rows = append(rows, r...)
 	}
-	overflow := 0
+	skuSource := SKUSourceShared
+	switch {
+	case pulled:
+		skuSource = SKUSourcePull(client)
+	case boundTenant != "":
+		skuSource = SKUSourceBound
+	}
+	overflow := map[string]int{} // tenant -> rows stored under another SKU
 	if in.skuGate != nil {
 		for i := range rows {
 			var over bool
-			if rows[i].SKU, over = in.skuGate(rows[i].Tenant, rows[i].SKU); over {
-				overflow++
+			if rows[i].SKU, over = in.skuGate.Admit(skuSource, rows[i].Tenant, rows[i].SKU); over {
+				overflow[rows[i].Tenant]++
 			}
 		}
-	}
-	if overflow > 0 {
-		res.Warnings = append(res.Warnings, fmt.Sprintf("%d usage row(s) are billed under another SKU: their tenant sent too many distinct SKUs today", overflow))
 	}
 	report := pulled || c.known || res.Accepted > 0 // health and metrics may name the client
 	if len(rows) > 0 {
@@ -548,6 +570,14 @@ func (in *Ingester) ingest(c ingestCall, objs []map[string]any) (Result, error) 
 			for _, ev := range rows {
 				stored.ids[ev.ID] = struct{}{}
 			}
+		}
+		total := 0
+		for t, n := range overflow {
+			in.skuGate.Overflowed(skuSource, t, n)
+			total += n
+		}
+		if total > 0 {
+			res.Warnings = append(res.Warnings, fmt.Sprintf("%d usage row(s) are billed under another SKU: their source sent too many new SKUs for the tenant today", total))
 		}
 	}
 	res.UsageRows = len(rows)

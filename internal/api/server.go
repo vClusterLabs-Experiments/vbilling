@@ -70,27 +70,30 @@ type Server struct {
 
 	limiter *rateLimiter // requests per ingest token
 	clients *clientNames // client names per ingest token
-	skus    *skuQuota    // distinct SKUs per tenant and day
+	skus    *skuQuota    // new SKUs per source, tenant and day
+	priced  pricedSKUs   // SKUs the price check found priced
 }
 
 // WithCrossChecks enables GET /api/v1/crosscheck.
 func (s *Server) WithCrossChecks(c []crosscheck.Check) *Server { s.checks = c; return s }
 
-// WithHealth exposes source health in the status API and /api/v1/sources.
-func (s *Server) WithHealth(h *health.Registry) *Server { s.health = h; return s }
+// WithHealth exposes source health in the status API and /api/v1/sources,
+// and reports usage stored past the SKU cap there.
+func (s *Server) WithHealth(h *health.Registry) *Server { s.health = h; s.skus.health = h; return s }
 
 // WithPauses exposes when clusters were paused in GET /api/v1/billing-states.
 func (s *Server) WithPauses(p *pause.Store) *Server { s.pauses = p; return s }
 
 // WithRecords enables POST /api/v1/records. Records (pushed or pulled)
-// count towards the same per-tenant SKU cap as ingested events.
+// count towards the same SKU caps as ingested events.
 func (s *Server) WithRecords(in *records.Ingester) *Server {
 	s.records = in
-	in.UseSKUGate(s.skus.admit)
+	in.UseSKUGate(s.skus)
 	return s
 }
 
 // WithPricing enables GET /api/v1/pricing and POST /api/v1/pricing/check.
+// SKUs it finds priced never count against the SKU cap (see Run).
 func (s *Server) WithPricing(p *pricing.Service) *Server { s.pricing = p; return s }
 
 func New(cfg *config.Config, sp *spool.Spool, disp *pipeline.Dispatcher, tenants *pipeline.TenantRegistry,
@@ -98,6 +101,7 @@ func New(cfg *config.Config, sp *spool.Spool, disp *pipeline.Dispatcher, tenants
 	s := &Server{cfg: cfg, spool: sp, disp: disp, tenants: tenants, ctrl: ctrl, enf: enf, tel: tel, version: version, now: time.Now, started: time.Now(),
 		limiter: newRateLimiter(time.Now), clients: newClientNames()}
 	s.skus = newSKUQuota(func() time.Time { return s.now() })
+	s.skus.priced = s.priced.has
 	return s
 }
 
@@ -458,6 +462,14 @@ func (s *Server) pricingReport(w http.ResponseWriter, r *http.Request) {
 type ingestCaller struct {
 	bound string // the tenant a tenant-bound token is bound to; "" for the shared token
 	key   string // the token's key in the rate limiter and the client names
+}
+
+// skuSource is the SKU cap the caller's usage counts against.
+func (c ingestCaller) skuSource() string {
+	if c.bound != "" {
+		return records.SKUSourceBound
+	}
+	return records.SKUSourceShared
 }
 
 // ingestAuth checks an ingest token and its request rate. A token from
@@ -921,10 +933,6 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 			rejected = append(rejected, rejection{Index: i, ID: e.ID, Error: strings.Join(problems, "; ")})
 			continue
 		}
-		var over bool
-		if e.SKU, over = s.skus.admit(e.Tenant, e.SKU); over {
-			overflow++
-		}
 		valid = append(valid, e)
 	}
 	// An event without an id that v0.3.0 stored (under its derived ID) is a
@@ -938,12 +946,32 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 		}
 		fresh = append(fresh, e)
 	}
+	// The SKU cap counts what each kind of token brings in for a tenant on
+	// its own: a tenant's bound token never uses up what the operator's
+	// gateways report for it.
+	capped := map[string]string{} // ID -> tenant, of events stored under OverflowSKU
+	for i := range fresh {
+		var over bool
+		if fresh[i].SKU, over = s.skus.Admit(caller.skuSource(), fresh[i].Tenant, fresh[i].SKU); over {
+			capped[fresh[i].ID] = fresh[i].Tenant
+		}
+	}
 	var dups []string
 	if len(fresh) > 0 {
 		if accepted, dups, err = s.spool.AppendIngest(source, fresh); err != nil {
 			writeErr(w, http.StatusServiceUnavailable, "ledger write failed: %v", err)
 			return
 		}
+	}
+	overTenants := map[string]int{}
+	for _, id := range accepted {
+		if t, ok := capped[id]; ok {
+			overflow++
+			overTenants[t]++
+		}
+	}
+	for t, n := range overTenants {
+		s.skus.Overflowed(caller.skuSource(), t, n)
 	}
 	dups = append(dups, retried...)
 	status := http.StatusOK
@@ -965,7 +993,7 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 			"If they are separate requests rather than retries, give each one an id, or send per-request usage to POST /api/v1/records", silent))
 	}
 	if overflow > 0 {
-		warnings = append(warnings, fmt.Sprintf("%d event(s) are billed under SKU %q: their tenant sent more than %d distinct SKUs today",
+		warnings = append(warnings, fmt.Sprintf("%d event(s) are billed under SKU %q: this kind of ingest token brought in more than %d new SKUs for their tenant today",
 			overflow, OverflowSKU, maxSKUsPerTenantPerDay))
 	}
 	if len(warnings) > 0 {

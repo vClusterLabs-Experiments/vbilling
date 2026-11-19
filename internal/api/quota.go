@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -11,16 +12,22 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/vclusterlabs-experiments/vbilling/internal/destinations"
+	"github.com/vclusterlabs-experiments/vbilling/internal/health"
+	"github.com/vclusterlabs-experiments/vbilling/internal/records"
+	"github.com/vclusterlabs-experiments/vbilling/internal/spool"
+	"github.com/vclusterlabs-experiments/vbilling/internal/usage"
 )
 
 // Ingest quotas. They are constants, not settings: each is far above what a
 // real emitter needs, and only bounds what one token or one tenant can do
 // to vBilling, and so to every other tenant.
 const (
-	// The shared ingest token (INGEST_TOKEN, by default the API token) is
-	// the operator's: its gateways post records for every tenant. 5,000
-	// requests per second, in bursts of 10,000, covers gateways that post
-	// every request on its own at thousands per second.
+	// The shared ingest token (INGEST_TOKEN) is the operator's: its
+	// gateways post records for every tenant. 5,000 requests per second, in
+	// bursts of 10,000, covers gateways that post every request on its own
+	// at thousands per second.
 	sharedTokenRate, sharedTokenBurst = 5000, 10000
 	// A tenant-bound token (INGEST_TOKENS) belongs to one tenant's own
 	// gateway. 500 requests per second, in bursts of 1,000, covers a gateway
@@ -36,14 +43,24 @@ const (
 	maxIngestBody   = 10 << 20
 	maxIngestEvents = 5000
 	maxRecordsBody  = 16 << 20
-	// maxSKUsPerTenantPerDay bounds the distinct SKUs one tenant brings in
-	// through ingest in one UTC day. Every new SKU can create a meter in a
-	// billing platform (vBilling splits Stripe meters by SKU), and meters
-	// are shared by every tenant of the account. Real tenants use a few GPU
-	// types and at most a few dozen models a day. Usage with a SKU beyond
-	// the cap is still billed, under OverflowSKU, never dropped: a cap that
-	// dropped usage would let a tenant drop its own.
+	// maxSKUsPerTenantPerDay bounds the new SKUs one source (the shared
+	// ingest token, a tenant's bound tokens, or one pull) brings in for a
+	// tenant in one UTC day. Every new SKU can create a meter in a billing
+	// platform (vBilling splits Stripe meters by SKU), and meters are shared
+	// by every tenant of the account. A SKU counts only when it is new:
+	// not in the tenant's recent ledger, not priced by a billing platform
+	// and not seen from the source today. Real tenants use a few GPU types
+	// and at most a few dozen models a day. Usage with a SKU beyond the cap
+	// is still stored, under OverflowSKU, never dropped (a cap that dropped
+	// usage would let a tenant drop its own), and the tenant's source turns
+	// failing in health.
 	maxSKUsPerTenantPerDay = 100
+	// knownSKUsFor is how long a SKU a tenant had in the ledger stays known
+	// (admitted without counting) after its last use.
+	knownSKUsFor = 48 * time.Hour
+	// pricedRefresh is how often the SKUs the price check covers are read
+	// again.
+	pricedRefresh = time.Minute
 )
 
 // Client names. X-VBilling-Client names the emitter: it is part of record
@@ -68,9 +85,9 @@ const (
 
 var clientNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
-// OverflowSKU is the SKU usage is billed under once its tenant brought in
-// maxSKUsPerTenantPerDay distinct SKUs in the day. Price it, or find out
-// why a tenant sends so many.
+// OverflowSKU is the SKU usage is stored under once its source brought in
+// maxSKUsPerTenantPerDay new SKUs for its tenant in the day. Price it, or
+// find out why a source sends so many.
 const OverflowSKU = "sku-limit-exceeded"
 
 // rateLimiter is a token bucket per ingest token.
@@ -209,47 +226,225 @@ func (s *Server) ingestClient(w http.ResponseWriter, r *http.Request, c ingestCa
 	return client, known, done, true
 }
 
-// skuQuota counts the distinct SKUs each tenant brought in during the
-// current UTC day (in memory: a restart starts the count again).
+// skuQuota counts the new SKUs each source brought in for each tenant
+// during the current UTC day (in memory). It implements records.SKUGate.
 type skuQuota struct {
-	mu   sync.Mutex
-	now  func() time.Time
-	day  string
-	seen map[string]map[string]bool // tenant -> SKUs today
+	mu     sync.Mutex
+	now    func() time.Time
+	day    string
+	seen   map[skuKey]map[string]bool // SKUs counted today
+	logged map[skuKey]bool
+	known  *skuIndex             // SKUs each tenant has in the ledger
+	priced func(sku string) bool // nil: no price check
+	health *health.Registry      // nil: no source health
 }
+
+type skuKey struct{ source, tenant string }
 
 func newSKUQuota(now func() time.Time) *skuQuota {
-	return &skuQuota{now: now, seen: map[string]map[string]bool{}}
+	return &skuQuota{now: now, seen: map[skuKey]map[string]bool{}, logged: map[skuKey]bool{}, known: newSKUIndex()}
 }
 
-// admit returns the SKU usage is stored under: sku itself while the tenant
-// is within maxSKUsPerTenantPerDay distinct SKUs today, else OverflowSKU.
-// overflow reports the replacement.
-func (q *skuQuota) admit(tenant, sku string) (stored string, overflow bool) {
+// Admit returns the SKU usage is stored under: sku itself, unless it is a
+// new SKU and source already brought in maxSKUsPerTenantPerDay new SKUs for
+// tenant today, then OverflowSKU. overflow reports the replacement. A SKU
+// the tenant has in its recent ledger, or one a billing platform prices,
+// is never new.
+func (q *skuQuota) Admit(source, tenant, sku string) (stored string, overflow bool) {
 	if sku == "" || sku == OverflowSKU {
 		return sku, false
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if day := q.now().UTC().Format("2006-01-02"); day != q.day {
-		q.day, q.seen = day, map[string]map[string]bool{}
+	now := q.now().UTC()
+	if day := now.Format("2006-01-02"); day != q.day {
+		q.day, q.seen, q.logged = day, map[skuKey]map[string]bool{}, map[skuKey]bool{}
 	}
-	skus := q.seen[tenant]
-	if skus == nil {
-		skus = map[string]bool{}
-		q.seen[tenant] = skus
-	}
-	if skus[sku] {
+	k := skuKey{source, tenant}
+	skus := q.seen[k]
+	if skus[sku] || q.known.has(tenant, sku) || (q.priced != nil && q.priced(sku)) {
 		return sku, false
 	}
 	if len(skus) >= maxSKUsPerTenantPerDay {
-		if !skus[OverflowSKU] {
-			skus[OverflowSKU] = true // log once per tenant and day
-			log.Printf("[api] tenant %s sent more than %d distinct SKUs today: new SKUs are billed as %q until tomorrow (UTC)",
-				tenant, maxSKUsPerTenantPerDay, OverflowSKU)
+		if !q.logged[k] {
+			q.logged[k] = true
+			log.Printf("[api] %s brought in more than %d new SKUs for tenant %s today: new SKUs are stored as %q until tomorrow (UTC)",
+				sourceDesc(source), maxSKUsPerTenantPerDay, tenant, OverflowSKU)
 		}
 		return OverflowSKU, true
 	}
+	if skus == nil {
+		skus = map[string]bool{}
+		q.seen[k] = skus
+	}
 	skus[sku] = true
+	q.known.add(tenant, sku, now)
 	return sku, false
+}
+
+// Overflowed marks the tenant's source failing: n usage rows of one
+// request were stored under OverflowSKU.
+func (q *skuQuota) Overflowed(source, tenant string, n int) {
+	if q.health == nil || n == 0 {
+		return
+	}
+	q.mu.Lock()
+	day := q.day
+	q.mu.Unlock()
+	q.health.Fail(health.Name("records", tenant, "sku-limit"), "records", tenant,
+		fmt.Errorf("%d usage row(s) from %s were stored under SKU %s: %s brought in more than %d new SKUs for tenant %s on %s (UTC). "+
+			"A SKU counts as new unless the tenant used it in the last two days or a billing platform prices it",
+			n, sourceDesc(source), OverflowSKU, sourceDesc(source), maxSKUsPerTenantPerDay, tenant, day),
+		"price "+OverflowSKU+" in your billing platform, or find out why this source sends so many SKUs; the count starts again at 00:00 UTC")
+}
+
+func sourceDesc(source string) string {
+	switch source {
+	case records.SKUSourceShared:
+		return "the shared ingest token"
+	case records.SKUSourceBound:
+		return "a tenant-bound ingest token"
+	default:
+		return source
+	}
+}
+
+// skuIndex knows the SKUs each tenant had in the usage ledger during the
+// last knownSKUsFor.
+type skuIndex struct {
+	mu   sync.Mutex
+	skus map[string]map[string]time.Time // tenant -> SKU -> last appended
+}
+
+func newSKUIndex() *skuIndex { return &skuIndex{skus: map[string]map[string]time.Time{}} }
+
+func (x *skuIndex) has(tenant, sku string) bool {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	_, ok := x.skus[tenant][sku]
+	return ok
+}
+
+func (x *skuIndex) add(tenant, sku string, at time.Time) {
+	if tenant == "" || sku == "" || sku == OverflowSKU {
+		return
+	}
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	m := x.skus[tenant]
+	if m == nil {
+		m = map[string]time.Time{}
+		x.skus[tenant] = m
+	}
+	if at.After(m[sku]) {
+		m[sku] = at
+	}
+}
+
+// prune forgets SKUs not appended since cutoff.
+func (x *skuIndex) prune(cutoff time.Time) {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	for t, m := range x.skus {
+		for sku, at := range m {
+			if at.Before(cutoff) {
+				delete(m, sku)
+			}
+		}
+		if len(m) == 0 {
+			delete(x.skus, t)
+		}
+	}
+}
+
+// follow reads the SKUs of the ledger's last knownSKUsFor, then of every
+// event appended, until ctx ends.
+func (x *skuIndex) follow(ctx context.Context, sp *spool.Spool, now func() time.Time) {
+	read := sp.Committed()
+	start := now()
+	err := sp.ScanAppended(start.Add(-knownSKUsFor), start.Add(time.Hour), func(ev *usage.Event, at time.Time) error {
+		x.add(ev.Tenant, ev.SKU, at)
+		return ctx.Err()
+	})
+	if err != nil && ctx.Err() == nil {
+		log.Printf("[api] read the SKUs of the last %s of the ledger: %v", knownSKUsFor, err)
+	}
+	pruned := now()
+	for {
+		changed := sp.Changed()
+		for {
+			recs, err := sp.Read(read, 5000)
+			if err != nil {
+				log.Printf("[api] follow the ledger's SKUs: %v", err)
+				break
+			}
+			if len(recs) == 0 {
+				break
+			}
+			for _, r := range recs {
+				if r.Event != nil {
+					x.add(r.Event.Tenant, r.Event.SKU, r.At)
+				}
+			}
+			read = recs[len(recs)-1].Seq
+		}
+		if t := now(); t.Sub(pruned) > time.Hour {
+			x.prune(t.Add(-knownSKUsFor))
+			pruned = t
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-changed:
+		case <-time.After(time.Minute):
+		}
+	}
+}
+
+// pricedSKUs are the SKUs the last price check found priced at a billing
+// platform.
+type pricedSKUs struct {
+	mu   sync.Mutex
+	skus map[string]bool
+}
+
+func (p *pricedSKUs) has(sku string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.skus[sku]
+}
+
+// refreshPriced reads the SKUs the price check covers.
+func (s *Server) refreshPriced() {
+	if s.pricing == nil {
+		return
+	}
+	skus := map[string]bool{}
+	for _, d := range s.pricing.Report().Destinations {
+		for _, row := range d.Series {
+			if row.Status == destinations.PriceCovered && row.SKU != "" {
+				skus[row.SKU] = true
+			}
+		}
+	}
+	s.priced.mu.Lock()
+	s.priced.skus = skus
+	s.priced.mu.Unlock()
+}
+
+// Run keeps what the SKU cap needs current until ctx ends: the SKUs each
+// tenant had in the ledger lately, and those billing platforms price.
+// Without it, only the SKUs admitted since the start are known.
+func (s *Server) Run(ctx context.Context) {
+	go s.skus.known.follow(ctx, s.spool, s.now)
+	t := time.NewTicker(pricedRefresh)
+	defer t.Stop()
+	for {
+		s.refreshPriced()
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
 }
