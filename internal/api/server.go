@@ -134,6 +134,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/destinations/{name}/dead-letters", s.auth(s.deadLetters))
 	mux.HandleFunc("POST /api/v1/destinations/{name}/dead-letters/replay", s.auth(s.longRoute(s.replayDeadLetters)))
 	mux.HandleFunc("POST /api/v1/destinations/{name}/cursor", s.auth(s.setCursor))
+	mux.HandleFunc("GET /api/v1/destinations/{name}/delivery/{id}", s.auth(s.deliveryReceipt))
+	mux.HandleFunc("PUT /api/v1/destinations/{name}/delivery/{id}", s.auth(s.resolveDelivery))
 	mux.HandleFunc("GET /api/v1/billing-states", s.auth(s.billingStates))
 	mux.HandleFunc("PUT /api/v1/billing-states/{tenant}", s.auth(s.setBillingState))
 
@@ -323,6 +325,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		"version":          s.version,
 		"region":           s.cfg.Region,
 		"cluster":          s.cfg.ClusterName,
+		"metering_source":  s.cfg.MeteringSource,
 		"adapters":         s.cfg.Adapters,
 		"window":           s.cfg.CollectionInterval.String(),
 		"enforcement_mode": s.cfg.EnforcementMode,
@@ -1335,8 +1338,8 @@ func (s *Server) deadLetters(w http.ResponseWriter, r *http.Request) {
 }
 
 // replayDeadLetters resends parked events (after fixing the cause, for
-// example creating a missing customer). Event IDs are stable, so a replay
-// can never double-bill.
+// example creating a missing customer). Destinations enforce their own
+// retry horizons and require reconciliation for ambiguous old deliveries.
 func (s *Server) replayDeadLetters(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	d := s.destination(name)
@@ -1361,26 +1364,38 @@ func (s *Server) replayDeadLetters(w http.ResponseWriter, r *http.Request) {
 	var partial *destinations.PartialError
 	switch {
 	case err == nil:
-		s.spool.ClearDeadLetters(name)
-		writeJSON(w, http.StatusOK, map[string]any{"replayed": len(events)})
 	case errors.As(err, &partial):
-		s.spool.ClearDeadLetters(name)
-		for _, ev := range events {
-			if reason, bad := partial.Rejected[ev.ID]; bad {
-				s.spool.AddDeadLetter(name, ev, reason)
-			}
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"replayed": len(events) - len(partial.Rejected), "still_rejected": len(partial.Rejected)})
 	default:
 		writeErr(w, http.StatusBadGateway, "replay failed, dead letters kept: %v", err)
+		return
 	}
+	var delivered []string
+	var confirmed []usage.Event
+	for _, ev := range events {
+		if partial != nil && partial.Rejected[ev.ID] != "" {
+			continue
+		}
+		delivered = append(delivered, ev.ID)
+		confirmed = append(confirmed, ev)
+	}
+	if err := s.spool.RemoveDeadLetters(name, delivered); err != nil {
+		writeErr(w, http.StatusInternalServerError, "persist replay results: %v", err)
+		return
+	}
+	if checkpoint, ok := d.(destinations.DeliveryCheckpointer); ok {
+		if err := checkpoint.CheckpointDelivery(confirmed); err != nil {
+			log.Printf("[api] %s: replay result is durable but receipt cleanup failed: %v", name, err)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"replayed": len(delivered), "still_rejected": len(events) - len(delivered)})
 }
 
 // setCursor rewinds or advances a destination, e.g. {"seq": 0} replays the
 // retained ledger into a newly added backend.
 func (s *Server) setCursor(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	if s.destination(name) == nil {
+	dest := s.destination(name)
+	if dest == nil {
 		writeErr(w, http.StatusNotFound, "no destination %q", name)
 		return
 	}
@@ -1390,6 +1405,12 @@ func (s *Server) setCursor(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req); err != nil || req.Seq == nil {
 		writeErr(w, http.StatusBadRequest, `body must be {"seq": <number>}`)
 		return
+	}
+	if validator, ok := dest.(destinations.ReplayValidator); ok {
+		if err := validator.ValidateReplay(r.Context(), s.spool.Cursor(name), *req.Seq); err != nil {
+			writeErr(w, http.StatusConflict, "%v", err)
+			return
+		}
 	}
 	if err := s.spool.SetCursor(name, *req.Seq); err != nil {
 		writeErr(w, http.StatusInternalServerError, "%v", err)

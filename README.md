@@ -15,7 +15,7 @@
 
 ---
 
-vBilling is the **metering pipe**, not the billing engine. It turns what runs in your clusters into canonical usage events. Your billing platform does the pricing, invoicing, tax and payments. vBilling makes sure every billable GPU-second reaches it exactly once, attributed to the right customer, region and SKU, and that you can prove it afterwards.
+vBilling is the **metering pipe**, not the billing engine. It turns what runs in your clusters into canonical usage events. Your billing platform does the pricing, invoicing, tax and payments. vBilling records usage durably, attributes it to the customer, region and SKU, and delivers it with stable IDs and provider-specific retry safeguards so you can reconcile it afterwards.
 
 > vBilling lives in `vClusterLabs-Experiments`: it is an experimental project, not a supported vCluster Labs product.
 
@@ -81,7 +81,7 @@ See [Usage sources](https://vclusterlabs-experiments.github.io/vbilling/usage-so
 1. **Discover** clusters (vCluster StatefulSets and Deployments, enriched from vCluster Platform when available) and group them into billing tenants.
 2. **Meter** each closed window (60s by default, aligned to the wall clock) into canonical events.
 3. **Commit** the window atomically to the ledger.
-4. **Deliver** to every destination at least once, with deterministic IDs so the effect is exactly-once.
+4. **Deliver** to every destination with deterministic IDs, durable cursors, and retries within each provider's deduplication limits.
 5. **Close the loop**: billing webhooks drive the tenant's billing state back onto its clusters.
 
 ## What gets metered
@@ -292,7 +292,9 @@ Run one replica. A restart loses nothing: the ledger keeps every committed windo
 
 ## Regions and data sovereignty
 
-Run one vBilling per control plane cluster and set `region` (for example `ap-southeast-2`, `syd-1`, `mel-1`). Every event, ledger record and billing state stays in that region's cluster. `GET /api/v1/status` reports the region, and each destination is a separately configured, documented data flow. Stripe and Metronome are hosted outside many jurisdictions (Metronome's public docs describe no regional hosting), so a sovereign region can choose to:
+Run one vBilling per control plane cluster and set `region` (for example `ap-southeast-2`, `syd-1`, `mel-1`). That installation discovers all customer vClusters on the host and reads private-node clusters through their own APIs; a separate collector per customer is unnecessary. Each independent installation has a persistent `metering_source` identity in `DATA_DIR/source.json`, included in automatically generated resource, Prometheus and request aggregate IDs. Preserve it with the ledger on restart or restore. Independent installations must collect disjoint inputs: sending the same gateway request to two installations still counts twice. IDs supplied to `POST /api/v1/events` remain the emitter's responsibility.
+
+Every event, ledger record and billing state stays in that region's cluster. `GET /api/v1/status` reports the region and metering source, and each destination is a separately configured, documented data flow. Stripe and Metronome are hosted outside many jurisdictions (Metronome's public docs describe no regional hosting), so a sovereign region can choose to:
 
 - keep the full-fidelity ledger and the webhook feed in-region and send only billing quantities offshore
 - pin customer IDs and keep names and emails out of usage events (they never contain PII; tenant IDs are yours to choose)
@@ -439,7 +441,8 @@ Every endpoint except `/healthz` and `/readyz` needs the API token (`Authorizati
 | `GET /api/v1/reconcile?from&to&destination` | Ledger vs. billing platform totals (default: previous UTC day) |
 | `GET /api/v1/pricing?destination&status`, `POST /api/v1/pricing/check` | Price coverage per destination: each (plan, metric, SKU) `priced`, `unpriced`, `zero` or `unknown`, with a hint naming the missing product, rate, price or charge, and held events (`PRICE_CHECK=hold`) |
 | `GET /api/v1/ledger/verify` | Hash-chain verification |
-| `GET /api/v1/destinations`, `GET …/{name}/dead-letters`, `POST …/{name}/dead-letters/replay`, `POST …/{name}/cursor` | Delivery operations |
+| `GET /api/v1/destinations`, `GET …/{name}/dead-letters`, `POST …/{name}/dead-letters/replay`, `POST …/{name}/cursor` | Delivery operations; Stripe refuses rewinds containing usage older than 23 hours |
+| `GET`, `PUT /api/v1/destinations/stripe/delivery/{id}` | Inspect an outstanding delivery receipt; resolve an ambiguous outcome as `delivered` or `not_delivered` with a reconciliation `reason`, then replay the dead letter |
 | `GET /api/v1/tenants`, `GET /api/v1/billing-states`, `PUT /api/v1/billing-states/{tenant}` | Tenants and billing state (`{"state", "reason", "hold"}`; `hold` defaults to `operator`) |
 | `POST /webhooks/stripe`, `POST /webhooks/metronome` | Billing signals |
 
@@ -510,7 +513,7 @@ v0.3.1 closes the issues a second independent review found in v0.3.0: tenants ca
 - **Pause.** Capacity stops billing once vBilling has verified the cluster's workloads are gone, with successful reads and no pod able to start; a pause it cannot verify still stops the control plane and keeps billing the cluster's own nodes. Pods get at most 30 seconds of grace. Pauses made by v0.3.0 are verified again before they stop billing.
 - **Billing holds.** Billing webhooks only raise a hold. A payment lowers it only after vBilling reads Stripe and Metronome again and finds nothing still owed: no subscription past due or unpaid, no open invoice past due or failed, no Metronome notification in alarm that a rule maps above warning. A Metronome customer that funds several tenants releases them all. `PUT /api/v1/billing-states` without `hold` now sets an operator hold, which no webhook lifts; pass `"hold": "billing"` for a hold a payment may lift. Events apply in the order they happened, and a retried older event is ignored. An operator still sets or clears any hold with `PUT /api/v1/billing-states`.
 - **Suspension inside clusters.** Only `kube-system` is exempt; the `enforcement-exempt` namespace label no longer works.
-- **Ingest.** SKU, dimension, region, project and resource values with markup or control characters are refused, and so are dimensions named like an event's own properties (`value`, `sku`, `region` and the others). `X-VBilling-Client` must be a short plain name, with at most 16 names per tenant-bound token and 64 for the shared token. Per-token rate limits apply, and a records push that would write more than 64 MiB gets 413. A source's 101st new, unpriced SKU for a tenant in a UTC day is billed as `sku-limit-exceeded` and fails its health source. LiteLLM requests bill to the key's team only; keys without a team are refused. Events and records sent with a tenant-bound token get IDs of that token's own, so two tokens bound to one tenant never take each other's. A gateway's retry of records v0.3.0 stored counts once when it arrives within an hour of the upgrade.
+- **Ingest.** SKU, dimension, region, project and resource values with markup or control characters are refused, and so are dimensions named like an event's own properties (`value`, `sku`, `region` and the others). `X-VBilling-Client` must be a short plain name, with at most 16 names per tenant-bound token and 64 for the shared token. Per-token rate limits apply, and a records push that would write more than 64 MiB gets 413. A source's 101st new, unpriced SKU for a tenant in a UTC day is billed as `sku-limit-exceeded` and fails its health source. LiteLLM requests bill to the key's team only; keys without a team are refused. Events and records sent with a tenant-bound token get IDs of that token's own, so two tokens bound to one tenant never take each other's. Retries of records stored by v0.3.0 are recognized for 48 hours from their original arrival, including across an upgrade. An invalid record cannot suppress a valid copy later in the same batch.
 - **Clusters with their own nodes.** Labels and taints written inside a cluster never lower its bill: `vbilling.vcluster.com/billable=false` and vCluster's placeholder label are ignored on its own nodes, downtime comes only from the Ready condition, a node's GPU count never drops, and its SKU and capacity type stay as first seen (for existing nodes, the first read after the upgrade), except attributes the node showed empty during its first 10 minutes. This history is kept by cluster and node name, so give a machine that replaces another a new node name. Usage mode reads namespaces inside clusters to honor `vbilling.vcluster.com/exclude=true`: add `namespaces` (`get`, `list`) to the reader role.
 - **Namespace syncing.** With `sync.toHost.namespaces`, what a cluster syncs to other namespaces (pods, volumes, load balancers and their Prometheus series) is metered, paused and suspended. It belongs to the cluster that vCluster's namespace labels (`vcluster.loft.sh/vcluster-name`, `vcluster.loft.sh/vcluster-namespace`) name; in a namespace without them, only to a cluster whose name is unique, and otherwise `synced-namespaces/<cluster>` fails. Counters there bill from the upgrade on.
 - **Offboarding.** The hour without usage counts from when a tenant's last usage arrived, not from the window it covered, so usage that arrives as hourly totals never offboards a tenant between posts.
@@ -518,6 +521,19 @@ v0.3.1 closes the issues a second independent review found in v0.3.0: tenants ca
 - **Counters.** A Prometheus series that appears with history (for example, a ServiceMonitor added for a running engine) is billed from its first sample, unless its start time shows it is new.
 - **Volume health.** The ledger volume, and the archive volume when set, report in source health and fail at 85% full: a full ledger volume stops every commit.
 - **Node-hour events.** They carry `vcpus`, `memory_gib`, `gpu_count` and `public_ip`, so their IDs differ from v0.3.0's. Committed windows are never sent again, so nothing is billed twice.
+
+**Readiness fixes in this source tree (version remains 0.3.1):**
+
+- **Independent collectors.** Automatic aggregates include the persisted metering source, separating two hosts billing the same customer, model and window. Keep the whole data directory, including `source.json` and destination state, together in backups.
+- **Stripe delivery recovery.** Attempts and confirmations are persisted before network calls and cursor acknowledgement. An uncertain outcome older than 23 hours is parked for reconciliation instead of blindly retried. Provider acceptance is separate from inclusion on a finalized invoice. See [Stripe recovery](https://vclusterlabs-experiments.github.io/vbilling/stripe.html#delivery).
+- **Stripe split meters.** New meter names include a digest of the original split keys and values, so `org/model`, `org-model` and case differences remain separate. Existing names are retained when the available ledger history identifies one split identity. Ambiguous names, or names without retained evidence, get separate meters and need price coverage checked before use. Existing prices are not rewritten.
+- **Ingest memory.** The 48-hour index uses 128-bit hashes and integer timestamps. Existing indexes load automatically; compaction rewrites them to the new format. Old binaries cannot read the rewritten index: take a consistent backup before upgrading and do not downgrade in place.
+- **Namespace ownership and node failures.** Cross-namespace objects retain their owner's attribution; mixed Prometheus namespaces require pod and namespace labels. Stale node Leases briefly hold affected windows. Update tenant-reader roles to allow `get,list` on Leases. For spot capacity keep `billing.collectionDelay: 75s`, since a failure just before collection can still look fresh.
+- **Production sizing.** [production-values.yaml](deploy/helm/production-values.yaml) provides an initial configuration with archival, price holds, tenant validation and larger resource allocations. Size it from measured request volume and retention; raw request rows often dominate the ledger.
+
+The v0.3.1 GitHub release was already published before these edits. These changes do not replace its tag, image or chart artifact automatically. The live Metronome sandbox acceptance run (#15), vMetal physical pause and trusted inventory (#16, #18), and shared-ledger HA (#17) remain open.
+
+**Rebuilding an existing release.** After the release tag points to the intended commit and CI has passed that commit, run `gh workflow run release.yml --ref v0.3.1 -f tag=v0.3.1`. The workflow rebuilds `linux/amd64` and `linux/arm64`, updates the version, minor-version and commit image tags (and `latest` when this is the latest release), and replaces the chart on the existing GitHub release. `release-metadata.json` records the source commit and image digest, and `SHA256SUMS` covers the chart and metadata. The published chart pins its default image through chart annotations, so `helm upgrade --reuse-values` picks the rebuilt image even when a node has the old version tag cached. Explicit image digests and custom repositories or tags remain supported. Existing pods need a Helm upgrade to use a rebuilt image.
 
 ## Upgrading from v0.2
 

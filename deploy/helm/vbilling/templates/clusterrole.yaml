@@ -14,11 +14,11 @@ rules:
   - apiGroups: [""]
     resources: ["pods", "persistentvolumeclaims", "services", "nodes", "namespaces"]
     verbs: ["get", "list", "watch"]
-  # Node Leases: when a node's kubelet goes silent, its last renewal dates
-  # the outage (get only, read just for nodes marked Unknown).
+  # Node Leases: check freshness before committing a window, and date an
+  # outage from its last renewal. Listing avoids a GET per healthy node.
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
-    verbs: ["get"]
+    verbs: ["get", "list"]
   # GPUs allocated through Dynamic Resource Allocation.
   - apiGroups: ["resource.k8s.io"]
     resources: ["resourceclaims", "resourceslices"]

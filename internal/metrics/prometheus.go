@@ -515,6 +515,10 @@ type queryVars struct {
 	// synced are the other namespaces a cluster on shared nodes syncs
 	// objects to: Matchers selects them too.
 	synced []string
+	// A namespace holding another cluster's synced pods requires per-pod
+	// attribution before counter samples can become usage.
+	seriesOwner func(map[string]string) (bool, error)
+	foreignPods bool
 }
 
 func varsFor(t Target, window time.Duration) queryVars {

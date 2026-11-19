@@ -140,3 +140,24 @@ Secret that holds the API token (key api-token).
 {{- define "vbilling.apiTokenSecret" -}}
 {{- .Values.api.existingSecret | default (include "vbilling.fullname" .) -}}
 {{- end }}
+
+{{/*
+Published charts carry an immutable image digest in their annotations. Keep
+it outside values so --reuse-values cannot retain an older release's default
+digest. Explicit image.digest overrides win; custom repositories or tags
+use their own image instead of the published default.
+*/}}
+{{- define "vbilling.image" -}}
+{{- $digest := .Values.image.digest | default "" -}}
+{{- $ann := .Chart.Annotations | default dict -}}
+{{- $repo := index $ann "vbilling.vcluster.com/image-repository" | default "" -}}
+{{- $tag := index $ann "vbilling.vcluster.com/image-tag" | default "" -}}
+{{- if and (not $digest) (eq .Values.image.repository $repo) (eq .Values.image.tag $tag) -}}
+{{- $digest = index $ann "vbilling.vcluster.com/image-digest" | default "" -}}
+{{- end -}}
+{{- if $digest -}}
+{{- printf "%s@%s" .Values.image.repository $digest -}}
+{{- else -}}
+{{- printf "%s:%s" .Values.image.repository .Values.image.tag -}}
+{{- end -}}
+{{- end }}

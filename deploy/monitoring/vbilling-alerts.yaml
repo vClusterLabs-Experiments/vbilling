@@ -1,0 +1,50 @@
+# Optional Prometheus Operator rules. Set metadata.namespace and labels to
+# match your Prometheus installation's rule selector before applying.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: vbilling
+  namespace: monitoring
+spec:
+  groups:
+    - name: vbilling
+      rules:
+        - alert: VBillingVolumeNearlyFull
+          expr: vbilling_volume_free_bytes / vbilling_volume_size_bytes < 0.15
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "vBilling volume {{ $labels.volume }} has less than 15% free space"
+            description: "Grow the volume before a full ledger prevents metering. Check archive health and destination lag."
+        - alert: VBillingDeliveryLag
+          expr: vbilling_destination_lag_seconds > 300
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "vBilling delivery to {{ $labels.destination }} is delayed"
+            description: "Inspect /api/v1/status and destination errors; late delivery can miss an invoice's finalization."
+        - alert: VBillingDeadLetters
+          expr: increase(vbilling_events_dead_lettered_total[10m]) > 0
+          labels:
+            severity: critical
+          annotations:
+            summary: "vBilling parked usage for {{ $labels.destination }}"
+            description: "Inspect the dead letters, fix the cause and reconcile any ambiguous Stripe delivery before replay."
+        - alert: VBillingSourceUnhealthy
+          expr: vbilling_sources{status=~"failing|diverged"} > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "vBilling has unhealthy {{ $labels.kind }} sources"
+            description: "Inspect /api/v1/sources for the affected customer, last successful read and recovery hint."
+        - alert: VBillingMissingPrices
+          expr: vbilling_unpriced_series > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "vBilling usage has no price in {{ $labels.destination }}"
+            description: "Inspect /api/v1/pricing and add prices before the invoice is finalized."

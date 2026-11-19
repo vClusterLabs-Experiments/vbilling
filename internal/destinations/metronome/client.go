@@ -87,7 +87,7 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
-	req.Header.Set("User-Agent", "vbilling/0.2")
+	req.Header.Set("User-Agent", "vbilling/0.3.1")
 	if in != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}

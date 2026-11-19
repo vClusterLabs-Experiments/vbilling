@@ -76,6 +76,9 @@ func (a *Adapter) RefreshTenantsOnPriceChange() bool { return a.cfg.StripeAutoSu
 // PrepareSeries creates the meter of each new series, so Finance can attach
 // a price to it before its first event is delivered.
 func (a *Adapter) PrepareSeries(ctx context.Context, series []destinations.PriceSeries) error {
+	if err := a.prepareMeterRoutes(ctx); err != nil {
+		return err
+	}
 	var errs []error
 	for _, s := range series {
 		if s.Catalog || !destinations.BillableOnly(s.Metric) {
@@ -83,7 +86,7 @@ func (a *Adapter) PrepareSeries(ctx context.Context, series []destinations.Price
 		}
 		ev := s.EventFor()
 		name := a.MeterName(&ev)
-		if _, err := a.ensureMeter(ctx, name, meterDisplayName(&ev, name)); err != nil {
+		if _, err := a.ensureMeter(ctx, ev.Metric, name, meterDisplayName(&ev, name)); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -94,6 +97,9 @@ func (a *Adapter) PrepareSeries(ctx context.Context, series []destinations.Price
 // active metered price (tagged with the tenant's plan under
 // STRIPE_AUTO_SUBSCRIBE).
 func (a *Adapter) CheckPrices(ctx context.Context, series []destinations.PriceSeries) ([]destinations.PriceCoverage, error) {
+	if err := a.prepareMeterRoutes(ctx); err != nil {
+		return nil, err
+	}
 	meters, err := a.c.ListMeters(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list meters: %w", err)

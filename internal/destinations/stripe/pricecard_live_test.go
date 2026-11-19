@@ -65,7 +65,7 @@ func TestLivePriceCard(t *testing.T) {
 	for _, p := range got {
 		t.Logf("%s %s %s/unit on %s", p.ID, p.Metadata["vbilling_meter"], priceDecimal(p), p.Recurring.Meter)
 		switch p.Metadata["vbilling_meter"] {
-		case "vcluster_gpu_hours__nvidia_a100_sxm4_40gb":
+		case a.MeterName(&usage.Event{Metric: usage.MetricGPUHours, SKU: "NVIDIA-A100-SXM4-40GB"}):
 			if priceDecimal(p) != "220" {
 				t.Errorf("GPU price %s", priceDecimal(p))
 			}
@@ -73,6 +73,12 @@ func TestLivePriceCard(t *testing.T) {
 			if priceDecimal(p) != "0.00006" {
 				t.Errorf("per-million price %s", priceDecimal(p))
 			}
+		case "vcluster_lb_hours":
+			if priceDecimal(p) != "2.5" {
+				t.Errorf("load balancer price %s", priceDecimal(p))
+			}
+		default:
+			t.Errorf("unexpected meter %s", p.Metadata["vbilling_meter"])
 		}
 	}
 	// A restart applies the card again: nothing new.

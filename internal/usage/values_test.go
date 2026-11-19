@@ -45,7 +45,7 @@ func TestCSVCellEscapesFormulas(t *testing.T) {
 
 func TestReservedDimensions(t *testing.T) {
 	for _, k := range []string{"value", "unit", "sku", "region", "project", "resource_id", "source", "window_start", "window_end",
-		"schema_version", "accuracy", "estimate"} {
+		"schema_version", "accuracy", "estimate", DimMeteringSource} {
 		if !ReservedDimension(k) {
 			t.Errorf("%s must be reserved", k)
 		}

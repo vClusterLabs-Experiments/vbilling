@@ -1,4 +1,4 @@
-FROM --platform=$BUILDPLATFORM golang:1.22-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27.4-alpine AS builder
 # Filled in by BuildKit from --platform (or the host); no defaults, so a plain
 # `docker build` on arm64 produces an arm64 binary.
 ARG TARGETOS

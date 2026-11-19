@@ -281,6 +281,7 @@ func (d *Dispatcher) loop(ctx context.Context, dest destinations.Destination) {
 			backoff = d.sleepBackoff(ctx, backoff)
 			continue
 		}
+		d.checkpointDelivery(dest, events)
 		cursor = last
 		backoff = 0
 		d.update(name, func(s *Status) {
@@ -291,6 +292,16 @@ func (d *Dispatcher) loop(ctx context.Context, dest destinations.Destination) {
 			s.OldestPending = time.Time{}
 		})
 		d.tel.Set("vbilling_destination_cursor", "Last ledger sequence acknowledged by a destination.", labels, float64(cursor))
+	}
+}
+
+// Forget confirmations only after the corresponding outbox cursor or held
+// release is durable. A cleanup failure can safely retain extra receipts.
+func (d *Dispatcher) checkpointDelivery(dest destinations.Destination, events []usage.Event) {
+	if checkpoint, ok := dest.(destinations.DeliveryCheckpointer); ok {
+		if err := checkpoint.CheckpointDelivery(events); err != nil {
+			log.Printf("[pipeline] %s: outbox result is durable but delivery receipt cleanup failed: %v", dest.Name(), err)
+		}
 	}
 }
 

@@ -22,7 +22,7 @@ func TestReviewPriceCoverageRequiresSubscribableCurrency(t *testing.T) {
 	if err := a.PrepareSeries(ctx, []destinations.PriceSeries{ser}); err != nil {
 		t.Fatal(err)
 	}
-	f.addPrice(t, "vcluster_gpu_hours__h100", "price_usd", i64(249), map[string]string{metaPlan: "standard"})
+	f.addPrice(t, meterForSKU(a, "H100"), "price_usd", i64(249), map[string]string{metaPlan: "standard"})
 	coverage := checkStripe(t, a, ser)[ser.Key()]
 	prices, err := a.planPrices(ctx, "standard", "eur")
 	if err != nil {
@@ -60,11 +60,11 @@ func TestPriceCoverageFollowsTenantCurrency(t *testing.T) {
 	if err := a.PrepareSeries(ctx, []destinations.PriceSeries{ser}); err != nil {
 		t.Fatal(err)
 	}
-	f.addPrice(t, "vcluster_gpu_hours__h100", "price_usd", i64(249), map[string]string{metaPlan: "standard"})
+	f.addPrice(t, meterForSKU(a, "H100"), "price_usd", i64(249), map[string]string{metaPlan: "standard"})
 	if c := checkStripe(t, a, ser)[ser.Key()]; c.Status != destinations.PriceMissing {
 		t.Fatalf("EUR tenant covered by a USD price: %s (%s)", c.Status, c.Detail)
 	}
-	f.addPrice(t, "vcluster_gpu_hours__h100", "price_eur", i64(229), map[string]string{metaPlan: "standard"}, func(p *Price) { p.Currency = "eur" })
+	f.addPrice(t, meterForSKU(a, "H100"), "price_eur", i64(229), map[string]string{metaPlan: "standard"}, func(p *Price) { p.Currency = "eur" })
 	if c := checkStripe(t, a, ser)[ser.Key()]; c.Status != destinations.PriceCovered {
 		t.Fatalf("EUR tenant with an EUR price: %s (%s)", c.Status, c.Detail)
 	}

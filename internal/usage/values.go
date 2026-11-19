@@ -83,11 +83,12 @@ func badRune(r rune) bool {
 var reservedDimensions = map[string]bool{
 	"value": true, "unit": true, "sku": true, "region": true, "project": true, "resource_id": true, "source": true,
 	"window_start": true, "window_end": true, "schema_version": true, "accuracy": true, "estimate": true,
+	DimMeteringSource: true, // assigned by the collector, never by an emitter
 }
 
 // ReservedDimension reports whether k names a property of the event itself
 // (value, unit, sku, region, project, resource_id, source, window_start,
-// window_end, schema_version, accuracy, estimate), which no dimension may
+// window_end, schema_version, accuracy, estimate, metering_source), which no emitter dimension may
 // use.
 func ReservedDimension(k string) bool { return reservedDimensions[k] }
 

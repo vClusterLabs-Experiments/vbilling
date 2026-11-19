@@ -1,5 +1,5 @@
 {{- if gt (int .Values.replicaCount) 1 -}}
-{{- fail (printf "replicaCount is %v: vBilling runs as one instance. Each replica would keep its own ledger, so gateway records would split between replicas and billing platforms would keep only one share of each window, and a second replica cannot take over either, because its volume holds none of the first one's ledger. Set replicaCount to 1: a restart is safe, the ledger and backfill resume where vBilling stopped." .Values.replicaCount) -}}
+{{- fail (printf "replicaCount is %v: this chart supports one active instance with its durable ledger. Per-replica volumes cannot provide shared-ledger failover: a replacement needs the previous writer's accepted records, source identity and delivery state. Set replicaCount to 1; shared-ledger HA is tracked in issue #17." .Values.replicaCount) -}}
 {{- end -}}
 {{- $adapters := include "vbilling.adapters" . | splitList "," -}}
 {{- $files := or .Values.records.formats .Values.records.pull (and .Values.metering.customMetrics (not (kindIs "string" .Values.metering.customMetrics))) (and (has "stripe" $adapters) .Values.stripe.priceCard) -}}
@@ -34,7 +34,7 @@ spec:
       {{- end }}
       containers:
         - name: vbilling
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: {{ include "vbilling.image" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
             allowPrivilegeEscalation: false

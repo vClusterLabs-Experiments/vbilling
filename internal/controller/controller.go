@@ -62,15 +62,16 @@ type Controller struct {
 	tel     *telemetry.Registry
 	now     func() time.Time
 
-	mu         sync.Mutex
-	clusters   []discovery.TenantCluster
-	lastSeen   map[string]time.Time       // tenant -> last time it had a tenant cluster or new usage
-	offboarded map[string]map[string]bool // tenant -> destinations done offboarding it
-	off        offboarding                // where each departed tenant's usage ends (offboard.go)
-	held       heldUsage                  // optional: usage held from destinations until priced
-	safeguard  *safeguard.Checker         // optional: flags windows that bill more than exists
-	discovered bool
-	lastWindow time.Time
+	mu              sync.Mutex
+	clusters        []discovery.TenantCluster
+	lastSeen        map[string]time.Time       // tenant -> last time it had a tenant cluster or new usage
+	offboarded      map[string]map[string]bool // tenant -> destinations done offboarding it
+	off             offboarding                // where each departed tenant's usage ends (offboard.go)
+	held            heldUsage                  // optional: usage held from destinations until priced
+	safeguard       *safeguard.Checker         // optional: flags windows that bill more than exists
+	discovered      bool
+	lastWindow      time.Time
+	collectionRetry time.Time // heartbeat uncertainty is retried before the next boundary
 	// lastUnrequested is the last logged count of pods without requests.
 	lastUnrequested int
 
@@ -395,6 +396,12 @@ func (c *Controller) latestDue() time.Time {
 func (c *Controller) untilNextWindow() time.Duration {
 	now := c.now()
 	next := c.latestDue().Add(c.cfg.CollectionInterval).Add(c.settle())
+	c.mu.Lock()
+	retry := c.collectionRetry
+	c.mu.Unlock()
+	if !retry.IsZero() && retry.Before(next) {
+		return max(time.Second, retry.Sub(now))
+	}
 	return next.Sub(now)
 }
 
@@ -658,10 +665,23 @@ func (c *Controller) CollectDue(ctx context.Context) {
 	started := time.Now()
 	byWindow, st, failed, err := c.collectAttributed(ctx, targets, windows, c.coll.Collect)
 	if err != nil {
+		var pending *metrics.HeartbeatPending
+		if errors.As(err, &pending) {
+			c.mu.Lock()
+			c.collectionRetry = c.now().Add(5 * time.Second)
+			c.mu.Unlock()
+			log.Printf("[controller] usage window held: %v", pending)
+			c.tel.Set("vbilling_collection_held", "1 while a window waits for stale node heartbeat evidence.", nil, 1)
+			return
+		}
 		log.Printf("[controller] metering failed for %d window(s), will retry: %v", len(windows), err)
 		c.tel.Add("vbilling_collection_failures_total", "Failed metering runs (windows are retried).", nil, 1)
 		return
 	}
+	c.mu.Lock()
+	c.collectionRetry = time.Time{}
+	c.mu.Unlock()
+	c.tel.Set("vbilling_collection_held", "1 while a window waits for stale node heartbeat evidence.", nil, 0)
 	// The windows a cluster's own API missed are recorded before any is
 	// committed: a crash in between must not leave a window committed
 	// without its cluster's API read and nothing to fill it.

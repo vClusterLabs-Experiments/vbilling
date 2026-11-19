@@ -20,6 +20,7 @@ import (
 	"github.com/vclusterlabs-experiments/vbilling/internal/config"
 	"github.com/vclusterlabs-experiments/vbilling/internal/destinations"
 	"github.com/vclusterlabs-experiments/vbilling/internal/kv"
+	"github.com/vclusterlabs-experiments/vbilling/internal/spool"
 	"github.com/vclusterlabs-experiments/vbilling/internal/usage"
 )
 
@@ -81,6 +82,13 @@ type Adapter struct {
 	card *PriceCard // STRIPE_PRICE_CARD
 
 	workers int
+
+	ledger      *spool.Spool
+	routeInitMu sync.Mutex
+	routesReady bool
+	routeMu     sync.RWMutex
+	routes      map[string]string // original split identity -> an unambiguous legacy meter
+	receipts    receiptState
 }
 
 // New builds the adapter around a client (exported for tests).
@@ -118,9 +126,14 @@ func (a *Adapter) loadMetersLocked(ctx context.Context) error {
 }
 
 // ensureMeter returns the meter for an event name, creating or reactivating it.
-func (a *Adapter) ensureMeter(ctx context.Context, eventName, displayName string) (Meter, error) {
+func (a *Adapter) ensureMeter(ctx context.Context, metric, eventName, displayName string) (Meter, error) {
 	a.meterMu.Lock()
 	defer a.meterMu.Unlock()
+	// A long metric code may be shortened in event_name to leave room for
+	// the identity digest. Retain the exact metric for reconciliation.
+	if err := a.state.Set("meter-metric/"+eventName, metric); err != nil {
+		return Meter{}, fmt.Errorf("persist meter metric: %w", err)
+	}
 	if err := a.loadMetersLocked(ctx); err != nil {
 		return Meter{}, err
 	}
@@ -147,17 +160,23 @@ func (a *Adapter) ensureMeter(ctx context.Context, eventName, displayName string
 
 // MeterName maps an event to its Stripe meter event_name.
 func (a *Adapter) MeterName(e *usage.Event) string {
-	name := e.Metric
-	for _, key := range a.cfg.StripeSplitMetersBy {
-		if v := fieldValue(e, key); v != "" {
-			name += "__" + slug(v)
-		}
+	identity, split := a.meterIdentity(e)
+	if !split {
+		return e.Metric
 	}
-	if len(name) > 100 {
-		sum := sha256.Sum256([]byte(name))
-		name = name[:91] + "_" + hex.EncodeToString(sum[:4])
+	a.routeMu.RLock()
+	legacy := a.routes[identity]
+	a.routeMu.RUnlock()
+	if legacy != "" {
+		return legacy
 	}
-	return name
+	name := a.legacyMeterName(e)
+	// The digest covers the original values and their keys, including empty
+	// ones. Slugs are only display text: org/model and org-model stay distinct.
+	if len(name) > 66 {
+		name = name[:66]
+	}
+	return name + "__" + identity
 }
 
 func meterDisplayName(e *usage.Event, eventName string) string {
@@ -203,12 +222,24 @@ func slug(s string) string {
 // Bootstrap creates (or reactivates) one meter per billable metric. Split
 // meters (per SKU, per region, ...) are created on first use.
 func (a *Adapter) Bootstrap(ctx context.Context, metrics []usage.MetricDef) error {
+	// Establish the upgrade boundary before any network-dependent setup.
+	// A new event held for pricing or a provider outage is not pre-upgrade
+	// usage merely because its first delivery happens much later.
+	a.receipts.mu.Lock()
+	err := a.loadReceiptsLocked()
+	a.receipts.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	if err := a.prepareMeterRoutes(ctx); err != nil {
+		return err
+	}
 	var errs []error
 	for _, def := range metrics {
 		if !def.Billable {
 			continue
 		}
-		if _, err := a.ensureMeter(ctx, def.Code, def.Name); err != nil {
+		if _, err := a.ensureMeter(ctx, def.Code, def.Code, def.Name); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -557,10 +588,27 @@ type job struct {
 // (customer, meter) because Stripe allows one concurrent meter-event call
 // per customer per meter.
 func (a *Adapter) SendEvents(ctx context.Context, events []usage.Event) error {
+	if err := a.prepareMeterRoutes(ctx); err != nil {
+		return err
+	}
 	rejected := map[string]string{}
 	var jobs []job
+	var confirmed []string
 	for _, ev := range events {
-		if a.sent.Has(ev.ID) || !a.Accepts(ev.Metric) {
+		if !a.Accepts(ev.Metric) {
+			continue
+		}
+		if a.sent.Has(ev.ID) {
+			confirmed = append(confirmed, ev.ID)
+			continue
+		}
+		receipt, exists, err := a.DeliveryReceipt(ev.ID)
+		if err != nil {
+			return err
+		}
+		if exists && receipt.Status == "delivered" {
+			// Acknowledgement can lag longer than Stripe's event-age limit.
+			// A durable acceptance remains success even then.
 			continue
 		}
 		if a.now().Sub(ev.WindowStart) > maxEventAge {
@@ -577,7 +625,7 @@ func (a *Adapter) SendEvents(ctx context.Context, events []usage.Event) error {
 			return err
 		}
 		name := a.MeterName(&ev)
-		m, err := a.ensureMeter(ctx, name, meterDisplayName(&ev, name))
+		m, err := a.ensureMeter(ctx, ev.Metric, name, meterDisplayName(&ev, name))
 		if err != nil {
 			if destinations.IsPermanent(err) {
 				rejected[ev.ID] = err.Error()
@@ -588,8 +636,18 @@ func (a *Adapter) SendEvents(ctx context.Context, events []usage.Event) error {
 		jobs = append(jobs, job{ev: ev, meter: m, cus: cus})
 	}
 
+	skip, blocked, err := a.prepareAttempts(jobs)
+	if err != nil {
+		return err
+	}
+	for id, reason := range blocked {
+		rejected[id] = reason
+	}
 	parts := make([][]job, a.workers)
 	for _, j := range jobs {
+		if skip[j.ev.ID] || blocked[j.ev.ID] != "" {
+			continue
+		}
 		h := fnv.New32a()
 		h.Write([]byte(j.cus + "|" + j.meter.EventName))
 		parts[h.Sum32()%uint32(a.workers)] = append(parts[h.Sum32()%uint32(a.workers)], j)
@@ -611,6 +669,9 @@ func (a *Adapter) SendEvents(ctx context.Context, events []usage.Event) error {
 				switch {
 				case err == nil || isDuplicate(err):
 					a.sent.Add(j.ev.ID)
+					mu.Lock()
+					confirmed = append(confirmed, j.ev.ID)
+					mu.Unlock()
 				case destinations.IsPermanent(err):
 					mu.Lock()
 					rejected[j.ev.ID] = err.Error()
@@ -627,6 +688,9 @@ func (a *Adapter) SendEvents(ctx context.Context, events []usage.Event) error {
 		}(part)
 	}
 	wg.Wait()
+	if err := a.confirmDelivery(confirmed); err != nil {
+		return fmt.Errorf("persist Stripe delivery confirmations: %w", err)
+	}
 	if retryErr != nil {
 		return retryErr
 	}
@@ -683,8 +747,9 @@ func (a *Adapter) RecordedTotals(ctx context.Context, q destinations.TotalsQuery
 	}
 	byMetric := map[string][]Meter{}
 	for name, m := range a.meters {
+		mapped, known := a.state.Get("meter-metric/" + name)
 		for _, metric := range q.Metrics {
-			if name == metric || strings.HasPrefix(name, metric+"__") {
+			if (known && mapped == metric) || (!known && (name == metric || strings.HasPrefix(name, metric+"__"))) {
 				byMetric[metric] = append(byMetric[metric], m)
 			}
 		}

@@ -10,6 +10,10 @@ replicaCount: 1
 image:
   repository: ghcr.io/vclusterlabs-experiments/vbilling
   tag: v0.3.1
+  # Explicit immutable image override. Published charts pin their default
+  # repository and tag through Chart.yaml annotations, including upgrades
+  # with --reuse-values. Custom repositories and tags remain usable.
+  digest: ""
   pullPolicy: IfNotPresent
 
 # Destinations usage fans out to. Built-in: stripe, metronome, lago, webhook, noop.
@@ -49,8 +53,8 @@ billing:
   # for (GET /api/v1/pricing). warn: report only. hold: also keep that usage
   # out of the billing platform until the price exists, then ship it in
   # order. off: no checks.
-  # hold releases usage still unpriced after 28 days, so the billing
-  # platform accepts it and can re-rate it once priced.
+  # hold releases usage still unpriced after 23 hours. Price new SKUs
+  # before usage starts: late usage can miss a finalized invoice.
   priceCheck:
     mode: warn # warn | hold | off
 

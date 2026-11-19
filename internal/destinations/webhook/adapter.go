@@ -147,7 +147,7 @@ func (a *Adapter) post(ctx context.Context, batch []CloudEvent) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/cloudevents-batch+json")
-	req.Header.Set("User-Agent", "vbilling/0.2")
+	req.Header.Set("User-Agent", "vbilling/0.3.1")
 	for k, v := range a.headers {
 		req.Header.Set(k, v)
 	}

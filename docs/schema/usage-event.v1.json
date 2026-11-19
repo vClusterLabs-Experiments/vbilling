@@ -27,6 +27,7 @@
       "additionalProperties": {"type": "string"},
       "description": "Identity-bearing attributes for grouping and pricing.",
       "properties": {
+        "metering_source": {"type": "string", "description": "Internally assigned persistent identity of the collector ledger; incoming emitter dimensions cannot set it. Separates aggregates from independent installations. Preserve source.json with the ledger across restarts and restores."},
         "tenant_cluster": {"type": "string"},
         "gpu_type": {"type": "string"},
         "gpu_profile": {"type": "string", "examples": ["full", "mig-1g.10gb", "timeslice-4"]},

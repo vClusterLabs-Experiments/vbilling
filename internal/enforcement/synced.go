@@ -62,9 +62,24 @@ func (e *Enforcer) reflectSynced(ctx context.Context, cl discovery.TenantCluster
 		}
 	}
 	blocked := e.opts.Mode == "enforce" && ts.State.blocks()
+	var namespaces []string
+	for ns := range targets {
+		namespaces = append(namespaces, ns)
+	}
+	host, err := discovery.ReadHostNamespaces(ctx, e.kube, namespaces)
+	if err != nil {
+		return err
+	}
+	if host.Err() != nil {
+		return host.Err()
+	}
+	planes := map[string]bool{}
+	for _, ns := range host.ControlPlanes() {
+		planes[ns] = true
+	}
 	var errs []error
 	for ns := range targets {
-		if ns == cl.Namespace || e.opts.Neighbors != nil && len(e.opts.Neighbors(ns)) > 0 {
+		if ns == cl.Namespace || planes[ns] || e.opts.Neighbors != nil && len(e.opts.Neighbors(ns)) > 0 {
 			continue
 		}
 		labels := map[string]any{LabelState: string(ts.State), LabelSuspended: nil} // merge patch: nil removes

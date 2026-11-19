@@ -111,6 +111,11 @@ type syncedView struct {
 	// objects in other namespaces.
 	err error
 	of  map[string]*elsewhere // by cluster external ID
+	// In a control-plane namespace containing another cluster's pods, a
+	// namespace selector alone does not establish who owns a series.
+	contaminated  map[string]bool
+	podOwners     map[string]string
+	defaultOwners map[string]string
 }
 
 // remembered is a namespace as vBilling last read it.
@@ -137,7 +142,7 @@ func (c *Collector) hostMemoryFor() time.Duration {
 // left there is never another's).
 func (c *Collector) readSynced(ctx context.Context, targets []Target) (*syncedView, error) {
 	now := c.opts.Now().UTC()
-	v := &syncedView{at: now, of: map[string]*elsewhere{}}
+	v := &syncedView{at: now, of: map[string]*elsewhere{}, contaminated: map[string]bool{}, podOwners: map[string]string{}, defaultOwners: map[string]string{}}
 	objs, denied, err := c.listSynced(ctx)
 	if err != nil {
 		return nil, err
@@ -155,6 +160,11 @@ func (c *Collector) readSynced(ctx context.Context, targets []Target) (*syncedVi
 		}
 		named[t.Cluster.Name] = append(named[t.Cluster.Name], t.Cluster)
 		current[t.Cluster.Namespace] = true
+		if previous, ok := v.defaultOwners[t.Cluster.Namespace]; ok && previous != t.Cluster.ExternalID() {
+			v.defaultOwners[t.Cluster.Namespace] = ""
+		} else if !ok {
+			v.defaultOwners[t.Cluster.Namespace] = t.Cluster.ExternalID()
+		}
 		for _, ns := range t.Cluster.Namesakes {
 			current[ns] = true
 		}
@@ -163,8 +173,10 @@ func (c *Collector) readSynced(ctx context.Context, targets []Target) (*syncedVi
 	// name outside the namespace every cluster runs in.
 	want := map[string]bool{}
 	note := func(name, ns string) {
-		if len(named[name]) > 0 && !current[ns] {
-			want[ns] = true
+		for _, cl := range named[name] {
+			if cl.Namespace != ns {
+				want[ns] = true
+			}
 		}
 	}
 	for name, l := range objs.pods {
@@ -194,6 +206,62 @@ func (c *Collector) readSynced(ctx context.Context, targets []Target) (*syncedVi
 		return c.deniedSynced(v, fmt.Errorf("the namespaces clusters synced objects to cannot be read, so those objects are not billed: %w", host.Err())), nil
 	}
 	c.reportSynced(nil)
+	notePod := func(p *corev1.Pod) {
+		if p.Labels[LabelManagedBy] == "" {
+			return
+		}
+		owner := ""
+		for _, cl := range named[p.Labels[LabelManagedBy]] {
+			if own, _ := host.WhoseObject(cl, p.Namespace); own == discovery.Owned {
+				owner = cl.ExternalID()
+				break
+			}
+		}
+		key := p.Namespace + "\x00" + p.Name
+		if previous, known := v.podOwners[key]; known && previous != owner {
+			owner = "" // the name was reused by another owner: do not guess
+		}
+		v.podOwners[key] = owner
+		if normal, exists := v.defaultOwners[p.Namespace]; exists && owner != normal {
+			v.contaminated[p.Namespace] = true
+		}
+	}
+	for _, pods := range objs.pods {
+		for i := range pods {
+			notePod(&pods[i])
+		}
+	}
+	for _, d := range gone {
+		notePod(d.obj)
+	}
+	// Volumes or Services can also expand a cluster's namespace selector.
+	// Treat that layout as mixed even before it has any foreign pod.
+	markForeign := func(name, ns string) {
+		normal, exists := v.defaultOwners[ns]
+		if !exists {
+			return
+		}
+		owner := ""
+		for _, cl := range named[name] {
+			if own, _ := host.WhoseObject(cl, ns); own == discovery.Owned {
+				owner = cl.ExternalID()
+				break
+			}
+		}
+		if owner != normal {
+			v.contaminated[ns] = true
+		}
+	}
+	for name, pvcs := range objs.pvcs {
+		for _, pvc := range pvcs {
+			markForeign(name, pvc.Namespace)
+		}
+	}
+	for name, services := range objs.services {
+		for _, service := range services {
+			markForeign(name, service.Namespace)
+		}
+	}
 
 	for _, t := range targets {
 		cl := t.Cluster
@@ -209,7 +277,7 @@ func (c *Collector) readSynced(ctx context.Context, targets []Target) (*syncedVi
 			if ns == cl.Namespace {
 				return false // its own namespace: metered there
 			}
-			own, why := host.Whose(cl, ns)
+			own, why := host.WhoseObject(cl, ns)
 			switch {
 			case own == discovery.Owned:
 				in[ns] = true
@@ -325,7 +393,7 @@ func (c *Collector) syncedPodsOf(ctx context.Context, cl discovery.TenantCluster
 	var out []*corev1.Pod
 	for _, e := range entries {
 		if p := e.pod; p.Labels[LabelManagedBy] == cl.Name {
-			if own, _ := host.Whose(cl, p.Namespace); own == discovery.Owned {
+			if own, _ := host.WhoseObject(cl, p.Namespace); own == discovery.Owned {
 				out = append(out, p)
 			}
 		}

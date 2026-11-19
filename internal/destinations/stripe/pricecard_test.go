@@ -130,7 +130,7 @@ plans:
 	}
 	var gpu Price
 	for _, p := range f.prices {
-		if p.Metadata["vbilling_meter"] == "vcluster_gpu_hours__nvidia_a100_sxm4_40gb" {
+		if p.Metadata["vbilling_meter"] == meterForSKU(a, "NVIDIA-A100-SXM4-40GB") {
 			gpu = p
 		}
 	}

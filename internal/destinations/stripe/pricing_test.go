@@ -16,6 +16,10 @@ import (
 func i64(v int64) *int64   { return &v }
 func str(v string) *string { return &v }
 
+func meterForSKU(a *Adapter, sku string) string {
+	return a.MeterName(&usage.Event{Metric: usage.MetricGPUHours, SKU: sku})
+}
+
 // addPrice puts a metered price on the meter with this event name.
 func (f *fakeStripe) addPrice(t *testing.T, eventName, id string, amount *int64, meta map[string]string, mutate ...func(*Price)) {
 	t.Helper()
@@ -67,14 +71,14 @@ func TestStripePriceCheckPerSKUMeter(t *testing.T) {
 	if err := a.PrepareSeries(ctx, []destinations.PriceSeries{h100, t4}); err != nil {
 		t.Fatal(err)
 	}
-	f.addPrice(t, "vcluster_gpu_hours__nvidia_h100", "price_h100", i64(249), nil)
-	f.addPrice(t, "vcluster_gpu_hours__nvidia_t4", "price_t4", nil, nil, func(p *Price) { p.UnitAmountDecimal = str("0.000") })
+	f.addPrice(t, meterForSKU(a, "NVIDIA-H100"), "price_h100", i64(249), nil)
+	f.addPrice(t, meterForSKU(a, "NVIDIA-T4"), "price_t4", nil, nil, func(p *Price) { p.UnitAmountDecimal = str("0.000") })
 
 	got := checkStripe(t, a, h100, b200, t4)
 	if c := got[h100.Key()]; c.Status != destinations.PriceCovered || !strings.Contains(c.Detail, "price_h100") || !strings.Contains(c.Detail, "STRIPE_AUTO_SUBSCRIBE is off") {
 		t.Errorf("H100: %+v", c)
 	}
-	if c := got[b200.Key()]; c.Status != destinations.PriceMissing || !strings.Contains(c.Detail, `no Stripe meter "vcluster_gpu_hours__nvidia_b200"`) {
+	if c := got[b200.Key()]; c.Status != destinations.PriceMissing || !strings.Contains(c.Detail, `no Stripe meter "`+meterForSKU(a, "NVIDIA-B200")+`"`) {
 		t.Errorf("B200 before its meter exists: %+v", c)
 	}
 	if c := got[t4.Key()]; c.Status != destinations.PriceZero {
@@ -87,7 +91,7 @@ func TestStripePriceCheckPerSKUMeter(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := checkStripe(t, a, b200)[b200.Key()]
-	if c.Status != destinations.PriceMissing || !strings.Contains(c.Hint, `create a metered price on meter "vcluster_gpu_hours__nvidia_b200"`) {
+	if c.Status != destinations.PriceMissing || !strings.Contains(c.Hint, `create a metered price on meter "`+meterForSKU(a, "NVIDIA-B200")+`"`) {
 		t.Errorf("B200 with a meter and no price: %+v", c)
 	}
 	for _, p := range f.prices {
@@ -95,7 +99,7 @@ func TestStripePriceCheckPerSKUMeter(t *testing.T) {
 			t.Fatal("vBilling created a price")
 		}
 	}
-	f.addPrice(t, "vcluster_gpu_hours__nvidia_b200", "price_b200", nil, nil, func(p *Price) { p.UnitAmountDecimal = str("410.5") })
+	f.addPrice(t, meterForSKU(a, "NVIDIA-B200"), "price_b200", nil, nil, func(p *Price) { p.UnitAmountDecimal = str("410.5") })
 	if c := checkStripe(t, a, b200)[b200.Key()]; c.Status != destinations.PriceCovered {
 		t.Errorf("B200 after its price was added: %+v", c)
 	}
@@ -108,11 +112,11 @@ func TestStripePriceCheckTiersInactiveAndCatalog(t *testing.T) {
 	a.Bootstrap(ctx, usage.Billable())
 	free, paid := gpuSeries(a, "FREE"), gpuSeries(a, "PAID")
 	a.PrepareSeries(ctx, []destinations.PriceSeries{free, paid})
-	f.addPrice(t, "vcluster_gpu_hours__free", "price_free", nil, nil, func(p *Price) {
+	f.addPrice(t, meterForSKU(a, "FREE"), "price_free", nil, nil, func(p *Price) {
 		p.BillingScheme = "tiered"
 		p.Tiers = []PriceTier{{UnitAmount: i64(0)}, {UnitAmountDecimal: str("0"), FlatAmount: i64(0)}}
 	})
-	f.addPrice(t, "vcluster_gpu_hours__paid", "price_paid", nil, nil, func(p *Price) {
+	f.addPrice(t, meterForSKU(a, "PAID"), "price_paid", nil, nil, func(p *Price) {
 		p.BillingScheme = "tiered"
 		p.Tiers = []PriceTier{{UnitAmount: i64(0)}, {FlatAmount: i64(5000)}}
 	})
@@ -137,7 +141,7 @@ func TestStripePriceCheckTiersInactiveAndCatalog(t *testing.T) {
 
 	f.mu.Lock()
 	for _, m := range f.meters {
-		if m.EventName == "vcluster_gpu_hours__paid" {
+		if m.EventName == meterForSKU(a, "PAID") {
 			m.Status = "inactive"
 		}
 	}
@@ -157,12 +161,12 @@ func TestStripePriceCheckPlanTags(t *testing.T) {
 		t.Fatalf("plan %q", h100.Plan)
 	}
 	a.PrepareSeries(ctx, []destinations.PriceSeries{h100})
-	f.addPrice(t, "vcluster_gpu_hours__h100", "price_enterprise", i64(199), map[string]string{metaPlan: "enterprise"})
+	f.addPrice(t, meterForSKU(a, "H100"), "price_enterprise", i64(199), map[string]string{metaPlan: "enterprise"})
 	c := checkStripe(t, a, h100)[h100.Key()]
 	if c.Status != destinations.PriceMissing || !strings.Contains(c.Hint, "vbilling_plan=standard") {
 		t.Errorf("price for another plan only: %+v", c)
 	}
-	f.addPrice(t, "vcluster_gpu_hours__h100", "price_standard", i64(249), map[string]string{metaPlan: "standard"})
+	f.addPrice(t, meterForSKU(a, "H100"), "price_standard", i64(249), map[string]string{metaPlan: "standard"})
 	if c := checkStripe(t, a, h100)[h100.Key()]; c.Status != destinations.PriceCovered {
 		t.Errorf("tagged price: %+v", c)
 	}

@@ -144,6 +144,19 @@ func key(ev *usage.Event) string {
 }
 
 func addTo(groups map[string]*group, order *[]string, ev *usage.Event) {
+	// Records accepted by an older binary may carry a client-chosen source
+	// dimension. It cannot partition aggregates that finish stamps with the
+	// collector's own source identity, or distinct groups would share an ID.
+	if _, claimed := ev.Dimensions[usage.DimMeteringSource]; claimed {
+		e := *ev
+		e.Dimensions = make(map[string]string, len(ev.Dimensions))
+		for k, v := range ev.Dimensions {
+			if k != usage.DimMeteringSource {
+				e.Dimensions[k] = v
+			}
+		}
+		ev = &e
+	}
 	k := key(ev)
 	g, ok := groups[k]
 	if !ok {
@@ -383,6 +396,16 @@ func (a *Aggregator) finish(groups map[string]*group, order []string, now time.T
 		g := groups[k]
 		ev := g.ev
 		ev.RecordedAt = now
+		if a.opts.MeteringSource != "" {
+			// Apply at aggregation, including records accepted before an
+			// upgrade. Request IDs and push/pull deduplication stay unchanged.
+			dims := make(map[string]string, len(ev.Dimensions)+1)
+			for k, v := range ev.Dimensions {
+				dims[k] = v
+			}
+			dims[usage.DimMeteringSource] = a.opts.MeteringSource
+			ev.Dimensions = dims
+		}
 		ev.Properties = map[string]any{"records": g.count}
 		if lateBy != nil {
 			ev.Source = SourceLate

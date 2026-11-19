@@ -43,6 +43,32 @@ type EventFilter interface {
 	Accepts(metric string) bool
 }
 
+// DeliveryCheckpointer forgets confirmed receipts only after the outbox's
+// cursor or dead-letter removal is durable.
+type DeliveryCheckpointer interface {
+	CheckpointDelivery(events []usage.Event) error
+}
+
+// ReplayValidator can refuse a rewind that a provider can no longer dedupe.
+type ReplayValidator interface {
+	ValidateReplay(ctx context.Context, from, to uint64) error
+}
+
+// DeliveryReceipt records an attempt whose outcome matters across restarts.
+type DeliveryReceipt struct {
+	Status       string    `json:"status"`
+	FirstAttempt time.Time `json:"first_attempt"`
+	UpdatedAt    time.Time `json:"updated_at"`
+	Reason       string    `json:"reason,omitempty"`
+}
+
+// DeliveryController exposes explicitly reviewed recovery of an ambiguous
+// provider delivery. It never infers that accepted usage was invoiced.
+type DeliveryController interface {
+	DeliveryReceipt(id string) (DeliveryReceipt, bool, error)
+	ResolveDelivery(id, outcome, reason string) error
+}
+
 // Reconciler is implemented by destinations that can report what they
 // recorded, so vBilling can compare it with its own ledger.
 type Reconciler interface {

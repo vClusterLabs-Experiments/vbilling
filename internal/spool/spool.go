@@ -139,7 +139,7 @@ type Spool struct {
 	anchor     string
 	watermarks map[string]time.Time
 	cursors    map[string]uint64
-	recentIDs  map[string]time.Time
+	recentIDs  map[[16]byte]int64         // SHA-256 prefixes -> arrival Unix seconds
 	deadIDs    map[string]map[string]bool // destination -> dead-lettered event IDs, loaded on first use
 	changed    chan struct{}
 	closed     bool
@@ -162,7 +162,7 @@ func Open(dir string, opts Options) (*Spool, error) {
 		opts:       opts,
 		watermarks: map[string]time.Time{},
 		cursors:    map[string]uint64{},
-		recentIDs:  map[string]time.Time{},
+		recentIDs:  map[[16]byte]int64{},
 		changed:    make(chan struct{}),
 	}
 	if err := s.recover(); err != nil {
@@ -440,7 +440,7 @@ func (s *Spool) AppendIngest(source string, events []usage.Event) (accepted, dup
 	seen := map[string]bool{}
 	var keep []usage.Event
 	for _, ev := range events {
-		if _, dup := s.recentIDs[ev.ID]; dup || seen[ev.ID] {
+		if _, dup := s.recentIDs[ingestIDHash(ev.ID)]; dup || seen[ev.ID] {
 			duplicates = append(duplicates, ev.ID)
 			continue
 		}
@@ -960,8 +960,14 @@ func (s *Spool) loadCursors() error {
 func (s *Spool) IngestedRecently(id string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, ok := s.recentIDs[id]
+	_, ok := s.recentIDs[ingestIDHash(id)]
 	return ok
+}
+
+func ingestIDHash(id string) (key [16]byte) {
+	sum := sha256.Sum256([]byte(id))
+	copy(key[:], sum[:16])
+	return key
 }
 
 func (s *Spool) recordDedupe(events []usage.Event, now time.Time) error {
@@ -972,8 +978,9 @@ func (s *Spool) recordDedupe(events []usage.Event, now time.Time) error {
 	defer f.Close()
 	var buf bytes.Buffer
 	for _, ev := range events {
-		s.recentIDs[ev.ID] = now
-		fmt.Fprintf(&buf, "%d\t%s\n", now.Unix(), ev.ID)
+		key := ingestIDHash(ev.ID)
+		s.recentIDs[key] = now.Unix()
+		fmt.Fprintf(&buf, "v2\t%d\t%x\n", now.Unix(), key)
 	}
 	if _, err := f.Write(buf.Bytes()); err != nil {
 		return err
@@ -986,16 +993,22 @@ func (s *Spool) recordDedupe(events []usage.Event, now time.Time) error {
 
 func (s *Spool) loadDedupe() error {
 	path := filepath.Join(s.dir, "ingest-ids.log")
-	b, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	cutoff := s.opts.Now().Add(-s.opts.DedupeWindow)
-	var keep bytes.Buffer
-	for _, line := range strings.Split(string(b), "\n") {
+	defer f.Close()
+	cutoff := s.opts.Now().Add(-s.opts.DedupeWindow).Unix()
+	scan := bufio.NewScanner(f)
+	for scan.Scan() {
+		line := scan.Text()
+		compact := strings.HasPrefix(line, "v2\t")
+		if compact {
+			line = strings.TrimPrefix(line, "v2\t")
+		}
 		ts, id, ok := strings.Cut(line, "\t")
 		if !ok {
 			continue
@@ -1004,15 +1017,25 @@ func (s *Spool) loadDedupe() error {
 		if err != nil {
 			continue
 		}
-		at := time.Unix(sec, 0)
-		if at.Before(cutoff) {
+		if sec < cutoff {
 			continue
 		}
-		s.recentIDs[id] = at
-		keep.WriteString(line)
-		keep.WriteByte('\n')
+		key := ingestIDHash(id) // legacy files contain the original ID
+		if compact {
+			b, err := hex.DecodeString(id)
+			if err != nil || len(b) != len(key) {
+				continue
+			}
+			copy(key[:], b)
+		}
+		if previous, ok := s.recentIDs[key]; !ok || sec > previous {
+			s.recentIDs[key] = sec
+		}
 	}
-	return writeFileAtomic(path, keep.Bytes(), s.opts.NoSync)
+	if err := scan.Err(); err != nil {
+		return fmt.Errorf("read ingest IDs: %w", err)
+	}
+	return s.writeDedupeLocked()
 }
 
 // --- retention ---
@@ -1035,10 +1058,10 @@ func (s *Spool) Compact(consumers []string) (removed int, err error) {
 }
 
 func (s *Spool) compactDedupeLocked() error {
-	cutoff := s.opts.Now().Add(-s.opts.DedupeWindow)
+	cutoff := s.opts.Now().Add(-s.opts.DedupeWindow).Unix()
 	pruned := false
 	for id, at := range s.recentIDs {
-		if at.Before(cutoff) {
+		if at < cutoff {
 			delete(s.recentIDs, id)
 			pruned = true
 		}
@@ -1046,11 +1069,42 @@ func (s *Spool) compactDedupeLocked() error {
 	if !pruned {
 		return nil
 	}
-	var buf bytes.Buffer
-	for id, at := range s.recentIDs {
-		fmt.Fprintf(&buf, "%d\t%s\n", at.Unix(), id)
+	return s.writeDedupeLocked()
+}
+
+// writeDedupeLocked streams the compact index through an atomic replacement.
+// Loading millions of IDs never needs a second in-memory copy of the file.
+func (s *Spool) writeDedupeLocked() error {
+	path := filepath.Join(s.dir, "ingest-ids.log")
+	f, err := os.OpenFile(path+".tmp", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o640)
+	if err != nil {
+		return err
 	}
-	return writeFileAtomic(filepath.Join(s.dir, "ingest-ids.log"), buf.Bytes(), s.opts.NoSync)
+	defer f.Close()
+	w := bufio.NewWriter(f)
+	for id, at := range s.recentIDs {
+		if _, err := fmt.Fprintf(w, "v2\t%d\t%x\n", at, id); err != nil {
+			return err
+		}
+	}
+	if err := w.Flush(); err != nil {
+		return err
+	}
+	if !s.opts.NoSync {
+		if err := f.Sync(); err != nil {
+			return err
+		}
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(path+".tmp", path); err != nil {
+		return err
+	}
+	if !s.opts.NoSync {
+		return syncDir(s.dir)
+	}
+	return nil
 }
 
 // --- verification ---
@@ -1164,13 +1218,44 @@ func (s *Spool) AddDeadLetter(dest string, ev usage.Event, reason string) error 
 	if err != nil {
 		return err
 	}
-	f, err := os.OpenFile(s.deadLetterPath(dest), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o640)
+	f, err := os.OpenFile(s.deadLetterPath(dest), os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o640)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	if _, err := f.Write(append(b, '\n')); err != nil {
+	st, err := f.Stat()
+	if err != nil {
 		return err
+	}
+	if st.Size() > 0 {
+		var last [1]byte
+		if _, err := f.ReadAt(last[:], st.Size()-1); err != nil {
+			return err
+		}
+		if last[0] != '\n' {
+			// A crash may leave an incomplete final line. Keep the next
+			// complete event separate so recovery never discards both.
+			b = append([]byte{'\n'}, b...)
+		}
+	}
+	line := append(b, '\n')
+	if n, err := f.Write(line); err != nil {
+		return err
+	} else if n != len(line) {
+		return io.ErrShortWrite
+	}
+	if !s.opts.NoSync {
+		if err := f.Sync(); err != nil {
+			return err
+		}
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if !s.opts.NoSync {
+		if err := syncDir(s.dir); err != nil {
+			return err
+		}
 	}
 	ids[ev.ID] = true
 	return nil
@@ -1216,7 +1301,45 @@ func (s *Spool) ClearDeadLetters(dest string) error {
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
+	if err == nil && !s.opts.NoSync {
+		return syncDir(s.dir)
+	}
 	return err
+}
+
+// RemoveDeadLetters removes only the IDs this replay delivered. Other
+// pending letters, including ones parked concurrently, survive atomically.
+func (s *Spool) RemoveDeadLetters(dest string, delivered []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	dls, err := s.deadLettersLocked(dest)
+	if err != nil {
+		return err
+	}
+	drop := make(map[string]bool, len(delivered))
+	for _, id := range delivered {
+		drop[id] = true
+	}
+	var b bytes.Buffer
+	ids := map[string]bool{}
+	for _, dl := range dls {
+		if drop[dl.Event.ID] {
+			continue
+		}
+		if err := json.NewEncoder(&b).Encode(dl); err != nil {
+			return err
+		}
+		ids[dl.Event.ID] = true
+	}
+	if err := writeFileAtomic(s.deadLetterPath(dest), b.Bytes(), s.opts.NoSync); err != nil {
+		delete(s.deadIDs, dest) // a rename may already have succeeded
+		return err
+	}
+	if s.deadIDs == nil {
+		s.deadIDs = map[string]map[string]bool{}
+	}
+	s.deadIDs[dest] = ids
+	return nil
 }
 
 // --- stats & lifecycle ---

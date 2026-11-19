@@ -193,6 +193,7 @@ func (d *Dispatcher) release(ctx context.Context, dest destinations.Destination)
 				return fmt.Errorf("release held events: %w", err)
 			}
 			d.shipped.set(name, h.Series, last)
+			d.checkpointDelivery(dest, events)
 			delivered := uint64(len(entries) - dead)
 			total += len(entries)
 			labels := map[string]string{"destination": name}
@@ -261,6 +262,7 @@ func (d *Dispatcher) releaseExpired(ctx context.Context, dest destinations.Desti
 			return fmt.Errorf("release expired held events: %w", err)
 		}
 		d.shipped.set(name, h.Series, last.Seq)
+		d.checkpointDelivery(dest, events)
 		total += n
 		labels := map[string]string{"destination": name}
 		d.tel.Add("vbilling_events_delivered_total", "Events accepted by a destination.", labels, float64(n-dead))

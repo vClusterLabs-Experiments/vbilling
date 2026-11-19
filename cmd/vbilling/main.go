@@ -40,6 +40,7 @@ import (
 	"github.com/vclusterlabs-experiments/vbilling/internal/pricing"
 	"github.com/vclusterlabs-experiments/vbilling/internal/records"
 	"github.com/vclusterlabs-experiments/vbilling/internal/safeguard"
+	"github.com/vclusterlabs-experiments/vbilling/internal/sourceid"
 	"github.com/vclusterlabs-experiments/vbilling/internal/spool"
 	"github.com/vclusterlabs-experiments/vbilling/internal/telemetry"
 	"github.com/vclusterlabs-experiments/vbilling/internal/tenantapi"
@@ -128,6 +129,10 @@ func main() {
 	// delivered before this process holds the Lease.
 	guard := holdLease(ctx, kube, namespace, cfg.ListenAddr)
 	defer guard.Release()
+	cfg.MeteringSource, err = sourceid.Load(cfg.DataDir)
+	if err != nil {
+		log.Fatalf("metering source identity: %v", err)
+	}
 
 	sp, err := spool.Open(filepath.Join(cfg.DataDir, "ledger"), spool.Options{Retention: cfg.Retention, ArchiveDir: cfg.ArchiveDir})
 	if err != nil {
@@ -147,6 +152,11 @@ func main() {
 	dests, err := destinations.NewAll(cfg.Adapters, cfg)
 	if err != nil {
 		log.Fatalf("initialize adapters: %v", err)
+	}
+	for _, d := range dests {
+		if consumer, ok := d.(interface{ UseLedger(*spool.Spool) }); ok {
+			consumer.UseLedger(sp)
+		}
 	}
 
 	metricsClient, err := metricsclient.NewForConfig(kubeConfig)
@@ -206,6 +216,7 @@ func main() {
 	}
 	coll := metrics.NewCollector(kube, metricsClient, metrics.Options{
 		Region:             cfg.Region,
+		MeteringSource:     cfg.MeteringSource,
 		RegionFromNode:     cfg.RegionFromNode,
 		Basis:              cfg.CPUMemoryBasis,
 		MeterControlPlane:  cfg.MeterControlPlane,
@@ -303,6 +314,7 @@ func main() {
 		AllowUnkeyed:         cfg.RecordsAllowUnkeyed,
 		RejectUnknownTenants: cfg.RecordsRejectUnknown,
 		Region:               cfg.Region,
+		MeteringSource:       cfg.MeteringSource,
 		BoundTokens:          cfg.IngestTokens, // pinned pulls use the record IDs of the tenant's bound token
 	}
 	// The aggregator must exist before the API accepts records: it raises the

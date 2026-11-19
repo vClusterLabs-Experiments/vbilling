@@ -130,6 +130,11 @@ func (c *Collector) collectTenant(ctx context.Context, t Target, hostNodes map[s
 		err = c.collectTenantAPI(ctx, t, conn, hostNodes, syncedOn, windows, tmp, st)
 	}
 	if err != nil {
+		var pending *HeartbeatPending
+		if errors.As(err, &pending) {
+			st.PendingHeartbeat = pending
+			return
+		}
 		log.Printf("[metrics] %s: tenant API unavailable, its windows will be filled later: %v", id, err)
 		st.TenantAPIFailed = append(st.TenantAPIFailed, id)
 		if c.health != nil {
@@ -304,6 +309,19 @@ func (c *Collector) collectTenantAPI(ctx context.Context, t Target, conn *Tenant
 	inv, err := readTenantInventory(ctx, conn.Kube, c.opts.Now())
 	if err != nil {
 		return err
+	}
+	proofs, heartbeatErr := readNodeHeartbeats(ctx, conn.Kube)
+	if heartbeatErr == nil {
+		inv.Leases = heartbeatRenewals(proofs)
+		if pending := settleHeartbeats(inv.Nodes, proofs, windows, c.opts.Now()); pending != nil {
+			return pending
+		}
+		if c.health != nil {
+			c.health.OK(health.Name("node-heartbeats", t.Cluster.ExternalID()), "tenant-api", t.Cluster.ExternalID(), len(proofs))
+		}
+	} else if c.health != nil {
+		c.health.Fail(health.Name("node-heartbeats", t.Cluster.ExternalID()), "tenant-api", t.Cluster.ExternalID(), heartbeatErr,
+			"add list on leases in kube-node-lease to the tenant's reader role; until then use COLLECTION_DELAY=75s for sudden node failures")
 	}
 	conn.Graveyard.SeenNodes(inv.Nodes, c.opts.Now())
 	if c.opts.PrivateNodeBilling == "usage" {

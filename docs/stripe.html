@@ -345,21 +345,22 @@
 
       <h2 id="meters">Meters</h2>
       <p>At startup vBilling creates, or reactivates, one meter per billable metric: sum aggregation, customers mapped by <code>stripe_customer_id</code>, the quantity in <code>value</code>. Informational metrics (<code>vcluster_gpu_utilization</code>, <code>vcluster_gpu_downtime_hours</code>) are never sent to Stripe.</p>
-      <p>Because a meter cannot price on dimensions, each event goes to a meter named after its metric plus the value of every field in <code>splitMetersBy</code>, created the first time that value appears. Values are lowercased and every other character becomes <code>_</code>; a name longer than Stripe's 100 characters ends in a short hash.</p>
+      <p>Because a meter cannot price on dimensions, each event goes to a meter for its metric and the original values of every field in <code>splitMetersBy</code>, created on first use. New names have a readable slug followed by a 128-bit digest of the split keys and values, including empty values. Thus <code>org/model</code>, <code>org-model</code> and case differences stay distinct. Names are at most 100 characters. In the examples below, <code>&lt;digest&gt;</code> stands for that suffix: list the actual meters before creating prices.</p>
+      <p><strong>Upgrade:</strong> when available pre-upgrade ledger and archive history identifies one split identity for an existing meter, vBilling persists that identity's route to the existing name and its prices. A legacy name shared by multiple observed identities is not reused; new names need their own prices. Removed history cannot establish earlier collisions, so reconcile historical SKU pricing before upgrading and check <code>GET /api/v1/pricing?destination=stripe</code> afterwards. Existing prices and subscriptions are not rewritten to new meters automatically.</p>
       <div class="config-table-wrap">
         <table class="config-table">
           <thead><tr><th>Metric</th><th>Meters that receive events (split on <code>sku</code>)</th><th>SKU comes from</th></tr></thead>
           <tbody>
-            <tr><td>GPU hours</td><td><code>vcluster_gpu_hours__nvidia_h100_80gb_hbm3</code><br><code>vcluster_gpu_hours__nvidia_a100_sxm4_40gb_mig_1g_5gb</code><br><code>vcluster_gpu_hours__nvidia_l4_timeslice_4</code></td><td>The GPU model or the node's SKU label, plus the MIG profile or time-slicing replicas for fractional GPUs</td></tr>
-            <tr><td>Dedicated node hours</td><td><code>vcluster_private_node_hours__bm_gpu_h100_8</code></td><td>The SKU label, the instance type, or <code>&lt;n&gt;x&lt;GPU model&gt;</code></td></tr>
-            <tr><td>Storage GiB-hours</td><td><code>vcluster_storage_gb_hours__standard_rwo</code></td><td>The storage class</td></tr>
+            <tr><td>GPU hours</td><td><code>vcluster_gpu_hours__nvidia_h100_80gb_hbm3__&lt;digest&gt;</code><br><code>vcluster_gpu_hours__nvidia_a100_sxm4_40gb_mig_1g_5gb__&lt;digest&gt;</code><br><code>vcluster_gpu_hours__nvidia_l4_timeslice_4__&lt;digest&gt;</code></td><td>The GPU model or the node's SKU label, plus the MIG profile or time-slicing replicas for fractional GPUs</td></tr>
+            <tr><td>Dedicated node hours</td><td><code>vcluster_private_node_hours__bm_gpu_h100_8__&lt;digest&gt;</code></td><td>The SKU label, the instance type, or <code>&lt;n&gt;x&lt;GPU model&gt;</code></td></tr>
+            <tr><td>Storage GiB-hours</td><td><code>vcluster_storage_gb_hours__standard_rwo__&lt;digest&gt;</code></td><td>The storage class</td></tr>
             <tr><td>CPU core-hours, memory GiB-hours, cluster hours, LoadBalancer hours, network egress</td><td><code>vcluster_cpu_core_hours</code>, <code>vcluster_memory_gb_hours</code>, and so on</td><td>No SKU: the base meter</td></tr>
           </tbody>
         </table>
       </div>
       <div class="callout callout-warn">
         <div class="callout-icon">!</div>
-        <div>Put prices on the meters that receive events. GPU usage lands on <code>vcluster_gpu_hours__&lt;sku&gt;</code>, so the base <code>vcluster_gpu_hours</code> meter stays empty and a price on it invoices nothing.</div>
+        <div>Put prices on the meters that receive events. GPU usage lands on its split meter, so the base <code>vcluster_gpu_hours</code> meter stays empty and a price on it invoices nothing. Use the exact event name reported by Stripe and vBilling's price coverage.</div>
       </div>
       <div class="code-block"><code>STRIPE_KEY=$(cat ./stripe-test-key)
 <span class="cmd">curl</span> <span class="flag">-s -G</span> https://api.stripe.com/v1/billing/meters <span class="flag">-u</span> <span class="string">"$STRIPE_KEY:"</span> <span class="flag">-d</span> limit=100 | jq <span class="flag">-r</span> <span class="string">'.data[] | "\(.id) \(.event_name)"'</span></code></div>
@@ -367,8 +368,8 @@
       <h3 id="split">Pricing on more dimensions</h3>
       <p>Add fields to the split to give them their own meters and prices. Any event field works: <code>sku</code>, <code>region</code>, <code>project</code>, or a dimension such as <code>capacity_type</code>, <code>billing_mode</code> or <code>tenant_class</code>. Suffixes follow the order of the list:</p>
       <div class="code-block"><code><span class="flag">--set</span> stripe.splitMetersBy=<span class="string">'{sku,capacity_type}'</span>
-<span class="comment"># vcluster_gpu_hours__nvidia_h100_80gb_hbm3__on_demand</span>
-<span class="comment"># vcluster_gpu_hours__nvidia_h100_80gb_hbm3__spot</span></code></div>
+<span class="comment"># vcluster_gpu_hours__nvidia_h100_80gb_hbm3__on_demand__&lt;digest&gt;</span>
+<span class="comment"># vcluster_gpu_hours__nvidia_h100_80gb_hbm3__spot__&lt;digest&gt;</span></code></div>
       <p>Every field multiplies the meters and prices you manage. Settle the split before you go live: a new split sends new usage to new meters, and earlier usage stays on the old ones.</p>
 
       <h2 id="customers">Customers</h2>
@@ -404,8 +405,8 @@
 
       <h2 id="prices">Prices and subscriptions</h2>
       <p>What a GPU-hour costs is your decision. vBilling creates prices only from a <a href="#price-card">price card</a> you give it, and never changes or archives one. Without a price card, create a recurring, metered price on each meter you charge for. Quantities are hours (GPU-hours, node-hours, GiB-hours), so unit prices are per hour. Fractional GPUs are already counted in GPU-equivalents (a <code>1g.5gb</code> slice of an A100 is 1/7), so one per-GPU-hour price fits every variant of a SKU, or the slices can carry a premium.</p>
-      <div class="code-block"><code>METER=$(<span class="cmd">curl</span> <span class="flag">-s -G</span> https://api.stripe.com/v1/billing/meters <span class="flag">-u</span> <span class="string">"$STRIPE_KEY:"</span> <span class="flag">-d</span> limit=100 \
-  | jq <span class="flag">-r</span> <span class="string">'.data[] | select(.event_name=="vcluster_gpu_hours__nvidia_h100_80gb_hbm3") | .id'</span>)
+      <div class="code-block"><code><span class="comment"># Copy the intended meter's ID from the meter listing above.</span>
+METER=mtr_REPLACE_WITH_ACTUAL_ID
 <span class="cmd">curl</span> <span class="flag">-s</span> https://api.stripe.com/v1/prices <span class="flag">-u</span> <span class="string">"$STRIPE_KEY:"</span> \
   <span class="flag">-d</span> currency=usd <span class="flag">-d</span> unit_amount_decimal=250 \
   <span class="flag">-d</span> <span class="string">"recurring[interval]=month"</span> <span class="flag">-d</span> <span class="string">"recurring[usage_type]=metered"</span> \
@@ -472,19 +473,20 @@
         <table class="config-table">
           <thead><tr><th>Concern</th><th>What vBilling does</th></tr></thead>
           <tbody>
-            <tr><td>Duplicates</td><td>The meter event <code>identifier</code> is the vBilling event ID: a hash of the event's identity (tenant, metric, window, dimensions), never of its quantity. A resend after a crash is rejected by Stripe as a duplicate and counted as delivered.</td></tr>
+            <tr><td>Duplicates</td><td>The meter event <code>identifier</code> is the vBilling event ID: a hash of identity (tenant, metric, window, dimensions, including the persistent metering source), never quantity. Confirmed deliveries have durable receipts until the outbox result is durable. Retries of uncertain attempts are bounded to 23 hours.</td></tr>
             <tr><td>Event time</td><td>The meter event <code>timestamp</code> is the window start, so late deliveries and backfills land in the period they belong to.</td></tr>
             <tr><td>Precision</td><td>Quantities are plain decimals with at most 15 significant digits and 9 decimals.</td></tr>
             <tr><td>Rate</td><td>A token bucket at <code>maxRPS</code>, and four workers partitioned by customer and meter, so a customer's meter never gets concurrent calls.</td></tr>
-            <tr><td>Retries</td><td>Authentication errors (401, 403), 404, conflicts (409), rate limits (429), 5xx and network errors are retried with backoff and never dead-lettered. Stripe's <code>Stripe-Should-Retry</code> header wins when present.</td></tr>
+            <tr><td>Retries</td><td>Authentication errors (401, 403), 404, conflicts (409), rate limits (429), 5xx and network errors retry with backoff within the safe retry horizon. Stripe's <code>Stripe-Should-Retry</code> header wins when present. An unresolved attempt older than 23 hours is parked for reconciliation.</td></tr>
             <tr><td>Dead letters</td><td>Events Stripe rejects as invalid (400, 413, 422) are isolated one by one and parked with the reason; the rest of the batch goes through.</td></tr>
           </tbody>
         </table>
       </div>
       <div class="callout callout-warn">
         <div class="callout-icon">!</div>
-        <div>Stripe enforces identifier uniqueness for at least 24 hours and accepts events up to 35 days old. vBilling never resends acknowledged events, and dead-letters events older than 35 days minus an hour of margin. Do not rewind the Stripe destination's cursor by more than 24 hours, or Stripe may count those events again; rewinding is meant for a newly added destination, which starts at the end of the ledger: <code>POST /api/v1/destinations/stripe/cursor</code> with <code>{"seq": 0}</code> sends it the retained ledger.</div>
+        <div>Stripe guarantees identifier uniqueness for at least 24 hours and accepts events up to 35 days old. These are different limits. vBilling persists an attempt before sending and a confirmation before acknowledging it. After 23 hours an uncertain outcome becomes a dead letter instead of a blind resend. Cursor rewinds containing usage older than 23 hours are refused, including for a newly added Stripe destination. Older recovery requires reconciliation; acceptance by the ingest API does not prove inclusion on a finalized invoice.</div>
       </div>
+      <p>For an ambiguous delivery, inspect <code>GET /api/v1/destinations/stripe/delivery/&lt;event-id&gt;</code> and reconcile with Stripe's recorded usage and invoices. With the operator API token, <code>PUT</code> that URL with <code>{"outcome":"delivered","reason":"reconciliation evidence"}</code> to confirm acceptance, or <code>"not_delivered"</code> only after establishing the event was not accepted. Then replay the dead letter. A delivered outcome removes it without another meter-event POST; a not-delivered outcome permits a fresh attempt. Preserve destination state with the ledger, and never delete receipts to force a retry. Pre-upgrade unacknowledged events older than the safe horizon are also parked conservatively because older binaries left no durable delivery receipt.</p>
       <p>After fixing what caused a rejection (often by upgrading vBilling), replay the parked events. Events Stripe still rejects stay parked (<code>still_rejected</code>). With <code>API_TOKEN</code> set, add <code>-H "Authorization: Bearer $API_TOKEN"</code>.</p>
       <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-H</span> <span class="string">"Authorization: Bearer $VBILLING_TOKEN"</span> <span class="flag">-s</span> localhost:8080/api/v1/destinations/stripe/dead-letters | jq
 <span class="cmd">curl</span> <span class="flag">-H</span> <span class="string">"Authorization: Bearer $VBILLING_TOKEN"</span> <span class="flag">-s -X POST</span> localhost:8080/api/v1/destinations/stripe/dead-letters/replay
@@ -579,7 +581,7 @@ spec:
           <thead><tr><th>Stripe limit</th><th>What vBilling does</th></tr></thead>
           <tbody>
             <tr><td>Meter events at most 35 days old</td><td>Older events are dead-lettered as <code>older than Stripe's 35-day meter event window</code>. Normal backfills (<code>billing.maxBackfill</code>, default 6h) stay far inside it.</td></tr>
-            <tr><td>Identifiers unique for at least 24 hours</td><td>Acknowledged events are never resent. Keep cursor rewinds within 24 hours.</td></tr>
+            <tr><td>Identifiers unique for at least 24 hours</td><td>Durable receipts protect unacknowledged successes; uncertain attempts stop retrying after 23 hours. Old cursor rewinds are refused.</td></tr>
             <tr><td>Meters invoiced from the subscription's start, and only until its period's invoice is finalized</td><td>Automatic subscriptions start at the tenant's first usage (above), and usage dated before the start is dead-lettered. Usage for a period whose invoice Stripe already finalized is accepted by Stripe and shows in meter summaries, but is not invoiced; vBilling does not detect that yet. It needs vBilling to be down or backlogged past the period's end plus Stripe's finalization grace period (one hour by default).</td></tr>
             <tr><td>Event names up to 100 characters</td><td>Longer split meter names end in a hash.</td></tr>
             <tr><td>20 prices per subscription</td><td>Automatic subscriptions refuse a plan with more than 20 prices and log the tenant as rejected, without holding up anyone's usage. Split the plan.</td></tr>

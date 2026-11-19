@@ -27,16 +27,17 @@ const SchemaVersion = "vbilling.usage/v1"
 // Well-known dimension keys. Dimensions are part of an event's identity and
 // are what rating engines group and price on.
 const (
-	DimTenantCluster = "tenant_cluster" // tenant cluster external ID
-	DimGPUType       = "gpu_type"       // normalized GPU model, e.g. NVIDIA-H100-80GB-HBM3
-	DimGPUProfile    = "gpu_profile"    // full, mig-1g.10gb, timeslice-4, ...
-	DimCapacityType  = "capacity_type"  // on-demand, spot, preemptible, reserved
-	DimBillingMode   = "billing_mode"   // shared, dedicated_node, private_node
-	DimZone          = "zone"
-	DimTenantClass   = "tenant_class" // e.g. public, enterprise, government, dev
-	DimNamespace     = "namespace"    // namespace inside the tenant cluster (optional)
-	DimNode          = "node"
-	DimInstanceType  = "instance_type"
+	DimMeteringSource = "metering_source" // stable identity of the collector's ledger
+	DimTenantCluster  = "tenant_cluster"  // tenant cluster external ID
+	DimGPUType        = "gpu_type"        // normalized GPU model, e.g. NVIDIA-H100-80GB-HBM3
+	DimGPUProfile     = "gpu_profile"     // full, mig-1g.10gb, timeslice-4, ...
+	DimCapacityType   = "capacity_type"   // on-demand, spot, preemptible, reserved
+	DimBillingMode    = "billing_mode"    // shared, dedicated_node, private_node
+	DimZone           = "zone"
+	DimTenantClass    = "tenant_class" // e.g. public, enterprise, government, dev
+	DimNamespace      = "namespace"    // namespace inside the tenant cluster (optional)
+	DimNode           = "node"
+	DimInstanceType   = "instance_type"
 )
 
 // Instance attributes on dedicated and private node-hour events: what an

@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"hash/fnv"
 	"sort"
 	"strings"
 	"sync"
@@ -37,6 +36,7 @@ type Options struct {
 	// tenant or alias. By default they are accepted and reported.
 	RejectUnknownTenants bool
 	Region               string
+	MeteringSource       string // stable collector identity, shared by its standby
 	Now                  func() time.Time
 	// BoundTokens is INGEST_TOKENS (token -> tenant). A pull pinned to a
 	// tenant stores its rows under the record IDs of that tenant's bound
@@ -384,21 +384,23 @@ func (a *arrivals) add(found []arrival) {
 	}
 }
 
-// storedBefore holds hashes of the IDs of the records stored in the hour
-// before this start, for an hour. Records sent with a tenant-bound token
+const upgradeMemory = 48 * time.Hour
+
+// storedBefore holds compact hashes of the IDs stored before this start,
+// for the same 48-hour retry horizon as the ingest index. Tenant-bound rows
 // get IDs of their own since v0.3.1, so a batch an emitter stored with
 // v0.3.0 and retries after the upgrade is recognized here by the ID v0.3.0
 // gave it.
 type storedBefore struct {
 	mu    sync.Mutex
 	until time.Time
-	ids   map[uint64]struct{}
+	ids   map[[16]byte]int64 // ID hash -> when the row was appended
 }
 
-func idHash(id string) uint64 {
-	h := fnv.New64a()
-	h.Write([]byte(id))
-	return h.Sum64()
+func idHash(id string) (key [16]byte) {
+	sum := sha256.Sum256([]byte(id))
+	copy(key[:], sum[:16])
+	return key
 }
 
 // has reports whether id was stored before the start, while that is still
@@ -410,25 +412,28 @@ func (b *storedBefore) has(id string, now time.Time) bool {
 		return false
 	}
 	if now.After(b.until) {
-		b.ids = nil // retries come within minutes; free the memory
+		b.ids = nil // the complete upgrade retry horizon has elapsed
 		return false
 	}
-	_, ok := b.ids[idHash(id)]
-	return ok
+	at, ok := b.ids[idHash(id)]
+	return ok && !time.Unix(at, 0).Before(now.Add(-upgradeMemory))
 }
 
-// loadRecent reads the records stored in the last arrivalMemory: when the
-// records without a time arrived, so a retry after a restart keeps its
-// time, and every ID, for storedBefore.
+// loadRecent remembers pre-start IDs for the 48-hour upgrade retry horizon.
+// Arrival-time records also keep their timestamp for arrivalMemory, so a
+// retry without a timestamp keeps the time assigned to its first copy.
 func (in *Ingester) loadRecent(sp *spool.Spool, now time.Time) {
-	in.before = &storedBefore{until: now.Add(arrivalMemory), ids: map[uint64]struct{}{}}
+	in.before = &storedBefore{until: now.Add(upgradeMemory), ids: map[[16]byte]int64{}}
 	if sp == nil {
 		return
 	}
 	var found []arrival
-	_ = sp.ScanAppended(now.Add(-arrivalMemory), now.Add(24*time.Hour), func(ev *usage.Event, _ time.Time) error {
-		in.before.ids[idHash(ev.ID)] = struct{}{}
-		if ev.Properties["arrival_time"] != true {
+	_ = sp.ScanAppended(now.Add(-upgradeMemory), now.Add(24*time.Hour), func(ev *usage.Event, appended time.Time) error {
+		key := idHash(ev.ID)
+		if prev, ok := in.before.ids[key]; !ok || appended.Unix() < prev {
+			in.before.ids[key] = appended.Unix()
+		}
+		if ev.Properties["arrival_time"] != true || appended.Before(now.Add(-arrivalMemory)) {
 			return nil
 		}
 		s, _ := ev.Properties["at"].(string)
@@ -703,6 +708,7 @@ func (in *Ingester) ingest(c ingestCall, objs []map[string]any) (Result, error) 
 		ws, we := usage.Window(rec.Time, in.opts.Window)
 		var recRows []usage.Event
 		var problems []string
+		duplicates := 0
 		metrics := make([]string, 0, len(rec.Usage))
 		for m := range rec.Usage {
 			metrics = append(metrics, m)
@@ -720,10 +726,9 @@ func (in *Ingester) ingest(c ingestCall, objs []map[string]any) (Result, error) 
 			}
 			id := RecordID(idClient, rec.TenantKey, rec.ID, metric)
 			if seen[id] {
-				res.DuplicatesInBatch++
+				duplicates++
 				continue
 			}
-			seen[id] = true
 			ev := usage.Event{
 				ID: id, Tenant: rec.Tenant, Metric: metric, Quantity: q, Unit: def.Unit,
 				WindowStart: ws, WindowEnd: we,
@@ -763,8 +768,12 @@ func (in *Ingester) ingest(c ingestCall, objs []map[string]any) (Result, error) 
 			continue
 		}
 		for i := range recRows {
+			// Only a valid record reserves its IDs. A refused copy must
+			// not suppress a valid replacement later in the same batch.
+			seen[recRows[i].ID] = true
 			size += rowSize(&recRows[i])
 		}
+		res.DuplicatesInBatch += duplicates
 		res.Accepted++
 		recs = append(recs, recRows)
 	}

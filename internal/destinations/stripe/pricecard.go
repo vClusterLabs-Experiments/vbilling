@@ -292,7 +292,7 @@ func (a *Adapter) applyPriceCard(ctx context.Context) error {
 func (a *Adapter) applyCardPrice(ctx context.Context, existing []Price, pc *PriceCard, plan, metric string, per int64, e cardEntry) (bool, error) {
 	ev := usage.Event{Metric: metric, SKU: e.sku, Dimensions: map[string]string{}}
 	name := a.MeterName(&ev)
-	m, err := a.ensureMeter(ctx, name, meterDisplayName(&ev, name))
+	m, err := a.ensureMeter(ctx, ev.Metric, name, meterDisplayName(&ev, name))
 	if err != nil {
 		return false, err
 	}

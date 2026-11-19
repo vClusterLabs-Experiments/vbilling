@@ -145,7 +145,7 @@ func TestSendEventsSplitsMetersPerSKU(t *testing.T) {
 	if len(f.events) != 4 {
 		t.Fatalf("recorded %d meter events, want 4 (utilization is informational): %+v", len(f.events), f.events)
 	}
-	for _, name := range []string{"vcluster_gpu_hours__nvidia_h100_80gb_hbm3", "vcluster_gpu_hours__nvidia_l40s", "vcluster_cpu_core_hours"} {
+	for _, name := range []string{meterForSKU(a, "NVIDIA-H100-80GB-HBM3"), meterForSKU(a, "NVIDIA-L40S"), "vcluster_cpu_core_hours"} {
 		found := false
 		for k := range got {
 			if strings.HasPrefix(k, name+"|") {
@@ -157,7 +157,7 @@ func TestSendEventsSplitsMetersPerSKU(t *testing.T) {
 		}
 	}
 	for k, v := range got {
-		if strings.HasPrefix(k, "vcluster_gpu_hours__nvidia_h100_80gb_hbm3|") && v != "0.133333333" && v != "0.016666667" {
+		if strings.HasPrefix(k, meterForSKU(a, "NVIDIA-H100-80GB-HBM3")+"|") && v != "0.133333333" && v != "0.016666667" {
 			t.Errorf("unexpected H100 value %s", v)
 		}
 	}
@@ -322,7 +322,7 @@ func TestMeterNameIsBoundedAndStable(t *testing.T) {
 	a := &Adapter{cfg: &config.Config{StripeSplitMetersBy: []string{"sku", "region"}}}
 	e := gpuEvent("acme", "NVIDIA-A100-SXM4-80GB-mig-1g.10gb", now, 1)
 	e.Region = "ap-southeast-2"
-	if got := a.MeterName(&e); got != "vcluster_gpu_hours__nvidia_a100_sxm4_80gb_mig_1g_10gb__ap_southeast_2" {
+	if got := a.MeterName(&e); len(got) > 100 || !strings.HasPrefix(got, "vcluster_gpu_hours__nvidia_a100") || got != a.MeterName(&e) {
 		t.Fatalf("meter name %q", got)
 	}
 	e.SKU = strings.Repeat("x", 200)

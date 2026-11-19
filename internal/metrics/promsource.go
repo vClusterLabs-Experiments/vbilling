@@ -409,6 +409,9 @@ func (p *PromSource) Collect(ctx context.Context, targets []Target, windows []Wi
 			p.holdUnscoped(t, synced.err) // likewise, until they can be read
 			continue
 		}
+		if bare {
+			vars.seriesOwner, vars.foreignPods = synced.seriesFilter(t, away.syncedNamespaces())
+		}
 		base := p.c.baseFor(t)
 		for _, m := range p.specs() {
 			name := health.Name("prometheus", m.Code, id)
@@ -421,6 +424,8 @@ func (p *PromSource) Collect(ctx context.Context, targets []Target, windows []Wi
 			var n int
 			var merr error
 			switch {
+			case vars.foreignPods && m.Counter == "":
+				merr = fmt.Errorf("namespace contains pods synced by another cluster: an aggregated query cannot isolate their usage; use a counter with namespace and pod labels, or trusted per-cluster matchers")
 			case m.builtin == "gpu-util":
 				n, merr = p.gpuUtil(ctx, client, t, vars, windows, accs, base)
 			case m.Counter != "":
@@ -440,6 +445,8 @@ func (p *PromSource) Collect(ctx context.Context, targets []Target, windows []Wi
 				// Read and billed where the cluster's objects are known to be;
 				// not where nothing tells whose they are.
 				p.health.Fail(name, "prometheus", id, fmt.Errorf("read %d series (%s); %s", n, how, away.why(t.Cluster)), syncedHint)
+			case vars.foreignPods:
+				p.health.Fail(name, "prometheus", id, fmt.Errorf("read %d attributable series; excluded other clusters' pods from a shared control-plane namespace", n), "move namespace mappings away from other clusters' control-plane namespaces")
 			case n == 0:
 				p.health.Empty(name, "prometheus", id, "no series for "+id+" ("+how+")", emptyHint(m.PromMetric, vars, p.opts.SourceLabel))
 			default:
@@ -451,6 +458,9 @@ func (p *PromSource) Collect(ctx context.Context, targets []Target, windows []Wi
 	for i, w := range windows {
 		var evs []usage.Event
 		for _, ev := range accs[w.End].list() {
+			if p.c.opts.MeteringSource != "" {
+				ev.Dimensions[usage.DimMeteringSource] = p.c.opts.MeteringSource
+			}
 			ev.Source = SourcePrometheus
 			ev.RecordedAt = now
 			if !w.Latest {
@@ -539,6 +549,19 @@ func (p *PromSource) counter(ctx context.Context, client *prometheusClient, m Pr
 	series, err := client.QueryRaw(ctx, selector, last.End.Sub(from), last.End)
 	if err != nil {
 		return 0, nil, err
+	}
+	if vars.seriesOwner != nil {
+		kept := series[:0]
+		for _, s := range series {
+			owned, err := vars.seriesOwner(s.Labels)
+			if err != nil {
+				return 0, nil, err
+			}
+			if owned {
+				kept = append(kept, s)
+			}
+		}
+		series = kept
 	}
 	appeared := func(s promSeries) bool {
 		return reachesPrev && len(s.Samples) > 0 && s.Samples[0].T.After(prevObserved)
@@ -861,6 +884,9 @@ func (p *PromSource) query(ctx context.Context, client *prometheusClient, m Prom
 // unsafe there are replaced (usage.SafeValue) rather than the usage dropped.
 func labelValues(ev *usage.Event, m PromMetric, labels map[string]string) {
 	for _, l := range m.Dimensions {
+		if dimKey(l) == usage.DimMeteringSource {
+			continue // source identity belongs to this ledger, never to a series
+		}
 		if v := labels[l]; v != "" {
 			ev.Dimensions[dimKey(l)] = usage.SafeValue(v)
 		}

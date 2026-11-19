@@ -64,8 +64,9 @@ const (
 // namespaces that hold synced objects: their vCluster labels, and which of
 // them a cluster's control plane runs in. The zero value knows nothing.
 type HostNamespaces struct {
-	read   map[string]hostNamespace
-	planes map[string]bool
+	read       map[string]hostNamespace
+	planes     map[string]bool
+	planeNames map[string]map[string]bool
 	// clusters reports namespaces that discovered clusters run in; former,
 	// namespaces clusters ran in before (UseClusters).
 	clusters, former func(namespace string) bool
@@ -153,7 +154,18 @@ func (h *HostNamespaces) readPlanes(ctx context.Context, kube kubernetes.Interfa
 	}
 	for i := range svcs.Items {
 		if svcs.Items[i].Labels[labelManagedBy] == "" {
-			h.planes[svcs.Items[i].Namespace] = true
+			svc := &svcs.Items[i]
+			h.planes[svc.Namespace] = true
+			if h.planeNames == nil {
+				h.planeNames = map[string]map[string]bool{}
+			}
+			if h.planeNames[svc.Namespace] == nil {
+				h.planeNames[svc.Namespace] = map[string]bool{}
+			}
+			h.planeNames[svc.Namespace][svc.Name] = true
+			if release := svc.Labels["release"]; release != "" {
+				h.planeNames[svc.Namespace][release] = true
+			}
 		}
 	}
 	return nil
@@ -283,6 +295,30 @@ func (h *HostNamespaces) Whose(cl TenantCluster, namespace string) (Ownership, s
 	return Owned, ""
 }
 
+// WhoseObject attributes one object carrying cl's managed-by label. A
+// unique cluster can sync into another current cluster's namespace. That
+// does not authorize changing the whole namespace's billing-state labels.
+// A surviving Service of a deleted namesake still protects its leftovers.
+func (h *HostNamespaces) WhoseObject(cl TenantCluster, namespace string) (Ownership, string) {
+	own, why := h.Whose(cl, namespace)
+	if own == Owned || cl.External || h == nil || namespace == cl.Namespace {
+		return own, why
+	}
+	n, read := h.read[namespace]
+	if read && n.exists && n.name == cl.Name && n.namespace == cl.Namespace {
+		return Owned, ""
+	}
+	if h.clusters != nil && h.clusters(namespace) && read && n.exists && n.name == "" {
+		if cl.NameShared() {
+			return Uncertain, ReasonNameShared
+		}
+		if !h.planeNames[namespace][cl.Name] {
+			return Owned, ""
+		}
+	}
+	return own, why
+}
+
 // listPageSize is how many objects one list request asks for: every pod
 // vCluster synced on a large control plane cluster is read a page at a time.
 const listPageSize = 500
@@ -370,7 +406,7 @@ func SyncedPodsOf(ctx context.Context, kube kubernetes.Interface, cl TenantClust
 		if p.Labels[labelManagedBy] != cl.Name {
 			continue
 		}
-		if own, _ := host.Whose(cl, p.Namespace); own == Owned {
+		if own, _ := host.WhoseObject(cl, p.Namespace); own == Owned {
 			out = append(out, p)
 		}
 	}

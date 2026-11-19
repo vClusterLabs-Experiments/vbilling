@@ -1,0 +1,8 @@
+.git
+.github
+.agents
+.codex
+bin
+dist
+**/__pycache__
+.DS_Store

@@ -35,6 +35,7 @@ const gib = 1024 * 1024 * 1024
 // Options configure metering behavior.
 type Options struct {
 	Region             string
+	MeteringSource     string
 	RegionFromNode     bool
 	Basis              string // usage | requests | max
 	MeterControlPlane  bool
@@ -265,7 +266,8 @@ type Stats struct {
 	Unrequested int
 	// TenantAPIFailed lists tenant clusters (external IDs) whose own API
 	// could not be read; nothing from it was metered for these windows.
-	TenantAPIFailed []string
+	TenantAPIFailed  []string
+	PendingHeartbeat *HeartbeatPending
 }
 
 // accumulator merges observations with the same identity within one
@@ -340,7 +342,23 @@ func (c *Collector) collect(ctx context.Context, targets []Target, windows []Win
 	}
 	c.graveyard.SeenNodes(nodeList.Items, c.opts.Now())
 	nodes := map[string]*nodeInfo{}
-	renewed := leaseRenewals(ctx, c.kube, nodeList.Items)
+	proofs, heartbeatErr := readNodeHeartbeats(ctx, c.kube)
+	renewed := heartbeatRenewals(proofs)
+	if heartbeatErr != nil {
+		// Older reader roles may have only get. Keep their existing
+		// metering, and make the missing freshness check visible.
+		renewed = leaseRenewals(ctx, c.kube, nodeList.Items)
+		if c.health != nil {
+			c.health.Fail("node-heartbeats/control-plane", "kubernetes", "", heartbeatErr, "grant list on leases in kube-node-lease to check sudden node failures before committing usage")
+		}
+	} else {
+		if pending := settleHeartbeats(nodeList.Items, proofs, windows, c.opts.Now()); pending != nil {
+			return nil, st, pending
+		}
+		if c.health != nil {
+			c.health.OK("node-heartbeats/control-plane", "kubernetes", "", len(proofs))
+		}
+	}
 	for i := range nodeList.Items {
 		ni := c.parseNodeLease(&nodeList.Items[i], renewed[nodeList.Items[i].Name])
 		nodes[ni.name] = ni
@@ -394,9 +412,15 @@ func (c *Collector) collect(ctx context.Context, targets []Target, windows []Win
 		}
 	}
 	c.saveNodeHistory()
+	if st.PendingHeartbeat != nil {
+		return nil, st, st.PendingHeartbeat
+	}
 	for _, w := range windows {
 		var evs []usage.Event
 		for _, ev := range accs[w.End].list() {
+			if c.opts.MeteringSource != "" {
+				ev.Dimensions[usage.DimMeteringSource] = c.opts.MeteringSource
+			}
 			ev.Source = "collector"
 			ev.RecordedAt = now
 			if !w.Latest {
@@ -849,6 +873,9 @@ func (c *Collector) baseFor(t Target) baseFn {
 			Tenant: t.Tenant, Metric: metric, Project: t.Project, ResourceID: extID,
 			Region:     n.regionOr(c.opts.Region, c.opts.RegionFromNode),
 			Dimensions: map[string]string{usage.DimTenantCluster: extID},
+		}
+		if c.opts.MeteringSource != "" {
+			e.Dimensions[usage.DimMeteringSource] = c.opts.MeteringSource
 		}
 		if t.TenantClass != "" {
 			e.Dimensions[usage.DimTenantClass] = t.TenantClass

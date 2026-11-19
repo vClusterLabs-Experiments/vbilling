@@ -21,7 +21,10 @@ type Config struct {
 	Region      string
 	Zone        string
 	ClusterName string // name of the control plane cluster (event source, webhook source)
-	TenantClass string // default tenant class, e.g. public, enterprise, government, dev
+	// MeteringSource is loaded from the ledger volume at startup, never from
+	// an emitter or tenant setting. It namespaces automatically derived IDs.
+	MeteringSource string
+	TenantClass    string // default tenant class, e.g. public, enterprise, government, dev
 
 	// Durable ledger.
 	DataDir    string

@@ -104,9 +104,9 @@ func TestPausedClusterIsMeteredFromItsSavedInventory(t *testing.T) {
 			t.Errorf("%s billed while paused: %v", m, got)
 		}
 	}
-	src := h.List()
-	if len(src) != 1 || src[0].Status != health.Paused || len(h.Problems()) != 0 {
-		t.Fatalf("health = %+v (a pause is not a problem)", src)
+	src, ok := sourceNamed(h, "tenant-api/"+tg.Cluster.ExternalID())
+	if !ok || src.Status != health.Paused || len(h.Problems()) != 0 {
+		t.Fatalf("health = %+v (a pause is not a problem)", h.List())
 	}
 
 	// After it resumes the saved inventory is dropped.
