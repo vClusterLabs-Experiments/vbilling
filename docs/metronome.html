@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Metronome - vBilling Docs</title>
-  <meta name="description" content="Ship vBilling usage to Metronome: customers, billable metrics and contracts created for you, pricing on dimensions, Stripe for payments, reconciliation and billing-state webhooks.">
+  <meta name="description" content="Send vBilling usage to Metronome: by default into an account your portal and Finance own (usage under the tenant ID as ingest alias, read-only otherwise), or with METRONOME_PROVISION=true into one vBilling populates. Event contract, prepaid wallet loop, price coverage, reconciliation.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Roboto+Mono:wght@500&display=swap" rel="stylesheet">
@@ -278,49 +278,58 @@
 
     <main class="content">
       <h1>Metronome</h1>
-      <p class="subtitle">The Metronome billing adapter ships vBilling usage to Metronome for rating and invoicing. vBilling creates the customers, billable metrics and contracts; your rate cards set the prices. With the Stripe link on, Stripe collects payment, invoices and tax.</p>
+      <p class="subtitle">The Metronome billing adapter sends vBilling usage to Metronome, which rates it, draws down prepaid balances and invoices. By default vBilling treats the Metronome account as yours: your portal creates customers and contracts, Finance manages billable metrics, products and rate cards as configuration, and vBilling only sends usage and reads. With <code>METRONOME_PROVISION=true</code> it creates what it needs itself.</p>
 
       <div class="callout callout-warn">
         <div class="callout-icon">!</div>
-        <div>The adapter's tests validate every request body against Metronome's published OpenAPI schemas and check webhook verification against Metronome's documented test vector. They do not run against a live Metronome account, so run vBilling against a Metronome sandbox before you invoice from it.</div>
+        <div><strong>Not yet run against a live Metronome account.</strong> The adapter is tested against an in-process fake Metronome that checks every request body against Metronome's published OpenAPI schemas, and its webhook verification against Metronome's documented test vector (see <a href="#verified">What is verified</a>). No sandbox run has been done yet. Run your loop in a Metronome sandbox before you invoice from it.</div>
       </div>
 
-      <h2 id="when">When to choose Metronome</h2>
-      <p>Both billing platforms receive the same usage. They differ in where pricing lives.</p>
-      <div class="info-grid">
-        <div class="info-box">
-          <h4>Stripe Billing Meters</h4>
-          <p>One meter per metric, split per SKU, with a metered price on each. A good fit for a pay-as-you-go price list. See <a href="stripe.html">Stripe</a>.</p>
-        </div>
-        <div class="info-box">
-          <h4>Metronome</h4>
-          <p>One billable metric per metric, priced on dimensions such as region, SKU and capacity type. Contracts add commits, credits and rate cards in the currency you invoice in.</p>
-        </div>
-      </div>
+      <h2 id="modes">Two modes</h2>
+      <p>An AI Cloud that already bills with Metronome owns its account: its portal creates each customer at signup, and the contract that holds the customer's prepaid commits, and Finance applies billable metrics, products and rate cards from configuration. In the default mode vBilling fits into that account without changing it. A Metronome account that exists only for vBilling can let vBilling create its objects instead.</p>
       <div class="config-table-wrap">
         <table class="config-table">
-          <thead><tr><th>Mode</th><th>Settings</th><th>Who does what</th></tr></thead>
+          <thead><tr><th></th><th>Default</th><th><code>METRONOME_PROVISION=true</code></th></tr></thead>
           <tbody>
-            <tr><td>Metronome</td><td><code>adapters: [metronome]</code></td><td>Metronome rates usage and produces invoices.</td></tr>
-            <tr><td>Metronome + Stripe</td><td><code>adapters: [metronome]</code><br><code>metronome.stripeLink: true</code></td><td>Metronome rates usage. vBilling creates each tenant's Stripe customer and links it, so Stripe collects payment, invoices and tax. The <code>stripe</code> adapter is not needed.</td></tr>
-            <tr><td>Plus a data feed</td><td><code>adapters: [metronome, webhook]</code></td><td>The same events also stream as signed CloudEvents to your data platform. Each destination has its own cursor, so one outage never blocks the other.</td></tr>
+            <tr><td>Customers</td><td>Your portal creates them, with the tenant ID as one of their ingest aliases. vBilling never creates or changes one.</td><td>One per tenant, with the tenant ID as ingest alias. A customer that already holds the alias is adopted, never duplicated.</td></tr>
+            <tr><td>Billable metrics</td><td>Finance adds them from <a href="#billable-metrics"><code>vbilling metronome billable-metrics</code></a>. vBilling finds them by event type.</td><td>Created at startup, matched by ID or name.</td></tr>
+            <tr><td>Contracts</td><td>Your portal's, with your commits and credits. vBilling reads their rate cards for price coverage.</td><td>One per tenant, on <code>METRONOME_RATE_CARD</code> or the tenant's plan.</td></tr>
+            <tr><td>Stripe link</td><td>Your portal's.</td><td>Created when a Stripe key is set.</td></tr>
+            <tr><td><code>customer_id</code> on usage</td><td>The tenant ID, as ingest alias.</td><td>The customer ID vBilling created, found or was pinned to.</td></tr>
+            <tr><td>What vBilling writes</td><td>Usage events only.</td><td>Usage events, customers, billable metrics, contracts and Stripe links.</td></tr>
           </tbody>
         </table>
       </div>
+      <p>Three Metronome rules make the default mode work:</p>
+      <ul>
+        <li><strong>Usage can arrive first.</strong> Metronome keeps usage sent under an ingest alias that no customer holds yet, and attributes it to the customer that gets the alias later. vBilling never waits for the portal.</li>
+        <li><strong>An alias belongs to one customer.</strong> Creating a customer with an alias another customer holds, archived customers included, fails with 409 until the alias is removed from that customer.</li>
+        <li><strong>A customer can hold several aliases,</strong> for example an identity alias the portal uses and a compute alias that metering events key on.</li>
+      </ul>
+
+      <h3 id="tenant-id">The tenant ID is the compute alias</h3>
+      <p>Usage events key on the vBilling tenant ID: <code>vbilling.vcluster.com/tenant</code> on the cluster's StatefulSet, its namespace or its <code>VirtualClusterInstance</code>; with <code>TENANT_SOURCE=platform</code>, the ID of its vCluster Platform Tenant (see <a href="private-nodes.html#platform">vCluster Platform mode</a>); otherwise <code>vcluster-&lt;namespace&gt;-&lt;name&gt;</code>. Give each customer that tenant ID as its compute alias at signup, next to its identity alias. Do not change it afterwards: usage under a new ID goes to whichever customer holds that alias, or stays unattributed.</p>
+      <p>To move a customer from another compute plane, add the tenant ID to the existing customer's ingest aliases, in place of the old compute alias, before its first usage from vBilling. Its wallet, contract, rate card and Stripe customer stay as they are.</p>
+
+      <h3 id="upgrading">Upgrading from v0.3.0</h3>
+      <p>v0.3.0 always created billable metrics and customers, and contracts when <code>metronome.rateCard</code> was set. That now takes <code>METRONOME_PROVISION=true</code>, which <code>metronome.stripeLink=true</code> still turns on. Without it, the customers, metrics and contracts vBilling created earlier stay as they are and keep receiving usage, because those customers hold the tenant ID as alias. <code>METRONOME_RATE_CARD</code> without provisioning only logs a warning. A tenant pinned to a customer with <code>vbilling.vcluster.com/metronome-customer-id</code> needs the tenant ID among that customer's aliases: the default mode sends usage under the alias and does not use the pin.</p>
 
       <h2 id="install">Install</h2>
-      <p>You need a Metronome API token. For Metronome + Stripe, also connect your Stripe account in Metronome and give vBilling a key for the same Stripe account: the customer IDs it links must exist there. Keep both in Secrets; values passed with <code>--set</code> are stored in the Helm release.</p>
+      <p>You need a Metronome API token, and a webhook secret for the billing-state loop. Keep both in a Secret; values passed with <code>--set</code> are stored in the Helm release.</p>
       <div class="code-block"><code><span class="cmd">kubectl</span> create namespace vbilling-system
-<span class="cmd">kubectl</span> <span class="flag">-n</span> vbilling-system create secret generic vbilling-metronome <span class="flag">--from-file</span>=api-token=./metronome-token
+<span class="cmd">kubectl</span> <span class="flag">-n</span> vbilling-system create secret generic vbilling-metronome \
+  <span class="flag">--from-file</span>=api-token=./metronome-token <span class="flag">--from-file</span>=webhook-secret=./metronome-webhook-secret
 <span class="cmd">helm</span> upgrade <span class="flag">--install</span> vbilling deploy/helm/vbilling <span class="flag">-n</span> vbilling-system \
   <span class="flag">--set</span> adapters=<span class="string">'{metronome}'</span> \
   <span class="flag">--set</span> metronome.existingSecret=vbilling-metronome \
-  <span class="flag">--set</span> metronome.rateCard=<span class="string">payg-usd</span> \
-  <span class="flag">--set</span> region=us-east-1</code></div>
-      <p>For Metronome + Stripe, add a Stripe Secret and turn on the link:</p>
+  <span class="flag">--set</span> enforcement.rules=<span class="string">'alerts.low_remaining_commit_balance_reached=paused'</span> \
+  <span class="flag">--set</span> region=ap-southeast-2</code></div>
+      <p>Then add the billable metrics to your Metronome configuration (<a href="#billable-metrics">Billable metrics as configuration</a>), with a usage product and a rate for each one you sell, and point a Metronome webhook at vBilling (<a href="#webhooks">Webhooks and billing state</a>).</p>
+      <p>To let vBilling create its own objects instead, on a Metronome account that exists for it, turn on <code>METRONOME_PROVISION</code>. This chart version has no value for it: <code>metronome.stripeLink=true</code> (with <code>stripe.existingSecret</code>) turns it on together with the Stripe link. Outside the chart, set <code>METRONOME_PROVISION=true</code> in vBilling's environment.</p>
       <div class="code-block"><code><span class="cmd">kubectl</span> <span class="flag">-n</span> vbilling-system create secret generic vbilling-stripe <span class="flag">--from-file</span>=api-key=./stripe-key
 <span class="cmd">helm</span> upgrade vbilling deploy/helm/vbilling <span class="flag">-n</span> vbilling-system <span class="flag">--reuse-values</span> \
   <span class="flag">--set</span> metronome.stripeLink=true \
+  <span class="flag">--set</span> metronome.rateCard=<span class="string">payg-usd</span> \
   <span class="flag">--set</span> stripe.existingSecret=vbilling-stripe</code></div>
 
       <h3 id="settings">Settings</h3>
@@ -330,222 +339,264 @@
           <tbody>
             <tr><td><code>adapters</code></td><td><code>ADAPTERS</code></td><td><code>[lago]</code></td><td>Include <code>metronome</code>.</td></tr>
             <tr><td><code>metronome.existingSecret</code></td><td><code>METRONOME_API_TOKEN</code>, <code>METRONOME_WEBHOOK_SECRET</code></td><td>(none)</td><td>Secret with the key <code>api-token</code> and, for webhooks, <code>webhook-secret</code>.</td></tr>
-            <tr><td><code>metronome.rateCard</code></td><td><code>METRONOME_RATE_CARD</code></td><td>(none)</td><td>Rate card alias or ID. Each tenant gets a contract on it; a tenant's <code>vbilling.vcluster.com/plan</code> overrides it.</td></tr>
-            <tr><td><code>metronome.stripeLink</code></td><td><code>METRONOME_STRIPE_LINK</code></td><td><code>false</code></td><td>Create each tenant's Stripe customer and link it in Metronome. Needs <code>stripe.existingSecret</code>.</td></tr>
-            <tr><td><code>metronome.stripeCollectionMethod</code></td><td><code>METRONOME_STRIPE_COLLECTION_METHOD</code></td><td><code>charge_automatically</code></td><td>Or <code>send_invoice</code>.</td></tr>
+            <tr><td>(none in this chart version)</td><td><code>METRONOME_PROVISION</code></td><td><code>false</code></td><td><code>true</code> lets vBilling create billable metrics, customers, contracts and Stripe links. Off, it only sends usage and reads.</td></tr>
+            <tr><td><code>metronome.rateCard</code></td><td><code>METRONOME_RATE_CARD</code></td><td>(none)</td><td>With <code>METRONOME_PROVISION=true</code>: the rate card alias or ID of the contract vBilling creates per tenant; a tenant's <code>vbilling.vcluster.com/plan</code> overrides it. Without it, unused: price coverage reads each customer's own contracts.</td></tr>
+            <tr><td><code>metronome.stripeLink</code></td><td><code>METRONOME_STRIPE_LINK</code></td><td><code>false</code></td><td>Turns on <code>METRONOME_PROVISION</code> and links each customer vBilling creates or adopts to a Stripe customer, with collection method <code>charge_automatically</code>. Needs <code>stripe.existingSecret</code>.</td></tr>
             <tr><td><code>stripe.existingSecret</code></td><td><code>STRIPE_API_KEY</code>, <code>STRIPE_WEBHOOK_SECRET</code></td><td>(none)</td><td>Secret with the key <code>api-key</code> and, for Stripe webhooks, <code>webhook-secret</code>.</td></tr>
+            <tr><td><code>enforcement.rules</code></td><td><code>ENFORCEMENT_RULES</code></td><td>(none)</td><td>Maps a webhook event type to a billing state, for example <code>alerts.low_remaining_commit_balance_reached=paused</code>.</td></tr>
+            <tr><td><code>billing.priceCheck.mode</code></td><td><code>PRICE_CHECK</code></td><td><code>warn</code></td><td><code>warn</code>, <code>hold</code> or <code>off</code>. See <a href="#price-coverage">Price coverage</a>.</td></tr>
             <tr><td><code>metronome.apiBase</code></td><td><code>METRONOME_API_BASE</code></td><td><code>https://api.metronome.com</code></td><td>API base URL.</td></tr>
             <tr><td><code>metronome.apiToken</code>, <code>metronome.webhookSecret</code></td><td></td><td>(none)</td><td>Inline alternatives to the Secret. Avoid them.</td></tr>
           </tbody>
         </table>
       </div>
 
-      <h2 id="objects">What vBilling creates in Metronome</h2>
-      <h3 id="customers">Customers</h3>
-      <p>Each tenant becomes one customer whose ingest alias is the tenant ID: <code>vcluster-&lt;namespace&gt;-&lt;name&gt;</code> by default, or the value of <code>vbilling.vcluster.com/tenant</code>. vBilling looks the customer up by alias before creating it, and a 409 on the alias resolves to the existing customer, so a tenant never gets two.</p>
-      <ul>
-        <li>The customer's name comes from <code>vbilling.vcluster.com/display-name</code> and is set at creation. Rename it in Metronome afterwards.</li>
-        <li>To use a customer that already exists, set <code>vbilling.vcluster.com/metronome-customer-id</code> on the tenant cluster's StatefulSet, its namespace or its <code>VirtualClusterInstance</code>.</li>
-        <li>Offboarded tenants keep their customer and contract, so final usage still invoices.</li>
-      </ul>
-
-      <h3 id="metrics">Billable metrics</h3>
-      <p>At startup vBilling creates one SUM billable metric per billable metric code. It sums the <code>value</code> property, filters on the event type (the metric code) and requires <code>value</code> and every group-key property to be present. Each metric gets one compound group key: the metric's pricing dimensions plus <code>tenant_cluster</code>. Existing metrics are matched by ID or by name and never duplicated; an archived metric is created again at the next start.</p>
-      <div class="config-table-wrap">
-        <table class="config-table">
-          <thead><tr><th>Billable metric</th><th>Group key</th></tr></thead>
-          <tbody>
-            <tr><td><code>GPU Hours [vcluster_gpu_hours]</code></td><td><code>region, sku, capacity_type, billing_mode, tenant_cluster</code></td></tr>
-            <tr><td><code>CPU Core Hours [vcluster_cpu_core_hours]</code></td><td><code>region, capacity_type, billing_mode, tenant_cluster</code></td></tr>
-            <tr><td><code>Memory GiB Hours [vcluster_memory_gb_hours]</code></td><td><code>region, capacity_type, billing_mode, tenant_cluster</code></td></tr>
-            <tr><td><code>Storage GiB Hours [vcluster_storage_gb_hours]</code></td><td><code>region, sku, tenant_cluster</code></td></tr>
-            <tr><td><code>Tenant Cluster Hours [vcluster_instance_hours]</code></td><td><code>region, tenant_class, tenant_cluster</code></td></tr>
-            <tr><td><code>Dedicated Node Hours [vcluster_private_node_hours]</code></td><td><code>region, sku, capacity_type, tenant_cluster</code></td></tr>
-            <tr><td><code>Network Egress GiB [vcluster_network_egress_gb]</code></td><td><code>region, tenant_cluster</code></td></tr>
-            <tr><td><code>Load Balancer Hours [vcluster_lb_hours]</code></td><td><code>region, tenant_cluster</code></td></tr>
-          </tbody>
-        </table>
-      </div>
-      <p>Custom metrics, from <code>CUSTOM_METRICS</code> or defined in PromQL, get a billable metric too, grouped on the keys you declare. The informational metrics <code>vcluster_gpu_utilization</code> and <code>vcluster_gpu_downtime_hours</code> are never sent to Metronome.</p>
-
-      <h3 id="contracts">Contracts</h3>
-      <p>When a tenant has a rate card, vBilling creates one contract per tenant and rate card. The rate card is the tenant's <code>vbilling.vcluster.com/plan</code>, or <code>metronome.rateCard</code> when the tenant has none. A UUID is used as the rate card ID, anything else as its alias.</p>
-      <ul>
-        <li>The contract starts at UTC midnight on the day vBilling creates it, with monthly usage statements on the first of the month.</li>
-        <li>Its uniqueness key is <code>vbilling:&lt;rate card&gt;@&lt;start date&gt;:&lt;tenant hash&gt;</code>, so a retry or a second replica never creates a second contract, and a tenant that loses its state adopts its open contract instead of creating one. Contracts from v0.2.0 (<code>vbilling-&lt;tenant&gt;-&lt;rate card&gt;</code>) are recognized and adopted too.</li>
-        <li>Moving a tenant to another rate card creates a contract on the new one from UTC midnight and ends the previous vBilling contract at that moment, so usage is never rated twice. A contract that would not have started by then (the plan changed back the same day) is archived instead. Moving back to an earlier rate card starts a new contract on it. Contracts vBilling did not create are never touched.</li>
-        <li>Without a rate card, vBilling creates the customer only and you manage its contracts in Metronome.</li>
-      </ul>
-
-      <h3 id="stripe-link">Stripe link</h3>
-      <p>With <code>metronome.stripeLink=true</code>, vBilling finds or creates the tenant's Stripe customer the same way the <a href="stripe.html">Stripe adapter</a> does (by the metadata <code>vbilling_tenant_id</code>, or the customer pinned with <code>vbilling.vcluster.com/stripe-customer-id</code>). It then creates the Metronome customer with Stripe as its billing provider, delivery method <code>direct_to_billing_provider</code> and your collection method. Contracts carry the same billing provider. No Stripe meters or prices are created in this mode.</p>
-      <div class="callout callout-info">
-        <div class="callout-icon">i</div>
-        <div>A customer that already exists in Metronome, found by its alias or pinned by ID, gets the same Stripe configuration if it has none, and is left as it is if it already has one.</div>
-      </div>
-
-      <h2 id="pricing">Pricing on dimensions</h2>
-      <p>Add a usage product per billable metric to your rate card. A product prices on a pricing group key and splits invoice lines with a presentation group key. Metronome requires the two together to form one compound group key of the billable metric, and vBilling defines exactly one, so split its keys between them:</p>
-      <div class="code-block"><code><span class="comment"># Usage product on "GPU Hours [vcluster_gpu_hours]"</span>
-pricing_group_key:      [region, sku, capacity_type, billing_mode]
-presentation_group_key: [tenant_cluster]
-
-<span class="comment"># Usage product on "Dedicated Node Hours [vcluster_private_node_hours]"</span>
-pricing_group_key:      [region, sku, capacity_type]
-presentation_group_key: [tenant_cluster]</code></div>
-      <p>Then give each combination you sell its own rate:</p>
-      <ul>
-        <li><strong>GPU model:</strong> <code>sku</code> carries the node's SKU label or GPU model, so H100 and L40S hours get different rates.</li>
-        <li><strong>Region:</strong> <code>region</code> is the vBilling instance's <code>region</code> (or each node's <code>topology.kubernetes.io/region</code> with <code>REGION_FROM_NODE=true</code>), so two regions can be priced differently.</li>
-        <li><strong>Capacity type:</strong> <code>capacity_type</code> is <code>on-demand</code>, <code>spot</code>, <code>preemptible</code> or <code>reserved</code>. A discount is a lower rate; quantities stay physical.</li>
-        <li><strong>Billing mode:</strong> <code>billing_mode</code> is <code>shared</code>, <code>dedicated_node</code> or <code>private_node</code>, so GPUs on whole nodes can carry their own rate.</li>
-      </ul>
-      <p>Price whole nodes either by node-hours or by their GPU, CPU and memory hours, not both (see <a href="private-nodes.html#billed">what gets billed</a>). Group-key properties an event does not carry are sent as <code>none</code>, so every event still matches its metric. vBilling sends quantities only: the rate card sets prices and currency.</p>
-
-      <h2 id="price-coverage">Price coverage</h2>
-      <p>Metronome rates usage it has no rate for at $0, without an error: a new GPU model or region that reaches Metronome before its rate does is missing from invoices, prepaid balances and spend alerts. vBilling checks, read-only, that the rate card prices everything it sends. It never creates products or rates and never writes to a rate card: Finance owns pricing.</p>
-      <p>For each billable metric, and for each series seen in the ledger within <code>PRICE_CHECK_LOOKBACK</code> (a metric, SKU and the values of the metric's other group keys, per rate card), the series is <strong>priced</strong> when:</p>
-      <ul>
-        <li>the metric's billable metric exists (vBilling creates it at bootstrap);</li>
-        <li>a usage product meters that billable metric;</li>
-        <li>the rate card of the tenant's contract (the tenant's <code>vbilling.vcluster.com/plan</code>, else <code>METRONOME_RATE_CARD</code>; an alias resolves to the rate card it points to now) has an entitled rate for that product, in effect now, whose <code>pricing_group_values</code> match the series on every key of the product's <code>pricing_group_key</code>: <code>sku</code>, and <code>region</code>, <code>capacity_type</code> or <code>billing_mode</code> if the product prices on them. Values an event does not carry match <code>none</code>, as vBilling sends them. A product without a pricing group key prices every SKU with one rate.</li>
-      </ul>
-      <div class="config-table-wrap">
-        <table class="config-table">
-          <thead><tr><th>Status</th><th>Meaning</th></tr></thead>
-          <tbody>
-            <tr><td><code>priced</code></td><td>A rate applies and is not 0.</td></tr>
-            <tr><td><code>unpriced</code></td><td>No billable metric, no usage product, no rate card with that ID or alias, or no entitled rate for the product and pricing group values. The hint names what to add, for example <code>add a rate for product "GPU Hours" (pricing group sku=NVIDIA-B200) to rate card "ai-cloud"</code>.</td></tr>
-            <tr><td><code>zero</code></td><td>The rate is 0 (flat 0, or every tier 0). This can be intentional, so it is information, not a gap.</td></tr>
-            <tr><td><code>unknown</code></td><td>A product meters the metric but no rate card is configured, so vBilling cannot tell which rates apply. Set <code>METRONOME_RATE_CARD</code> or the tenant's plan.</td></tr>
-          </tbody>
-        </table>
-      </div>
-      <p>Checks run at startup, every <code>PRICE_CHECK_INTERVAL</code> (10 minutes), within seconds of a new series appearing in the ledger, and on <code>POST /api/v1/pricing/check</code>. Gaps show in <code>GET /api/v1/pricing</code>, as <code>unpriced</code> entries in <code>GET /api/v1/sources?kind=pricing</code> with the hint, in the dashboard's Price coverage tile, and as <code>vbilling_unpriced_series{destination="metronome"}</code>:</p>
-      <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-s</span> <span class="string">'localhost:8080/api/v1/pricing?destination=metronome&amp;status=unpriced'</span> | jq <span class="string">'.destinations[].series[]'</span>
-{
-  <span class="string">"plan"</span>: "ai-cloud",
-  <span class="string">"metric"</span>: "vcluster_gpu_hours",
-  <span class="string">"sku"</span>: "NVIDIA-B200",
-  <span class="string">"status"</span>: "unpriced",
-  <span class="string">"detail"</span>: "rate card \"ai-cloud\" has no rate for product \"GPU Hours\" (pricing group billing_mode=private_node, capacity_type=on-demand, region=us-east-1, sku=NVIDIA-B200)",
-  <span class="string">"hint"</span>: "add a rate for product \"GPU Hours\" (pricing group ...) to rate card \"ai-cloud\"",
-  <span class="string">"combinations"</span>: 2,
-  <span class="string">"missing"</span>: [{"billing_mode": "private_node", "capacity_type": "on-demand", "region": "us-east-1"}]
-}</code></div>
-      <p>With <code>PRICE_CHECK=hold</code>, events of an unpriced series are not sent to Metronome until its rate exists, then they ship in ledger order (see <a href="troubleshooting.html#unpriced-usage">Unpriced usage</a>). Metronome accepts usage up to 34 days old, so usage held longer than <code>PRICE_CHECK_MAX_HOLD</code> (28 days) is released without a rate: Metronome rates it at $0 until the rate is added, and the <code>pricing/metronome/...</code> source turns <code>failing</code>.</p>
-      <p>The check reads these endpoints (the adapter's tests validate the requests and the response fixtures against the schemas of these pages):</p>
-      <ul>
-        <li><code>GET /v1/billable-metrics</code>: <a href="https://docs.metronome.com/api-reference/billable-metrics/list-all-billable-metrics" target="_blank">List all billable metrics</a></li>
-        <li><code>POST /v1/contract-pricing/products/list</code> with <code>{"archive_filter": "NOT_ARCHIVED"}</code>: <a href="https://docs.metronome.com/api-reference/products/list-products" target="_blank">List products</a></li>
-        <li><code>POST /v1/contract-pricing/rate-cards/list</code> (aliases only): <a href="https://docs.metronome.com/api-reference/rate-cards/list-rate-cards" target="_blank">List rate cards</a></li>
-        <li><code>POST /v1/contract-pricing/rate-cards/getRates</code> with the rate card, <code>at</code> = now and one selector per product: <a href="https://docs.metronome.com/api-reference/rate-cards/get-rates" target="_blank">Get rates</a></li>
-      </ul>
-      <p>Not covered: contract-level overrides. The check reads the rate card, not each contract's rate schedule, so a rate that exists only as an override on one contract is reported as a gap (and held in hold mode). Also not covered: pricing per <code>tenant_cluster</code>, and rates scheduled to start later (they count from their <code>starting_at</code>). Series are tracked per rate card, so tenants on different rate cards are checked separately.</p>
-
-      <h2 id="delivery">Delivery</h2>
-      <p>vBilling posts events to <code>/v1/ingest</code> in batches of 100, one event per tenant, metric, window and set of dimensions. <code>customer_id</code> is the Metronome customer ID once vBilling knows it, and the ingest alias before that:</p>
+      <h2 id="contract">Event contract</h2>
+      <p>vBilling posts usage to <code>POST /v1/ingest</code> in batches of 100: one event per tenant, metric, 60-second window and set of dimensions, sent about a minute after the window closes. Property values are strings, as Metronome recommends for numeric precision. One window of a private node with 8 GPUs and a public IP:</p>
       <div class="code-block"><code>{
   <span class="string">"transaction_id"</span>: "vb1_7c4e9a0d5b...",
-  <span class="string">"customer_id"</span>: "vcluster-team-a-team-a",
-  <span class="string">"event_type"</span>: "vcluster_gpu_hours",
-  <span class="string">"timestamp"</span>: "2026-10-05T10:00:00Z",
+  <span class="string">"customer_id"</span>: "tenant-acme",
+  <span class="string">"event_type"</span>: "vcluster_private_node_hours",
+  <span class="string">"timestamp"</span>: "2026-11-19T10:00:00Z",
   <span class="string">"properties"</span>: {
-    "value": "0.133333333", "unit": "gpu-hours",
-    "window_start": "2026-10-05T10:00:00Z", "window_end": "2026-10-05T10:01:00Z",
+    "value": "0.016666667", "unit": "node-hours",
+    "window_start": "2026-11-19T10:00:00Z", "window_end": "2026-11-19T10:01:00Z",
     "schema_version": "vbilling.usage/v1", "source": "collector",
-    "region": "us-east-1", "sku": "NVIDIA-H100-80GB-HBM3", "resource_id": "gpu-node-1",
-    "capacity_type": "on-demand", "billing_mode": "private_node",
-    "gpu_type": "NVIDIA-H100-80GB-HBM3", "gpu_profile": "full",
-    "tenant_cluster": "vcluster-team-a-team-a"
+    "region": "ap-southeast-2", "sku": "gpu-h100-8", "resource_id": "gpu-node-1",
+    "capacity_type": "reserved", "billing_mode": "private_node",
+    "node": "gpu-node-1", "tenant_cluster": "vcluster-acme-train",
+    "vcpus": "208", "memory_gib": "2014.8", "gpu_count": "8", "public_ip": "true"
   }
 }</code></div>
       <div class="config-table-wrap">
         <table class="config-table">
+          <thead><tr><th>Field</th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr><td><code>transaction_id</code></td><td>vBilling's event ID: <code>vb1_</code> and a hash of the tenant, metric, window, region, project, SKU, resource and dimensions. The same window always gets the same ID (the quantity is not part of it), and Metronome drops a repeated <code>transaction_id</code> for 34 days, so retries and replays never count twice.</td></tr>
+            <tr><td><code>customer_id</code></td><td>The tenant ID, which Metronome resolves as an ingest alias. With <code>METRONOME_PROVISION=true</code>, the customer ID vBilling created, found or was pinned to.</td></tr>
+            <tr><td><code>event_type</code></td><td>The metric code, such as <code>vcluster_private_node_hours</code> (see <a href="#billable-metrics">Billable metrics as configuration</a>).</td></tr>
+            <tr><td><code>timestamp</code></td><td>The start of the window, in UTC.</td></tr>
+            <tr><td><code>value</code></td><td>The quantity in the metric's unit, up to 9 decimals. Billable metrics sum it.</td></tr>
+            <tr><td><code>unit</code>, <code>window_start</code>, <code>window_end</code>, <code>schema_version</code>, <code>source</code></td><td>The unit, the window, <code>vbilling.usage/v1</code>, and where the quantity comes from (<code>collector</code> for Kubernetes objects, <code>prometheus</code>, <code>records</code>, ...).</td></tr>
+            <tr><td><code>region</code>, <code>sku</code>, <code>project</code>, <code>resource_id</code></td><td>The region, the SKU (the node's <code>SKU_LABEL</code> label, else its instance type or GPU model; the storage class for storage), the project, and the node name on per-node events (the cluster ID otherwise).</td></tr>
+            <tr><td><code>tenant_cluster</code>, <code>capacity_type</code>, <code>billing_mode</code>, ...</td><td>The event's dimensions: the cluster, <code>on-demand</code>, <code>spot</code>, <code>preemptible</code> or <code>reserved</code>, <code>shared</code>, <code>dedicated_node</code> or <code>private_node</code>, and where they apply the GPU type and profile, node, instance type, zone and tenant class.</td></tr>
+            <tr><td><code>vcpus</code>, <code>memory_gib</code>, <code>gpu_count</code>, <code>public_ip</code></td><td>On <code>vcluster_private_node_hours</code> only, for dedicated and private nodes: the node's CPU capacity in cores, its memory capacity in GiB (one decimal), its physical GPUs (MIG and time-slicing converted back to whole GPUs), and <code>true</code> when it has an <code>ExternalIP</code> address. They describe the instance and are not group keys.</td></tr>
+            <tr><td><code>accuracy</code></td><td><code>estimate</code> on quantities that are estimates: metrics the catalog marks as estimates (PromQL <code>query:</code> metrics, CPU and memory with <code>CPU_MEMORY_BASIS</code> other than <code>requests</code>, egress from <code>EGRESS_QUERY</code>), and any event that marks itself as an estimate. Absent on exact quantities. The webhook adapter adds the same property for its consumers.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>A group-key property an event does not carry is sent as <code>none</code>, so every event passes the billable metric's filters. Metronome accepts events up to 34 days old: vBilling dead-letters older ones before sending them (with an hour of margin), so a rewound cursor or a longer outage shows in the dead-letter list and in reconciliation instead of disappearing.</p>
+      <div class="config-table-wrap">
+        <table class="config-table">
           <thead><tr><th>Case</th><th>What happens</th></tr></thead>
           <tbody>
-            <tr><td>Retries and replays</td><td>Metronome ignores a repeated <code>transaction_id</code> for 34 days, so nothing counts twice. vBilling sends no <code>Idempotency-Key</code>, because Metronome would cache an error response under it.</td></tr>
-            <tr><td>Events older than 34 days</td><td>Dead-lettered as <code>older than Metronome's 34-day ingest window</code> (vBilling keeps an hour of margin).</td></tr>
+            <tr><td>Retries and replays</td><td>Deduplicated by <code>transaction_id</code> for 34 days. vBilling sends no <code>Idempotency-Key</code>, because Metronome would cache an error response under it.</td></tr>
+            <tr><td>No customer holds the alias yet</td><td>Accepted. Metronome attributes the usage when a customer gets the alias; price coverage reports <code>no customer for this alias yet</code> meanwhile.</td></tr>
+            <tr><td>Events older than 34 days</td><td>Dead-lettered as <code>older than Metronome's 34-day ingest window</code>.</td></tr>
             <tr><td>HTTP 400, 413, 422</td><td>The batch is split until the rejected events are isolated. Those are dead-lettered; the rest are delivered.</td></tr>
             <tr><td>HTTP 401, 403, 404, 408, 409, 429, 5xx, network errors</td><td>Retried with backoff, never dead-lettered. Only Metronome waits: other destinations keep delivering from their own cursors.</td></tr>
           </tbody>
         </table>
       </div>
-      <p>Check delivery, list dead letters and replay them (add your API token as a bearer token if you set one):</p>
+      <p>Check delivery, list dead letters and replay them (add your API token as a bearer token):</p>
       <div class="code-block"><code><span class="cmd">kubectl</span> <span class="flag">-n</span> vbilling-system port-forward svc/vbilling 8080
 <span class="cmd">curl</span> <span class="flag">-s</span> localhost:8080/api/v1/destinations | jq <span class="string">'.destinations[] | select(.name == "metronome")'</span>
 <span class="cmd">curl</span> <span class="flag">-s</span> localhost:8080/api/v1/destinations/metronome/dead-letters | jq
 <span class="cmd">curl</span> <span class="flag">-s -X POST</span> localhost:8080/api/v1/destinations/metronome/dead-letters/replay</code></div>
-      <p>Adding Metronome to a running vBilling starts delivery at the next committed window. To send the retained ledger as well (<code>persistence.retention</code>, default <code>168h</code>), rewind its cursor; transaction IDs keep the overlap from counting twice:</p>
+      <p>Adding Metronome to a running vBilling starts delivery at the next committed window. To send the retained ledger as well, rewind its cursor; transaction IDs keep the overlap from counting twice:</p>
       <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-s -X POST</span> localhost:8080/api/v1/destinations/metronome/cursor <span class="flag">-d</span> <span class="string">'{"seq": 0}'</span></code></div>
 
-      <h2 id="reconcile">Reconciliation</h2>
-      <p><code>GET /api/v1/reconcile?destination=metronome</code> recomputes each tenant's usage from the ledger and compares it with what Metronome's usage API (<code>/v1/usage</code>) recorded. Metronome reports whole UTC days only, so <code>from</code> and <code>to</code> must be UTC midnights (<code>YYYY-MM-DD</code> works). Without them, the previous full UTC day is checked. Narrow it with <code>tenant</code> or <code>metric</code>. <code>project</code>, <code>region</code>, <code>sku</code> and <code>cluster</code> pick the tenants and metrics with such usage, and each row still compares all of that tenant's usage of the metric, because Metronome reports totals per customer.</p>
-      <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-s</span> <span class="string">'localhost:8080/api/v1/reconcile?destination=metronome&amp;from=2026-10-04&amp;to=2026-10-05'</span> | jq
+      <h2 id="billable-metrics">Billable metrics as configuration</h2>
+      <p><code>vbilling metronome billable-metrics</code> prints the billable metrics vBilling's events need, as a JSON array of bodies for Metronome's <code>POST /v1/billable-metrics/create</code>: one per billable metric, the SUM of <code>value</code>, filtered on the event type and requiring <code>value</code> and every group-key property, with one compound group key. It does not call Metronome. Run it in vBilling's pod, so custom metrics are included, and add the entries to the configuration Finance applies to Metronome:</p>
+      <div class="code-block"><code><span class="cmd">kubectl</span> <span class="flag">-n</span> vbilling-system exec vbilling-0 -- /vbilling metronome billable-metrics &gt; billable-metrics.json
+<span class="cmd">jq</span> <span class="string">'.[] | select(.event_type_filter.in_values[0] == "vcluster_private_node_hours")'</span> billable-metrics.json
 <span class="output">{
-  "from": "2026-10-04T00:00:00Z",
-  "to": "2026-10-05T00:00:00Z",
+  "name": "Dedicated Node Hours [vcluster_private_node_hours]",
+  "aggregation_type": "SUM",
+  "aggregation_key": "value",
+  "event_type_filter": { "in_values": ["vcluster_private_node_hours"] },
+  "property_filters": [
+    { "name": "value", "exists": true },
+    { "name": "region", "exists": true },
+    { "name": "sku", "exists": true },
+    { "name": "capacity_type", "exists": true },
+    { "name": "tenant_cluster", "exists": true }
+  ],
+  "group_keys": [["region", "sku", "capacity_type", "tenant_cluster"]]
+}</span></code></div>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead><tr><th>Event type</th><th>Unit</th><th>Group key</th></tr></thead>
+          <tbody>
+            <tr><td><code>vcluster_gpu_hours</code></td><td>GPU-hours</td><td><code>region, sku, capacity_type, billing_mode, tenant_cluster</code></td></tr>
+            <tr><td><code>vcluster_cpu_core_hours</code></td><td>core-hours</td><td><code>region, capacity_type, billing_mode, tenant_cluster</code></td></tr>
+            <tr><td><code>vcluster_memory_gb_hours</code></td><td>GiB-hours</td><td><code>region, capacity_type, billing_mode, tenant_cluster</code></td></tr>
+            <tr><td><code>vcluster_storage_gb_hours</code></td><td>GiB-hours</td><td><code>region, sku, tenant_cluster</code></td></tr>
+            <tr><td><code>vcluster_instance_hours</code> (control plane hours)</td><td>hours</td><td><code>region, tenant_class, tenant_cluster</code></td></tr>
+            <tr><td><code>vcluster_private_node_hours</code></td><td>node-hours</td><td><code>region, sku, capacity_type, tenant_cluster</code></td></tr>
+            <tr><td><code>vcluster_network_egress_gb</code></td><td>GiB</td><td><code>region, tenant_cluster</code></td></tr>
+            <tr><td><code>vcluster_lb_hours</code></td><td>hours</td><td><code>region, tenant_cluster</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Name them as you like: vBilling finds a metric's billable metrics by their event type filter and their SUM of <code>value</code>, not by name. Property filters may narrow one, for example to the SKUs you sell; price coverage then reports the usage they leave out. Custom metrics, from <code>CUSTOM_METRICS</code>, gateway formats or PromQL, get a definition too, grouped on the keys you declare. <code>vcluster_gpu_utilization</code> and <code>vcluster_gpu_downtime_hours</code> are informational and never sent to Metronome. With <code>METRONOME_PROVISION=true</code> vBilling creates the same billable metrics at startup.</p>
+
+      <h3 id="pricing">Pricing on dimensions</h3>
+      <p>Add a usage product on each billable metric you sell. A product prices on a pricing group key and splits invoice lines with a presentation group key; together they must form a compound group key of the billable metric, so split its keys between them:</p>
+      <div class="code-block"><code><span class="comment"># Usage product on the vcluster_private_node_hours billable metric</span>
+pricing_group_key:      [region, sku, capacity_type]
+presentation_group_key: [tenant_cluster]
+
+<span class="comment"># Usage product on the vcluster_gpu_hours billable metric</span>
+pricing_group_key:      [region, sku, capacity_type, billing_mode]
+presentation_group_key: [tenant_cluster]</code></div>
+      <ul>
+        <li><strong>Instance profile:</strong> <code>sku</code> on node-hours is the node's profile when <code>SKU_LABEL</code> names the node label that carries it, else its instance type or GPU model, so each profile gets its own rate.</li>
+        <li><strong>Region:</strong> <code>region</code> is the vBilling instance's <code>region</code> (or each node's <code>topology.kubernetes.io/region</code> with <code>REGION_FROM_NODE=true</code>).</li>
+        <li><strong>Capacity type:</strong> <code>capacity_type</code> is <code>on-demand</code>, <code>spot</code>, <code>preemptible</code> or <code>reserved</code>. A discount is a lower rate; quantities stay physical.</li>
+        <li><strong>Public IP:</strong> a second billable metric on the same event type counts the node-hours of nodes with a public address, one per node:</li>
+      </ul>
+      <div class="code-block"><code>{
+  "name": "Public IP Hours",
+  "aggregation_type": "SUM",
+  "aggregation_key": "value",
+  "event_type_filter": { "in_values": ["vcluster_private_node_hours"] },
+  "property_filters": [
+    { "name": "value", "exists": true },
+    { "name": "public_ip", "in_values": ["true"] }
+  ]
+}</code></div>
+      <p>Price whole nodes either by node-hours or by their GPU, CPU and memory hours, not both (see <a href="private-nodes.html#billed">what gets billed</a>). Node disks are not metered. vBilling sends quantities only: the rate card sets prices and currency.</p>
+
+      <h2 id="prepaid-loop">The prepaid wallet loop</h2>
+      <p>An AI Cloud that sells prepaid capacity keeps the wallet in Metronome: the portal's contract carries prepaid commits, and a top-up adds a commit. vBilling closes the loop around that wallet:</p>
+      <ol>
+        <li>Usage reaches Metronome about a minute after each window, so the commit balance draws down while the cluster runs.</li>
+        <li>A threshold notification on the commit balance fires. A rule maps it to <code>paused</code>: in <code>enforce</code> mode vBilling pauses each of the tenant's clusters, and their workloads, control plane and node capacity stop billing at the second of the pause, while volumes and load balancers keep billing by default (see <a href="private-nodes.html#pause">Pausing a tenant</a>).</li>
+        <li>The customer tops up. When the payment for the payment-gated commit succeeds, Metronome sends <code>payment_gate.payment_status</code> with <code>payment_status: paid</code>, which clears the billing hold and resumes the clusters. Holds set for other reasons, such as <code>support</code> or <code>abuse</code>, stay.</li>
+      </ol>
+      <div class="code-block"><code><span class="comment"># values.yaml</span>
+enforcement:
+  mode: enforce
+  rules: <span class="string">"alerts.low_remaining_commit_balance_reached=paused"</span></code></div>
+      <p>Pick the notification that watches the balance the wallet is made of:</p>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead><tr><th>Wallet</th><th>Notification type for the rule</th></tr></thead>
+          <tbody>
+            <tr><td>Prepaid commits (the portal's top-ups)</td><td><code>alerts.low_remaining_commit_balance_reached</code></td></tr>
+            <tr><td>Commits and credits together</td><td><code>alerts.low_remaining_contract_credit_and_commit_balance_reached</code></td></tr>
+            <tr><td>Credits only (promotional or free credits)</td><td><code>alerts.low_remaining_contract_credit_balance_reached</code>. It watches credits only, so it never fires for a commit balance: do not use it for a prepaid commit wallet.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Metronome sends a threshold notification when the customer goes into alarm, so the pause follows the balance crossing the threshold, plus Metronome's notification delay. A webhook for a customer whose tenant vBilling has not seen yet (signed up, no cluster) is not resolved: have the portal hold and release such a tenant with <code>PUT /api/v1/billing-states/&lt;tenant&gt;</code>.</p>
+
+      <h2 id="price-coverage">Price coverage</h2>
+      <p>Metronome rates usage it has no rate for at $0, without an error: a new GPU model or region that reaches Metronome before its rate does is missing from invoices, prepaid drawdown and spend alerts. vBilling checks, read-only, that each tenant's usage has a rate where Metronome rates it. It never creates products or rates and never writes to a rate card.</p>
+      <p>In the default mode a series (a metric, SKU and the values of the metric's other group keys) is <strong>priced</strong> when:</p>
+      <ul>
+        <li>a billable metric sums <code>value</code> for its event type and its property filters let the series through (filters on the SKU and the metric's other group keys are checked; filters on properties that vary within a series, such as <code>public_ip</code> or <code>resource_id</code>, are assumed to pass);</li>
+        <li>a usage product meters that billable metric;</li>
+        <li>an active contract of the tenant's own customer, the customer that holds the tenant ID as ingest alias, has a rate card with an entitled rate for that product, in effect now, whose <code>pricing_group_values</code> match the series on every key of the product's <code>pricing_group_key</code>. Values an event does not carry match <code>none</code>, as vBilling sends them. A product without a pricing group key prices every SKU with one rate.</li>
+      </ul>
+      <p><code>METRONOME_RATE_CARD</code> and the tenant's plan play no part: the customer's contracts decide. vBilling reads each tenant's customer and contracts when its usage first appears, and again at a check once that read is 5 minutes old; tenants on the same rate card share their series. With <code>METRONOME_PROVISION=true</code>, the rate card is the one vBilling's contract uses: the tenant's <code>vbilling.vcluster.com/plan</code>, else <code>METRONOME_RATE_CARD</code> (an alias resolves to the rate card it points to now), and the billable metric is the one vBilling created.</p>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead><tr><th>Status</th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr><td><code>priced</code></td><td>A rate applies and is not 0.</td></tr>
+            <tr><td><code>unpriced</code></td><td>No billable metric counts the usage, no usage product meters it, or the rate card has no entitled rate for the product and pricing group values. The hint names what to add, for example <code>add a rate for product "Compute Instance Hours" (pricing group sku=gpu-b200-8) to rate card "AI Cloud AUD"</code>.</td></tr>
+            <tr><td><code>zero</code></td><td>The rate is 0 (flat 0, or every tier 0). This can be intentional, so it is information, not a gap.</td></tr>
+            <tr><td><code>unknown</code></td><td><code>no customer for this alias yet</code>, or the customer has no active contract with a rate card. A warning only: Metronome keeps the usage and rates it once a customer and a contract cover it, so it is never held.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Checks run at startup, every 10 minutes, within seconds of a new series appearing in the ledger, and on <code>POST /api/v1/pricing/check</code>. Gaps show in <code>GET /api/v1/pricing</code>, as <code>unpriced</code> entries in <code>GET /api/v1/sources?kind=pricing</code> with the hint, in the dashboard's Price coverage tile, and as <code>vbilling_unpriced_series{destination="metronome"}</code>:</p>
+      <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-s</span> <span class="string">'localhost:8080/api/v1/pricing?destination=metronome'</span> | jq <span class="string">'.destinations[].series[] | select(.status != "priced")'</span></code></div>
+      <p>With <code>PRICE_CHECK=hold</code>, events of an <code>unpriced</code> series wait in vBilling until the rate exists, then ship in ledger order (see <a href="troubleshooting.html#unpriced-usage">Unpriced usage</a>). Metronome accepts usage up to 34 days old, so usage held longer than 28 days is released without a rate and the <code>pricing/metronome/...</code> source turns <code>failing</code>.</p>
+      <p>The check reads, and the adapter's tests validate its requests and fixtures against the schemas of these pages:</p>
+      <ul>
+        <li><code>GET /v1/billable-metrics</code>: <a href="https://docs.metronome.com/api-reference/billable-metrics/list-all-billable-metrics" target="_blank">List all billable metrics</a></li>
+        <li><code>POST /v1/contract-pricing/products/list</code> with <code>{"archive_filter": "NOT_ARCHIVED"}</code>: <a href="https://docs.metronome.com/api-reference/products/list-products" target="_blank">List products</a></li>
+        <li><code>POST /v1/contract-pricing/rate-cards/list</code>, for names and aliases: <a href="https://docs.metronome.com/api-reference/rate-cards/list-rate-cards" target="_blank">List rate cards</a></li>
+        <li><code>POST /v1/contract-pricing/rate-cards/getRates</code> with the rate card, <code>at</code> = now and one selector per product: <a href="https://docs.metronome.com/api-reference/rate-cards/get-rates" target="_blank">Get rates</a></li>
+        <li>In the default mode, per tenant: <code>GET /v1/customers?ingest_alias=&lt;tenant&gt;</code> (<a href="https://docs.metronome.com/api-reference/customers/list-customers" target="_blank">List customers</a>) and <code>POST /v2/contracts/list</code> with <code>covering_date</code> = now (<a href="https://docs.metronome.com/api-reference/contracts/list-customer-contracts-v2" target="_blank">List customer contracts</a>)</li>
+      </ul>
+      <p>Not covered: contract-level overrides (the check reads the contract's rate card, so a rate that exists only as an override is reported as a gap, and held in hold mode), SQL billable metrics, pricing per <code>tenant_cluster</code>, and rates scheduled to start later (they count from their <code>starting_at</code>). When several billable metrics count the same usage, the series is priced if any of them has a rate.</p>
+
+      <h2 id="reconcile">Reconciliation</h2>
+      <p><code>GET /api/v1/reconcile?destination=metronome</code> recomputes each tenant's usage from the ledger and compares it with what Metronome's usage API (<code>POST /v1/usage</code>) recorded for the tenant's customer, found by ingest alias, on a billable metric that sums the value of every event of the type (one without filters on values, such as vBilling's definition). Metronome reports whole UTC days only, so <code>from</code> and <code>to</code> must be UTC midnights (<code>YYYY-MM-DD</code> works). Without them, the previous full UTC day is checked. Narrow it with <code>tenant</code> or <code>metric</code>; each row compares all of that tenant's usage of the metric, because Metronome reports totals per customer.</p>
+      <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-s</span> <span class="string">'localhost:8080/api/v1/reconcile?destination=metronome&amp;from=2026-11-18&amp;to=2026-11-19'</span> | jq
+<span class="output">{
+  "from": "2026-11-18T00:00:00Z",
+  "to": "2026-11-19T00:00:00Z",
   "results": [{
     "destination": "metronome",
     "ok": true,
     "rows": [{
-      "tenant": "vcluster-team-a-team-a", "metric": "vcluster_gpu_hours",
-      "ledger": 192, "dead_lettered": 0, "expected": 192,
-      "recorded": 192, "difference": 0, "match": true
+      "tenant": "tenant-acme", "metric": "vcluster_private_node_hours",
+      "ledger": 24, "dead_lettered": 0, "expected": 24,
+      "recorded": 24, "difference": 0, "match": true
     }]
   }]
 }</span></code></div>
-      <p><code>expected</code> is the ledger total minus dead letters, and a row matches within 0.1%. Reconcile once a day has closed and <code>lag_records</code> on <code>/api/v1/destinations</code> is back to 0, so no events are still in flight.</p>
+      <p><code>expected</code> is the ledger total minus dead letters, and a row matches within 0.1%. Reconcile once a day has closed and <code>lag_records</code> on <code>/api/v1/destinations</code> is back to 0. Usage of a tenant that no customer holds yet reads 0 in Metronome until the portal adds the alias, and two tenants that are aliases of one customer are not reconciled, because Metronome reports one total for both.</p>
 
       <h2 id="webhooks">Webhooks and billing state</h2>
-      <p>Create a webhook in Metronome pointing at <code>https://&lt;your vBilling host&gt;/webhooks/metronome</code> and add its secret to the Secret as <code>webhook-secret</code>. The Service is <code>ClusterIP</code>; expose only the <code>/webhooks/</code> paths to the internet. Billing states are always available: Metronome's webhooks set them once <code>webhook-secret</code> is set.</p>
-      <div class="code-block"><code><span class="cmd">kubectl</span> <span class="flag">-n</span> vbilling-system create secret generic vbilling-metronome \
-  <span class="flag">--from-file</span>=api-token=./metronome-token <span class="flag">--from-file</span>=webhook-secret=./metronome-webhook-secret \
-  <span class="flag">--dry-run=client -o</span> yaml | <span class="cmd">kubectl</span> apply <span class="flag">-f</span> -
-<span class="cmd">kubectl</span> <span class="flag">-n</span> vbilling-system rollout restart statefulset/vbilling</code></div>
-      <p>vBilling verifies <code>Metronome-Webhook-Signature</code>: hex HMAC-SHA256 with the secret over <code>X-Metronome-Date</code> (or <code>Date</code>), a newline and the raw body, within 5 minutes of that date. A bad signature gets a 400. Verified events that carry no billing signal, belong to a customer that is not a vBilling tenant, or repeat an event already applied get a 200 with <code>"applied": false</code>; other failures return a 500 so Metronome retries.</p>
+      <p>Create a webhook in Metronome pointing at <code>https://&lt;your vBilling host&gt;/webhooks/metronome</code> and put its secret in the Secret as <code>webhook-secret</code>. The Service is <code>ClusterIP</code>; expose only the <code>/webhooks/</code> paths to the internet.</p>
+      <p>vBilling verifies <code>Metronome-Webhook-Signature</code>: hex HMAC-SHA256 with the secret over <code>X-Metronome-Date</code> (or <code>Date</code>), a newline and the raw body, within 5 minutes of that date. A bad signature gets a 400. A webhook names the customer by its Metronome ID; vBilling reads the customer's ingest aliases (cached for a minute) and resolves the webhook to the alias it knows as a tenant, the compute alias, whatever order the aliases are in. Verified events that carry no billing signal, belong to a customer that holds none of vBilling's tenants' aliases, or repeat an event already applied get a 200 with <code>"applied": false</code>; other failures return a 500 so Metronome retries.</p>
       <div class="config-table-wrap">
         <table class="config-table">
           <thead><tr><th>Metronome event</th><th>Billing state</th></tr></thead>
           <tbody>
-            <tr><td><code>alerts.*</code>, for example <code>alerts.spend_threshold_reached</code> or <code>alerts.low_remaining_contract_credit_balance_reached</code></td><td><code>warning</code>, with the alert's name as the reason</td></tr>
+            <tr><td><code>alerts.*</code>, for example <code>alerts.low_remaining_commit_balance_reached</code> or <code>alerts.spend_threshold_reached</code></td><td><code>warning</code>, with the notification's name as the reason, unless a rule maps it</td></tr>
             <tr><td><code>payment_gate.payment_status</code> with <code>payment_status: failed</code></td><td><code>delinquent</code></td></tr>
             <tr><td><code>payment_gate.payment_status</code> with <code>payment_status: paid</code></td><td><code>active</code></td></tr>
           </tbody>
         </table>
       </div>
-      <p>Map any event type to another state with <code>enforcement.rules</code> (<code>ENFORCEMENT_RULES</code>). A hard spend cap suspends the tenant when its spend alert fires:</p>
-      <div class="code-block"><code><span class="comment"># values.yaml</span>
-enforcement:
-  mode: enforce
-  rules: <span class="string">"alerts.spend_threshold_reached=suspended"</span>
-  admissionPolicy:
-    enabled: true</code></div>
+      <p>Map any event type to another state with <code>enforcement.rules</code> (<code>ENFORCEMENT_RULES</code>): <code>paused</code> for a prepaid wallet (<a href="#prepaid-loop">The prepaid wallet loop</a>), or <code>suspended</code> for a hard spend cap (<code>alerts.spend_threshold_reached=suspended</code>), which blocks new workloads and keeps running ones.</p>
       <div class="config-table-wrap">
         <table class="config-table">
           <thead><tr><th>enforcement.mode</th><th>Effect</th></tr></thead>
           <tbody>
             <tr><td><code>observe</code> (default)</td><td>Records the state. It appears in <code>GET /api/v1/billing-states</code>, the metrics and the dashboard.</td></tr>
-            <tr><td><code>annotate</code></td><td>Also annotates the tenant cluster, labels its namespace <code>vbilling.vcluster.com/billing-state</code> and emits a Kubernetes event.</td></tr>
-            <tr><td><code>enforce</code></td><td>Also labels suspended namespaces <code>vbilling.vcluster.com/suspended=true</code>. With <code>enforcement.admissionPolicy.enabled=true</code> (Kubernetes 1.30+), a ValidatingAdmissionPolicy denies new pods in those namespaces of the control plane cluster. Running workloads keep running.</td></tr>
+            <tr><td><code>annotate</code></td><td>Also annotates the cluster, labels its namespace <code>vbilling.vcluster.com/billing-state</code> and emits a Kubernetes event.</td></tr>
+            <tr><td><code>enforce</code></td><td>Also acts on the state: <code>suspended</code> denies new pods (see <a href="private-nodes.html#enforcement">Enforcement</a>), <code>paused</code> pauses the tenant's clusters.</td></tr>
           </tbody>
         </table>
       </div>
-      <p><strong>Metronome + Stripe:</strong> payment failures on invoices Stripe collects reach vBilling through Stripe's webhooks, not Metronome's, so point Stripe's webhooks at <code>/webhooks/stripe</code> as well and add <code>webhook-secret</code> to the <code>vbilling-stripe</code> Secret. vBilling resolves them through the linked Stripe customers. See <a href="stripe.html#webhooks">Stripe webhooks</a>. To override a state by hand, use <code>PUT /api/v1/billing-states/&lt;tenant&gt;</code> with <code>{"state": "active", "reason": "..."}</code>.</p>
+      <p><strong>Stripe:</strong> payment failures on invoices Stripe collects reach vBilling through Stripe's webhooks, not Metronome's. With the Stripe link (<code>METRONOME_PROVISION=true</code>), point Stripe's webhooks at <code>/webhooks/stripe</code> too; vBilling resolves them through the linked Stripe customers (see <a href="stripe.html#webhooks">Stripe webhooks</a>). To set a state by hand, use <code>PUT /api/v1/billing-states/&lt;tenant&gt;</code> with <code>{"state": "active", "reason": "..."}</code>.</p>
+
+      <h2 id="verified">What is verified</h2>
+      <ul>
+        <li><strong>Request shapes.</strong> Every request body vBilling sends to Metronome is validated in tests against request schemas extracted from Metronome's published OpenAPI specification (ingest, customers, billable metrics, contracts, usage, billing provider configurations), strictly: an unknown field fails. The price check's requests and response fixtures are validated against the schemas of their endpoints too.</li>
+        <li><strong>A fake Metronome.</strong> An in-process fake (<code>internal/destinations/metronome/metronometest</code>) implements what vBilling uses, as Metronome documents it: ingest with <code>transaction_id</code> dedupe and usage attached to the customer that gets its alias later; customers with several aliases and 409 on a taken alias, archived customers included; billable metrics, products, rate cards and rates; contracts per customer; usage aggregation; and webhooks signed with Metronome's scheme. It validates request bodies against the same schemas.</li>
+        <li><strong>The loop.</strong> A test runs the default mode end to end against the fake: the portal creates a customer with an identity alias and a compute alias and a contract with a prepaid commit; vBilling delivers an hour of ledger usage under the compute alias and creates nothing; price coverage reads the customer's contract; a signed <code>alerts.low_remaining_commit_balance_reached</code> webhook pauses the tenant through a rule, and a signed <code>payment_gate.payment_status</code> <code>paid</code> webhook resumes it, both through vBilling's webhook handler; and reconciliation against <code>/v1/usage</code> matches the ledger.</li>
+        <li><strong>Webhook signatures</strong> are checked against Metronome's documented test vector.</li>
+      </ul>
+      <p><strong>Not verified:</strong> nothing has run against a live Metronome account or sandbox yet. The fake follows Metronome's documentation, so what the documentation does not pin down is untested: how fast threshold notifications fire, how usage that arrives before its customer is attributed in practice, Metronome's error responses, and rate and contract edge cases. Run the loop in a sandbox before you invoice from it.</p>
 
       <h2 id="troubleshooting">Troubleshooting</h2>
       <h3>The pod exits at startup</h3>
       <p><code>initialize adapters: METRONOME_API_TOKEN is required when the metronome adapter is enabled</code> means the token did not reach the pod. The chart mounts Secret keys as optional, so a wrong Secret name or key shows up here: the key must be <code>api-token</code> in the Secret named by <code>metronome.existingSecret</code>. <code>METRONOME_STRIPE_LINK needs STRIPE_API_KEY to create Stripe customers</code> is the same problem with the key <code>api-key</code> in <code>stripe.existingSecret</code>.</p>
-      <h3>Delivery to Metronome is paused</h3>
-      <p><code>[pipeline] metronome: bootstrap failed (delivery paused, will retry): list billable metrics: metronome GET /v1/billable-metrics: HTTP 401</code> means Metronome rejected the token. Usage keeps accumulating in the ledger and other destinations keep delivering. Fix the token, then restart vBilling, which reads Secrets at startup.</p>
+      <h3>Delivery fails with 401</h3>
+      <p>Metronome rejected the token. Usage keeps accumulating in the ledger and other destinations keep delivering. Fix the token, then restart vBilling, which reads Secrets at startup. With <code>METRONOME_PROVISION=true</code> the log reads <code>bootstrap failed (delivery paused, will retry)</code> instead.</p>
+      <h3>Usage does not show on the customer</h3>
+      <p>The customer does not hold the tenant ID as an ingest alias. <code>GET /api/v1/pricing</code> reports <code>no customer for this alias yet</code> for the tenant's series. Add the tenant ID to the customer's ingest aliases: Metronome attributes the usage sent earlier, and the next price check finds the customer.</p>
+      <h3>A webhook is not applied</h3>
+      <p><code>"applied": false</code> with <code>customer is not a vBilling tenant</code> means the customer holds none of the aliases vBilling knows as tenants: its compute alias is not a tenant ID, or the tenant has not sent usage yet. Fix the alias, or set the state with <code>PUT /api/v1/billing-states/&lt;tenant&gt;</code>.</p>
+      <h3>Creating a customer fails with 409 (provisioning)</h3>
+      <p>Another customer holds the tenant ID as alias. vBilling adopts an active one; for an archived one it logs <code>ingest alias "..." belongs to archived customer ...</code> and creates nothing. Remove the alias from the archived customer, or pin the tenant with <code>vbilling.vcluster.com/metronome-customer-id</code>.</p>
       <h3>Tenants get no contract</h3>
-      <p>Contract errors name the tenant and rate card: <code>create contract for &lt;tenant&gt; on &lt;rate card&gt;</code>. Check that the alias or ID exists in Metronome, and check the tenant's <code>vbilling.vcluster.com/plan</code> if it has one. When Metronome answers 400, the log reads <code>[pipeline] metronome: tenant &lt;tenant&gt; rejected</code> and usage keeps flowing to the customer without a contract; other errors pause delivery and retry.</p>
+      <p>vBilling creates contracts only with <code>METRONOME_PROVISION=true</code>; without it, <code>METRONOME_RATE_CARD only creates contracts with METRONOME_PROVISION=true</code> is logged at startup. With it, contract errors name the tenant and rate card (<code>create contract for &lt;tenant&gt; on &lt;rate card&gt;</code>): check that the alias or ID exists in Metronome, and the tenant's <code>vbilling.vcluster.com/plan</code> if it has one. A new contract starts at UTC midnight of the day of the usage it is created for, so a backlog delivered after midnight is rated; when another vBilling contract of the tenant still runs, the new one takes over today.</p>
       <h3>Dead letters older than 34 days</h3>
       <p><code>older than Metronome's 34-day ingest window</code> comes from a cursor rewind or an outage longer than Metronome accepts backdated events. Metronome cannot take them. They stay in the dead-letter list, and reconciliation reports them as <code>dead_lettered</code>.</p>
       <h3>A series is unpriced</h3>
-      <p><code>[pricing] metronome: vcluster_gpu_hours sku=NVIDIA-B200 (plan ai-cloud) is unpriced: ...</code> and the <code>pricing/metronome/...</code> source name the product and rate card, and the hint names the rate to add. Add it to the rate card, then run <code>curl -s -X POST localhost:8080/api/v1/pricing/check</code> or wait for the next check. A product on the wrong billable metric, a rate marked not entitled, or a rate card alias that points elsewhere show up the same way, with the detail saying which.</p>
-      <h3>Reconciliation fails</h3>
-      <p><code>metronome reconciliation needs whole UTC days (got ... to ...)</code> means <code>from</code> or <code>to</code> is not a UTC midnight. Pass dates as <code>YYYY-MM-DD</code>, or RFC 3339 times at <code>00:00:00Z</code>.</p>
+      <p><code>[pricing] metronome: vcluster_private_node_hours sku=gpu-b200-8 (plan ...) is unpriced: ...</code> and the <code>pricing/metronome/...</code> source name the billable metric, product or rate card, and the hint names what to add. Add it in Metronome, then run <code>curl -s -X POST localhost:8080/api/v1/pricing/check</code> or wait for the next check.</p>
+      <h3>Reconciliation fails or reads 0</h3>
+      <p><code>metronome reconciliation needs whole UTC days (got ... to ...)</code> means <code>from</code> or <code>to</code> is not a UTC midnight. A recorded total of 0 means no customer holds the tenant's alias yet, or no billable metric sums every event of the type: the log says which.</p>
     </main>
   </div>
 
