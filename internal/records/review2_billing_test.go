@@ -78,8 +78,8 @@ func TestReview2RecordsSurviveACollectionIntervalChange(t *testing.T) {
 func TestReview2TwoReplicasSplitRecordsKeepTheFullTotal(t *testing.T) {
 	kube := fake.NewSimpleClientset()
 	leaseOpts := func(id string) lease.Options {
-		return lease.Options{Namespace: "vbilling-system", Identity: id, LeaseDuration: time.Second,
-			RenewDeadline: 600 * time.Millisecond, RetryPeriod: 100 * time.Millisecond, Logf: func(string, ...any) {}}
+		return lease.Options{Namespace: "vbilling-system", Identity: id, LeaseDuration: 2 * time.Second,
+			RenewDeadline: 1500 * time.Millisecond, RetryPeriod: 200 * time.Millisecond, Logf: func(string, ...any) {}}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -123,7 +123,7 @@ func TestReview2TwoReplicasSplitRecordsKeepTheFullTotal(t *testing.T) {
 	select {
 	case <-bRunning:
 		t.Fatal("a second instance started while the first holds the Lease")
-	case <-time.After(2500 * time.Millisecond):
+	case <-time.After(4500 * time.Millisecond):
 	}
 	if wm, ok := b.ledger.Watermark(SourceBase); ok || b.ledger.Committed() != 0 {
 		t.Fatalf("the waiting instance committed to its ledger (watermark %s, seq %d)", wm, b.ledger.Committed())

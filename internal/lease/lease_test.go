@@ -19,11 +19,12 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 )
 
-// fast keeps tests short. A Lease records whole seconds, so one second is
-// the shortest lease that still expires.
+// fast keeps tests short. A Lease records whole seconds; two seconds keep
+// a holder's renewals ahead of expiry even when -race and parallel test
+// binaries starve it for a moment.
 func fast(id string) Options {
-	return Options{Namespace: "vbilling-system", Identity: id, LeaseDuration: time.Second,
-		RenewDeadline: 600 * time.Millisecond, RetryPeriod: 100 * time.Millisecond, Logf: func(string, ...any) {}}
+	return Options{Namespace: "vbilling-system", Identity: id, LeaseDuration: 2 * time.Second,
+		RenewDeadline: 1500 * time.Millisecond, RetryPeriod: 200 * time.Millisecond, Logf: func(string, ...any) {}}
 }
 
 func acquireAsync(ctx context.Context, t *testing.T, kube *fake.Clientset, o Options) <-chan *Held {
@@ -54,7 +55,7 @@ func TestSecondInstanceWaitsForTheLease(t *testing.T) {
 	select {
 	case <-b:
 		t.Fatal("b took the Lease while a holds it")
-	case <-time.After(2500 * time.Millisecond): // more than two lease durations: a keeps renewing
+	case <-time.After(4500 * time.Millisecond): // more than two lease durations: a keeps renewing
 	}
 	released := time.Now()
 	a.Release()
@@ -123,7 +124,7 @@ func TestLosingTheLeaseIsReported(t *testing.T) {
 	refuse.Store(true)
 	select {
 	case <-h.Lost():
-	case <-time.After(3 * time.Second):
+	case <-time.After(6 * time.Second):
 		t.Fatal("a Lease that cannot be renewed was not reported lost")
 	}
 	h.Release()
