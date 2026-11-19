@@ -65,7 +65,9 @@ func TestPauseOpenedByAnOlderVersionIsVerifiedAfresh(t *testing.T) {
 }
 
 // An external cluster's pause an older version opened is replaced at the
-// next clean pass, and resuming ends it whether or not it was verified.
+// next clean pass (dropped: that pass also finds no pause admission policy,
+// so nothing before it is vouched for), and resuming ends it whether or not
+// it was verified.
 func TestExternalPauseOpenedByAnOlderVersion(t *testing.T) {
 	inside := fake.NewSimpleClientset(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "edge-1"}})
 	cl := discovery.TenantCluster{Name: "edge", External: true}
@@ -82,8 +84,8 @@ func TestExternalPauseOpenedByAnOlderVersion(t *testing.T) {
 	e.Resync(ctx)
 	e.Wait()
 	got := spans.Spans(cl.ExternalID())
-	if len(got) != 2 || got[0].Verified() || !got[0].To.Equal(clock.Now()) || !got[1].Verified() || !got[1].Open() {
-		t.Fatalf("spans after the first pass = %+v, want the older one ended and a verified one open", got)
+	if len(got) != 1 || !got[0].Verified() || !got[0].Drained || !got[0].Open() || !got[0].From.Equal(clock.Now()) {
+		t.Fatalf("spans after the first pass = %+v, want only a verified one, open from now", got)
 	}
 
 	// A pause an older version opened is ended on resume too.

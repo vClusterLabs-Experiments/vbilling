@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -154,7 +156,7 @@ func (e *Enforcer) pauseCluster(ctx context.Context, cl discovery.TenantCluster,
 		left, down, err = e.confirmStopped(ctx, cl, own)
 		switch {
 		case err != nil:
-			own = ownCheck{why: fmt.Sprintf("could not confirm its control plane stopped (%v)", err)}
+			own = ownCheck{why: fmt.Sprintf("its own nodes could not be checked while its control plane stopped (%v)", err)}
 		case len(left) > 0:
 			own = ownCheck{why: stillThere(left, "started on its own nodes while its control plane stopped")}
 		}
@@ -232,11 +234,15 @@ type ownCheck struct {
 	// list returns the workload pods on the cluster's own nodes, to check
 	// again while its control plane stops; nil when it has none.
 	list func(context.Context) ([]corev1.Pod, error)
+	// inside is the cluster's API, whose pause admission policy is checked
+	// with list.
+	inside kubernetes.Interface
 }
 
 // drainOwn blocks new pods inside the cluster and drains its own nodes. An
 // error means the drain failed (its API refused a call or could not be
-// reached) and may succeed if retried.
+// reached, or the pause admission policy could not be installed) and may
+// succeed if retried.
 func (e *Enforcer) drainOwn(ctx context.Context, cl discovery.TenantCluster, ts TenantState) (ownCheck, error) {
 	if e.opts.TenantClient == nil {
 		return ownCheck{noAccess: true}, nil
@@ -250,6 +256,12 @@ func (e *Enforcer) drainOwn(ctx context.Context, cl discovery.TenantCluster, ts 
 		// either, so nothing on its own nodes is billed.
 		return ownCheck{ok: true}, nil
 	}
+	// No pod may start from here on, in any namespace: the drain then
+	// converges, and a pod that starts after the last check below needs the
+	// policy removed first, which that check sees.
+	if err := e.pausePolicy(ctx, kube); err != nil {
+		return ownCheck{}, fmt.Errorf("install the pause admission policy %s: %w", PausedPolicyName, err)
+	}
 	if err := e.policyInside(ctx, kube, ts); err != nil {
 		log.Printf("[enforcement] %s: admission policy before pause: %v", cl.ExternalID(), err)
 	}
@@ -260,7 +272,7 @@ func (e *Enforcer) drainOwn(ctx context.Context, cl discovery.TenantCluster, ts 
 	if len(d.left) > 0 {
 		return ownCheck{why: stillThere(d.left, "still on its own nodes after the drain")}, nil
 	}
-	return ownCheck{ok: true, list: d.list}, nil
+	return ownCheck{ok: true, list: d.list, inside: kube}, nil
 }
 
 // ownWithoutAccess decides about the own nodes of a cluster vBilling could
@@ -295,9 +307,13 @@ func (e *Enforcer) ownSinceRestart(ctx context.Context, cl discovery.TenantClust
 }
 
 // confirmStopped waits for a stopped control plane to go down. While the
-// cluster's API still answers, it checks no workload came back on the
-// cluster's own nodes: a pod started in the last moments of the API would
-// run on with nothing left to stop it.
+// cluster's API still answers, it checks that no workload came back on the
+// cluster's own nodes and that the pause admission policy is still in
+// place: a pod started in the last moments of the API would run on with
+// nothing left to stop it. Only the API going away once its control plane
+// is down (apiGone) ends the checks; a check that fails any other way
+// (Forbidden, Unauthorized, a timeout, a policy removed or changed) is an
+// error, and the pause stays unverified.
 func (e *Enforcer) confirmStopped(ctx context.Context, cl discovery.TenantCluster, own ownCheck) ([]corev1.Pod, bool, error) {
 	deadline := time.Now().Add(e.drainTimeout())
 	every := min(time.Second, e.drainTimeout()/10+time.Millisecond)
@@ -308,13 +324,17 @@ func (e *Enforcer) confirmStopped(ctx context.Context, cl discovery.TenantCluste
 			return nil, false, err
 		}
 		if answering {
-			pods, err := own.list(ctx)
+			pods, err := e.checkOwn(ctx, own)
 			switch {
-			case err != nil:
-				answering = false // its API went away with the control plane
-			case len(pods) > 0:
+			case err == nil && len(pods) > 0:
 				return pods, w.down(), nil
+			case err == nil:
+			case !apiGone(err):
+				return nil, w.down(), err
+			case w.down():
+				answering = false // its API went away with the control plane
 			}
+			// Gone while the control plane is not down yet: look again.
 		}
 		if w.down() && !answering || !time.Now().Before(deadline) {
 			return nil, w.down(), nil
@@ -327,14 +347,52 @@ func (e *Enforcer) confirmStopped(ctx context.Context, cl discovery.TenantCluste
 	}
 }
 
+// checkOwn lists the workloads on a cluster's own nodes and checks that its
+// pause admission policy is intact.
+func (e *Enforcer) checkOwn(ctx context.Context, own ownCheck) ([]corev1.Pod, error) {
+	pods, err := own.list(ctx)
+	if err != nil || len(pods) > 0 || own.inside == nil {
+		return pods, err
+	}
+	why, err := pausePolicyChanged(ctx, own.inside)
+	if err != nil {
+		return nil, fmt.Errorf("read the pause admission policy: %w", err)
+	}
+	if why != "" {
+		return nil, errors.New(why)
+	}
+	return nil, nil
+}
+
+// apiGone reports whether a call failed because the cluster's API went away
+// with its control plane: the connection was refused or reset, it ended
+// early (EOF), or the proxy in front of it answered 503. Anything else,
+// Forbidden and Unauthorized above all, means the API is there and did not
+// answer: a tenant, cluster admin inside, can revoke vBilling's access.
+func apiGone(err error) bool {
+	if err == nil {
+		return false
+	}
+	if apierrors.IsServiceUnavailable(err) {
+		return true
+	}
+	if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	// A transport error that reaches us only as text.
+	msg := err.Error()
+	return strings.HasSuffix(msg, "connect: connection refused") || strings.HasSuffix(msg, "connection reset by peer") || strings.HasSuffix(msg, ": EOF")
+}
+
 // pauseExternal pauses a cluster vBilling reaches only through its own API
 // (vCluster Standalone, clusters elsewhere): its control plane is not
-// vBilling's to stop, so the pause is the in-cluster policy plus drained
-// nodes, applied again at every pass. The pause span opens only once a
-// pass confirmed nothing runs on its nodes; a pass that finds workloads
-// again (a cluster admin inside can undo the policy and the taint) ends it
-// at the last pass that found none, and a failed pass drops what it cannot
-// vouch for.
+// vBilling's to stop, so the pause is the pause admission policy plus
+// drained nodes, applied again at every pass. The pause span opens only
+// once a pass confirmed nothing runs on its nodes; a pass that finds
+// workloads again, or finds the policy that keeps pods from starting
+// removed or changed (a cluster admin inside can undo it, start something
+// and put it back), ends it at the last pass that found neither, and a
+// failed pass drops what it cannot vouch for.
 func (e *Enforcer) pauseExternal(ctx context.Context, cl discovery.TenantCluster, ts TenantState) (pauseOutcome, error) {
 	id := cl.ExternalID()
 	fail := func(why string, err error) (pauseOutcome, error) {
@@ -351,6 +409,13 @@ func (e *Enforcer) pauseExternal(ctx context.Context, cl discovery.TenantCluster
 	if err != nil {
 		return fail("", fmt.Errorf("reach the cluster's API: %w", err))
 	}
+	changed, err := pausePolicyChanged(ctx, kube)
+	if err != nil {
+		return fail("", fmt.Errorf("read the pause admission policy: %w", err))
+	}
+	if err := e.pausePolicy(ctx, kube); err != nil {
+		return fail("", fmt.Errorf("install the pause admission policy %s: %w", PausedPolicyName, err))
+	}
 	if err := e.policyInside(ctx, kube, ts); err != nil {
 		log.Printf("[enforcement] %s: admission policy: %v", id, err)
 	}
@@ -361,9 +426,9 @@ func (e *Enforcer) pauseExternal(ctx context.Context, cl discovery.TenantCluster
 	if len(d.left) > 0 {
 		return fail(stillThere(d.left, "still on its nodes after the drain"), nil)
 	}
-	if !d.clean {
-		// Something ran since the last pass: nothing after that pass stays
-		// clipped.
+	if !d.clean || changed != "" {
+		// Something ran since the last pass, or could have (the policy was
+		// removed or changed): nothing after that pass stays clipped.
 		e.endSpanAt(id, e.lastVerified(id))
 	}
 	e.openSpan(id)
