@@ -3,79 +3,92 @@ package stripe
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 )
 
-// Before a payment lowers a billing hold it did not settle itself, Stripe
-// is read again: the tenant's subscriptions (by vBilling's metadata) and
-// the subscription that caused the hold, past_due, unpaid or incomplete,
-// still hold it; so does a subscription that caused it and ended with its
-// last invoice unpaid, and a one-off invoice that is still open.
-func TestOwedReadsSubscriptionsAndInvoicesAgain(t *testing.T) {
+// Before a payment clears a billing hold, Stripe is read again for the
+// customer's whole standing: any subscription past_due, unpaid or
+// incomplete (whoever created it), any open invoice past due or whose
+// payment failed, and any uncollectible invoice keeps the hold. An open
+// invoice not due yet and never charged does not, nor do paid, void and
+// draft ones. Every page is read; the customer can be the tenant's own.
+func TestOwedReadsTheCustomersWholeStanding(t *testing.T) {
 	f := newFakeStripe(t, func() time.Time { return now })
 	a := newTestAdapter(t, f, "")
+	a.now = func() time.Time { return now }
 	ctx := context.Background()
-	sub := func(id, status, tenant, latest string) {
-		s := &Subscription{ID: id, Status: status, Customer: "cus_acme", Metadata: map[string]string{}, LatestInvoice: ObjectID(latest)}
-		if tenant != "" {
-			s.Metadata[metaTenant] = tenant
-		}
-		f.subs[id] = s
+	sub := func(id, status string) {
+		f.subs[id] = &Subscription{ID: id, Status: status, Customer: "cus_acme", Metadata: map[string]string{}}
 	}
-	invoice := func(id, status string) { f.invoices[id] = &Invoice{ID: id, Customer: "cus_acme", Status: status} }
-	owed := func(causes ...string) string {
+	invoice := func(id, status string, attempts int, due time.Time) {
+		inv := &Invoice{ID: id, Customer: "cus_acme", Status: status, AttemptCount: &attempts}
+		if !due.IsZero() {
+			d := due.Unix()
+			inv.DueDate = &d
+		}
+		f.invoices[id] = inv
+	}
+	owed := func(customer string) string {
 		t.Helper()
-		got, err := a.Owed(ctx, "acme", "cus_acme", causes)
+		got, err := a.Owed(ctx, "acme", customer, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
 		return strings.Join(got, ",")
 	}
 
-	sub("sub_metered", "unpaid", "", "in_large") // the portal's, without vBilling's metadata
-	sub("sub_vb", "active", "acme", "in_vb")
-	sub("sub_neighbor", "past_due", "globex", "") // another tenant's, same customer
-	if got := owed("subscription:sub_metered"); got != "subscription:sub_metered" {
-		t.Fatalf("an unpaid subscription that caused the hold: owed %q", got)
+	sub("sub_portal", "unpaid") // created outside vBilling, without its metadata
+	sub("sub_vb", "active")
+	sub("sub_old", "canceled")
+	if got := owed("cus_acme"); got != "subscription sub_portal unpaid" {
+		t.Fatalf("a subscription in arrears: owed %q", got)
 	}
-	f.subs["sub_metered"].Status = "active"
-	if got := owed("subscription:sub_metered"); got != "" {
-		t.Fatalf("active again: owed %q, want nothing", got)
-	}
-	f.subs["sub_vb"].Status = "past_due"
-	if got := owed("subscription:sub_metered"); got != "subscription:sub_vb" {
-		t.Fatalf("another subscription of the tenant past due: owed %q", got)
-	}
-	if got := owed(); got != "subscription:sub_vb" {
-		t.Fatalf("a hold without a recorded cause: owed %q", got)
-	}
-	f.subs["sub_vb"].Status = "active"
-
-	// Ended: its last invoice says whether it is still owed.
-	sub("sub_gone", "canceled", "", "in_last")
-	invoice("in_last", "open")
-	if got := owed("subscription:sub_gone"); got != "subscription:sub_gone" {
-		t.Fatalf("canceled with its last invoice open: owed %q", got)
-	}
-	invoice("in_last", "void")
-	if got := owed("subscription:sub_gone"); got != "" {
-		t.Fatalf("canceled with its last invoice void: owed %q", got)
+	f.subs["sub_portal"].Status = "active"
+	if got := owed("cus_acme"); got != "" {
+		t.Fatalf("every subscription active or ended, no invoice: owed %q, want nothing", got)
 	}
 
-	invoice("in_oneoff", "open")
-	invoice("in_written_off", "uncollectible")
-	invoice("in_paid", "paid")
-	if got := owed("invoice:in_oneoff", "invoice:in_written_off", "invoice:in_paid", "invoice:in_missing"); got !=
-		"invoice:in_missing,invoice:in_oneoff,invoice:in_written_off" {
-		t.Fatalf("one-off invoices: owed %q", got)
+	invoice("in_failed", "open", 1, time.Time{})                                                // charged automatically, declined
+	invoice("in_overdue", "open", 0, now.Add(-24*time.Hour))                                    // sent, past its due date
+	invoice("in_written_off", "uncollectible", 4, time.Time{})                                  // written off unpaid
+	invoice("in_new", "open", 0, time.Time{})                                                   // finalized, first charge pending
+	invoice("in_not_due", "open", 0, now.Add(7*24*time.Hour))                                   // sent, due next week
+	invoice("in_paid", "paid", 2, time.Time{})                                                  // paid after a failure
+	invoice("in_void", "void", 1, time.Time{})                                                  // voided
+	f.invoices["in_unknown"] = &Invoice{ID: "in_unknown", Customer: "cus_acme", Status: "open"} // attempts not said
+	f.invoices["in_globex"] = &Invoice{ID: "in_globex", Customer: "cus_globex", Status: "uncollectible"}
+	want := "invoice in_failed open, payment failed (attempt 1),invoice in_overdue open, past due," +
+		"invoice in_unknown open, its payment attempts unknown,invoice in_written_off uncollectible"
+	if got := owed("cus_acme"); got != want {
+		t.Fatalf("invoices: owed %q, want %q", got, want)
 	}
-	if got := owed("subscription:sub_elsewhere", "alert:alrt_1", "subscription:"); got != "alert:alrt_1,subscription:,subscription:sub_elsewhere" {
-		t.Fatalf("causes Stripe cannot confirm: owed %q", got)
+
+	// Paged: more invoices than one page holds are all read.
+	for _, id := range []string{"in_failed", "in_overdue", "in_written_off", "in_unknown"} {
+		delete(f.invoices, id)
 	}
-	f.failNext["GET /v1/subscriptions"] = 1
-	if _, err := a.Owed(ctx, "acme", "cus_acme", []string{"subscription:sub_metered"}); err == nil {
+	for i := 0; i < 150; i++ {
+		invoice(fmt.Sprintf("in_%03d", i), "open", 0, time.Time{})
+	}
+	invoice("in_zzz", "open", 3, time.Time{}) // after the first page
+	if got := owed("cus_acme"); got != "invoice in_zzz open, payment failed (attempt 3)" {
+		t.Fatalf("an invoice past the first page: owed %q", got)
+	}
+
+	// The tenant's own customer, when the webhook came from elsewhere.
+	if got := owed(""); got != "" {
+		t.Fatalf("a tenant vBilling never mapped to a customer: owed %q, want nothing", got)
+	}
+	a.remember("acme", "cus_acme")
+	if got := owed(""); got != "invoice in_zzz open, payment failed (attempt 3)" {
+		t.Fatalf("the tenant's own customer: owed %q", got)
+	}
+
+	f.failNext["GET /v1/invoices"] = 1
+	if _, err := a.Owed(ctx, "acme", "cus_acme", nil); err == nil {
 		t.Fatal("a failed read must be an error, so the webhook is retried")
 	}
 }

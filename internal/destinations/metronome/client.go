@@ -211,6 +211,48 @@ func (c *Client) GetCustomer(ctx context.Context, id string) (*Customer, error) 
 	return &resp.Data, nil
 }
 
+// --- threshold notifications ---
+
+// CustomerAlert is a threshold notification as Metronome evaluates it for
+// one customer.
+type CustomerAlert struct {
+	// CustomerStatus is ok, in_alarm or evaluating; null once the
+	// notification is archived.
+	CustomerStatus *string `json:"customer_status"`
+	Alert          struct {
+		ID     string `json:"id"`
+		Name   string `json:"name"`
+		Type   string `json:"type"`   // low_remaining_commit_balance_reached, spend_threshold_reached, ...
+		Status string `json:"status"` // enabled, disabled or archived
+	} `json:"alert"`
+}
+
+// ListCustomerAlerts pages through POST /v1/customer-alerts/list: every
+// enabled threshold notification of a customer with its real-time status
+// for the customer. It fails rather than return part of them.
+func (c *Client) ListCustomerAlerts(ctx context.Context, customerID string) ([]CustomerAlert, error) {
+	req := struct {
+		CustomerID string `json:"customer_id"`
+	}{customerID}
+	var out []CustomerAlert
+	q := url.Values{}
+	for page := 0; page < 100; page++ {
+		var resp struct {
+			Data     []CustomerAlert `json:"data"`
+			NextPage *string         `json:"next_page"`
+		}
+		if err := c.do(ctx, http.MethodPost, "/v1/customer-alerts/list", q, req, &resp); err != nil {
+			return nil, err
+		}
+		out = append(out, resp.Data...)
+		if resp.NextPage == nil || *resp.NextPage == "" {
+			return out, nil
+		}
+		q.Set("next_page", *resp.NextPage)
+	}
+	return nil, fmt.Errorf("metronome POST /v1/customer-alerts/list: more than 100 pages for customer %s", customerID)
+}
+
 // --- billable metrics ---
 
 // PropertyFilter is one rule of a billable metric on an event property.

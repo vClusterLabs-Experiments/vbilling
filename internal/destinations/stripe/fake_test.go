@@ -347,6 +347,16 @@ func (f *fakeStripe) route(w http.ResponseWriter, r *http.Request) {
 		f.subs[s.ID] = s
 		writeJSON(w, s)
 
+	case r.Method == "GET" && p == "/v1/invoices":
+		var out []Invoice
+		for _, inv := range f.invoices {
+			if (r.Form.Get("customer") == "" || inv.Customer == r.Form.Get("customer")) && (r.Form.Get("status") == "" || inv.Status == r.Form.Get("status")) {
+				out = append(out, *inv)
+			}
+		}
+		sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+		writeJSON(w, page(r, out, func(inv Invoice) string { return inv.ID }))
+
 	case r.Method == "GET" && reInvoice.MatchString(p):
 		inv, ok := f.invoices[reInvoice.FindStringSubmatch(p)[1]]
 		if !ok {

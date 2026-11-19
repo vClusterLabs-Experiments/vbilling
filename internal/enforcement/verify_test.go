@@ -95,6 +95,7 @@ func TestDrainCapsGraceAndForceDeletesWhatIsLeft(t *testing.T) {
 		p.DeletionTimestamp, p.DeletionGracePeriodSeconds = &ts, &g
 		return true, nil, inside.Tracker().Update(podsGVR, p, da.Namespace)
 	})
+	stopsWithItsControlPlane(host, inside)
 	spans := pause.Memory()
 	e := New(host, Options{Mode: "enforce", DrainTimeout: 40 * time.Millisecond, Pauses: spans,
 		Clusters: func(string) []discovery.TenantCluster { return []discovery.TenantCluster{cl} }, TenantClient: clientFor(inside)})

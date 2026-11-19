@@ -32,6 +32,40 @@ func transportErr(err error) error {
 	return &url.Error{Op: "Get", URL: "https://private.tenant:443/api/v1/pods", Err: err}
 }
 
+// stopsWithItsControlPlane makes a cluster's API behave as a vCluster's
+// does when its control plane is scaled to zero: it answers one more check
+// of the cluster's own nodes (whose last read is the pause policy's
+// binding), then refuses connections until the control plane is scaled up
+// again. A pause is verified only once its API was seen to go away.
+func stopsWithItsControlPlane(host, inside *fake.Clientset) {
+	var mu sync.Mutex
+	stopping, gone := false, false
+	host.PrependReactor("patch", "statefulsets", func(a ktesting.Action) (bool, runtime.Object, error) {
+		patch := string(a.(ktesting.PatchActionImpl).Patch)
+		mu.Lock()
+		defer mu.Unlock()
+		switch {
+		case strings.Contains(patch, `"replicas":0`):
+			stopping = true
+		case strings.Contains(patch, `"replicas":`):
+			stopping, gone = false, false
+		}
+		return false, nil, nil
+	})
+	refused := &net.OpError{Op: "dial", Net: "tcp", Err: &os.SyscallError{Syscall: "connect", Err: syscall.ECONNREFUSED}}
+	inside.PrependReactor("*", "*", func(a ktesting.Action) (bool, runtime.Object, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if gone {
+			return true, nil, transportErr(refused)
+		}
+		if stopping && a.GetVerb() == "get" && a.GetResource().Resource == "validatingadmissionpolicybindings" {
+			gone = true // its last answer
+		}
+		return false, nil, nil
+	})
+}
+
 // Once the control plane is scaled down, the checks of the cluster's own
 // nodes end only when its API goes away with it: the connection is refused
 // or reset, ends early, or the proxy in front of it answers 503. Any other
@@ -114,6 +148,7 @@ func TestPauseDeniesEveryNewPodUntilResume(t *testing.T) {
 		order.add("delete pod")
 		return false, nil, nil
 	})
+	stopsWithItsControlPlane(host, inside)
 	spans := pause.Memory()
 	e := New(host, Options{Mode: "enforce", DrainTimeout: 20 * time.Millisecond, Pauses: spans,
 		Clusters: func(string) []discovery.TenantCluster { return []discovery.TenantCluster{cl} }, TenantClient: clientFor(inside)})
@@ -126,18 +161,22 @@ func TestPauseDeniesEveryNewPodUntilResume(t *testing.T) {
 	if got := order.list(); len(got) < 2 || got[0] != "create policy "+PausedPolicyName {
 		t.Fatalf("order = %v, want the pause policy created before the first pod is deleted", got)
 	}
+	// The cluster's API is down while it is paused: read what it stores.
+	po, err := inside.Tracker().Get(admissionv1.SchemeGroupVersion.WithResource("validatingadmissionpolicies"), "", PausedPolicyName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bo, err := inside.Tracker().Get(admissionv1.SchemeGroupVersion.WithResource("validatingadmissionpolicybindings"), "", PausedPolicyName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, b := po.(*admissionv1.ValidatingAdmissionPolicy), bo.(*admissionv1.ValidatingAdmissionPolicyBinding)
 	api := inside.AdmissionregistrationV1()
-	p, err := api.ValidatingAdmissionPolicies().Get(ctx, PausedPolicyName, metav1.GetOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	b, err := api.ValidatingAdmissionPolicyBindings().Get(ctx, PausedPolicyName, metav1.GetOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if p.Spec.MatchConstraints.NamespaceSelector != nil || p.Spec.Validations[0].Expression != mirrorPod ||
+	if p.Spec.MatchConstraints.NamespaceSelector != nil || len(p.Spec.Validations) != 2 ||
+		p.Spec.Validations[0].Expression != createdMirror || p.Spec.Validations[1].Expression != gatesKept ||
+		!coversPods(p.Spec.MatchConstraints.ResourceRules, admissionv1.Update) ||
 		len(b.Spec.ValidationActions) != 1 || b.Spec.ValidationActions[0] != admissionv1.Deny {
-		t.Fatalf("pause policy %+v, binding %+v: want every namespace, mirror pods only, denied", p.Spec, b.Spec)
+		t.Fatalf("pause policy %+v, binding %+v: want every namespace, mirror pods only, no gate removed, denied", p.Spec, b.Spec)
 	}
 	if why := policyNarrowed(p.Spec, b.Spec); why != "" {
 		t.Fatalf("vBilling's own pause policy reads as changed: %s", why)
@@ -325,7 +364,8 @@ func TestExternalPauseSpanEndsWhenThePolicyWasRemoved(t *testing.T) {
 }
 
 // The API server fills in defaults the comparison must not take for a
-// change; anything that lets a pod through must count as one.
+// change; anything that lets a pod through, or lets a pod's scheduling
+// gates go, must count as one.
 func TestPausePolicyComparison(t *testing.T) {
 	equivalent := admissionv1.Equivalent
 	all := admissionv1.AllScopes
@@ -337,11 +377,11 @@ func TestPausePolicyComparison(t *testing.T) {
 				MatchConstraints: &admissionv1.MatchResources{
 					NamespaceSelector: &metav1.LabelSelector{}, ObjectSelector: &metav1.LabelSelector{}, MatchPolicy: &equivalent,
 					ResourceRules: []admissionv1.NamedRuleWithOperations{{RuleWithOperations: admissionv1.RuleWithOperations{
-						Operations: []admissionv1.OperationType{admissionv1.Create},
+						Operations: []admissionv1.OperationType{admissionv1.Create, admissionv1.Update},
 						Rule:       admissionv1.Rule{APIGroups: []string{""}, APIVersions: []string{"v1"}, Resources: []string{"pods"}, Scope: &all},
 					}}},
 				},
-				Validations: []admissionv1.Validation{{Expression: mirrorPod}},
+				Validations: []admissionv1.Validation{{Expression: createdMirror}, {Expression: gatesKept}},
 			}, admissionv1.ValidatingAdmissionPolicyBindingSpec{
 				PolicyName: PausedPolicyName, ValidationActions: []admissionv1.ValidationAction{admissionv1.Deny},
 				MatchResources: &admissionv1.MatchResources{NamespaceSelector: &metav1.LabelSelector{}, ObjectSelector: &metav1.LabelSelector{}, MatchPolicy: &equivalent},
@@ -365,6 +405,16 @@ func TestPausePolicyComparison(t *testing.T) {
 		},
 		"updates only": func(p *admissionv1.ValidatingAdmissionPolicySpec, _ *admissionv1.ValidatingAdmissionPolicyBindingSpec) {
 			p.MatchConstraints.ResourceRules[0].Operations = []admissionv1.OperationType{admissionv1.Update}
+		},
+		"creations only": func(p *admissionv1.ValidatingAdmissionPolicySpec, _ *admissionv1.ValidatingAdmissionPolicyBindingSpec) {
+			p.MatchConstraints.ResourceRules[0].Operations = []admissionv1.OperationType{admissionv1.Create}
+		},
+		"gates may go": func(p *admissionv1.ValidatingAdmissionPolicySpec, _ *admissionv1.ValidatingAdmissionPolicyBindingSpec) {
+			p.Validations[1].Expression = "true"
+		},
+		"v0.3.1's first policy": func(p *admissionv1.ValidatingAdmissionPolicySpec, _ *admissionv1.ValidatingAdmissionPolicyBindingSpec) {
+			p.MatchConstraints.ResourceRules[0].Operations = []admissionv1.OperationType{admissionv1.Create}
+			p.Validations = []admissionv1.Validation{{Expression: mirrorPod}}
 		},
 		"one pod by name": func(p *admissionv1.ValidatingAdmissionPolicySpec, _ *admissionv1.ValidatingAdmissionPolicyBindingSpec) {
 			p.MatchConstraints.ResourceRules[0].ResourceNames = []string{"x"}
