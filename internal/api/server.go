@@ -692,6 +692,26 @@ const (
 	maxRecordsBody  = 16 << 20
 )
 
+// valueProblems checks the SKU and dimension values of an ingested event.
+// They reach dashboards, exports and billing platforms.
+func valueProblems(e *usage.Event) []string {
+	var out []string
+	if err := usage.CheckValue(e.SKU); err != nil {
+		out = append(out, "sku "+err.Error())
+	}
+	keys := make([]string, 0, len(e.Dimensions))
+	for k := range e.Dimensions {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if err := usage.CheckValue(e.Dimensions[k]); err != nil {
+			out = append(out, fmt.Sprintf("dimension %s %v", k, err))
+		}
+	}
+	return out
+}
+
 // ingest accepts usage from custom emitters: inference gateways (tokens),
 // Slurm accounting, storage or network exporters. Events need a declared
 // metric (builtin or CUSTOM_METRICS) and a closed window; an omitted ID is
@@ -764,6 +784,7 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 			e.Properties["client_event_id"] = e.ID
 			e.ID = TenantEventID(bound, client, e.ID)
 		}
+		problems = append(problems, valueProblems(&e)...)
 		e.Finalize()
 		if j, dup := firstAt[e.ID]; dup && (noID || derived[e.ID]) {
 			problems = append(problems, fmt.Sprintf("same tenant, metric, window and dimensions as event %d and no id: "+

@@ -81,10 +81,10 @@ func (c *Collector) parseNodeLease(n *corev1.Node, renewed time.Time) *nodeInfo 
 	if gpu, profile, ok := strings.Cut(ni.gpuType, "-MIG-"); ok && gpu != "" && profile != "" {
 		ni.gpuType, ni.migProfile = gpu, profile
 	} else if p := n.Labels["cloud.google.com/gke-gpu-partition-size"]; p != "" {
-		ni.migProfile = p
+		ni.migProfile = usage.SafeValue(p)
 	}
 	if c.opts.SKULabel != "" {
-		ni.sku = n.Labels[c.opts.SKULabel]
+		ni.sku = usage.SafeValue(n.Labels[c.opts.SKULabel])
 	}
 	for _, res := range c.opts.GPUResources {
 		if q, ok := n.Status.Capacity[corev1.ResourceName(res)]; ok {
@@ -295,13 +295,16 @@ func normalizeCapacity(v string) string {
 }
 
 func normalizeGPUType(raw string) string {
-	return strings.ReplaceAll(strings.TrimSpace(raw), " ", "-")
+	return usage.SafeValue(strings.ReplaceAll(strings.TrimSpace(raw), " ", "-"))
 }
 
+// firstLabel returns the first label set, made safe to use as a SKU or
+// dimension value (usage.SafeValue): a cluster with its own nodes labels
+// them itself.
 func firstLabel(labels map[string]string, keys ...string) string {
 	for _, k := range keys {
 		if v := labels[k]; v != "" {
-			return v
+			return usage.SafeValue(v)
 		}
 	}
 	return ""

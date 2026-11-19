@@ -72,6 +72,38 @@ type Ingester struct {
 	tel     *telemetry.Registry
 }
 
+// recordValues checks a pushed record's SKU and dimension values, which
+// reach dashboards, exports and billing platforms.
+func recordValues(rec *Record) string {
+	if err := usage.CheckValue(rec.SKU); err != nil {
+		return "sku " + err.Error()
+	}
+	if err := usage.CheckValue(rec.TenantCluster); err != nil {
+		return "tenant_cluster " + err.Error()
+	}
+	keys := make([]string, 0, len(rec.Dimensions))
+	for k := range rec.Dimensions {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if err := usage.CheckValue(rec.Dimensions[k]); err != nil {
+			return fmt.Sprintf("dimension %s %v", k, err)
+		}
+	}
+	return ""
+}
+
+// makeSafe repairs a pulled record's values instead of refusing it: the
+// request was served, and dropping its usage would be worse.
+func makeSafe(rec *Record) {
+	rec.SKU = usage.SafeValue(rec.SKU)
+	rec.TenantCluster = usage.SafeValue(rec.TenantCluster)
+	for k, v := range rec.Dimensions {
+		rec.Dimensions[k] = usage.SafeValue(v)
+	}
+}
+
 // NewIngester returns an ingester writing to sp, the records ledger.
 func NewIngester(sp *spool.Spool, formats Formats, opts Options, resolve TenantResolver, h *health.Registry, tel *telemetry.Registry) *Ingester {
 	opts.defaults()
@@ -178,6 +210,12 @@ func (in *Ingester) ingest(format, client, boundTenant string, objs []map[string
 				continue
 			}
 			rec.ID = ContentID(obj)
+		}
+		if pulled {
+			makeSafe(&rec)
+		} else if msg := recordValues(&rec); msg != "" {
+			reject(msg)
+			continue
 		}
 		switch {
 		case boundTenant != "":

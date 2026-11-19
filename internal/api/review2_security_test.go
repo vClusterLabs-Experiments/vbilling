@@ -217,7 +217,18 @@ func TestReview2TenantSKUIsRenderedAsHTMLInTheDashboard(t *testing.T) {
 	ws := now.Add(-2 * time.Minute)
 	ev, _ := json.Marshal([]map[string]any{{"id": "x1", "metric": usage.MetricGPUHours, "quantity": 0.001, "sku": payload,
 		"window_start": ws, "window_end": ws.Add(time.Minute)}})
-	if code, out := postJSON(t, e.srv.URL+"/api/v1/events", "tok-acme", string(ev)); code != 200 {
+	code, out := postJSON(t, e.srv.URL+"/api/v1/events", "tok-acme", string(ev))
+	switch {
+	case code == http.StatusBadRequest && strings.Contains(fmt.Sprint(out["rejected"]), "sku"):
+		// v0.3.1 refuses the SKU at ingest. A ledger written before can still
+		// hold one, and the dashboard must stay safe with it.
+		stored := usage.Event{ID: "x1", Tenant: "acme", Metric: usage.MetricGPUHours, Quantity: 0.001, SKU: payload,
+			WindowStart: ws, WindowEnd: ws.Add(time.Minute), RecordedAt: now, Source: "ingest:api"}
+		stored.Finalize()
+		if _, _, err := e.sp.AppendIngest(stored.Source, []usage.Event{stored}); err != nil {
+			t.Fatal(err)
+		}
+	case code != http.StatusOK:
 		t.Fatalf("ingest: %d %v", code, out)
 	}
 	// What the dashboard requests for its SKU chart.
@@ -237,6 +248,12 @@ func TestReview2TenantSKUIsRenderedAsHTMLInTheDashboard(t *testing.T) {
 		t.Fatal(err)
 	}
 	sink := regexp.MustCompile(`data-tip="' \+ esc\("<b>" \+ label`).Match(src) && strings.Contains(string(src), "tip.innerHTML = html")
+	if len(resp.Rows) == 0 {
+		t.Fatal("test setup: the SKU chart has no rows")
+	}
+	if html := regexp.MustCompile(`innerHTML|outerHTML|insertAdjacentHTML|document\.write`).Find(src); html != nil {
+		t.Fatalf("the dashboard still has an HTML sink (%s): data could be rendered as markup", html)
+	}
 	for _, r := range resp.Rows {
 		// esc() into the attribute, entity-decoded by dataset, then innerHTML.
 		tooltip := html.UnescapeString(dashboardEsc("<b>" + r.SKU + "</b><br>"))
