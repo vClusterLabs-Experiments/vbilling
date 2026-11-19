@@ -105,3 +105,53 @@ func TestCheckerFlagsAndClears(t *testing.T) {
 		}
 	}
 }
+
+// Usage an emitter reports chooses its own windows (up to 34 days, any
+// alignment) and its own node and resource names. It never widens what a
+// pass reads, and never raises a finding: one ingested event a minute with
+// a month-long window would otherwise make every pass read a month of
+// ledger, and a tenant could flag another tenant's node.
+func TestReportedUsageIsNotChecked(t *testing.T) {
+	now := ws.Add(5 * time.Minute)
+	sp, err := spool.Open(t.TempDir(), spool.Options{NoSync: true, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sp.Close()
+	h := health.New(nil)
+	h.SetLogger(func(string, ...any) {})
+	c := New(sp, h, nil)
+	if err := sp.AppendWindow(spool.SourceCollector, ws.Add(time.Minute), wholeNode("acme", "gpu-1", ws, 8, 1), ""); err != nil {
+		t.Fatal(err)
+	}
+	// A tenant's gateway reports gpu-1 as its own, over a month, and twice
+	// in the collector's window.
+	month := wholeNode("globex", "gpu-1", ws.Add(-30*24*time.Hour), 8, 1)
+	for i := range month {
+		month[i].WindowEnd = ws.Add(time.Minute)
+		month[i].ID, month[i].Source = "", "ingest:gw"
+		month[i].Finalize()
+	}
+	same := wholeNode("globex", "gpu-1", ws, 8, 1)
+	for i := range same {
+		same[i].ID, same[i].Source = "", "records"
+		same[i].Finalize()
+	}
+	if _, _, err := sp.AppendIngest("ingest:gw", month); err != nil {
+		t.Fatal(err)
+	}
+	if err := sp.AppendWindow("records", ws.Add(time.Minute), same, ""); err != nil {
+		t.Fatal(err)
+	}
+	if f := c.Once(); len(f) != 0 {
+		t.Fatalf("reported usage raised findings: %+v", f)
+	}
+	if c.scanned.start.Before(ws) {
+		t.Fatalf("the pass read the ledger from %s, before the collector's window %s", c.scanned.start, ws)
+	}
+	for _, s := range h.List() {
+		if s.Kind == "safeguard" && s.Status != health.OK {
+			t.Errorf("%s: %s", s.Name, s.Status)
+		}
+	}
+}

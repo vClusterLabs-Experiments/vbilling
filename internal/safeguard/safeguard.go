@@ -1,13 +1,20 @@
 // Package safeguard checks that vBilling never bills more than exists.
 //
-// After every collection, the windows that received events since the last
-// pass (from any source: the collector, Prometheus, records, fills) are
-// checked whole:
+// After every collection, the windows that received events vBilling
+// measured itself since the last pass (the collector, Prometheus, fills of
+// a cluster's own API) are checked whole, on those events:
 //
 //   - no node is billed more node-hours than the window lasts;
 //   - no node is billed more GPU-hours than its physical GPUs times the
 //     window;
 //   - no resource is billed to two tenants in the same window.
+//
+// Usage that emitters report (ingested events and per-request records) is
+// left out. Its windows are the emitter's (up to 34 days, any alignment),
+// so one event could make every pass read a month of ledger, and its node
+// and resource names are whatever the emitter says, so they prove nothing
+// about vBilling's own bills and would raise findings against other
+// tenants.
 //
 // A violation turns the subject's source health "diverged" and counts in
 // vbilling_safeguard_violations_total. It never holds delivery: the check
@@ -62,6 +69,7 @@ type Checker struct {
 
 	mu      sync.Mutex
 	read    uint64                     // ledger read through this seq
+	scanned window                     // the ledger range the last pass read
 	flagged map[string]time.Time       // health source -> end of the window last over
 	counted map[string]time.Time       // check|subject|window counted already -> window end
 	open    map[string]map[string]bool // check -> flagged subjects
@@ -81,6 +89,13 @@ func New(sp *spool.Spool, h *health.Registry, tel *telemetry.Registry) *Checker 
 
 type window struct{ start, end time.Time }
 
+// measured reports whether vBilling measured an event itself, rather than
+// an emitter reporting it: ingested events (ingest:<client>) and records
+// aggregated per window (records, records-late) are reported.
+func measured(e *usage.Event) bool {
+	return !strings.HasPrefix(e.Source, "ingest:") && e.Source != "records" && e.Source != "records-late"
+}
+
 // Once checks every window that received events since the last call.
 func (c *Checker) Once() []Finding {
 	c.mu.Lock()
@@ -96,7 +111,7 @@ func (c *Checker) Once() []Finding {
 			break
 		}
 		for _, r := range recs {
-			if r.Event != nil {
+			if r.Event != nil && measured(r.Event) {
 				touched[window{r.Event.WindowStart, r.Event.WindowEnd}] = true
 			}
 		}
@@ -129,8 +144,9 @@ func (c *Checker) Once() []Finding {
 		}
 	}
 	byWindow := map[window][]usage.Event{}
+	c.scanned = window{from, to}
 	err := c.spool.Scan(from, to, func(e *usage.Event) error {
-		if w := (window{e.WindowStart, e.WindowEnd}); touched[w] {
+		if w := (window{e.WindowStart, e.WindowEnd}); touched[w] && measured(e) {
 			byWindow[w] = append(byWindow[w], *e)
 		}
 		return nil
