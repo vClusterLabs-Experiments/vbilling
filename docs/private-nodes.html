@@ -350,6 +350,9 @@ experimental:
           - apiGroups: [""]
             resources: [nodes, pods, persistentvolumeclaims, services]
             verbs: [get, list, watch]
+          - apiGroups: [""]
+            resources: [namespaces]
+            verbs: [get, list]
           - apiGroups: [coordination.k8s.io]
             resources: [leases]
             verbs: [get]
@@ -365,11 +368,17 @@ experimental:
           <thead><tr><th>Setting</th><th>Effect</th></tr></thead>
           <tbody>
             <tr><td><code>PRIVATE_NODE_BILLING=node</code> (default)</td><td>Each private node is billed whole: node-hours, whole GPUs, CPU and memory capacity.</td></tr>
-            <tr><td><code>PRIVATE_NODE_BILLING=usage</code></td><td>The pods on private nodes are billed instead, like shared usage (namespaces in <code>TENANT_EXCLUDE_NAMESPACES</code>, default <code>kube-system</code>, are skipped).</td></tr>
+            <tr><td><code>PRIVATE_NODE_BILLING=usage</code></td><td>The pods on private nodes are billed instead, like shared usage. Pods in <code>kube-system</code>, and in namespaces of the cluster labeled <code>vbilling.vcluster.com/exclude=true</code> (for example the GPU operator's), are skipped.</td></tr>
           </tbody>
         </table>
       </div>
       <p>The <code>vbilling.vcluster.com/billable=false</code> label exempts only dedicated nodes of the control plane cluster, which the operator labels. On a cluster's own nodes it is ignored.</p>
+      <p><code>vbilling.vcluster.com/exclude=true</code> means two things, depending on where it is set:</p>
+      <ul>
+        <li>On the control plane cluster, on a cluster's namespace, StatefulSet or Deployment, or VirtualClusterInstance: the whole cluster is not metered.</li>
+        <li>On a namespace inside a cluster, with <code>PRIVATE_NODE_BILLING=usage</code>: the pods in that namespace are not billed. It needs <code>get</code> and <code>list</code> on namespaces in the reader role above; without them, no namespace is skipped. It has no effect with <code>PRIVATE_NODE_BILLING=node</code>, which bills whole nodes whatever runs on them.</li>
+      </ul>
+      <p>In usage mode the cluster decides which of its namespaces count: its admins can label a namespace, or run pods in <code>kube-system</code>. Use usage mode for clusters whose admins you trust, and bill other clusters' own nodes whole (the default).</p>
       <p><strong>Outages.</strong> If a cluster's API cannot be read, everything else is still metered and the windows it missed are recorded under <code>DATA_DIR</code>. As soon as the API answers, exactly those windows are metered and appended as late events, deduplicated by ID, up to <code>MAX_BACKFILL</code>. An API that fails, answers and fails again has only its failed windows filled: a window read in between is never billed again.</p>
       <p><strong>Scale-down.</strong> Nodes deleted between two windows (Auto Nodes scaling down, a machine removed) are billed until the second they were deleted. A deletion noticed only after a watch reconnects is dated to the last time vBilling saw the node, never later.</p>
 

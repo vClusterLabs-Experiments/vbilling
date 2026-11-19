@@ -90,6 +90,9 @@ type Collector struct {
 	// syncedReported: clusters (by ID, "" for the list itself) whose
 	// synced-namespaces source is reported (guarded by invMu).
 	syncedReported map[string]bool
+	// nsForbidden: a cluster refused to list its namespaces (logged once;
+	// guarded by invMu).
+	nsForbidden bool
 }
 
 // UseGraveyard makes the collector bill pods and nodes deleted between

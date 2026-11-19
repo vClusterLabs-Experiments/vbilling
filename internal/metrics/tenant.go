@@ -9,6 +9,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
@@ -169,6 +170,9 @@ type tenantInventory struct {
 	// was read, whoever paused it.
 	Pods        []corev1.Pod         `json:"pods,omitempty"`
 	PodsDeleted map[string]time.Time `json:"podsDeleted,omitempty"`
+	// ExcludedNamespaces are the cluster's namespaces labeled
+	// vbilling.vcluster.com/exclude=true, read with the pods.
+	ExcludedNamespaces []string `json:"excludedNamespaces,omitempty"`
 	// Views are the nodes that were control plane cluster nodes seen through
 	// the cluster when it was read (hostViews). Classified is false for an
 	// inventory saved by an earlier version.
@@ -192,9 +196,21 @@ func (inv *tenantInventory) podEntries(stored bool) []podEntry {
 	return out
 }
 
+// LabelExclude on a namespace inside a cluster keeps its pods out of
+// PRIVATE_NODE_BILLING=usage, as kube-system is. (The same setting on a
+// cluster's own namespace of the control plane cluster, its StatefulSet or
+// its VirtualClusterInstance excludes the whole cluster; see discovery.)
+const LabelExclude = discovery.AnnotationPrefix + "exclude"
+
 // readPods adds a cluster's pods to its inventory, with those deleted since
-// the last read and when they were deleted.
+// the last read and when they were deleted, and its namespaces labeled
+// LabelExclude=true.
 func (c *Collector) readPods(ctx context.Context, conn *TenantConn, inv *tenantInventory) error {
+	excluded, err := c.excludedNamespaces(ctx, conn.Kube)
+	if err != nil {
+		return err
+	}
+	inv.ExcludedNamespaces = excluded
 	list, err := conn.Kube.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return fmt.Errorf("list pods: %w", err)
@@ -213,6 +229,33 @@ func (c *Collector) readPods(ctx context.Context, conn *TenantConn, inv *tenantI
 	}
 	inv.Pods, inv.PodsDeleted = pods, deleted
 	return nil
+}
+
+// excludedNamespaces lists a cluster's namespaces labeled LabelExclude=true.
+// A reader role without access to namespaces excludes none (the cluster's
+// pods are all billed) and is logged once.
+func (c *Collector) excludedNamespaces(ctx context.Context, kube kubernetes.Interface) ([]string, error) {
+	list, err := kube.CoreV1().Namespaces().List(ctx, metav1.ListOptions{LabelSelector: LabelExclude + "=true"})
+	if apierrors.IsForbidden(err) {
+		c.invMu.Lock()
+		warned := c.nsForbidden
+		c.nsForbidden = true
+		c.invMu.Unlock()
+		if !warned {
+			log.Printf("[metrics] a cluster's API refuses to list namespaces, so no namespace in it is excluded with %s=true: grant its reader role list on namespaces (%v)", LabelExclude, err)
+		}
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("list namespaces: %w", err)
+	}
+	var out []string
+	for _, ns := range list.Items {
+		if ns.Labels[LabelExclude] == "true" {
+			out = append(out, ns.Name)
+		}
+	}
+	return out, nil
 }
 
 func readTenantInventory(ctx context.Context, kube kubernetes.Interface, at time.Time) (*tenantInventory, error) {
@@ -338,9 +381,16 @@ func (c *Collector) meterTenant(ctx context.Context, t Target, conn *TenantConn,
 		if latest := windows[len(windows)-1]; live && latest.Latest && c.opts.Basis != "requests" && conn.Metrics != nil {
 			usageByPod = podUsage(ctx, conn.Metrics, "")
 		}
+		// Pods in kube-system, and in namespaces the cluster labels
+		// vbilling.vcluster.com/exclude=true, are not billed: in usage mode the
+		// cluster decides which of its namespaces are workloads.
+		excluded := map[string]bool{}
+		for _, ns := range inv.ExcludedNamespaces {
+			excluded[ns] = true
+		}
 		include := func(p *corev1.Pod) bool {
 			_, onPrivate := private[p.Spec.NodeName]
-			return onPrivate && !c.excludedTenantNS[p.Namespace]
+			return onPrivate && !c.excludedTenantNS[p.Namespace] && !excluded[p.Namespace]
 		}
 		c.meterPods(inv.podEntries(!live), include, func(p *corev1.Pod) string { return p.Namespace },
 			private, nil, dra, windows, accs, st, base, usageByPod, "private_node", c.workloadPauses(t))
