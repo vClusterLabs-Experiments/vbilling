@@ -943,6 +943,15 @@ func (s *Spool) loadCursors() error {
 
 // --- ingest dedupe index ---
 
+// IngestedRecently reports whether an event with this ID was appended
+// through AppendIngest within the dedupe window.
+func (s *Spool) IngestedRecently(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.recentIDs[id]
+	return ok
+}
+
 func (s *Spool) recordDedupe(events []usage.Event, now time.Time) error {
 	f, err := os.OpenFile(filepath.Join(s.dir, "ingest-ids.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o640)
 	if err != nil {

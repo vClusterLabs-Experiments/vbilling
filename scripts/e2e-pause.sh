@@ -23,6 +23,7 @@ WORK=${WORK:-$(mktemp -d -t vbilling-pause)}
 CLUSTER=vbilling-e2e-pause
 KEEP=${1:-}
 API=127.0.0.1:28191
+TOKEN=e2e-admin-token # the API always needs a token
 export KUBECONFIG=$WORK/kubeconfig # never touches ~/.kube/config
 
 pass=0; fail=0
@@ -30,8 +31,8 @@ ok()    { echo "  PASS  $*"; pass=$((pass+1)); }
 bad()   { echo "  FAIL  $*"; fail=$((fail+1)); }
 step()  { echo; echo "==> $*"; }
 check() { if eval "$2"; then ok "$1"; else bad "$1"; fi; }
-api()   { curl -fsS "http://$API$1"; }
-put()   { curl -fsS -X PUT -H 'Content-Type: application/json' -d "$2" "http://$API$1"; }
+api()   { curl -fsS -H "Authorization: Bearer $TOKEN" "http://$API$1"; }
+put()   { curl -fsS -X PUT -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d "$2" "http://$API$1"; }
 vc()    { vcluster connect team-a -n vc-team-a --driver helm -- "$@"; }
 utc()   { python3 -I -c 'import datetime,sys; print((datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(seconds=int(sys.argv[1]))).strftime("%Y-%m-%dT%H:%M:%SZ"))' "${1:-0}"; }
 minute(){ python3 -I -c 'import datetime,sys; t=datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(seconds=int(sys.argv[1])); print(t.replace(second=0,microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ"))' "${1:-0}"; }
@@ -99,6 +100,7 @@ region: e2e
 metering: {cpuMemoryBasis: requests}
 enforcement: {mode: enforce, admissionPolicy: {enabled: true}}
 persistence: {enabled: true, size: 1Gi}
+api: {token: $TOKEN}
 EOF
 helm install vbilling "$ROOT/deploy/helm/vbilling" -n vbilling --create-namespace -f "$WORK/values.yaml" --wait --timeout 180s >/dev/null
 forward

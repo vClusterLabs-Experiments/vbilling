@@ -101,8 +101,11 @@ type Mapping struct {
 
 // LiteLLM maps LiteLLM's StandardLoggingPayload, as its generic API logger
 // (callback_type: generic_api) posts it. Records are billed to the team of
-// the virtual key, falling back to its organization and user; failed calls
-// are skipped; the model group becomes the SKU. Input tokens served from a
+// the virtual key, and only to it: LiteLLM sets the team from the key, while
+// fields such as end_user come from the client's request, and a client
+// must never choose who pays. A request whose key has no team is refused
+// (give every key a team). Failed calls are skipped; the model group
+// becomes the SKU. Input tokens served from a
 // prompt cache are their own metric (inference_cached_input_tokens) and are
 // taken out of inference_input_tokens, as token factories price them
 // separately; a requested service tier (priority, flex) is a dimension. The request ID is
@@ -114,7 +117,7 @@ var LiteLLM = Mapping{
 	RequestID:     LiteLLMRequestID,
 	Time:          Path{"endTime", "startTime"},
 	TimePrecision: time.Millisecond,
-	Tenant:        Path{"metadata.user_api_key_team_id", "metadata.user_api_key_org_id", "metadata.user_api_key_user_id", "end_user"},
+	Tenant:        Path{"metadata.user_api_key_team_id"},
 	Usage: map[string]Path{
 		"inference_input_tokens":        {"prompt_tokens"},
 		"inference_cached_input_tokens": {"metadata.usage_object.prompt_tokens_details.cached_tokens"},

@@ -192,12 +192,13 @@ func (p *PromSource) clientFor(ctx context.Context, t Target, raw string) (*prom
 	}
 	// PROMETHEUS_HEADERS and the bearer token belong to PROMETHEUS_URL. A
 	// cluster's own Prometheus on another host gets neither (put credentials
-	// for it in its URL), so an annotation can never send them elsewhere.
+	// for it in its URL), so an annotation can never send them elsewhere,
+	// and its redirects are never followed.
 	headers, token := p.c.opts.PromHeaders, p.c.opts.PromTokenFile
 	if !sameHost(raw, p.c.opts.PrometheusURL) {
 		headers, token = nil, ""
 	}
-	c := newPrometheusClient(raw, headers, token)
+	c := newClusterPrometheusClient(raw, headers, token)
 	p.clients[raw] = c
 	return c, nil
 }
@@ -402,14 +403,7 @@ func (p *PromSource) counter(ctx context.Context, client *prometheusClient, m Pr
 			lastPerWindow[k] = prev
 		}
 		ev := base(m.Code, nil)
-		for _, l := range m.Dimensions {
-			if v := s.Labels[l]; v != "" {
-				ev.Dimensions[dimKey(l)] = v
-			}
-		}
-		if l := m.skuLabel(); l != "" {
-			ev.SKU = s.Labels[l]
-		}
+		labelValues(&ev, m, s.Labels)
 		for i, w := range windows {
 			if incs[i] > 0 {
 				accs[w.End].add(ev, incs[i]*m.scale(), map[string]any{"series": 1})
@@ -446,18 +440,26 @@ func (p *PromSource) query(ctx context.Context, client *prometheusClient, m Prom
 		for _, r := range byWindow[w.End] {
 			n++
 			ev := base(m.Code, nil)
-			for _, l := range m.Dimensions {
-				if v := r.Labels[l]; v != "" {
-					ev.Dimensions[dimKey(l)] = v
-				}
-			}
-			if l := m.skuLabel(); l != "" {
-				ev.SKU = r.Labels[l]
-			}
+			labelValues(&ev, m, r.Labels)
 			accs[w.End].add(ev, r.Value*m.scale(), map[string]any{"estimate": true})
 		}
 	}
 	return n, nil
+}
+
+// labelValues sets an event's dimensions and SKU from series labels. Label
+// values can come from workloads a tenant runs, and SKUs and dimensions end
+// up in dashboards, exports and billing platforms, so characters that are
+// unsafe there are replaced (usage.SafeValue) rather than the usage dropped.
+func labelValues(ev *usage.Event, m PromMetric, labels map[string]string) {
+	for _, l := range m.Dimensions {
+		if v := labels[l]; v != "" {
+			ev.Dimensions[dimKey(l)] = usage.SafeValue(v)
+		}
+	}
+	if l := m.skuLabel(); l != "" {
+		ev.SKU = usage.SafeValue(labels[l])
+	}
 }
 
 // evaluate runs an instant query for one window or a range query for many.

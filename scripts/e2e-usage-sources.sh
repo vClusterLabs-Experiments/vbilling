@@ -26,6 +26,7 @@ KEEP=${1:-}
 API=127.0.0.1:28181
 PROM=127.0.0.1:29191
 INGEST=e2e-ingest
+TOKEN=e2e-admin-token # the API always needs a token
 export KUBECONFIG=$WORK/kubeconfig # never touches ~/.kube/config
 
 pass=0; fail=0
@@ -33,7 +34,7 @@ ok()    { echo "  PASS  $*"; pass=$((pass+1)); }
 bad()   { echo "  FAIL  $*"; fail=$((fail+1)); }
 step()  { echo; echo "==> $*"; }
 check() { if eval "$2"; then ok "$1"; else bad "$1"; fi; }
-api()   { curl -fsS "http://$API$1"; }
+api()   { curl -fsS -H "Authorization: Bearer $TOKEN" "http://$API$1"; }
 vc()    { vcluster connect team-a -n vc-team-a --driver helm -- "$@"; }
 utc()   { python3 -I -c 'import datetime,sys; print((datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(seconds=int(sys.argv[1]))).strftime("%Y-%m-%dT%H:%M:%SZ"))' "${1:-0}"; }
 minute(){ python3 -I -c 'import datetime,sys; t=datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(seconds=int(sys.argv[1])); print(t.replace(second=0,microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ"))' "${1:-0}"; }
@@ -171,7 +172,7 @@ cat >"$WORK/values.yaml" <<EOF
 image: {repository: vbilling, tag: e2e-sources, pullPolicy: Never}
 adapters: [noop]
 region: e2e
-api: {ingestToken: $INGEST, tenantIngestTokens: {acme: gw-acme}}
+api: {token: $TOKEN, ingestToken: $INGEST, tenantIngestTokens: {acme: gw-acme}}
 prometheus:
   url: http://prometheus.monitoring.svc:9090
   gpuUtilQuery: none

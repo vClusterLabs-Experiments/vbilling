@@ -127,9 +127,11 @@ prometheus:
 
 platform:
   cluster: "" # vCluster Platform cluster name of this control plane cluster (multi-cluster setups)
-  # tenantSource: platform. Owners come from Platform Tenants and Projects;
-  # clusters with their own nodes are reached through the Platform proxy with
-  # the same access key. See docs/private-nodes.html#platform.
+  # tenantSource: platform. Owners and vbilling.vcluster.com/ settings come
+  # from Platform Tenants and Projects only (settings on a cluster's workload,
+  # namespace or instance are ignored); clusters with their own nodes are
+  # reached only through the Platform proxy with the same access key
+  # (vbilling-kubeconfig Secrets are not read). See docs/security.html.
   url: "" # e.g. https://platform.example.com
   accessKey: "" # prefer existingSecret
   existingSecret: "" # Secret with key access-key
@@ -204,13 +206,17 @@ webhook:
 
 api:
   port: 8080
-  token: "" # protects usage and admin endpoints
+  # Every endpoint except /healthz and /readyz needs this token, /metrics
+  # included (the ServiceMonitor gets it). Empty: the chart generates one in
+  # its Secret and keeps it across upgrades (helm lookup). Tools that render
+  # with helm template cannot look it up: set token or existingSecret there.
+  token: ""
   ingestToken: "" # enables POST /api/v1/events and /api/v1/records (defaults to token)
   # Ingest tokens bound to one tenant ({tenant: token}): usage sent with such
   # a token is always billed to that tenant, so a gateway inside a tenant's
   # cluster can never report usage for another tenant.
   tenantIngestTokens: {}
-  existingSecret: "" # keys: api-token, ingest-token
+  existingSecret: "" # keys: api-token (required), ingest-token, ingest-tokens
   service:
     type: ClusterIP
     port: 8080

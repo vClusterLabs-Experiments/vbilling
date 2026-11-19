@@ -67,6 +67,9 @@ type Server struct {
 	started time.Time         // records wait for the first discovery after this
 	checks  []crosscheck.Check
 	pricing *pricing.Service // nil: PRICE_CHECK=off
+
+	limiter *rateLimiter // requests per ingest token
+	skus    *skuQuota    // distinct SKUs per tenant and day
 }
 
 // WithCrossChecks enables GET /api/v1/crosscheck.
@@ -78,23 +81,33 @@ func (s *Server) WithHealth(h *health.Registry) *Server { s.health = h; return s
 // WithPauses exposes when clusters were paused in GET /api/v1/billing-states.
 func (s *Server) WithPauses(p *pause.Store) *Server { s.pauses = p; return s }
 
-// WithRecords enables POST /api/v1/records.
-func (s *Server) WithRecords(in *records.Ingester) *Server { s.records = in; return s }
+// WithRecords enables POST /api/v1/records. Records (pushed or pulled)
+// count towards the same per-tenant SKU cap as ingested events.
+func (s *Server) WithRecords(in *records.Ingester) *Server {
+	s.records = in
+	in.UseSKUGate(s.skus.admit)
+	return s
+}
 
 // WithPricing enables GET /api/v1/pricing and POST /api/v1/pricing/check.
 func (s *Server) WithPricing(p *pricing.Service) *Server { s.pricing = p; return s }
 
 func New(cfg *config.Config, sp *spool.Spool, disp *pipeline.Dispatcher, tenants *pipeline.TenantRegistry,
 	ctrl Controller, enf *enforcement.Enforcer, tel *telemetry.Registry, version string) *Server {
-	return &Server{cfg: cfg, spool: sp, disp: disp, tenants: tenants, ctrl: ctrl, enf: enf, tel: tel, version: version, now: time.Now, started: time.Now()}
+	s := &Server{cfg: cfg, spool: sp, disp: disp, tenants: tenants, ctrl: ctrl, enf: enf, tel: tel, version: version, now: time.Now, started: time.Now(),
+		limiter: newRateLimiter(time.Now)}
+	s.skus = newSKUQuota(func() time.Time { return s.now() })
+	return s
 }
 
-// Handler returns the routed handler.
+// Handler returns the routed handler. Everything but /healthz, /readyz,
+// the billing webhooks (signed by the billing platform), ingest (ingest
+// tokens) and the dashboard's static page needs the API token.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "ok\n") })
 	mux.HandleFunc("GET /readyz", s.readyz)
-	mux.HandleFunc("GET /metrics", s.metrics)
+	mux.HandleFunc("GET /metrics", s.auth(s.metrics))
 
 	mux.HandleFunc("GET /api/v1/status", s.auth(s.status))
 	mux.HandleFunc("GET /api/v1/catalog", s.auth(s.catalog))
@@ -120,8 +133,17 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /webhooks/metronome", s.metronomeWebhook)
 
 	sub, _ := fs.Sub(dashboardFS, "dashboard")
-	mux.Handle("GET /", http.FileServer(http.FS(sub)))
-	return mux
+	mux.Handle("GET /", dashboardHeaders(http.FileServer(http.FS(sub))))
+	return noSniff(mux)
+}
+
+// noSniff stops browsers from reading a response as anything but its
+// declared type.
+func noSniff(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		h.ServeHTTP(w, r)
+	})
 }
 
 // --- helpers ---
@@ -146,10 +168,13 @@ func tokenOK(got, want string) bool {
 	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
 }
 
-// auth protects read and admin endpoints with API_TOKEN when it is set.
+// auth requires the API token on read and admin endpoints. Without a
+// configured token nothing passes: the API is never open (PrepareTokens
+// generates one at startup when API_TOKEN is not set).
 func (s *Server) auth(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if s.cfg.APIToken != "" && !tokenOK(bearer(r), s.cfg.APIToken) {
+		if s.cfg.APIToken == "" || !tokenOK(bearer(r), s.cfg.APIToken) {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="vbilling"`)
 			writeErr(w, http.StatusUnauthorized, "missing or invalid bearer token")
 			return
 		}
@@ -428,8 +453,9 @@ func (s *Server) pricingReport(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, rep)
 }
 
-// ingestAuth checks an ingest token. A token from INGEST_TOKENS is bound to
-// a tenant: everything sent with it is billed to that tenant.
+// ingestAuth checks an ingest token and its request rate. A token from
+// INGEST_TOKENS is bound to a tenant: everything sent with it is billed to
+// that tenant.
 func (s *Server) ingestAuth(w http.ResponseWriter, r *http.Request) (boundTenant string, ok bool) {
 	if s.cfg.IngestToken == "" && len(s.cfg.IngestTokens) == 0 {
 		writeErr(w, http.StatusForbidden, "ingest is disabled: set INGEST_TOKEN (or API_TOKEN), or INGEST_TOKENS for tokens bound to a tenant")
@@ -437,11 +463,11 @@ func (s *Server) ingestAuth(w http.ResponseWriter, r *http.Request) (boundTenant
 	}
 	got := bearer(r)
 	if s.cfg.IngestToken != "" && tokenOK(got, s.cfg.IngestToken) {
-		return "", true
+		return "", s.limitIngest(w, got, false)
 	}
 	for tok, tenant := range s.cfg.IngestTokens {
 		if tokenOK(got, tok) {
-			return tenant, true
+			return tenant, s.limitIngest(w, tok, true)
 		}
 	}
 	writeErr(w, http.StatusUnauthorized, "missing or invalid bearer token")
@@ -671,17 +697,55 @@ func (s *Server) exportEvents(w http.ResponseWriter, r *http.Request) {
 // --- ingest ---
 
 const (
-	maxIngestBody   = 10 << 20
-	maxIngestEvents = 5000
-	ingestMaxAge    = 34 * 24 * time.Hour // the strictest backend window (Metronome)
-	ingestMaxSkew   = 5 * time.Minute
-	maxRecordsBody  = 16 << 20
+	ingestMaxAge  = 34 * 24 * time.Hour // the strictest backend window (Metronome)
+	ingestMaxSkew = 5 * time.Minute
 )
+
+// reservedIDPrefixes are the ID namespaces vBilling derives itself:
+// usage.DeriveID (vb1_, every event vBilling measures: collector,
+// Prometheus, records aggregator, fills), TenantEventID (te1_) and
+// IngestEventID (ie1_). An id sent with the shared ingest token is kept as
+// is, so it must not start with one of them.
+var reservedIDPrefixes = []string{"vb1_", "te1_", "ie1_"}
+
+func reservedID(id string) bool {
+	for _, p := range reservedIDPrefixes {
+		if strings.HasPrefix(id, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// valueProblems checks the SKU and dimension values of an ingested event.
+// They reach dashboards, exports and billing platforms.
+func valueProblems(e *usage.Event) []string {
+	var out []string
+	if err := usage.CheckValue(e.SKU); err != nil {
+		out = append(out, "sku "+err.Error())
+	}
+	keys := make([]string, 0, len(e.Dimensions))
+	for k := range e.Dimensions {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if err := usage.CheckValue(e.Dimensions[k]); err != nil {
+			out = append(out, fmt.Sprintf("dimension %s %v", k, err))
+		}
+	}
+	return out
+}
 
 // ingest accepts usage from custom emitters: inference gateways (tokens),
 // Slurm accounting, storage or network exporters. Events need a declared
 // metric (builtin or CUSTOM_METRICS) and a closed window; an omitted ID is
 // derived from the event identity, so resends deduplicate.
+//
+// Ingested events never take an ID vBilling's own sources use: an event's
+// own id is scoped to the tenant (TenantEventID) when its token is bound to
+// one, and must not use a reserved prefix otherwise; an event without an id
+// gets IngestEventID.
 func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 	bound, ok := s.ingestAuth(w, r)
 	if !ok {
@@ -724,8 +788,11 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 	}
 	var valid []usage.Event
 	var rejected []rejection
-	derived := map[string]bool{} // IDs vBilling derived because the event had none
+	var warnings []string
+	derived := map[string]bool{}  // IDs vBilling derived because the event had none
+	legacy := map[string]string{} // derived ID -> the ID v0.3.0 gave the same event
 	firstAt := map[string]int{}
+	overflow := 0
 	for i := range events {
 		e := events[i]
 		e.Source = source
@@ -741,7 +808,9 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 			e.Tenant = bound
 		}
 		noID := e.ID == ""
-		if bound != "" && !noID {
+		switch {
+		case noID:
+		case bound != "":
 			// A tenant chooses its own IDs, so two tenants may pick the same
 			// one: scope it to the tenant and client, as record IDs are.
 			if e.Properties == nil {
@@ -749,8 +818,19 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 			}
 			e.Properties["client_event_id"] = e.ID
 			e.ID = TenantEventID(bound, client, e.ID)
+		case reservedID(e.ID):
+			problems = append(problems, fmt.Sprintf("id %q starts with a prefix vBilling reserves for the IDs it derives (%s)",
+				e.ID, strings.Join(reservedIDPrefixes, ", ")))
 		}
+		problems = append(problems, valueProblems(&e)...)
 		e.Finalize()
+		if noID {
+			// e.ID is now usage.DeriveID: the ID of the same usage measured by
+			// vBilling itself. Move it into the ingest namespace.
+			id := IngestEventID(source, bound, client, e.ID)
+			legacy[id] = e.ID
+			e.ID = id
+		}
 		if j, dup := firstAt[e.ID]; dup && (noID || derived[e.ID]) {
 			problems = append(problems, fmt.Sprintf("same tenant, metric, window and dimensions as event %d and no id: "+
 				"events without an id are deduplicated by those fields, so separate requests would be counted once. "+
@@ -778,15 +858,31 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 			rejected = append(rejected, rejection{Index: i, ID: e.ID, Error: strings.Join(problems, "; ")})
 			continue
 		}
+		var over bool
+		if e.SKU, over = s.skus.admit(e.Tenant, e.SKU); over {
+			overflow++
+		}
 		valid = append(valid, e)
 	}
+	// An event without an id that v0.3.0 stored (under its derived ID) is a
+	// retry across the upgrade: count it once.
+	fresh := valid[:0:0]
+	var retried []string
+	for _, e := range valid {
+		if old := legacy[e.ID]; old != "" && s.spool.IngestedRecently(old) {
+			retried = append(retried, e.ID)
+			continue
+		}
+		fresh = append(fresh, e)
+	}
 	var accepted, dups []string
-	if len(valid) > 0 {
-		if accepted, dups, err = s.spool.AppendIngest(source, valid); err != nil {
+	if len(fresh) > 0 {
+		if accepted, dups, err = s.spool.AppendIngest(source, fresh); err != nil {
 			writeErr(w, http.StatusServiceUnavailable, "ledger write failed: %v", err)
 			return
 		}
 	}
+	dups = append(dups, retried...)
 	status := http.StatusOK
 	if len(valid) == 0 {
 		status = http.StatusBadRequest
@@ -800,8 +896,15 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if silent > 0 {
-		out["warnings"] = []string{fmt.Sprintf("%d event(s) without an id matched usage already in the ledger and were not counted again. "+
-			"If they are separate requests rather than retries, give each one an id, or send per-request usage to POST /api/v1/records", silent)}
+		warnings = append(warnings, fmt.Sprintf("%d event(s) without an id matched usage already in the ledger and were not counted again. "+
+			"If they are separate requests rather than retries, give each one an id, or send per-request usage to POST /api/v1/records", silent))
+	}
+	if overflow > 0 {
+		warnings = append(warnings, fmt.Sprintf("%d event(s) are billed under SKU %q: their tenant sent more than %d distinct SKUs today",
+			overflow, OverflowSKU, maxSKUsPerTenantPerDay))
+	}
+	if len(warnings) > 0 {
+		out["warnings"] = warnings
 	}
 	writeJSON(w, status, out)
 }
@@ -812,6 +915,18 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 func TenantEventID(tenant, client, id string) string {
 	sum := sha256.Sum256([]byte(tenant + "\x00" + client + "\x00" + id))
 	return "te1_" + hex.EncodeToString(sum[:16])
+}
+
+// IngestEventID is the ledger ID of an event sent without an id. derived is
+// the event's usage.DeriveID, which every event vBilling measures itself
+// (collector, Prometheus, records aggregator, fills) uses as its ID. The ingest
+// source, the tenant the token is bound to ("" for the shared ingest token)
+// and the client are hashed with it, so a retry gets the same ID while an
+// ingested event can never take the ID of vBilling's own usage, nor of
+// another tenant's or client's.
+func IngestEventID(source, bound, client, derived string) string {
+	sum := sha256.Sum256([]byte("ingest\x00" + source + "\x00" + bound + "\x00" + client + "\x00" + derived))
+	return "ie1_" + hex.EncodeToString(sum[:16])
 }
 
 // --- reconciliation ---

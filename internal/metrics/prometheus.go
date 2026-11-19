@@ -16,6 +16,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/yaml"
 
+	"github.com/vclusterlabs-experiments/vbilling/internal/safehttp"
 	"github.com/vclusterlabs-experiments/vbilling/internal/usage"
 )
 
@@ -134,6 +135,15 @@ func newPrometheusClient(baseURL string, headers map[string]string, tokenFile st
 		headers:    headers,
 		tokenFile:  tokenFile,
 	}}
+}
+
+// newClusterPrometheusClient reaches a Prometheus a cluster named in its
+// own settings (vbilling.vcluster.com/prometheus-url). Its answers can
+// redirect anywhere, so redirects are never followed.
+func newClusterPrometheusClient(baseURL string, headers map[string]string, tokenFile string) *prometheusClient {
+	c := newPrometheusClient(baseURL, headers, tokenFile)
+	c.t.(*httpTransport).httpClient.CheckRedirect = safehttp.RefuseRedirect
+	return c
 }
 
 type promResult struct {

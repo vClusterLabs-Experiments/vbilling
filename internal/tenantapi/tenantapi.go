@@ -10,15 +10,19 @@
 //     namespace. vCluster writes it through exportKubeConfig.additionalSecrets
 //     with a read-only service account, so vBilling never holds admin access;
 //   - with TENANT_SOURCE=platform, clusters bound to a vCluster Platform
-//     instance are reached through the Platform proxy with the Platform
-//     access key, the way `vcluster platform connect vcluster` does, when
-//     no dedicated Secret exists (the Secret stays an override);
+//     instance are reached only through the Platform proxy with the Platform
+//     access key, the way `vcluster platform connect vcluster` does. No
+//     Secret is read in that mode: whoever writes a cluster's vcluster.yaml
+//     can write one (exportKubeConfig) that points anywhere;
 //   - with TENANT_ADMIN_FALLBACK=true, the tenant cluster's admin kubeconfig
 //     (Secret vc-<name>) is used when no dedicated Secret exists.
 //
 // Kubeconfigs that point at localhost (the vCluster default) are rewritten to
 // the tenant cluster's Service, https://<name>.<namespace>.svc:443, verified
 // as <name>.<namespace> (a name vCluster's serving certificate includes).
+//
+// A tenant controls what its cluster's API answers, redirects included, so
+// no client built here follows a redirect (see internal/safehttp).
 package tenantapi
 
 import (
@@ -45,6 +49,7 @@ import (
 
 	"github.com/vclusterlabs-experiments/vbilling/internal/discovery"
 	"github.com/vclusterlabs-experiments/vbilling/internal/metrics"
+	"github.com/vclusterlabs-experiments/vbilling/internal/safehttp"
 )
 
 // DefaultSecretName is the Secret vBilling reads in a tenant cluster's namespace.
@@ -109,12 +114,15 @@ type PlatformRoute interface {
 type Options struct {
 	SecretName    string
 	AdminFallback bool
-	Platform      PlatformRoute // nil: no Platform proxy
-	External      []External
-	WatchPods     bool          // watch pod deletions too (usage-mode billing)
-	Retention     time.Duration // how long deleted nodes and pods are kept
-	Timeout       time.Duration
-	Now           func() time.Time
+	// Platform is set with TENANT_SOURCE=platform. Clusters on this control
+	// plane cluster are then reached only through it, and a cluster the
+	// Platform does not know has no tenant API.
+	Platform  PlatformRoute
+	External  []External
+	WatchPods bool          // watch pod deletions too (usage-mode billing)
+	Retention time.Duration // how long deleted nodes and pods are kept
+	Timeout   time.Duration
+	Now       func() time.Time
 }
 
 // Manager implements metrics.TenantAPI with cached clients per tenant cluster.
@@ -176,15 +184,19 @@ func (m *Manager) Conn(ctx context.Context, cl discovery.TenantCluster) (*metric
 		}
 		e.cancel() // credentials rotated
 	}
-	kube, err := kubernetes.NewForConfig(cfg)
+	hc, err := safehttp.KubeHTTPClient(cfg)
 	if err != nil {
 		return nil, err
 	}
-	dyn, err := dynamic.NewForConfig(cfg)
+	kube, err := kubernetes.NewForConfigAndClient(cfg, hc)
 	if err != nil {
 		return nil, err
 	}
-	mc, err := metricsclient.NewForConfig(cfg)
+	dyn, err := dynamic.NewForConfigAndClient(cfg, hc)
+	if err != nil {
+		return nil, err
+	}
+	mc, err := metricsclient.NewForConfigAndClient(cfg, hc)
 	if err != nil {
 		return nil, err
 	}
@@ -231,17 +243,21 @@ func (m *Manager) restConfig(ctx context.Context, cl discovery.TenantCluster) (*
 		sum := sha256.Sum256(data)
 		return cfg, hex.EncodeToString(sum[:8]), nil
 	}
-	cfg, version, err := m.fromSecret(ctx, cl, m.opts.SecretName)
-	if !errors.Is(err, metrics.ErrNoTenantAPI) {
-		return cfg, version, err // the dedicated Secret overrides every other route
-	}
-	if m.opts.Platform != nil && cl.Platform != nil {
+	if m.opts.Platform != nil {
+		// TENANT_SOURCE=platform: the Platform proxy is the only route.
+		if cl.Platform == nil {
+			return nil, "", metrics.ErrNoTenantAPI
+		}
 		cfg, version, err := m.opts.Platform.ProxyConfig(cl)
 		if err != nil {
 			return nil, "", err
 		}
 		cfg.Timeout = m.opts.Timeout
 		return cfg, version, nil
+	}
+	cfg, version, err := m.fromSecret(ctx, cl, m.opts.SecretName)
+	if !errors.Is(err, metrics.ErrNoTenantAPI) {
+		return cfg, version, err
 	}
 	if m.opts.AdminFallback {
 		return m.fromSecret(ctx, cl, "vc-"+cl.Name)

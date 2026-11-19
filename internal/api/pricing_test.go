@@ -54,17 +54,13 @@ func TestPricingEndpoint(t *testing.T) {
 	}
 	svc.Observe(evs, time.Now())
 
-	cfg := &config.Config{Adapters: []string{"metronome"}}
+	cfg := &config.Config{Adapters: []string{"metronome"}, APIToken: adminToken}
 	srv := httptest.NewServer(New(cfg, sp, disp, reg, nil, nil, telemetry.New(), "test").WithPricing(svc).Handler())
 	defer srv.Close()
 
 	get := func(method, path string) pricing.Report {
 		t.Helper()
-		req, _ := http.NewRequest(method, srv.URL+path, nil)
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatal(err)
-		}
+		resp := do(t, method, srv.URL+path, adminToken, nil)
 		defer resp.Body.Close()
 		if resp.StatusCode != 200 {
 			t.Fatalf("%s %s: %d", method, path, resp.StatusCode)
@@ -89,7 +85,7 @@ func TestPricingEndpoint(t *testing.T) {
 
 	off := httptest.NewServer(New(cfg, sp, disp, reg, nil, nil, telemetry.New(), "test").Handler())
 	defer off.Close()
-	resp, _ := http.Get(off.URL + "/api/v1/pricing")
+	resp := do(t, http.MethodGet, off.URL+"/api/v1/pricing", adminToken, nil)
 	var o pricing.Report
 	json.NewDecoder(resp.Body).Decode(&o)
 	resp.Body.Close()

@@ -70,6 +70,48 @@ type Ingester struct {
 	resolve TenantResolver
 	health  *health.Registry
 	tel     *telemetry.Registry
+	skuGate SKUGate
+}
+
+// SKUGate returns the SKU a tenant's usage is stored under: sku itself, or
+// a replacement (overflow true) once the tenant brought in too many
+// distinct SKUs.
+type SKUGate func(tenant, sku string) (stored string, overflow bool)
+
+// UseSKUGate applies g to every usage row stored, pushed or pulled. Set it
+// before records are ingested.
+func (in *Ingester) UseSKUGate(g SKUGate) { in.skuGate = g }
+
+// recordValues checks a pushed record's SKU and dimension values, which
+// reach dashboards, exports and billing platforms.
+func recordValues(rec *Record) string {
+	if err := usage.CheckValue(rec.SKU); err != nil {
+		return "sku " + err.Error()
+	}
+	if err := usage.CheckValue(rec.TenantCluster); err != nil {
+		return "tenant_cluster " + err.Error()
+	}
+	keys := make([]string, 0, len(rec.Dimensions))
+	for k := range rec.Dimensions {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if err := usage.CheckValue(rec.Dimensions[k]); err != nil {
+			return fmt.Sprintf("dimension %s %v", k, err)
+		}
+	}
+	return ""
+}
+
+// makeSafe repairs a pulled record's values instead of refusing it: the
+// request was served, and dropping its usage would be worse.
+func makeSafe(rec *Record) {
+	rec.SKU = usage.SafeValue(rec.SKU)
+	rec.TenantCluster = usage.SafeValue(rec.TenantCluster)
+	for k, v := range rec.Dimensions {
+		rec.Dimensions[k] = usage.SafeValue(v)
+	}
 }
 
 // NewIngester returns an ingester writing to sp, the records ledger.
@@ -179,6 +221,12 @@ func (in *Ingester) ingest(format, client, boundTenant string, objs []map[string
 			}
 			rec.ID = ContentID(obj)
 		}
+		if pulled {
+			makeSafe(&rec)
+		} else if msg := recordValues(&rec); msg != "" {
+			reject(msg)
+			continue
+		}
 		switch {
 		case boundTenant != "":
 			// The token identifies the source, and the source is the tenant.
@@ -278,6 +326,18 @@ func (in *Ingester) ingest(format, client, boundTenant string, objs []map[string
 	var rows []usage.Event
 	for _, r := range recs {
 		rows = append(rows, r...)
+	}
+	overflow := 0
+	if in.skuGate != nil {
+		for i := range rows {
+			var over bool
+			if rows[i].SKU, over = in.skuGate(rows[i].Tenant, rows[i].SKU); over {
+				overflow++
+			}
+		}
+	}
+	if overflow > 0 {
+		res.Warnings = append(res.Warnings, fmt.Sprintf("%d usage row(s) are billed under another SKU: their tenant sent too many distinct SKUs today", overflow))
 	}
 	if len(rows) > 0 {
 		if _, err := in.spool.AppendBatch(source, rows); err != nil {

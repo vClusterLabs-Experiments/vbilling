@@ -245,8 +245,8 @@ func main() {
 			Retention:     retention,
 		}
 		if owners != nil && cfg.PlatformProxy {
-			topts.Platform = owners // the vbilling-kubeconfig Secret still overrides it per cluster
-			log.Printf("Tenant APIs: clusters bound to vCluster Platform are reached through its proxy at %s", owners.Client().Host())
+			topts.Platform = owners // the only route: kubeconfig Secrets are not read in Platform mode
+			log.Printf("Tenant APIs: clusters are reached only through the vCluster Platform proxy at %s", owners.Client().Host())
 		}
 		mgr := tenantapi.New(ctx, kube, topts)
 		coll.UseTenantAPI(mgr)
@@ -320,13 +320,19 @@ func main() {
 		}
 	}
 
+	// The API is never open: without API_TOKEN, a token is generated in
+	// DATA_DIR (log its path, never the token).
+	tokenFile, err := api.PrepareTokens(cfg)
+	if err != nil {
+		log.Fatalf("API token: %v", err)
+	}
+	if tokenFile != "" {
+		log.Printf("API_TOKEN is not set: the API requires the token vBilling keeps in %s", tokenFile)
+	}
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
 		Handler:           api.New(cfg, sp, disp, tenants, ctrl, enf, tel, version).WithHealth(sources).WithPauses(pauses).WithRecords(ingester).WithCrossChecks(checks).WithPricing(prices).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
-	}
-	if cfg.APIToken == "" {
-		log.Printf("WARNING: API_TOKEN is not set; usage and admin endpoints on %s are unauthenticated (keep the Service internal)", cfg.ListenAddr)
 	}
 
 	var wg sync.WaitGroup

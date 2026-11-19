@@ -166,17 +166,23 @@ func TestPlatformProxyReplacesExportedKubeconfig(t *testing.T) {
 		t.Fatalf("proxy route: %+v %s %v", cfg, version, err)
 	}
 
-	// The dedicated Secret stays an override.
-	m = New(context.Background(), fake.NewSimpleClientset(secret("team-p", DefaultSecretName, "https://localhost:8443")), Options{Platform: route})
-	if _, version, err := m.restConfig(context.Background(), bound); err != nil || !strings.HasPrefix(version, DefaultSecretName+"@") {
-		t.Fatalf("Secret override: %s %v", version, err)
+	// A vbilling-kubeconfig Secret is never read in Platform mode: whoever
+	// writes the cluster's vcluster.yaml can export one pointing anywhere.
+	withSecret := fake.NewSimpleClientset(secret("team-p", DefaultSecretName, "https://localhost:8443"))
+	m = New(context.Background(), withSecret, Options{Platform: route})
+	if _, version, err := m.restConfig(context.Background(), bound); err != nil || version != "platform:acme-train/team-p" {
+		t.Fatalf("a bound cluster must use the Platform proxy even with a Secret: %s %v", version, err)
 	}
 
-	// Clusters the Platform does not know keep the Secret rules.
+	// Clusters the Platform does not know have no tenant API, Secret or not.
 	route.calls = 0
-	m = New(context.Background(), fake.NewSimpleClientset(), Options{Platform: route})
 	if _, _, err := m.restConfig(context.Background(), team); !errors.Is(err, metrics.ErrNoTenantAPI) || route.calls != 0 {
 		t.Fatalf("unbound cluster: %v (route called %d times)", err, route.calls)
+	}
+	for _, a := range withSecret.Actions() {
+		if a.GetResource().Resource == "secrets" {
+			t.Fatalf("Platform mode read a Secret: %v", a)
+		}
 	}
 
 	// A sleeping instance is an outage of its tenant API, not "no API":
