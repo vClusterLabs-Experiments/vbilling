@@ -1332,14 +1332,19 @@ func (s *Server) setBillingState(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		State  enforcement.State `json:"state"`
 		Reason string            `json:"reason"`
-		// Hold names the reason class: "billing" (default, the hold billing
-		// webhooks set and clear) or any other, e.g. "support" or "abuse",
-		// which only an operator can clear.
+		// Hold names the reason class: "operator" (default) or any other,
+		// e.g. "support" or "abuse", which no webhook touches and only an
+		// operator clears; or "billing", the hold billing webhooks raise and
+		// a payment clears once nothing is owed (for a portal that wants a
+		// payment to lift its hold).
 		Hold string `json:"hold"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON: %v", err)
 		return
+	}
+	if req.Hold == "" {
+		req.Hold = enforcement.HoldOperator
 	}
 	if req.Reason == "" {
 		req.Reason = "set by operator"

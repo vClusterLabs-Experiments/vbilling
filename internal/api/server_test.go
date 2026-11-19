@@ -430,3 +430,41 @@ func TestReconcileFiltersSelectTenantMetricPairs(t *testing.T) {
 		t.Fatalf("a filter that matches nothing should compare nothing: %s", body)
 	}
 }
+
+// PUT /api/v1/billing-states sets the operator hold unless the request names
+// another. No webhook touches it: a payment never lifts an operator's pause,
+// even when the billing platform shows nothing owed. A portal that wants a
+// payment to lift its hold names the billing hold.
+func TestBillingStatePutSetsTheOperatorHoldByDefault(t *testing.T) {
+	e := setup(t)
+	put := func(body string) enforcement.TenantState {
+		t.Helper()
+		resp := do(t, http.MethodPut, e.srv.URL+"/api/v1/billing-states/acme", adminToken, strings.NewReader(body))
+		defer resp.Body.Close()
+		var ts enforcement.TenantState
+		if err := json.NewDecoder(resp.Body).Decode(&ts); err != nil || resp.StatusCode != http.StatusOK {
+			t.Fatalf("PUT %s: %d %v", body, resp.StatusCode, err)
+		}
+		return ts
+	}
+	if ts := put(`{"state":"paused","reason":"wallet empty"}`); ts.State != enforcement.Paused || ts.Hold != enforcement.HoldOperator {
+		t.Fatalf("PUT without a hold: %+v, want the operator hold paused", ts)
+	}
+	body := []byte(fmt.Sprintf(`{"id":"evt_paid","type":"invoice.paid","created":%d,"data":{"object":{"object":"invoice","id":"in_1","customer":"cus_acme"}}}`, now.Unix()))
+	req, _ := http.NewRequest("POST", e.srv.URL+"/webhooks/stripe", bytes.NewReader(body))
+	req.Header.Set("Stripe-Signature", stripe.SignatureHeader(body, "whsec_api", now))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if st := e.enf.StateOf("acme"); st.State != enforcement.Paused || st.Hold != enforcement.HoldOperator {
+		t.Fatalf("a payment webhook changed the operator's pause: %+v", st)
+	}
+	if ts := put(`{"state":"active"}`); ts.State != enforcement.Active || len(ts.Holds) != 0 {
+		t.Fatalf("PUT active without a hold: %+v, want the operator hold lifted", ts)
+	}
+	if ts := put(`{"state":"suspended","hold":"billing","reason":"invoice overdue"}`); ts.State != enforcement.Suspended || ts.Hold != enforcement.HoldBilling {
+		t.Fatalf("PUT with the billing hold: %+v", ts)
+	}
+}
