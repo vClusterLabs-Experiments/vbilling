@@ -20,11 +20,13 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/vclusterlabs-experiments/vbilling/internal/kv"
@@ -115,6 +117,15 @@ func (g *Gate) block(ctx context.Context, b Blocker, tenant string) error {
 			continue
 		}
 		if err != nil {
+			if !ours && Definite(err) {
+				// The block certainly did not happen: drop the claim this
+				// call made. Kept, an administrator's block made before the
+				// next try would look like vBilling's, and a payment would
+				// lift it.
+				if derr := g.state.Delete(k); derr != nil {
+					errs = append(errs, derr)
+				}
+			}
 			errs = append(errs, fmt.Errorf("%s: block %s for tenant %s: %w", b.Name(), id, tenant, err))
 			g.tel.Add("vbilling_gateway_block_errors_total", "Failed gateway block or unblock calls.", map[string]string{"gateway": b.Name()}, 1)
 			continue
@@ -165,6 +176,37 @@ func (g *Gate) Blocked() map[string]map[string]string {
 		out[parts[0]][parts[1]] = t
 	}
 	return out
+}
+
+// StatusError is a gateway's error answer to a call.
+type StatusError struct {
+	Code int
+	Body string
+}
+
+func (e *StatusError) Error() string { return fmt.Sprintf("HTTP %d: %s", e.Code, e.Body) }
+
+// Definite reports whether a failed call certainly changed nothing: the
+// gateway answered with an error, or the request was never sent
+// (connection refused, unknown host). A timeout, a connection lost once
+// the request was out, or a proxy's 502 or 504 may hide a call that took
+// effect.
+func Definite(err error) bool {
+	var status *StatusError
+	if errors.As(err, &status) {
+		return status.Code != http.StatusBadGateway && status.Code != http.StatusGatewayTimeout
+	}
+	var dns *net.DNSError
+	if errors.As(err, &dns) || errors.Is(err, syscall.ECONNREFUSED) {
+		return true
+	}
+	var op *net.OpError
+	if errors.As(err, &op) && op.Op == "dial" {
+		return true
+	}
+	// A blocker that reports such errors only as text.
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "connection refused") || strings.Contains(msg, "no such host")
 }
 
 func unique(in []string) []string {
@@ -252,7 +294,7 @@ func (l *LiteLLM) post(ctx context.Context, path, team string) error {
 	if unknownTeam(resp.StatusCode, msg) {
 		return ErrUnknown
 	}
-	return fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(msg)))
+	return &StatusError{Code: resp.StatusCode, Body: strings.TrimSpace(string(msg))}
 }
 
 // unknownTeam recognizes LiteLLM's answer for a team that does not exist.
