@@ -143,6 +143,9 @@ func (d *Dispatcher) Statuses() []Status {
 // Destinations returns the configured destinations.
 func (d *Dispatcher) Destinations() []destinations.Destination { return d.dests }
 
+// Held returns the store of events held from destinations, or nil.
+func (d *Dispatcher) Held() *HeldStore { return d.opts.Held }
+
 func (d *Dispatcher) update(name string, fn func(*Status)) {
 	d.mu.Lock()
 	defer d.mu.Unlock()

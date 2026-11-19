@@ -149,7 +149,8 @@ th .est { color: var(--warning); }
 
   <section class="card">
     <h2>Usage by tenant</h2>
-    <p class="desc">Every metric in the catalog that has usage, unrated, from the vBilling ledger. Expand a tenant for its SKUs.
+    <p class="desc">Every metric in the catalog that has usage, unrated, from the vBilling ledger and its archive, each event counted once. Expand a tenant for its SKUs.
+      "Of which" rows are the part of a tenant's usage a billing platform refused for good (dead letters) or that is held until priced: not billed there (yet).
       <span class="est">&#8776;</span> marks estimates (PromQL queries); everything else is measured exactly. Prices and invoices come from your billing platform.</p>
     <div class="scroll"><table id="usage"><thead></thead><tbody></tbody></table></div>
   </section>
@@ -362,13 +363,22 @@ async function loadTenants() {
 async function loadUsage() {
   await loadCatalog();
   const u = await json("/api/v1/usage?" + qs({ group_by: "tenant,sku" }));
-  const totals = {}, bySku = {};
+  const totals = {}, bySku = {}, undelivered = {};
   let gpu = 0;
+  // Parts of the totals a destination refused for good or holds until priced.
+  const addUndelivered = (kind, t, m, perDest) => {
+    for (const [d, q] of Object.entries(perDest || {})) {
+      const k = kind + "\u0000" + d;
+      ((undelivered[t] ||= {})[k] ||= { kind, dest: d, vals: {} }).vals[m] = (undelivered[t][k].vals[m] || 0) + q;
+    }
+  };
   for (const r of u.rows) {
     const t = r.tenant, m = r.metric, sku = r.sku || "";
     (totals[t] ||= {})[m] = (totals[t][m] || 0) + r.quantity;
     ((bySku[t] ||= {})[sku] ||= {})[m] = (bySku[t][sku][m] || 0) + r.quantity;
     if (m === "vcluster_gpu_hours") gpu += r.quantity;
+    addUndelivered("dead", t, m, r.dead_lettered);
+    addUndelivered("held", t, m, r.held);
   }
   $("#t-gpu").textContent = fmt(gpu);
   $("#t-gpu-sub").textContent = { "24h": "last 24 hours", "7d": "last 7 days", mtd: "month to date" }[range];
@@ -388,6 +398,9 @@ async function loadUsage() {
       ? '<button class="toggle" data-tenant="' + esc(t) + '" aria-expanded="' + open + '" aria-label="SKUs of ' + esc(t) + '">' + (open ? "&#9662;" : "&#9656;") + "</button>" : "";
     let html = "<tr><td>" + toggle + tenantCell(t) + "</td>" + cells(totals[t]) + "</tr>";
     if (open) html += skus.map((sku) => '<tr class="sku"><td>' + esc(sku || "no SKU") + "</td>" + cells(bySku[t][sku]) + "</tr>").join("");
+    html += Object.values(undelivered[t] || {}).sort((a, b) => (a.kind + a.dest).localeCompare(b.kind + b.dest)).map((x) =>
+      '<tr class="sku"><td>' + (x.kind === "dead" ? "of which dead-lettered at " : "of which held from ") + esc(x.dest) + (x.kind === "held" ? " until priced" : "") +
+      "</td>" + cells(x.vals) + "</tr>").join("");
     return html;
   }).join("") || '<tr><td class="empty">No usage in this range yet.</td></tr>';
 

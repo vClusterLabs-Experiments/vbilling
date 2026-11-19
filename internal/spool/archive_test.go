@@ -63,6 +63,37 @@ func compactedLedger(t *testing.T) (dir, arch string) {
 	return dir, arch
 }
 
+// ScanAll reads a range through the archive: once compaction moved the
+// oldest windows there, Scan sees only what is retained, ScanAll all of it.
+func TestScanAllReadsThroughTheArchive(t *testing.T) {
+	dir, arch := compactedLedger(t)
+	c := &clock{t: t0.Add(3 * time.Hour)}
+	s := open(t, dir, c, archiveOpts(arch))
+	defer s.Close()
+	count := func(scan func(from, to time.Time, fn func(*usage.Event) error) error) (n int, q float64) {
+		if err := scan(t0, t0.Add(time.Hour), func(e *usage.Event) error {
+			n++
+			q += e.Quantity
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return n, q
+	}
+	if n, _ := count(s.Scan); n != 6 {
+		t.Fatalf("Scan saw %d events, want the 6 still in the ledger", n)
+	}
+	n, q := count(s.ScanAll)
+	if n != 12 || q != 0.6+1+2+3+4+5+6 {
+		t.Fatalf("ScanAll saw %d events (%v), want all 12 (21.6)", n, q)
+	}
+	// A range that starts after the archived windows reads no archive file.
+	var late int
+	if err := s.ScanAll(t0.Add(4*time.Minute), t0.Add(time.Hour), func(*usage.Event) error { late++; return nil }); err != nil || late != 4 {
+		t.Fatalf("ScanAll from 10:04 saw %d events (%v), want 4", late, err)
+	}
+}
+
 func copyDir(t *testing.T, src string) string {
 	t.Helper()
 	dst := t.TempDir()
