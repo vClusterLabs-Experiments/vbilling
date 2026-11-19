@@ -473,7 +473,7 @@ presentation_group_key: [tenant_cluster]</code></div>
       <p>An AI Cloud that sells prepaid capacity keeps the wallet in Metronome: the portal's contract carries prepaid commits, and a top-up adds a commit. vBilling closes the loop around that wallet:</p>
       <ol>
         <li>Usage reaches Metronome about a minute after each window, so the commit balance draws down while the cluster runs.</li>
-        <li>A threshold notification on the commit balance fires. A rule maps it to <code>paused</code>: in <code>enforce</code> mode vBilling pauses each of the tenant's clusters, and their workloads, control plane and node capacity stop billing at the second of the pause, while volumes and load balancers keep billing by default (see <a href="private-nodes.html#pause">Pausing a tenant</a>).</li>
+        <li>A threshold notification on the commit balance fires. A rule maps it to <code>paused</code>: in <code>enforce</code> mode vBilling pauses each of the tenant's clusters, and their workloads, control plane and node capacity stop billing once vBilling has verified the workloads are gone, while volumes and load balancers keep billing by default (see <a href="private-nodes.html#pause">Pausing a tenant</a>).</li>
         <li>The customer tops up. When the payment for the payment-gated commit succeeds, Metronome sends <code>payment_gate.payment_status</code> with <code>payment_status: paid</code>, which clears the billing hold and resumes the clusters. Holds set for other reasons, such as <code>support</code> or <code>abuse</code>, stay.</li>
       </ol>
       <div class="code-block"><code><span class="comment"># values.yaml</span>

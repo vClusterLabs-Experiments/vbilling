@@ -488,7 +488,7 @@ callback_settings:
           <tbody>
             <tr><td>Request ID</td><td><code>litellm_call_id</code> and <code>id</code> (the response ID), joined as <code>&lt;litellm_call_id&gt;/&lt;id&gt;</code>, with LiteLLM's <code>_cache_hit&lt;time&gt;</code> suffix cut</td></tr>
             <tr><td>Time</td><td><code>endTime</code>, else <code>startTime</code>, rounded to the millisecond as LiteLLM's spend logs store it</td></tr>
-            <tr><td>Tenant</td><td><code>metadata.user_api_key_team_id</code>, else <code>metadata.user_api_key_org_id</code>, <code>metadata.user_api_key_user_id</code>, <code>end_user</code></td></tr>
+            <tr><td>Tenant</td><td><code>metadata.user_api_key_team_id</code>, the virtual key's team. A request whose key has no team is refused: fields the client sends, such as <code>end_user</code>, never decide who pays</td></tr>
             <tr><td><code>inference_input_tokens</code></td><td><code>prompt_tokens</code> minus the cached ones: input billed at the input rate</td></tr>
             <tr><td><code>inference_cached_input_tokens</code></td><td><code>metadata.usage_object.prompt_tokens_details.cached_tokens</code>: input served from a prompt cache, which token factories price lower. Zero when the model server reports none (vLLM reports them with <code>--enable-prompt-tokens-details</code>).</td></tr>
             <tr><td><code>inference_output_tokens</code></td><td><code>completion_tokens</code></td></tr>

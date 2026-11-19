@@ -476,7 +476,7 @@ vcluster.loft.sh/cluster=<span class="string">team-gpu</span>
 
 <span class="comment"># inside the cluster</span>
 <span class="cmd">kubectl</span> get validatingadmissionpolicy/vbilling-suspended validatingadmissionpolicybinding/vbilling-suspended</code></div>
-          <p>New pods outside <code>kube-system</code> and namespaces labeled <code>vbilling.vcluster.com/enforcement-exempt</code> are then denied with the reason. Running pods keep running.</p>
+          <p>New pods outside <code>kube-system</code> are then denied with the reason (no label exempts a namespace). Running pods keep running.</p>
         </div>
       </div>
 
@@ -590,7 +590,7 @@ skuLabel: model_name</code></div>
           <p><code>POST /api/v1/records</code> answers with <code>unknown_tenants</code> and a warning such as <code>billed to tenants vBilling does not know (e2f1c0de-7b1a-4c55-9a7e-2d4f8b3c6a10); map gateway identities with the vbilling.vcluster.com/aliases annotation or the format's tenantMap</code>. Source health shows <code>records/litellm/unknown-tenants</code> as <code>empty</code>, and a customer with that ID appears in your billing platform.</p>
 
           <h4>Cause</h4>
-          <p>The record's tenant value is neither a tenant ID vBilling knows nor an alias of one. LiteLLM sends the team ID of the virtual key, a generated UUID unless the team was created with a <code>team_id</code>, or its organization, user or end user when the key has no team. By default such records are accepted and billed to that raw ID.</p>
+          <p>The record's tenant value is neither a tenant ID vBilling knows nor an alias of one. LiteLLM sends the team ID of the virtual key, a generated UUID unless the team was created with a <code>team_id</code>. A request whose key has no team is refused: fields the client sends never decide who pays. By default records for an unknown team are accepted and billed to that raw ID.</p>
 
           <h4><span class="fix-label">Fix</span> Map the identity to the tenant</h4>
           <div class="code-block"><code><span class="cmd">kubectl</span> annotate namespace globex <span class="flag">--overwrite</span> \

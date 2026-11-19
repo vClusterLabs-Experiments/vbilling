@@ -279,22 +279,22 @@
 
     <main class="content">
       <h1>Dedicated and Private Node Billing</h1>
-      <p class="subtitle">How vBilling bills nodes that belong to one tenant cluster for their full capacity, whether they sit in the control plane cluster (dedicated nodes) or join the tenant cluster itself (vCluster Private Nodes, Auto Nodes, Standalone), without ever billing the workloads on them twice.</p>
+      <p class="subtitle">How vBilling bills nodes that belong to one cluster for their full capacity, whether they sit in the control plane cluster (dedicated nodes) or join the cluster itself (vCluster Private Nodes, Auto Nodes, Standalone), without ever billing the workloads on them twice.</p>
 
       <h2 id="what">What dedicated nodes are</h2>
-      <p>A dedicated node is a physical server, VM or bare-metal machine assigned to one tenant cluster. AI Clouds typically sell them by SKU (for example <code>bm.gpu.h100.8</code>), billing the whole machine regardless of utilization. Shared nodes, by contrast, are billed by what each pod allocates.</p>
+      <p>A dedicated node is a physical server, VM or bare-metal machine assigned to one cluster. AI Clouds typically sell them by SKU (for example <code>bm.gpu.h100.8</code>), billing the whole machine regardless of utilization. Shared nodes, by contrast, are billed by what each pod allocates.</p>
       <div class="callout callout-info">
         <div class="callout-icon">i</div>
-        <div>Dedicated nodes are control plane cluster nodes assigned through labels. With vCluster <strong>Private Nodes</strong>, nodes join the tenant cluster directly and the control plane cluster never sees them or their pods; see <a href="#private">Private Nodes, Auto Nodes and Standalone</a>.</div>
+        <div>Dedicated nodes are control plane cluster nodes assigned through labels. With vCluster <strong>Private Nodes</strong>, nodes join the cluster directly and the control plane cluster never sees them or their pods; see <a href="#private">Private Nodes, Auto Nodes and Standalone</a>.</div>
       </div>
 
       <h2 id="detection">How vBilling detects them</h2>
-      <p>A node is dedicated to a tenant cluster when any of these labels match. The namespace is the tenant cluster's control plane cluster namespace; the name is the tenant cluster's name.</p>
+      <p>A node is dedicated to a cluster when any of these labels match. The namespace is the cluster's control plane cluster namespace; the name is the cluster's name.</p>
       <div class="config-table-wrap">
         <table class="config-table">
           <thead><tr><th>Label</th><th>Matches</th></tr></thead>
           <tbody>
-            <tr><td><code>vbilling.vcluster.com/tenant-cluster</code></td><td>The tenant cluster ID (<code>vcluster-&lt;namespace&gt;-&lt;name&gt;</code>) or name. Recommended.</td></tr>
+            <tr><td><code>vbilling.vcluster.com/tenant-cluster</code></td><td>The cluster ID (<code>vcluster-&lt;namespace&gt;-&lt;name&gt;</code>) or name. Recommended.</td></tr>
             <tr><td><code>vcluster.loft.sh/managed-by</code></td><td>Namespace or name (also the name with a <code>vcluster-</code> or <code>vc-</code> namespace prefix stripped)</td></tr>
             <tr><td><code>vcluster.loft.sh/cluster</code></td><td>As above</td></tr>
             <tr><td><code>VCLUSTER_NODE_LABEL</code> pattern</td><td>Any <code>key=value</code> where <code>%s</code> is replaced with the candidate names, e.g. <code>tenant=%s</code></td></tr>
@@ -328,8 +328,8 @@
       <p>If a dedicated node is NotReady, or carries a taint listed in <code>UNHEALTHY_NODE_TAINTS</code>, its node-hours stop and its GPUs are recorded as <code>vcluster_gpu_downtime_hours</code> (informational, never invoiced), from the moment the condition or taint appeared. A node that stops reporting (a preempted spot VM, a host that loses power) is marked Unknown only after the node controller's grace period, 40 to 50 seconds. For such a node the downtime starts at its last proof of life instead: the later of its last status heartbeat and its last Lease renewal, which the reader role above may <code>get</code>. On GCP, a preempted A100 spot node was billed until its last heartbeat, not the 59 seconds more until the Unknown mark.</p>
 
       <h2 id="private">Private Nodes, Auto Nodes and Standalone</h2>
-      <p>With Private Nodes, vCluster syncs nothing to the control plane cluster: the nodes, their pods and their volumes exist only in the tenant cluster. vBilling meters these tenant clusters through their own API. Every node the tenant cluster's API reports that the control plane cluster does not have (and that is not one of vCluster's placeholder nodes, labeled <code>vcluster.loft.sh/fake-node</code>) is a private node, billed like a dedicated node with <code>billing_mode=private_node</code>. The tenant cluster's volumes and load balancers are billed as well. Shared tenant clusters are never billed twice, even when vBilling can read their API.</p>
-      <p>vBilling reads one Secret per tenant cluster, <code>vbilling-kubeconfig</code> in its namespace, and its RBAC is pinned to that name. Let vCluster write it with a read-only service account:</p>
+      <p>With Private Nodes, vCluster syncs nothing to the control plane cluster: the nodes, their pods and their volumes exist only in the cluster. vBilling meters these clusters through their own API. Every node the cluster's API reports that the control plane cluster does not have (and that is not one of vCluster's placeholder nodes, labeled <code>vcluster.loft.sh/fake-node</code>) is a private node, billed like a dedicated node with <code>billing_mode=private_node</code>. The cluster's volumes and load balancers are billed as well. Shared clusters are never billed twice, even when vBilling can read their API.</p>
+      <p>vBilling reads one Secret per cluster, <code>vbilling-kubeconfig</code> in its namespace, and its RBAC is pinned to that name. Let vCluster write it with a read-only service account:</p>
       <div class="code-block"><code>exportKubeConfig:
   additionalSecrets:
     - name: vbilling-kubeconfig
@@ -358,7 +358,7 @@ experimental:
           - apiGroups: [metrics.k8s.io]
             resources: [pods]
             verbs: [get, list]</code></div>
-      <p>vCluster writes kubeconfigs for <code>localhost</code>; vBilling connects to the tenant cluster's Service and verifies TLS against <code>&lt;name&gt;.&lt;namespace&gt;</code>. Tenant clusters outside the control plane cluster (vCluster Standalone, or any other cluster) are listed in <code>TENANT_CLUSTERS_FILE</code> with their own kubeconfig.</p>
+      <p>vCluster writes kubeconfigs for <code>localhost</code>; vBilling connects to the cluster's Service and verifies TLS against <code>&lt;name&gt;.&lt;namespace&gt;</code>. Clusters outside the control plane cluster (vCluster Standalone, or any other cluster) are listed in <code>TENANT_CLUSTERS_FILE</code> with their own kubeconfig.</p>
       <div class="config-table-wrap">
         <table class="config-table">
           <thead><tr><th>Setting</th><th>Effect</th></tr></thead>
@@ -366,11 +366,10 @@ experimental:
             <tr><td><code>PRIVATE_NODE_BILLING=node</code> (default)</td><td>Each private node is billed whole: node-hours, whole GPUs, CPU and memory capacity.</td></tr>
             <tr><td><code>PRIVATE_NODE_BILLING=usage</code></td><td>The pods on private nodes are billed instead, like shared usage (namespaces in <code>TENANT_EXCLUDE_NAMESPACES</code>, default <code>kube-system</code>, are skipped).</td></tr>
             <tr><td><code>vbilling.vcluster.com/billable=false</code> node label</td><td>Exempts a node, for example hardware the tenant owns. Works for dedicated nodes too.</td></tr>
-            <tr><td><code>TENANT_ADMIN_FALLBACK=true</code></td><td>Also accepts the tenant cluster's admin kubeconfig (<code>vc-&lt;name&gt;</code>). Requires read access to Secrets; prefer the read-only export.</td></tr>
           </tbody>
         </table>
       </div>
-      <p><strong>Outages.</strong> If a tenant cluster's API cannot be read, everything else is still metered and the gap is recorded under <code>DATA_DIR</code>. As soon as the API answers, exactly the missed windows are metered and appended as late events, deduplicated by ID, up to <code>MAX_BACKFILL</code>.</p>
+      <p><strong>Outages.</strong> If a cluster's API cannot be read, everything else is still metered and the gap is recorded under <code>DATA_DIR</code>. As soon as the API answers, exactly the missed windows are metered and appended as late events, deduplicated by ID, up to <code>MAX_BACKFILL</code>.</p>
       <p><strong>Scale-down.</strong> Nodes deleted between two windows (Auto Nodes scaling down, a machine removed) are billed until the second they were deleted. A deletion noticed only after a watch reconnects is dated to the last time vBilling saw the node, never later.</p>
 
       <h2 id="platform">vCluster Platform mode</h2>
@@ -384,7 +383,7 @@ experimental:
             <tr><td>Who pays?</td><td>The Platform Tenant that owns the project, as customer <code>tenant-&lt;name&gt;</code>. Projects no Tenant owns, and every project on Platform versions before 4.12 (they have no Tenant resource), are customers <code>project-&lt;name&gt;</code>, the same ID <code>TENANT_SOURCE=project</code> uses.</td></tr>
             <tr><td>Keep an existing customer ID?</td><td>Set <code>vbilling.vcluster.com/tenant</code> on the Tenant (or on a Project no Tenant owns). Use it when you switch from label-based identity and want invoices to continue under the same customer.</td></tr>
             <tr><td>Name, email, plan, currency, tenant class, customer IDs</td><td>The Tenant's display name and its <code>vbilling.vcluster.com/</code> annotations (the Project's, when no Tenant owns it). For a cluster the Platform knows, these settings on the cluster, its namespace or its VirtualClusterInstance are ignored: the people who create clusters can set those (vcluster.yaml sets workload labels), so they never choose who pays or at what price.</td></tr>
-            <tr><td>Per-cluster settings such as <code>prometheus-url</code></td><td>Still read from the cluster's namespace and workload; the Tenant or Project can set a default.</td></tr>
+            <tr><td>Per-cluster settings such as <code>prometheus-url</code></td><td>Read only from the Tenant or Project, never from the cluster, its namespace or its instance: whoever writes vcluster.yaml writes those, and they decide how a cluster is metered. See <a href="security.html">Security</a>.</td></tr>
             <tr><td>Clusters without an instance</td><td>Billed by the usual label rules (<code>vbilling.vcluster.com/tenant</code>, else one customer per cluster), and listed as <code>empty</code> in <code>GET /api/v1/sources</code>.</td></tr>
           </tbody>
         </table>
@@ -446,7 +445,7 @@ platform:
       </div>
 
       <h3 id="platform-proxy">Clusters with their own nodes</h3>
-      <p>For a cluster bound to an instance, vBilling connects to <code>&lt;PLATFORM_URL&gt;/kubernetes/project/&lt;project&gt;/virtualcluster/&lt;instance&gt;</code> with the access key, the same route and credential <code>vcluster platform connect vcluster</code> uses. No kubeconfig Secret and no Secret RBAC are needed. A <code>vbilling-kubeconfig</code> Secret in the cluster's namespace still wins when it exists, so you can override the route per cluster, and clusters the Platform does not know keep using it.</p>
+      <p>For a cluster bound to an instance, vBilling connects to <code>&lt;PLATFORM_URL&gt;/kubernetes/project/&lt;project&gt;/virtualcluster/&lt;instance&gt;</code> with the access key, the same route and credential <code>vcluster platform connect vcluster</code> uses. No kubeconfig Secret and no Secret RBAC are needed, and vBilling never reads a <code>vbilling-kubeconfig</code> Secret in this mode: a cluster's creator can export one, pointing anywhere.</p>
       <p>vBilling never wakes a sleeping instance to meter it: while the Platform reports an instance as <code>Sleeping</code>, its own-node usage is recorded as a gap and filled when it wakes, like any tenant API outage. Requests carry the user agent <code>vbilling/&lt;version&gt;</code>; add <code>vbilling/*</code> to the instance's <code>sleepmode.loft.sh/ignore-user-agents</code> annotation so metering does not count as activity.</p>
 
       <h3 id="platform-failures">Outages and moves</h3>
