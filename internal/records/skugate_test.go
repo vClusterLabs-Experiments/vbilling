@@ -48,7 +48,7 @@ func TestSKUGateAppliesToRecords(t *testing.T) {
 	if _, err := r.in.ingestPulled(Native, "gw", "", []map[string]any{obj}, nil); err != nil {
 		t.Fatal(err)
 	}
-	for _, src := range []string{SKUSourceShared, SKUSourceBound, SKUSourcePull("gw")} {
+	for _, src := range []string{SKUSourceShared, SKUSourceToken(""), SKUSourcePull("gw")} { // a bound push counts against its token
 		if !g.sources[src] {
 			t.Errorf("no row counted against %s (asked: %v)", src, g.sources)
 		}

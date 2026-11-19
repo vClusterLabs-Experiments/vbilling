@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vclusterlabs-experiments/vbilling/internal/config"
 	"github.com/vclusterlabs-experiments/vbilling/internal/health"
 )
 
@@ -28,24 +29,45 @@ import (
 // posts its own copy under client litellm with 1 input token; the pull then
 // finds that ID stored and drops the real row. security.html (v0.3.1) says
 // "a tenant's copy of a request never takes the ID of the gateway's".
+//
+// Since the fix every tenant-bound token has a record ID namespace of its
+// own, and a pinned pull stores its rows under the IDs of the pinned
+// tenant's bound token, so that a request the pulled LiteLLM pushed with
+// that token and the pull read back counts once. A pin cannot tell which of
+// a tenant's tokens its LiteLLM pushes with: with globex holding a token of
+// its own next to the one the operator's LiteLLM pushes with (the setup
+// above), vBilling refuses to start, so globex's copy can never take the ID
+// of a pulled row. With the gateway's token alone, its push and the pinned
+// pull share their IDs, and the real row is billed once.
 func TestReview4TenantBoundPushReplacesThePinnedPullOfTheOperatorsGateway(t *testing.T) {
-	r := newRig(t, Options{Settle: 20 * time.Second})
+	const gwToken, ownToken = "tok-gw-globex", "tok-globex-own"
+	t.Setenv("INGEST_TOKENS", gwToken+"=globex,"+ownToken+"=globex")
+	t.Setenv("LITELLM_TENANT", "globex")
+	t.Setenv("LITELLM_URL", "http://litellm.invalid")
+	t.Setenv("LITELLM_API_KEY", "sk-admin")
+	cfg := config.Load()
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "LITELLM_TENANT") {
+		t.Errorf("LITELLM_TENANT=globex while globex holds two tokens: Validate says %v, want a refusal naming LITELLM_TENANT", err)
+	}
+	both := newRig(t, Options{Settle: 20 * time.Second, BoundTokens: cfg.IngestTokens})
+	defer both.close()
+	if err := both.in.CheckPin("globex"); err == nil || !strings.Contains(err.Error(), "2 tokens in INGEST_TOKENS") {
+		t.Errorf("a pull pinned to globex (RECORDS_PULL_FILE tenant:) while it holds two tokens: %v, want a refusal", err)
+	}
+
+	r := newRig(t, Options{Settle: 20 * time.Second, BoundTokens: map[string]string{gwToken: "globex"}})
 	defer r.close()
 	fake := &fakeLiteLLM{}
 	srv := httptest.NewServer(fake)
 	defer srv.Close()
-
 	real := request{call: "c-1", resp: "chatcmpl-1", team: "globex", end: t0.Add(10 * time.Second), in: 50000, out: 2000}
-	forged := real
-	forged.in, forged.out = 1, 1
-	body, _ := json.Marshal([]map[string]any{forged.payload(t)})
+	body, _ := json.Marshal([]map[string]any{real.payload(t)})
 	r.clk.set(t0.Add(12 * time.Second))
-	// POST /api/v1/records?format=litellm with globex's own bound token and
-	// X-VBilling-Client: litellm.
-	if res, err := r.in.Ingest("litellm", "litellm", "globex", body); err != nil || res.Accepted != 1 {
-		t.Fatalf("globex's own push: %+v %v", res, err)
+	// POST /api/v1/records?format=litellm from the operator's LiteLLM, with
+	// the token bound to globex.
+	if res, err := r.in.IngestPush("litellm", Push{Client: "litellm", Bound: "globex", Token: TokenID(gwToken), Known: true}, body); err != nil || res.Accepted != 1 {
+		t.Fatalf("the operator's push: %+v %v", res, err)
 	}
-	// The operator's LiteLLM wrote the real request to its spend logs.
 	fake.add(real.row(t))
 	r.clk.set(t0.Add(3 * time.Minute))
 	p, _ := newPuller(t, r, srv, LiteLLMPullOptions{Tenant: "globex"})
@@ -55,10 +77,9 @@ func TestReview4TenantBoundPushReplacesThePinnedPullOfTheOperatorsGateway(t *tes
 	}
 	r.tick(t, t0.Add(4*time.Minute+30*time.Second))
 	onTime, late := byMetric(r.ledgerEvents(t), "inference_input_tokens")
-	if onTime+late != 50000 {
-		t.Errorf("the operator's pinned pull read a request of 50000 input tokens and billed globex %v (%v on time, %v late; pull: %d already stored): "+
-			"globex's own bound token posted the request's record ID first with 1 token, and the pull dropped the real row as already stored",
-			onTime+late, onTime, late, res.AlreadyStored)
+	if onTime+late != 50000 || res.AlreadyStored != 1 {
+		t.Errorf("the operator's LiteLLM pushed and the pinned pull read a request of 50000 input tokens; globex is billed %v (%v on time, %v late; "+
+			"pull: %d already stored), want 50000 once", onTime+late, onTime, late, res.AlreadyStored)
 	}
 }
 
@@ -66,26 +87,31 @@ func TestReview4TenantBoundPushReplacesThePinnedPullOfTheOperatorsGateway(t *tes
 // ("A LiteLLM that serves one tenant can use a tenant-bound token
 // instead"), while globex holds a second token bound to itself: both
 // tokens give the same record IDs, and billing keeps the first copy.
+//
+// Since the fix each token has its own namespace: the operator's copy is
+// stored and billed whatever globex sent first, and so is globex's own
+// copy, which can only add to globex's bill.
 func TestReview4TenantBoundPushReplacesThePushOfTheOperatorsBoundGateway(t *testing.T) {
 	r := newRig(t, Options{Settle: 20 * time.Second})
 	defer r.close()
 	real := request{call: "c-1", resp: "chatcmpl-1", team: "globex", end: t0.Add(10 * time.Second), in: 50000, out: 2000}
 	forged := real
 	forged.in, forged.out = 1, 1
+	push := func(token string, q request) {
+		t.Helper()
+		body, _ := json.Marshal([]map[string]any{q.payload(t)})
+		if res, err := r.in.IngestPush("litellm", Push{Client: "litellm", Bound: "globex", Token: TokenID(token), Known: true}, body); err != nil || res.Accepted != 1 {
+			t.Fatalf("push with %s: %+v %v", token, res, err)
+		}
+	}
 	r.clk.set(t0.Add(11 * time.Second))
-	own, _ := json.Marshal([]map[string]any{forged.payload(t)})
-	if res, err := r.in.Ingest("litellm", "litellm", "globex", own); err != nil || res.Accepted != 1 { // globex's own token
-		t.Fatalf("globex's own push: %+v %v", res, err)
-	}
+	push("tok-globex-own", forged)      // globex's own token
 	r.clk.set(t0.Add(15 * time.Second)) // LiteLLM flushes its batch every 5 seconds
-	gw, _ := json.Marshal([]map[string]any{real.payload(t)})
-	if res, err := r.in.Ingest("litellm", "litellm", "globex", gw); err != nil || res.Accepted != 1 { // the operator's LiteLLM, its own globex token
-		t.Fatalf("the operator's push: %+v %v", res, err)
-	}
+	push("tok-gw-globex", real)         // the operator's LiteLLM, its own globex token
 	r.tick(t, t0.Add(2*time.Minute))
-	if got := total(r.ledgerEvents(t), "inference_input_tokens"); got != 50000 {
-		t.Errorf("the operator's LiteLLM pushed 50000 input tokens for globex with its globex-bound token and globex was billed %v: "+
-			"globex's own bound token sent the same record ID first", got)
+	if got := total(r.ledgerEvents(t), "inference_input_tokens"); got != 50001 {
+		t.Errorf("the operator's LiteLLM pushed 50000 input tokens for globex with its globex-bound token, and globex 1 with its own token; "+
+			"globex was billed %v, want both: 50001", got)
 	}
 }
 
@@ -152,8 +178,11 @@ func TestReview4RefusedRecordsWithoutATimeHoldMemoryForAnHour(t *testing.T) {
 	runtime.GC()
 	runtime.ReadMemStats(&before)
 	res, err := r.in.IngestPush(Native, Push{Client: "edge-gw", Bound: "acme"}, body)
-	if err != nil || res.Accepted != 0 || len(res.Rejected) != recs {
-		t.Fatalf("every record must be refused (unknown metrics): %d accepted, %d refused, %v", res.Accepted, len(res.Rejected), err)
+	// Since the fix such records are refused before anything is dated (more
+	// than MaxUsagePerRecord usage keys), and the answer lists the first
+	// MaxRejections refusals with a count of all.
+	if err != nil || res.Accepted != 0 || res.RejectedCount != recs || len(res.Rejected) > MaxRejections {
+		t.Fatalf("every record must be refused: %d accepted, %d refused (%d listed), %v", res.Accepted, res.RejectedCount, len(res.Rejected), err)
 	}
 	answer, _ := json.Marshal(res) // what POST /api/v1/records answers (400)
 	answerLen := len(answer)

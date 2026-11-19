@@ -2,14 +2,13 @@ package api
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"log"
 	"math"
 	"net/http"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -44,7 +43,7 @@ const (
 	maxIngestEvents = 5000
 	maxRecordsBody  = 16 << 20
 	// maxSKUsPerTenantPerDay bounds the new SKUs one source (the shared
-	// ingest token, a tenant's bound tokens, or one pull) brings in for a
+	// ingest token, each tenant-bound token, or one pull) brings in for a
 	// tenant in one UTC day. Every new SKU can create a meter in a billing
 	// platform (vBilling splits Stripe meters by SKU), and meters are shared
 	// by every tenant of the account. A SKU counts only when it is new:
@@ -128,12 +127,10 @@ func (l *rateLimiter) allow(key string, rate, burst float64) (bool, time.Duratio
 	return true, 0
 }
 
-// limitKey identifies an ingest token in the rate limiter and the client
-// names without keeping the token itself as a map key.
-func limitKey(token string) string {
-	sum := sha256.Sum256([]byte(token))
-	return hex.EncodeToString(sum[:8])
-}
+// limitKey identifies an ingest token in the rate limiter, the client
+// names, the SKU caps and record IDs without keeping the token itself as a
+// map key.
+func limitKey(token string) string { return records.TokenID(token) }
 
 // limitIngest answers 429 with Retry-After when the caller's token is over
 // its request rate.
@@ -299,10 +296,10 @@ func (q *skuQuota) Overflowed(source, tenant string, n int) {
 }
 
 func sourceDesc(source string) string {
-	switch source {
-	case records.SKUSourceShared:
+	switch {
+	case source == records.SKUSourceShared:
 		return "the shared ingest token"
-	case records.SKUSourceBound:
+	case strings.HasPrefix(source, records.SKUSourceBound+":"):
 		return "a tenant-bound ingest token"
 	default:
 		return source
