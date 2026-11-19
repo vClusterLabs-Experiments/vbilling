@@ -187,14 +187,16 @@ type StatusError struct {
 func (e *StatusError) Error() string { return fmt.Sprintf("HTTP %d: %s", e.Code, e.Body) }
 
 // Definite reports whether a failed call certainly changed nothing: the
-// gateway answered with an error, or the request was never sent
-// (connection refused, unknown host). A timeout, a connection lost once
-// the request was out, or a proxy's 502 or 504 may hide a call that took
-// effect.
+// gateway refused it with a 4xx, or the request was never sent (connection
+// refused, unknown host). A 5xx is not definite: a server error can come
+// after the block was written (LiteLLM updates the team, then fails on
+// something else), and a proxy's 502 or 504 can hide a call that reached
+// the gateway. Neither are a timeout or a connection lost once the request
+// was out.
 func Definite(err error) bool {
 	var status *StatusError
 	if errors.As(err, &status) {
-		return status.Code != http.StatusBadGateway && status.Code != http.StatusGatewayTimeout
+		return status.Code >= 400 && status.Code < 500
 	}
 	var dns *net.DNSError
 	if errors.As(err, &dns) || errors.Is(err, syscall.ECONNREFUSED) {
