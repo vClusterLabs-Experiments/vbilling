@@ -387,7 +387,7 @@ Billing on DCGM fields takes two precautions. The exporter refreshes values ever
 
 | Cluster | `{{matchers}}` |
 |---|---|
-| With `vbilling.vcluster.com/prometheus-url` (`https://...`, or `tenant-service://NAMESPACE/NAME:PORT` through the cluster's API server) | `__name__!=""`: that Prometheus sees only this cluster |
+| With `vbilling.vcluster.com/prometheus-url` (`https://...`, or `tenant-service://NAMESPACE/NAME:PORT` through the cluster's API server; with `TENANT_SOURCE=platform` set on the Tenant or Project only) | `__name__!=""`: that Prometheus sees only this cluster |
 | With `PROMETHEUS_PRESET=vcluster-platform` | `vcluster_platform_instance="<instance>",vcluster_platform_project="<project>"` |
 | Own nodes (Private Nodes, Auto Nodes, Standalone) | `vcluster="<cluster name>"`: the external label its Prometheus agent adds when it remote writes (`PROMETHEUS_SOURCE_LABEL`, name overridable with `vbilling.vcluster.com/prometheus-source`) |
 | Shared or dedicated nodes | `namespace="<namespace on the control plane cluster>"` |
@@ -419,10 +419,13 @@ Divergence above the tolerance turns the check `diverged`. Every source (each Pr
 
 ## HTTP API
 
+Every endpoint except `/healthz` and `/readyz` needs the API token (`Authorization: Bearer ...`). vBilling never runs an open API: without `API_TOKEN` it generates one into `DATA_DIR/api-token`, and the chart generates one into its Secret. Gateways send usage with `INGEST_TOKEN` or a tenant-bound token, never the API token. See [Security](https://vclusterlabs-experiments.github.io/vbilling/security.html).
+
 | Endpoint | Purpose |
 |---|---|
-| `GET /` | Dashboard (embedded; no external assets, works air-gapped) |
-| `GET /healthz`, `GET /readyz`, `GET /metrics` | Probes and Prometheus metrics |
+| `GET /` | Dashboard (embedded; no external assets, works air-gapped; asks for the API token) |
+| `GET /healthz`, `GET /readyz` | Probes (the only endpoints without the API token) |
+| `GET /metrics` | Prometheus metrics (API token as bearer token; the chart's ServiceMonitor sends it) |
 | `GET /api/v1/status` | Region, destinations (cursor, lag, failures, dead letters), ledger stats, and source health: `healthy`, `sources` (counts by status), `warnings` |
 | `GET /api/v1/catalog` | Metric catalog: unit, billable, `accuracy` (`exact` or `estimate`) and source |
 | `GET /api/v1/usage?from&to&group_by=tenant,sku,region,day&format=csv` | Unrated line items (filters: `tenant`, `metric`, `project`, `region`, `sku`, `cluster`) |
