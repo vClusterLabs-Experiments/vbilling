@@ -305,3 +305,54 @@ func TestHoldModeNeverHoldsUsageWithoutCustomer(t *testing.T) {
 		t.Fatalf("after the plan moved to the rate card: %+v", dec)
 	}
 }
+
+// Webhooks resolve through every alias of the customer: the one vBilling
+// knows as a tenant, never just the first. Aliases are cached for a minute.
+func TestCustomerAliasesAndWebhookResolution(t *testing.T) {
+	f := newFake(t)
+	cus, _ := f.CreateCustomer("Acme AI", "org_1f2e", "tenant-acme") // identity alias first
+	stranger, _ := f.CreateCustomer("Not ours", "org_7777")
+	a := newReadOnly(t, f)
+	ctx := context.Background()
+	if err := a.SendEvents(ctx, []usage.Event{gpu("tenant-acme", "c1", now.Add(-time.Minute), 1)}); err != nil {
+		t.Fatal(err)
+	}
+
+	aliases, err := a.CustomerAliases(ctx, cus)
+	if err != nil || strings.Join(aliases, ",") != "org_1f2e,tenant-acme" {
+		t.Fatalf("aliases %v, %v", aliases, err)
+	}
+	if tenant, ok := a.TenantForCustomer(ctx, cus); !ok || tenant != "tenant-acme" {
+		t.Fatalf("resolved %q %v, want the compute alias tenant-acme, not the identity alias", tenant, ok)
+	}
+	if tenant, ok := a.TenantForCustomer(ctx, stranger); ok {
+		t.Fatalf("a customer with no vBilling tenant resolved to %q", tenant)
+	}
+	if n := f.Calls("GET /v1/customers/{id}"); n != 2 {
+		t.Fatalf("customer reads %d: cached per customer", n)
+	}
+
+	// A migration swaps the compute alias; the cache expires within a minute.
+	if err := f.SetIngestAliases(cus, "org_1f2e", "tenant-acme-2"); err != nil {
+		t.Fatal(err)
+	}
+	if aliases, _ := a.CustomerAliases(ctx, cus); strings.Join(aliases, ",") != "org_1f2e,tenant-acme" {
+		t.Fatalf("within the minute the cached aliases stay: %v", aliases)
+	}
+	a.now = func() time.Time { return now.Add(2 * time.Minute) }
+	if aliases, _ := a.CustomerAliases(ctx, cus); strings.Join(aliases, ",") != "org_1f2e,tenant-acme-2" {
+		t.Fatalf("after a minute the aliases are read again: %v", aliases)
+	}
+	if _, ok := a.TenantForCustomer(ctx, cus); ok {
+		t.Fatal("the customer no longer holds a vBilling tenant's alias")
+	}
+
+	if aliases, err := a.CustomerAliases(ctx, "00000000-0000-4000-8000-000000000000"); err != nil || aliases != nil {
+		t.Fatalf("unknown customer: %v %v", aliases, err)
+	}
+	a.now = func() time.Time { return now.Add(10 * time.Minute) } // the cached entry expired
+	f.FailNext("GET /v1/customers/{id}", 1)
+	if _, err := a.CustomerAliases(ctx, stranger); err == nil {
+		t.Fatal("a failed read must be an error, so the webhook is retried")
+	}
+}

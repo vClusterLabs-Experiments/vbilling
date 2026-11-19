@@ -9,6 +9,7 @@ import (
 	"log"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -59,6 +60,9 @@ const maxEventAge = 34*24*time.Hour - time.Hour
 // metrics require every group-key property to exist.
 const placeholder = "none"
 
+// aliasTTL is how long CustomerAliases keeps a customer's aliases.
+const aliasTTL = time.Minute
+
 var uuidRe = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
 // Adapter ships usage to Metronome. Events carry the vBilling tenant ID as
@@ -76,15 +80,21 @@ type Adapter struct {
 
 	mu      sync.Mutex
 	metrics map[string]string      // metric code -> billable metric ID vBilling created or adopted (provisioning)
+	aliases map[string]aliasEntry  // customer ID -> its ingest aliases, cached
 	plans   map[string]*tenantPlan // tenant -> rate cards of its customer's contracts (price coverage)
 	known   map[string]bool        // tenants recorded as vBilling ingest aliases
 	warned  map[string]bool        // tenants told that their pinned customer is not used
 }
 
+type aliasEntry struct {
+	aliases []string
+	at      time.Time
+}
+
 // New builds the adapter (exported for tests). link may be nil.
 func New(c *Client, cfg *config.Config, state *kv.Store, link *stripe.Adapter) *Adapter {
 	return &Adapter{c: c, cfg: cfg, state: state, stripe: link, now: time.Now, metrics: map[string]string{},
-		plans: map[string]*tenantPlan{}, known: map[string]bool{}, warned: map[string]bool{}}
+		aliases: map[string]aliasEntry{}, plans: map[string]*tenantPlan{}, known: map[string]bool{}, warned: map[string]bool{}}
 }
 
 func (a *Adapter) Name() string { return "metronome" }
@@ -273,6 +283,22 @@ func (a *Adapter) markKnown(alias string) {
 			log.Printf("[metronome] remember tenant %s: %v", alias, err)
 		}
 	}
+}
+
+// isTenant reports whether vBilling knows alias as one of its tenants: it
+// sent usage under it, or found or created the customer for it.
+func (a *Adapter) isTenant(alias string) bool {
+	a.mu.Lock()
+	known := a.known[alias]
+	a.mu.Unlock()
+	if known {
+		return true
+	}
+	if _, ok := a.state.Get("alias/" + alias); ok {
+		return true
+	}
+	_, ok := a.state.Get("cus/" + alias)
+	return ok
 }
 
 func (a *Adapter) ensureCustomer(ctx context.Context, t usage.Tenant) (string, error) {
@@ -592,17 +618,75 @@ func (a *Adapter) RemoveTenant(ctx context.Context, t usage.Tenant) error {
 	return nil
 }
 
-// TenantForCustomer resolves a webhook's customer_id to a tenant.
-func (a *Adapter) TenantForCustomer(ctx context.Context, customerID string) (string, bool) {
-	if t, ok := a.state.Get("tenant/" + customerID); ok {
-		return t, true
+// CustomerAliases returns every ingest alias of a Metronome customer, cached
+// for a minute. A customer Metronome does not know has none (nil, no error);
+// any other failure is returned, so the webhook that asked can be retried.
+func (a *Adapter) CustomerAliases(ctx context.Context, customerID string) ([]string, error) {
+	if customerID == "" {
+		return nil, nil
 	}
+	now := a.now()
+	a.mu.Lock()
+	if e, ok := a.aliases[customerID]; ok && now.Sub(e.at) < aliasTTL {
+		a.mu.Unlock()
+		return slices.Clone(e.aliases), nil
+	}
+	a.mu.Unlock()
+	var aliases []string
 	cus, err := a.c.GetCustomer(ctx, customerID)
-	if err != nil || len(cus.IngestAliases) == 0 {
-		return "", false
+	switch {
+	case IsNotFound(err):
+	case err != nil:
+		return nil, fmt.Errorf("customer %s: %w", customerID, err)
+	default:
+		aliases = slices.Clone(cus.IngestAliases)
 	}
-	a.remember(cus.IngestAliases[0], customerID)
-	return cus.IngestAliases[0], true
+	a.mu.Lock()
+	if len(a.aliases) >= 10000 {
+		for id, e := range a.aliases {
+			if now.Sub(e.at) >= aliasTTL {
+				delete(a.aliases, id)
+			}
+		}
+	}
+	a.aliases[customerID] = aliasEntry{aliases: aliases, at: now}
+	a.mu.Unlock()
+	return slices.Clone(aliases), nil
+}
+
+// TenantForCustomer resolves a webhook's customer to a tenant: the alias of
+// the customer that vBilling knows as a tenant. A customer with an identity
+// alias and a compute alias (the tenant ID) resolves to the compute alias,
+// whatever their order; a customer with none of vBilling's tenants resolves
+// to nothing. With METRONOME_PROVISION, a customer vBilling created, found or
+// was pinned to resolves to that tenant directly.
+func (a *Adapter) TenantForCustomer(ctx context.Context, customerID string) (string, bool) {
+	stored, hasStored := a.state.Get("tenant/" + customerID)
+	if hasStored && a.provision() {
+		return stored, true
+	}
+	aliases, err := a.CustomerAliases(ctx, customerID)
+	if err != nil {
+		// Metronome cannot be read now: use what vBilling mapped itself.
+		log.Printf("[metronome] resolve customer %s: %v", customerID, err)
+		return stored, hasStored
+	}
+	var mapped []string
+	for _, al := range aliases {
+		if a.isTenant(al) {
+			mapped = append(mapped, al)
+		}
+	}
+	switch {
+	case len(mapped) == 0:
+		return "", false
+	case hasStored && slices.Contains(mapped, stored):
+		return stored, true
+	case len(mapped) > 1:
+		log.Printf("[metronome] customer %s holds the aliases of several tenants (%s); its webhooks resolve to %s",
+			customerID, strings.Join(mapped, ", "), mapped[0])
+	}
+	return mapped[0], true
 }
 
 // ToIngest converts a canonical event to Metronome's wire format.
