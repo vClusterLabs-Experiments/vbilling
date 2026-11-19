@@ -917,12 +917,12 @@ func (e *Enforcer) drain(ctx context.Context, kube kubernetes.Interface, cl disc
 		for _, n := range nodes.Items {
 			host[n.Name] = n.Status.NodeInfo
 		}
-		pods, err := e.kube.CoreV1().Pods("").List(ctx, metav1.ListOptions{LabelSelector: labelManagedBy + "=" + cl.Name})
+		pods, err := e.syncedPods(ctx, cl)
 		if err != nil {
 			return drained{}, fmt.Errorf("list pods the cluster synced: %w", err)
 		}
-		for _, p := range pods.Items {
-			if p.Spec.NodeName != "" && p.Labels[labelManagedBy] == cl.Name && cl.SyncedHere(p.Namespace) {
+		for _, p := range pods {
+			if p.Spec.NodeName != "" {
 				syncedOn[p.Spec.NodeName] = true
 			}
 		}
@@ -1008,13 +1008,13 @@ func (e *Enforcer) drain(ctx context.Context, kube kubernetes.Interface, cl disc
 
 // stopSyncedPods stops the pods a cluster synced to the control plane
 // cluster, as `vcluster pause` deletes them: in its namespace, and in the
-// namespaces it syncs to (sync.toHost.namespaces) when its name says whose
-// they are (discovery.TenantCluster.SyncedHere). They come back on resume:
+// namespaces it syncs to (sync.toHost.namespaces) that are its, decided as
+// metering decides (discovery.HostNamespaces.Whose). They come back on resume:
 // the cluster still has them and syncs them again. With wait, it waits for
 // them to be gone (stopPods); it returns those still there.
 func (e *Enforcer) stopSyncedPods(ctx context.Context, cl discovery.TenantCluster, wait bool) ([]corev1.Pod, error) {
 	list := func(ctx context.Context) ([]corev1.Pod, error) {
-		return syncedPods(ctx, e.kube, cl)
+		return e.syncedPods(ctx, cl)
 	}
 	return e.stopPods(ctx, e.kube, list, wait)
 }

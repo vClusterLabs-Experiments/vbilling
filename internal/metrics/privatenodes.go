@@ -15,7 +15,6 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/vclusterlabs-experiments/vbilling/internal/discovery"
 	"github.com/vclusterlabs-experiments/vbilling/internal/health"
@@ -142,13 +141,13 @@ func sameMachine(h *nodeInfo, n *corev1.Node) bool {
 // cluster synced there run on, deleted ones included (vCluster keeps a
 // placeholder until its last pod is gone).
 func (c *Collector) syncedPodNodes(ctx context.Context, cl discovery.TenantCluster) (map[string]bool, error) {
-	pods, err := c.kube.CoreV1().Pods("").List(ctx, metav1.ListOptions{LabelSelector: LabelManagedBy + "=" + cl.Name})
+	pods, err := c.syncedPodsOf(ctx, cl, "")
 	if err != nil {
-		return nil, fmt.Errorf("list pods synced to the control plane cluster: %w", err)
+		return nil, err
 	}
 	out := map[string]bool{}
-	for _, e := range withDeleted(pods.Items, c.graveyard.Pods("")) {
-		if p := e.pod; p.Spec.NodeName != "" && p.Labels[LabelManagedBy] == cl.Name && cl.SyncedHere(p.Namespace) {
+	for _, p := range pods {
+		if p.Spec.NodeName != "" {
 			out[p.Spec.NodeName] = true
 		}
 	}
@@ -158,13 +157,12 @@ func (c *Collector) syncedPodNodes(ctx context.Context, cl discovery.TenantClust
 // syncedPodOn reports whether a pod the cluster synced runs on a control
 // plane cluster node.
 func (c *Collector) syncedPodOn(ctx context.Context, cl discovery.TenantCluster, node string) (bool, error) {
-	pods, err := c.kube.CoreV1().Pods("").List(ctx, metav1.ListOptions{
-		LabelSelector: LabelManagedBy + "=" + cl.Name, FieldSelector: "spec.nodeName=" + node})
+	pods, err := c.syncedPodsOf(ctx, cl, "spec.nodeName="+node)
 	if err != nil {
-		return false, fmt.Errorf("list pods synced to node %s: %w", node, err)
+		return false, fmt.Errorf("pods synced to node %s: %w", node, err)
 	}
-	for _, e := range withDeleted(pods.Items, c.graveyard.Pods("")) {
-		if p := e.pod; p.Spec.NodeName == node && p.Labels[LabelManagedBy] == cl.Name && cl.SyncedHere(p.Namespace) {
+	for _, p := range pods {
+		if p.Spec.NodeName == node {
 			return true, nil
 		}
 	}
