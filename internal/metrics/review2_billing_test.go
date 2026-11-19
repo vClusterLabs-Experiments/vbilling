@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/vclusterlabs-experiments/vbilling/internal/discovery"
+	"github.com/vclusterlabs-experiments/vbilling/internal/health"
 	"github.com/vclusterlabs-experiments/vbilling/internal/pause"
 	"github.com/vclusterlabs-experiments/vbilling/internal/usage"
 )
@@ -66,24 +68,54 @@ func TestReview2ExternalPauseBillsPodsBeforeThePause(t *testing.T) {
 // namespace="<namespace>". Every cluster in the namespace then reads every
 // series in it: egress (on by default with PROMETHEUS_URL) and any counter:
 // metric are billed once per cluster, to each cluster's tenant.
+//
+// Rewritten for v0.3.1: the review expected cluster a's series to be told
+// apart by the synced pod name. vBilling does not guess from names (long
+// ones are truncated and hashed, and many series carry no pod label): a
+// cluster selected by a shared namespace alone bills no Prometheus usage
+// until an operator scopes it with vbilling.vcluster.com/prometheus-matchers.
+// Its sources fail with that hint meanwhile, and its counters then catch
+// up, so the usage is billed once, to the right tenant.
 func TestReview2ClustersSharingANamespaceDoNotBillEachOthersCounters(t *testing.T) {
 	// Cluster a's synced pod is the only one that sent anything: 10 tokens
-	// per scrape, 4 scrapes in the window.
+	// per scrape, 4 scrapes per window.
 	fp := &fakeProm{series: []fakeSeries{{name: "vllm:generation_tokens_total",
 		labels:  map[string]string{"namespace": "shared", "pod": "engine-x-default-x-a", "model_name": "llama"},
-		samples: counterSamples(ws.Add(-time.Minute), we, 10, time.Time{})}}}
+		samples: counterSamples(ws.Add(-time.Minute), ws.Add(3*time.Minute), 10, time.Time{})}}}
 	srv := httptest.NewServer(fp.handler(t))
 	defer srv.Close()
-	_, p, _ := promSourceFor(t, srv.URL, "", nil, tokens)
+	_, p, h := promSourceFor(t, srv.URL, "", nil, tokens)
 	a := Target{Cluster: discovery.TenantCluster{Name: "a", Namespace: "shared"}, Tenant: "tenant-a"}
 	b := Target{Cluster: discovery.TenantCluster{Name: "b", Namespace: "shared"}, Tenant: "tenant-b"}
-	res := collectOK(t, p, []Target{a, b}, latest())
 	byTenant := map[string]float64{}
-	for _, e := range res[0].Events {
-		byTenant[e.Tenant] += e.Quantity
+	run := func(w Window) {
+		res := collectOK(t, p, []Target{a, b}, []Window{w})
+		if err := p.Commit(res, func(Window, []usage.Event) error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range res[0].Events {
+			byTenant[e.Tenant] += e.Quantity
+		}
 	}
-	if byTenant["tenant-b"] != 0 || byTenant["tenant-a"] != 40 {
-		t.Fatalf("billed %v: want 40 tokens to tenant-a (cluster a's pod) and none to tenant-b", byTenant)
+	wins := windowsFrom(ws, 3)
+	run(wins[0])
+	run(wins[1])
+	if len(byTenant) != 0 {
+		t.Fatalf("billed %v while the namespace alone selects both clusters' series: want nothing for either", byTenant)
+	}
+	for _, s := range h.List() {
+		if s.Status != health.Failing || !strings.Contains(s.Hint, "prometheus-matchers") {
+			t.Fatalf("source %s = %s (%s): want failing with a hint to set prometheus-matchers", s.Name, s.Status, s.Hint)
+		}
+	}
+	// An operator scopes each cluster to its own series.
+	a.Cluster.Annotations = map[string]string{discovery.AnnotationPrefix + "prometheus-matchers": `pod="engine-x-default-x-a"`}
+	b.Cluster.Annotations = map[string]string{discovery.AnnotationPrefix + "prometheus-matchers": `pod="engine-x-default-x-b"`}
+	run(wins[2])
+	// Cluster a's three windows (4 scrapes of 10 each) catch up in the
+	// first scoped window; nothing reaches tenant-b.
+	if byTenant["tenant-b"] != 0 || byTenant["tenant-a"] != 120 {
+		t.Fatalf("billed %v: want 120 tokens to tenant-a (cluster a's pod, three windows) and none to tenant-b", byTenant)
 	}
 }
 

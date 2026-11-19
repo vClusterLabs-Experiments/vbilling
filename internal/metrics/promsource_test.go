@@ -97,6 +97,17 @@ func matches(sel string, labels map[string]string) bool {
 	return true
 }
 
+// createdSeries is the OpenMetrics _created series of a counter (or a
+// process_start_time_seconds series): its value, the creation time in Unix
+// seconds, scraped every 15s from start to end.
+func createdSeries(name string, labels map[string]string, created, start, end time.Time) fakeSeries {
+	var samples []promSample
+	for ts := start; !ts.After(end); ts = ts.Add(15 * time.Second) {
+		samples = append(samples, promSample{T: ts, V: float64(created.UnixMilli()) / 1000})
+	}
+	return fakeSeries{name: name, labels: labels, samples: samples}
+}
+
 // counterSamples returns a counter sampled every 15s from start to end that
 // grows by perSample, resetting to zero at resetAt (if non-zero).
 func counterSamples(start, end time.Time, perSample float64, resetAt time.Time) []promSample {
@@ -344,18 +355,25 @@ func TestOwnPrometheusGetsNoGlobalCredentials(t *testing.T) {
 }
 
 // On the first read a counter's history is not billed; a series that
-// appears later counts from zero.
+// appears later counts from zero when its _created sample shows it is new,
+// and from its first sample when nothing does.
 func TestCounterFirstReadAndNewSeries(t *testing.T) {
+	visible := counterSamples(ws.Add(75*time.Second), ws.Add(2*time.Minute), 3, time.Time{})
+	for i := range visible {
+		visible[i].V += 1000 // counted before Prometheus scraped it
+	}
 	fp := &fakeProm{series: []fakeSeries{
 		{name: "vllm:generation_tokens_total", labels: map[string]string{"namespace": ns, "model_name": "old"},
 			samples: counterSamples(ws.Add(-30*time.Minute), ws.Add(2*time.Minute), 100, time.Time{})},
 		{name: "vllm:generation_tokens_total", labels: map[string]string{"namespace": ns, "model_name": "new"},
 			samples: counterSamples(ws.Add(75*time.Second), ws.Add(2*time.Minute), 3, time.Time{})},
+		createdSeries("vllm:generation_tokens_created", map[string]string{"namespace": ns, "model_name": "new"}, ws.Add(70*time.Second), ws.Add(75*time.Second), ws.Add(2*time.Minute)),
+		{name: "vllm:generation_tokens_total", labels: map[string]string{"namespace": ns, "model_name": "visible"}, samples: visible},
 	}}
 	srv := httptest.NewServer(fp.handler(t))
 	defer srv.Close()
 	target := Target{Cluster: discovery.TenantCluster{Name: "gpu", Namespace: ns}, Tenant: "acme"}
-	_, p, _ := promSourceFor(t, srv.URL, "", nil, tokens)
+	_, p, h := promSourceFor(t, srv.URL, "", nil, tokens)
 	wins := windowsFrom(ws, 2)
 	bySKU := map[string]float64{}
 	for _, w := range wins {
@@ -377,6 +395,71 @@ func TestCounterFirstReadAndNewSeries(t *testing.T) {
 	// 15s through ws+2m: 4 samples, 3+3+3+3 = 12, counted from zero.
 	if bySKU["new"] != 12 {
 		t.Errorf("new series billed %v, want 12", bySKU["new"])
+	}
+	// Nothing says the third one is new: its 1003 at the first scrape is
+	// history, and only the growth after it (3 samples of 3) is billed.
+	if bySKU["visible"] != 9 {
+		t.Errorf("series visible with history billed %v, want 9", bySKU["visible"])
+	}
+	var note *health.Source
+	for _, s := range h.List() {
+		if strings.HasSuffix(s.Name, "/history") {
+			s := s
+			note = &s
+		}
+	}
+	if note == nil || !strings.Contains(note.Message, "series appeared with history; billed from its first sample") || !strings.Contains(note.Message, `model_name="visible"`) {
+		t.Fatalf("history not reported in source health: %+v", note)
+	}
+}
+
+// A counter series that appears after the last read counts from zero only
+// with evidence that its process started after that read: its own
+// _created sample, else process_start_time_seconds of the same job and
+// instance. Otherwise its first sample is its baseline.
+func TestCounterCountsFromZeroOnlyWithEvidence(t *testing.T) {
+	engine := map[string]string{"namespace": ns, "model_name": "llama", "job": "vllm", "instance": "10.0.0.7:8000"}
+	process := map[string]string{"namespace": ns, "job": "vllm", "instance": "10.0.0.7:8000", "pod": "engine-x-default-x-gpu"}
+	for _, tc := range []struct {
+		name     string
+		evidence []fakeSeries
+		want     float64
+	}{
+		{"created after the last read", []fakeSeries{createdSeries("vllm:generation_tokens_created", engine, ws.Add(70*time.Second), ws.Add(75*time.Second), we.Add(time.Minute))}, 5012},
+		{"created before the last read", []fakeSeries{createdSeries("vllm:generation_tokens_created", engine, ws.Add(-time.Hour), ws.Add(75*time.Second), we.Add(time.Minute))}, 9},
+		{"process started after the last read", []fakeSeries{createdSeries("process_start_time_seconds", process, ws.Add(65*time.Second), ws.Add(75*time.Second), we.Add(time.Minute))}, 5012},
+		{"process started before the last read", []fakeSeries{createdSeries("process_start_time_seconds", process, ws.Add(-48*time.Hour), ws.Add(75*time.Second), we.Add(time.Minute))}, 9},
+		{"another instance's process", []fakeSeries{createdSeries("process_start_time_seconds", map[string]string{"namespace": ns, "job": "vllm", "instance": "10.0.0.9:8000"}, ws.Add(65*time.Second), ws.Add(75*time.Second), we.Add(time.Minute))}, 9},
+		{"no evidence", nil, 9},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The series is first scraped at ws+75s holding 5003: everything
+			// the engine counted before that scrape.
+			samples := counterSamples(ws.Add(75*time.Second), we.Add(time.Minute), 3, time.Time{})
+			for i := range samples {
+				samples[i].V += 5000
+			}
+			fp := &fakeProm{series: append([]fakeSeries{{name: "vllm:generation_tokens_total", labels: engine, samples: samples}}, tc.evidence...)}
+			srv := httptest.NewServer(fp.handler(t))
+			defer srv.Close()
+			_, p, _ := promSourceFor(t, srv.URL, "", nil, tokens)
+			tg := Target{Cluster: discovery.TenantCluster{Name: "gpu", Namespace: ns}, Tenant: "acme"}
+			var billed float64
+			for _, w := range windowsFrom(ws, 2) { // read through ws+1m, before the series appeared
+				res := collectOK(t, p, []Target{tg}, []Window{w})
+				if err := p.Commit(res, func(Window, []usage.Event) error { return nil }); err != nil {
+					t.Fatal(err)
+				}
+				for _, e := range res[0].Events {
+					billed += e.Quantity
+				}
+			}
+			// From zero: 5003 + 3 more samples of 3 = 5012. From the first
+			// sample: 3 samples of 3 = 9.
+			if billed != tc.want {
+				t.Fatalf("billed %v, want %v", billed, tc.want)
+			}
+		})
 	}
 }
 
@@ -466,5 +549,48 @@ func TestParsePromMetricsValidation(t *testing.T) {
 	}
 	if d, ok := usage.Lookup("a4"); !ok || d.Billable || d.Accuracy != usage.AccuracyExact {
 		t.Errorf("billable: false must be honored: %+v", d)
+	}
+}
+
+// A cluster whose namespace stops being shared because the other cluster
+// left is selected by the namespace again. Its own counters catch up on
+// the shared period, but a series that appeared meanwhile may have been the
+// other cluster's, so it bills nothing from before the namespace was its own.
+func TestSharedNamespaceLeftByTheOtherCluster(t *testing.T) {
+	own := map[string]string{"namespace": "shared", "pod": "engine-x-default-x-a", "model_name": "a"}
+	other := map[string]string{"namespace": "shared", "pod": "engine-x-default-x-b", "model_name": "b"}
+	fp := &fakeProm{series: []fakeSeries{
+		{name: "vllm:generation_tokens_total", labels: own, samples: counterSamples(ws.Add(-time.Minute), ws.Add(3*time.Minute), 10, time.Time{})},
+		// Cluster b's engine runs only while b exists, in the second window.
+		{name: "vllm:generation_tokens_total", labels: other, samples: counterSamples(ws.Add(75*time.Second), ws.Add(2*time.Minute), 7, time.Time{})},
+		createdSeries("vllm:generation_tokens_created", other, ws.Add(70*time.Second), ws.Add(75*time.Second), ws.Add(2*time.Minute)),
+	}}
+	srv := httptest.NewServer(fp.handler(t))
+	defer srv.Close()
+	_, p, _ := promSourceFor(t, srv.URL, "", nil, tokens)
+	a := Target{Cluster: discovery.TenantCluster{Name: "a", Namespace: "shared"}, Tenant: "tenant-a"}
+	b := Target{Cluster: discovery.TenantCluster{Name: "b", Namespace: "shared"}, Tenant: "tenant-b"}
+	bySKU := map[string]float64{}
+	run := func(w Window, targets ...Target) {
+		res := collectOK(t, p, targets, []Window{w})
+		if err := p.Commit(res, func(Window, []usage.Event) error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range res[0].Events {
+			if e.Tenant != "tenant-a" {
+				t.Errorf("billed %v to %s", e.Quantity, e.Tenant)
+			}
+			bySKU[e.SKU] += e.Quantity
+		}
+	}
+	wins := windowsFrom(ws, 3)
+	run(wins[0], a)    // alone in the namespace
+	run(wins[1], a, b) // shared: neither is billed
+	run(wins[2], a)    // b was deleted
+	if bySKU["a"] != 120 {
+		t.Errorf("cluster a's own counter billed %v, want 120 (three windows of 4 scrapes of 10)", bySKU["a"])
+	}
+	if bySKU["b"] != 0 {
+		t.Errorf("cluster b's engine, seen while b shared the namespace, billed %v to cluster a", bySKU["b"])
 	}
 }
