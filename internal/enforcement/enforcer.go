@@ -45,6 +45,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/vclusterlabs-experiments/vbilling/internal/destinations"
@@ -81,6 +82,11 @@ const (
 	AnnotationState = "vbilling.vcluster.com/billing-state"
 	AnnotationWhy   = "vbilling.vcluster.com/billing-reason"
 	AnnotationAt    = "vbilling.vcluster.com/billing-state-at"
+	// AnnotationActivePrefix plus a cluster's name, on a namespace labeled
+	// suspended, lets that cluster's synced pods start: the namespace hosts
+	// a suspended tenant's cluster, but not only that one. The chart's
+	// admission policy reads it.
+	AnnotationActivePrefix = "vbilling.vcluster.com/active."
 )
 
 // Signal is a normalized billing event.
@@ -185,6 +191,10 @@ type Options struct {
 	// the records configuration. A webhook for a billing customer with
 	// several aliases applies to the ones that are known tenants.
 	IsTenant func(id string) bool
+	// Neighbors lists the clusters in a control plane cluster namespace, by
+	// name, with the tenant each bills to. The namespace's labels then
+	// reflect every one of them: two tenants' clusters can share one.
+	Neighbors func(namespace string) map[string]string
 
 	// Pausing (state paused, enforce mode).
 	Pauses *pause.Store // pause spans, so capacity is not billed while paused
@@ -747,10 +757,6 @@ func (e *Enforcer) converge(ctx context.Context, tenant string, cl discovery.Ten
 // a suspended tenant's clusters.
 const PolicyName = "vbilling-suspended"
 
-// LabelExempt on a namespace inside a tenant's cluster exempts it from the
-// in-cluster policy (kube-system always is).
-const LabelExempt = "vbilling.vcluster.com/enforcement-exempt"
-
 func suspendedMessage(ts TenantState) string {
 	if ts.State == Paused {
 		if ts.Hold != "" && ts.Hold != HoldBilling {
@@ -784,7 +790,12 @@ func (e *Enforcer) reflectInside(ctx context.Context, cl discovery.TenantCluster
 }
 
 // policyInside installs the admission policy inside a cluster while its
-// tenant's state blocks new workloads, and removes it otherwise.
+// tenant's state blocks new workloads, and removes it otherwise. The
+// policy and its binding are set to vBilling's spec at every pass, whoever
+// created or changed them; only kube-system is exempt. The tenant is
+// cluster admin inside its cluster and can still delete them between two
+// passes or run pods in kube-system, so suspension inside a tenant's
+// cluster is best effort: a pause is the hard stop.
 func (e *Enforcer) policyInside(ctx context.Context, kube kubernetes.Interface, ts TenantState) error {
 	api := kube.AdmissionregistrationV1()
 	if !ts.State.blocks() {
@@ -810,7 +821,6 @@ func (e *Enforcer) policyInside(ctx context.Context, kube kubernetes.Interface, 
 			MatchConstraints: &admissionv1.MatchResources{
 				NamespaceSelector: &metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{
 					{Key: "kubernetes.io/metadata.name", Operator: metav1.LabelSelectorOpNotIn, Values: []string{"kube-system"}},
-					{Key: LabelExempt, Operator: metav1.LabelSelectorOpDoesNotExist},
 				}},
 				ResourceRules: []admissionv1.NamedRuleWithOperations{{RuleWithOperations: admissionv1.RuleWithOperations{
 					Operations: []admissionv1.OperationType{admissionv1.Create},
@@ -833,8 +843,7 @@ func (e *Enforcer) policyInside(ctx context.Context, kube kubernetes.Interface, 
 	}
 	if cur, err := api.ValidatingAdmissionPolicies().Get(ctx, PolicyName, metav1.GetOptions{}); err == nil {
 		policy.ResourceVersion = cur.ResourceVersion
-		_, err = api.ValidatingAdmissionPolicies().Update(ctx, policy, metav1.UpdateOptions{})
-		if err != nil {
+		if _, err := api.ValidatingAdmissionPolicies().Update(ctx, policy, metav1.UpdateOptions{}); err != nil {
 			return fmt.Errorf("update admission policy: %w", err)
 		}
 	} else if apierrors.IsNotFound(err) {
@@ -844,8 +853,19 @@ func (e *Enforcer) policyInside(ctx context.Context, kube kubernetes.Interface, 
 	} else {
 		return fmt.Errorf("read admission policy: %w", err)
 	}
-	if _, err := api.ValidatingAdmissionPolicyBindings().Create(ctx, binding, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
-		return fmt.Errorf("create admission policy binding: %w", err)
+	// A binding that already exists may not be vBilling's (one that only
+	// audits disarms the policy): it gets vBilling's spec too.
+	if cur, err := api.ValidatingAdmissionPolicyBindings().Get(ctx, PolicyName, metav1.GetOptions{}); err == nil {
+		binding.ResourceVersion = cur.ResourceVersion
+		if _, err := api.ValidatingAdmissionPolicyBindings().Update(ctx, binding, metav1.UpdateOptions{}); err != nil {
+			return fmt.Errorf("update admission policy binding: %w", err)
+		}
+	} else if apierrors.IsNotFound(err) {
+		if _, err := api.ValidatingAdmissionPolicyBindings().Create(ctx, binding, metav1.CreateOptions{}); err != nil {
+			return fmt.Errorf("create admission policy binding: %w", err)
+		}
+	} else {
+		return fmt.Errorf("read admission policy binding: %w", err)
 	}
 	return nil
 }
@@ -883,7 +903,11 @@ func (e *Enforcer) Resync(ctx context.Context) {
 	}
 }
 
-// reflect writes the state onto one tenant cluster.
+// reflect writes the state onto one tenant cluster: its workload's
+// annotations, and its namespace's labels. The namespace reflects every
+// cluster in it (Options.Neighbors): it is labeled suspended while any of
+// them is blocked, and each of the others is marked active there, so the
+// chart's admission policy lets their synced pods start.
 func (e *Enforcer) reflect(ctx context.Context, cl discovery.TenantCluster, ts TenantState, withEvent bool) error {
 	if cl.External {
 		return nil // nothing of it lives in the control plane cluster: only the in-cluster policy applies
@@ -901,13 +925,38 @@ func (e *Enforcer) reflect(ctx context.Context, cl discovery.TenantCluster, ts T
 		return fmt.Errorf("annotate workload: %w", err)
 	}
 
-	labels := map[string]any{LabelState: string(ts.State)}
-	if e.opts.Mode == "enforce" && ts.State.blocks() {
-		labels[LabelSuspended] = "true"
-	} else {
-		labels[LabelSuspended] = nil // merge patch: remove
+	states := map[string]State{cl.Name: ts.State}
+	if e.opts.Neighbors != nil {
+		for name, tenant := range e.opts.Neighbors(cl.Namespace) {
+			if name != cl.Name {
+				states[name] = e.StateOf(tenant).State
+			}
+		}
 	}
-	nsPatch, _ := json.Marshal(map[string]any{"metadata": map[string]any{"labels": labels}})
+	blocked := func(s State) bool { return e.opts.Mode == "enforce" && s.blocks() }
+	worst, anyBlocked := Active, false
+	for _, s := range states {
+		if severity[s] > severity[worst] {
+			worst = s
+		}
+		anyBlocked = anyBlocked || blocked(s)
+	}
+	labels := map[string]any{LabelState: string(worst), LabelSuspended: nil} // merge patch: nil removes
+	if anyBlocked {
+		labels[LabelSuspended] = "true"
+	}
+	nsAnn := map[string]any{}
+	for name, s := range states {
+		key := AnnotationActivePrefix + name
+		if len(validation.IsQualifiedName(key)) > 0 {
+			continue // a name too long to mark: its pods stay blocked with the namespace
+		}
+		nsAnn[key] = nil
+		if anyBlocked && !blocked(s) {
+			nsAnn[key] = "true"
+		}
+	}
+	nsPatch, _ := json.Marshal(map[string]any{"metadata": map[string]any{"labels": labels, "annotations": nsAnn}})
 	if _, err := e.kube.CoreV1().Namespaces().Patch(ctx, cl.Namespace, types.MergePatchType, nsPatch, metav1.PatchOptions{}); err != nil {
 		return fmt.Errorf("label namespace: %w", err)
 	}

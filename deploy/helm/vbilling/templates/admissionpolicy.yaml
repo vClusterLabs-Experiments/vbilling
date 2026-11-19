@@ -1,6 +1,10 @@
 {{- if .Values.enforcement.admissionPolicy.enabled }}
 # Blocks new pods in namespaces vBilling labeled suspended (ENFORCEMENT_MODE=enforce).
 # Running workloads keep running; the tenant cluster's own control plane may restart.
+# Clusters of several tenants can share a namespace: vBilling then annotates
+# it vbilling.vcluster.com/active.<cluster> for each cluster whose tenant is
+# not blocked, and that cluster's synced pods (labeled
+# vcluster.loft.sh/managed-by=<cluster>) still start. Every other pod is denied.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -19,7 +23,12 @@ spec:
         operations: ["CREATE"]
         resources: ["pods"]
   validations:
-    - expression: "has(object.metadata.labels) && 'app' in object.metadata.labels && object.metadata.labels['app'] == 'vcluster'"
+    - expression: >-
+        has(object.metadata.labels) && (
+        ('app' in object.metadata.labels && object.metadata.labels['app'] == 'vcluster') ||
+        ('vcluster.loft.sh/managed-by' in object.metadata.labels &&
+        has(namespaceObject.metadata.annotations) &&
+        ('vbilling.vcluster.com/active.' + object.metadata.labels['vcluster.loft.sh/managed-by']) in namespaceObject.metadata.annotations))
       message: "This tenant is suspended for billing. New workloads are blocked until the account is current; running workloads are not affected."
       reason: Forbidden
 ---

@@ -525,6 +525,7 @@ func newEnforcer(cfg *config.Config, kube kubernetes.Interface, ctrl *controller
 		State:                  state,
 		Telemetry:              tel,
 		IsTenant:               ctrl.KnownTenant,
+		Neighbors:              neighbors(cfg, ctrl),
 		Pauses:                 pauses,
 		OnPause:                ctrl.SetPaused,
 		DrainTimeout:           cfg.PauseDrainTimeout,
@@ -537,6 +538,21 @@ func newEnforcer(cfg *config.Config, kube kubernetes.Interface, ctrl *controller
 		opts.Freeze, opts.OwnNodes = coll.Freeze, coll.OwnNodes
 	}
 	return enforcement.New(kube, opts)
+}
+
+// neighbors lists the clusters in a control plane cluster namespace with
+// the tenant each bills to.
+func neighbors(cfg *config.Config, ctrl *controller.Controller) func(string) map[string]string {
+	src := discovery.TenantSource(cfg.TenantSource)
+	return func(ns string) map[string]string {
+		out := map[string]string{}
+		for _, cl := range ctrl.Clusters() {
+			if !cl.External && cl.Namespace == ns {
+				out[cl.Name] = cl.TenantID(src)
+			}
+		}
+		return out
+	}
 }
 
 // recordsConfigTenants returns the tenants the records configuration bills
