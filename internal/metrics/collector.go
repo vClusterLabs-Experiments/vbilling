@@ -662,6 +662,11 @@ func (c *Collector) meterWholeNode(name string, n *nodeInfo, windows []Window, a
 		if n.instanceType != "" {
 			nodeEv.Dimensions[usage.DimInstanceType] = n.instanceType
 		}
+		// vCPUs, memory, GPUs and public IP of the instance: not group keys,
+		// so nothing is priced on them unless a billing platform chooses to.
+		for k, v := range n.instanceAttributes() {
+			nodeEv.Dimensions[k] = v
+		}
 		acc.add(nodeEv, h, nil)
 		if gpus := n.physicalGPUs(); gpus > 0 {
 			gev := base(usage.MetricGPUHours, n)

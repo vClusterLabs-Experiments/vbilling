@@ -534,6 +534,9 @@ func (a *Adapter) ToIngest(e *usage.Event) IngestEvent {
 			}
 		}
 	}
+	if e.Estimate() {
+		props["accuracy"] = usage.AccuracyEstimate
+	}
 	customer := e.Tenant
 	if id, ok := a.state.Get("cus/" + e.Tenant); ok {
 		customer = id // pinned or created customer UUID

@@ -110,6 +110,15 @@ func (a *Adapter) SendEvents(ctx context.Context, events []usage.Event) error {
 		batch := make([]CloudEvent, 0, end-i)
 		for j := i; j < end; j++ {
 			e := events[j]
+			if e.Estimate() {
+				// Consumers see estimates as such: "accuracy": "estimate".
+				props := make(map[string]any, len(e.Properties)+1)
+				for k, v := range e.Properties {
+					props[k] = v
+				}
+				props["accuracy"] = usage.AccuracyEstimate
+				e.Properties = props
+			}
 			ce := a.envelope(TypeUsage, e.ID, e.Tenant, e.WindowEnd, e)
 			ce.DataSchema = DataSchema
 			batch = append(batch, ce)
