@@ -1032,15 +1032,16 @@ func (e *Enforcer) policyInside(ctx context.Context, kube kubernetes.Interface, 
 	if !ts.State.blocks() {
 		return removePolicy(ctx, kube, PolicyName)
 	}
-	return applyPolicy(ctx, kube, PolicyName, &metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{
+	return applyPolicy(ctx, kube, PolicyName, podPolicy(&metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{
 		{Key: "kubernetes.io/metadata.name", Operator: metav1.LabelSelectorOpNotIn, Values: []string{"kube-system"}},
-	}}, suspendedMessage(ts))
+	}}, []admissionv1.OperationType{admissionv1.Create}, admissionv1.Validation{Expression: mirrorPod, Message: suspendedMessage(ts)}))
 }
 
 // PausedPolicyName is the admission policy (and binding) vBilling installs
-// inside a paused cluster before it drains it, and removes on resume. It
-// denies every new pod in every namespace, kube-system included, except the
-// kubelet's mirror pods (mirrorPod). A pod started after the pause's last
+// inside a paused cluster before it drains it, and removes on resume. In
+// every namespace, kube-system included, it denies every new pod except the
+// kubelet's mirror pods (createdMirror), and every update that removes a
+// pod's scheduling gates (gatesKept). A pod started after the pause's last
 // check needs it removed or changed first, which the checks look for.
 const PausedPolicyName = "vbilling-paused"
 
@@ -1052,38 +1053,60 @@ const PausedPolicyName = "vbilling-paused"
 // deletes it.
 const mirrorPod = "has(object.metadata.annotations) && 'kubernetes.io/config.mirror' in object.metadata.annotations"
 
+// createdMirror is mirrorPod for a policy that also matches pod updates:
+// it judges creations only.
+const createdMirror = "request.operation != 'CREATE' || (" + mirrorPod + ")"
+
+// gatesKept lets a pod update through unless it removes scheduling gates. A
+// pod created with gates waits, unscheduled, for them to go: removing them
+// would start a pod made before the pause without creating one. Kubernetes
+// lets gates be removed after creation, never added, so fewer is a removal.
+const gatesKept = "request.operation != 'UPDATE' || !has(oldObject.spec.schedulingGates) || size(oldObject.spec.schedulingGates) == 0 || " +
+	"(has(object.spec.schedulingGates) && size(object.spec.schedulingGates) >= size(oldObject.spec.schedulingGates))"
+
+// pausedPolicy is the spec of vbilling-paused.
+func pausedPolicy() admissionv1.ValidatingAdmissionPolicySpec {
+	return podPolicy(nil, []admissionv1.OperationType{admissionv1.Create, admissionv1.Update},
+		admissionv1.Validation{Expression: createdMirror,
+			Message: "This cluster is paused. No pod can start until its tenant's hold is lifted and the cluster resumes."},
+		admissionv1.Validation{Expression: gatesKept,
+			Message: "This cluster is paused. No pod's scheduling gates can be removed until its tenant's hold is lifted and the cluster resumes."})
+}
+
 // pausePolicy installs the pause admission policy and binding inside a
 // cluster, with vBilling's spec whoever created or changed them.
 func (e *Enforcer) pausePolicy(ctx context.Context, kube kubernetes.Interface) error {
-	return applyPolicy(ctx, kube, PausedPolicyName, nil,
-		"This cluster is paused. No pod can start until its tenant's hold is lifted and the cluster resumes.")
+	return applyPolicy(ctx, kube, PausedPolicyName, pausedPolicy())
 }
 
-// applyPolicy creates or updates a policy that denies new pods (except
-// mirror pods) in the namespaces sel selects (all when nil), and its binding.
-func applyPolicy(ctx context.Context, kube kubernetes.Interface, name string, sel *metav1.LabelSelector, message string) error {
-	api := kube.AdmissionregistrationV1()
+// podPolicy is the spec of a policy that judges the given operations on
+// pods in the namespaces sel selects (all when nil), and denies what one of
+// the validations rejects.
+func podPolicy(sel *metav1.LabelSelector, ops []admissionv1.OperationType, validations ...admissionv1.Validation) admissionv1.ValidatingAdmissionPolicySpec {
 	fail := admissionv1.Fail
 	forbidden := metav1.StatusReasonForbidden
-	labels := map[string]string{"app.kubernetes.io/managed-by": "vbilling"}
-	policy := &admissionv1.ValidatingAdmissionPolicy{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Labels: labels},
-		Spec: admissionv1.ValidatingAdmissionPolicySpec{
-			FailurePolicy: &fail,
-			MatchConstraints: &admissionv1.MatchResources{
-				NamespaceSelector: sel,
-				ResourceRules: []admissionv1.NamedRuleWithOperations{{RuleWithOperations: admissionv1.RuleWithOperations{
-					Operations: []admissionv1.OperationType{admissionv1.Create},
-					Rule:       admissionv1.Rule{APIGroups: []string{""}, APIVersions: []string{"v1"}, Resources: []string{"pods"}},
-				}}},
-			},
-			Validations: []admissionv1.Validation{{
-				Expression: mirrorPod,
-				Message:    message,
-				Reason:     &forbidden,
-			}},
-		},
+	for i := range validations {
+		validations[i].Reason = &forbidden
 	}
+	return admissionv1.ValidatingAdmissionPolicySpec{
+		FailurePolicy: &fail,
+		MatchConstraints: &admissionv1.MatchResources{
+			NamespaceSelector: sel,
+			ResourceRules: []admissionv1.NamedRuleWithOperations{{RuleWithOperations: admissionv1.RuleWithOperations{
+				Operations: ops,
+				Rule:       admissionv1.Rule{APIGroups: []string{""}, APIVersions: []string{"v1"}, Resources: []string{"pods"}},
+			}}},
+		},
+		Validations: validations,
+	}
+}
+
+// applyPolicy creates or updates a policy with vBilling's spec, and its
+// binding.
+func applyPolicy(ctx context.Context, kube kubernetes.Interface, name string, spec admissionv1.ValidatingAdmissionPolicySpec) error {
+	api := kube.AdmissionregistrationV1()
+	labels := map[string]string{"app.kubernetes.io/managed-by": "vbilling"}
+	policy := &admissionv1.ValidatingAdmissionPolicy{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: labels}, Spec: spec}
 	binding := &admissionv1.ValidatingAdmissionPolicyBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Labels: labels},
 		Spec: admissionv1.ValidatingAdmissionPolicyBindingSpec{
@@ -1161,8 +1184,14 @@ func pausePolicyChanged(ctx context.Context, kube kubernetes.Interface) (string,
 }
 
 // policyNarrowed says how a policy and binding no longer deny every new
-// pod but mirror pods, "" if they still do.
+// pod but mirror pods, and every removal of a pod's scheduling gates, ""
+// if they still do.
 func policyNarrowed(p admissionv1.ValidatingAdmissionPolicySpec, b admissionv1.ValidatingAdmissionPolicyBindingSpec) string {
+	want := pausedPolicy().Validations
+	same := len(p.Validations) == len(want)
+	for i := 0; same && i < len(want); i++ {
+		same = p.Validations[i].Expression == want[i].Expression
+	}
 	switch mc := p.MatchConstraints; {
 	case p.FailurePolicy != nil && *p.FailurePolicy != admissionv1.Fail:
 		return "its failure policy is " + string(*p.FailurePolicy)
@@ -1170,9 +1199,10 @@ func policyNarrowed(p admissionv1.ValidatingAdmissionPolicySpec, b admissionv1.V
 		return "it takes parameters"
 	case len(p.MatchConditions) > 0:
 		return "it has match conditions"
-	case mc == nil || !emptySelector(mc.NamespaceSelector) || !emptySelector(mc.ObjectSelector) || len(mc.ExcludeResourceRules) > 0 || !coversPodCreation(mc.ResourceRules):
-		return "it no longer matches every new pod"
-	case len(p.Validations) != 1 || p.Validations[0].Expression != mirrorPod:
+	case mc == nil || !emptySelector(mc.NamespaceSelector) || !emptySelector(mc.ObjectSelector) || len(mc.ExcludeResourceRules) > 0 ||
+		!coversPods(mc.ResourceRules, admissionv1.Create) || !coversPods(mc.ResourceRules, admissionv1.Update):
+		return "it no longer matches every new pod and every pod update"
+	case !same:
 		return "its validation is not vBilling's"
 	case b.PolicyName != PausedPolicyName || b.ParamRef != nil:
 		return "its binding names another policy or parameters"
@@ -1189,16 +1219,13 @@ func emptySelector(s *metav1.LabelSelector) bool {
 	return s == nil || len(s.MatchLabels) == 0 && len(s.MatchExpressions) == 0
 }
 
-// coversPodCreation reports whether resource rules match the creation of
-// every pod.
-func coversPodCreation(rules []admissionv1.NamedRuleWithOperations) bool {
+// coversPods reports whether resource rules match an operation on every
+// pod.
+func coversPods(rules []admissionv1.NamedRuleWithOperations, op admissionv1.OperationType) bool {
 	has := func(l []string, v string) bool { return slices.Contains(l, v) || slices.Contains(l, "*") }
 	for _, r := range rules {
-		ops := false
-		for _, op := range r.Operations {
-			ops = ops || op == admissionv1.Create || op == admissionv1.OperationAll
-		}
-		if ops && len(r.ResourceNames) == 0 && has(r.APIGroups, "") && has(r.APIVersions, "v1") && has(r.Resources, "pods") &&
+		if (slices.Contains(r.Operations, op) || slices.Contains(r.Operations, admissionv1.OperationAll)) && len(r.ResourceNames) == 0 &&
+			has(r.APIGroups, "") && has(r.APIVersions, "v1") && has(r.Resources, "pods") &&
 			(r.Scope == nil || *r.Scope == admissionv1.AllScopes || *r.Scope == admissionv1.NamespacedScope) {
 			return true
 		}

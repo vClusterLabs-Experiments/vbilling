@@ -145,23 +145,22 @@ func (e *Enforcer) pauseCluster(ctx context.Context, cl discovery.TenantCluster,
 		e.opts.OnPause(id, true)
 	}
 	e.opts.Telemetry.Add("vbilling_clusters_paused_total", "Clusters vBilling paused.", nil, 1)
-	synced, err := e.stopSyncedPods(ctx, cl, true)
-	if err != nil {
-		e.setOwnChecked(id, own)
-		return pauseOutcome{why: fmt.Sprintf("its synced pods could not be stopped (%v)", err)}, nil
-	}
+	synced, serr := e.stopSyncedPods(ctx, cl, true)
+	// The cluster's own nodes are watched while its control plane stops
+	// even when its synced pods could not be stopped: a later pass stops
+	// those, but only this one can see the API go away.
 	down := false
 	if own.ok {
-		var left []corev1.Pod
-		left, down, err = e.confirmStopped(ctx, cl, own)
-		switch {
-		case err != nil:
-			own = ownCheck{why: fmt.Sprintf("its own nodes could not be checked while its control plane stopped (%v)", err)}
-		case len(left) > 0:
-			own = ownCheck{why: stillThere(left, "started on its own nodes while its control plane stopped")}
-		}
+		own, down = e.confirmStopped(ctx, cl, own, true, true)
 	}
 	e.setOwnChecked(id, own)
+	if serr != nil {
+		why := fmt.Sprintf("its synced pods could not be stopped (%v)", serr)
+		if !own.ok {
+			why += "; " + own.why
+		}
+		return pauseOutcome{why: why}, nil
+	}
 	out := e.verdict(id, own, synced, down)
 	if out.verified {
 		log.Printf("[enforcement] %s: paused (%s), verified: capacity stops billing", id, ts.Reason)
@@ -173,7 +172,7 @@ func (e *Enforcer) pauseCluster(ctx context.Context, cl discovery.TenantCluster,
 
 // keepPaused keeps a cluster vBilling stopped down, and finishes verifying
 // its pause if an earlier pass could not (synced pods still stopping, a
-// restart in between).
+// call that said nothing as its API went away, a restart in between).
 //
 // A span an older version opened (v0.3.0, at its mark, before its drain and
 // whatever the drain left running) verified nothing: it ends now, and the
@@ -198,7 +197,15 @@ func (e *Enforcer) keepPaused(ctx context.Context, cl discovery.TenantCluster, w
 	if !ok {
 		own = e.ownSinceRestart(ctx, cl)
 	}
-	out := e.verdict(id, own, left, w.down())
+	down := w.down()
+	if own.watch != watchNone {
+		// An earlier pass found its own nodes empty but did not see the
+		// API go away: watch it again. A pause verified now bills until
+		// now (verdict opens its span at this pass).
+		own, down = e.confirmStopped(ctx, cl, own, own.watch == watchResume, false)
+		e.setOwnChecked(id, own)
+	}
+	out := e.verdict(id, own, left, down)
 	if !out.verified && e.openedByOlder(id) {
 		out.why = olderPause + ": " + out.why
 	}
@@ -226,7 +233,9 @@ func (e *Enforcer) verdict(id string, own ownCheck, synced []corev1.Pod, down bo
 // ownCheck is what a pause established about the cluster's own nodes.
 type ownCheck struct {
 	// ok: no workload runs on the cluster's own nodes, or vBilling bills
-	// none of them.
+	// none of them. Before the control plane stops, it means they were
+	// found empty, with the pause policy in place; confirmStopped then
+	// decides whether that holds once the cluster's API is gone.
 	ok  bool
 	why string // why not
 	// noAccess: vBilling cannot look inside (decided after Freeze).
@@ -237,12 +246,34 @@ type ownCheck struct {
 	// inside is the cluster's API, whose pause admission policy is checked
 	// with list.
 	inside kubernetes.Interface
+	// watch says what a later pass can still do for own nodes that were
+	// found empty but not seen to stay so until the API went away.
+	watch watchFrom
 }
 
-// drainOwn blocks new pods inside the cluster and drains its own nodes. An
-// error means the drain failed (its API refused a call or could not be
-// reached, or the pause admission policy could not be installed) and may
-// succeed if retried.
+// watchFrom is how a later pass may still verify a cluster's own nodes.
+type watchFrom int
+
+const (
+	// watchNone: nothing (verified, or unverified for good).
+	watchNone watchFrom = iota
+	// watchResume: the last check that reached the API found them empty,
+	// and every call since said nothing (a timeout, a 5xx other than
+	// 503): the API going away with the control plane down completes the
+	// verification.
+	watchResume
+	// watchFresh: the API answered after the last check that found them
+	// empty, and nothing watched it since: a check of its own must find
+	// them empty before the API going away counts.
+	watchFresh
+)
+
+// drainOwn blocks new pods inside the cluster and drains its own nodes, then
+// checks once more that they are empty and the pause admission policy is in
+// place: the clean check the stop is watched from. An error means the
+// drain failed (its API refused a call or could not be reached, or the
+// pause admission policy could not be installed, or was changed during the
+// drain) and may succeed if retried.
 func (e *Enforcer) drainOwn(ctx context.Context, cl discovery.TenantCluster, ts TenantState) (ownCheck, error) {
 	if e.opts.TenantClient == nil {
 		return ownCheck{noAccess: true}, nil
@@ -272,7 +303,23 @@ func (e *Enforcer) drainOwn(ctx context.Context, cl discovery.TenantCluster, ts 
 	if len(d.left) > 0 {
 		return ownCheck{why: stillThere(d.left, "still on its own nodes after the drain")}, nil
 	}
-	return ownCheck{ok: true, list: d.list, inside: kube}, nil
+	own := ownCheck{ok: true, list: d.list, inside: kube}
+	if own.list == nil {
+		return own, nil
+	}
+	// The clean check the stop is watched from: the own nodes empty, and
+	// the pause policy, which a pod would need removed or changed to
+	// start, still in place.
+	pods, changed, err := e.checkOwn(ctx, own)
+	switch {
+	case err != nil:
+		return ownCheck{}, err
+	case len(pods) > 0:
+		return ownCheck{why: stillThere(pods, "started on its own nodes during the drain")}, nil
+	case changed != "":
+		return ownCheck{}, fmt.Errorf("during the drain, %s", changed)
+	}
+	return own, nil
 }
 
 // ownWithoutAccess decides about the own nodes of a cluster vBilling could
@@ -306,62 +353,129 @@ func (e *Enforcer) ownSinceRestart(ctx context.Context, cl discovery.TenantClust
 	return o
 }
 
-// confirmStopped waits for a stopped control plane to go down. While the
-// cluster's API still answers, it checks that no workload came back on the
-// cluster's own nodes and that the pause admission policy is still in
-// place: a pod started in the last moments of the API would run on with
-// nothing left to stop it. Only the API going away once its control plane
-// is down (apiGone) ends the checks; a check that fails any other way
-// (Forbidden, Unauthorized, a timeout, a policy removed or changed) is an
-// error, and the pause stays unverified.
-func (e *Enforcer) confirmStopped(ctx context.Context, cl discovery.TenantCluster, own ownCheck) ([]corev1.Pod, bool, error) {
+// confirmStopped watches a control plane scaled to zero go down, for up to
+// the drain timeout, and decides about the cluster's own nodes (own, found
+// empty). It reports the control plane's state when it ended.
+//
+// While the cluster's API answers, each check lists the workloads on its
+// own nodes and reads the pause admission policy. The own nodes are
+// verified only when the API goes away (apiGone) while the control plane
+// is down, after a clean check: a pod started after that check needed the
+// policy removed or changed first, while the API still answered and a
+// check was watching. clean says whether a clean check counts already (the
+// drain's, or an earlier pass's whose checks ended on calls that said
+// nothing). A check that finds workloads or a changed policy, or that the
+// API refuses (Forbidden, Unauthorized: a tenant's admins can revoke
+// vBilling's access; TooManyRequests: they can throttle it), leaves the
+// pause unverified for good.
+//
+// A call that says nothing (a timeout, a 5xx other than 503, the API gone
+// while the control plane is not down yet) does not clear the watch, so one
+// transient error does not leave a clean pause unverified for good. When
+// the watch ends on such calls, a later pass completes it once it sees the
+// API gone with the control plane down (watchResume). When it ends while
+// the API still answers, nothing watched the API afterwards: a later pass
+// must find the own nodes empty itself before the API going away counts
+// (watchFresh), and an API gone before that leaves the pause unverified.
+//
+// patient keeps looking through calls that say nothing until the deadline
+// (the pass that stops the control plane); otherwise the first one ends the
+// watch, and the next pass (Guard, every 15 seconds) looks again.
+func (e *Enforcer) confirmStopped(ctx context.Context, cl discovery.TenantCluster, own ownCheck, clean, patient bool) (ownCheck, bool) {
 	deadline := time.Now().Add(e.drainTimeout())
 	every := min(time.Second, e.drainTimeout()/10+time.Millisecond)
-	answering := own.list != nil
+	answered := false // the last call that reached the API found the own nodes empty
+	var silent error  // the last call that said nothing
 	for {
 		w, err := e.workload(ctx, cl)
+		down := err == nil && w.down()
 		if err != nil {
-			return nil, false, err
+			silent = fmt.Errorf("read its control plane: %w", err)
 		}
-		if answering {
-			pods, err := e.checkOwn(ctx, own)
+		if own.list == nil {
+			// Nothing of it to watch inside: the control plane going down
+			// is all.
+			if down || !time.Now().Before(deadline) {
+				return own, down
+			}
+		} else {
+			pods, changed, err := e.checkOwn(ctx, own)
 			switch {
 			case err == nil && len(pods) > 0:
-				return pods, w.down(), nil
+				return ownCheck{why: stillThere(pods, "started on its own nodes while its control plane stopped")}, down
+			case err == nil && changed != "":
+				return ownCheck{why: "its own nodes could not be checked while its control plane stopped (" + changed + ")"}, down
 			case err == nil:
-			case !apiGone(err):
-				return nil, w.down(), err
-			case w.down():
-				answering = false // its API went away with the control plane
+				clean, answered = true, true
+			case apiGone(err) && down:
+				if clean {
+					return ownCheck{ok: true}, true // its API went away with the control plane
+				}
+				return ownCheck{why: "its API went away unwatched after it last answered, so nothing shows what ran on its own nodes since"}, true
+			case refusedCheck(err):
+				return ownCheck{why: fmt.Sprintf("its own nodes could not be checked while its control plane stopped (%v)", err)}, down
+			default:
+				answered, silent = false, err
+				if !patient {
+					return own.unfinished(clean, answered, down, silent), down
+				}
 			}
-			// Gone while the control plane is not down yet: look again.
-		}
-		if w.down() && !answering || !time.Now().Before(deadline) {
-			return nil, w.down(), nil
+			if !time.Now().Before(deadline) {
+				return own.unfinished(clean, answered, down, silent), down
+			}
 		}
 		select {
 		case <-ctx.Done():
-			return nil, false, ctx.Err()
+			if own.list == nil {
+				return own, false
+			}
+			return own.unfinished(clean, answered, false, ctx.Err()), false
 		case <-time.After(every):
 		}
 	}
 }
 
-// checkOwn lists the workloads on a cluster's own nodes and checks that its
-// pause admission policy is intact.
-func (e *Enforcer) checkOwn(ctx context.Context, own ownCheck) ([]corev1.Pod, error) {
-	pods, err := own.list(ctx)
+// unfinished is what a watch that never saw the API go away leaves for a
+// later pass: whether a clean check still counts, and why the pause is not
+// verified yet.
+func (own ownCheck) unfinished(clean, answered, down bool, silent error) ownCheck {
+	own.ok = false
+	switch {
+	case !clean || answered:
+		own.watch = watchFresh
+		own.why = "its API still answered when the checks ended, so nothing shows what ran on its own nodes after the last one"
+		if !down {
+			own.why = "its control plane has not stopped yet, and " + own.why
+		}
+	default:
+		own.watch = watchResume
+		own.why = fmt.Sprintf("its own nodes could not be checked while its control plane stopped (%v)", silent)
+	}
+	return own
+}
+
+// checkOwn lists the workloads on a cluster's own nodes and reads its pause
+// admission policy; changed says how the policy no longer denies what it
+// must ("" when it still does).
+func (e *Enforcer) checkOwn(ctx context.Context, own ownCheck) (pods []corev1.Pod, changed string, err error) {
+	pods, err = own.list(ctx)
 	if err != nil || len(pods) > 0 || own.inside == nil {
-		return pods, err
+		return pods, "", err
 	}
-	why, err := pausePolicyChanged(ctx, own.inside)
+	changed, err = pausePolicyChanged(ctx, own.inside)
 	if err != nil {
-		return nil, fmt.Errorf("read the pause admission policy: %w", err)
+		return nil, "", fmt.Errorf("read the pause admission policy: %w", err)
 	}
-	if why != "" {
-		return nil, errors.New(why)
-	}
-	return nil, nil
+	return nil, changed, nil
+}
+
+// refusedCheck reports whether a check failed because the cluster's API is
+// there and will not answer vBilling: its access was revoked (Forbidden,
+// Unauthorized) or its requests are throttled (TooManyRequests, which API
+// Priority and Fairness inside the cluster can be set to answer). A tenant's
+// admins can do either, so such a pause stays unverified.
+func refusedCheck(err error) bool {
+	return apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err) || apierrors.IsTooManyRequests(err)
 }
 
 // apiGone reports whether a call failed because the cluster's API went away
@@ -528,10 +642,16 @@ func (e *Enforcer) clearFailing(id string) {
 	delete(e.failing, id)
 }
 
+// setOwnChecked records what a pause pass found on a cluster's own nodes;
+// the checks themselves are kept only while a later pass can still use
+// them (watch).
 func (e *Enforcer) setOwnChecked(id string, own ownCheck) {
 	e.wmu.Lock()
 	defer e.wmu.Unlock()
-	e.checked[id] = ownCheck{ok: own.ok, why: own.why}
+	if own.watch == watchNone {
+		own = ownCheck{ok: own.ok, why: own.why}
+	}
+	e.checked[id] = own
 }
 
 func (e *Enforcer) ownChecked(id string) (ownCheck, bool) {
@@ -539,6 +659,14 @@ func (e *Enforcer) ownChecked(id string) (ownCheck, bool) {
 	defer e.wmu.Unlock()
 	o, ok := e.checked[id]
 	return o, ok
+}
+
+// watching reports whether a paused cluster's own nodes wait for a pass to
+// see its API go away (ownCheck.watch).
+func (e *Enforcer) watching(id string) bool {
+	e.wmu.Lock()
+	defer e.wmu.Unlock()
+	return e.checked[id].watch != watchNone
 }
 
 // sawStopped records that a cluster's control plane was stopped now: a
@@ -850,9 +978,10 @@ func (e *Enforcer) drainTimeout() time.Duration {
 // Guard pauses again, at once, any cluster of a paused tenant that runs:
 // one scaled back up by hand, woken by vCluster Platform, or created while
 // the tenant is paused. It checks external clusters again too, since a
-// cluster admin inside one can undo its pause. It is cheap (one read per
-// cluster of a paused tenant) and runs every few seconds; Resync covers
-// the rest.
+// cluster admin inside one can undo its pause, and finishes verifying a
+// stopped cluster whose API was not seen to go away yet. It is cheap (one
+// read per cluster of a paused tenant) and runs every few seconds; Resync
+// covers the rest.
 func (e *Enforcer) Guard(ctx context.Context) {
 	if e.opts.Mode != "enforce" || e.kube == nil || e.opts.Clusters == nil {
 		return
@@ -872,6 +1001,10 @@ func (e *Enforcer) Guard(ctx context.Context) {
 			}
 			if w.replicas == 0 {
 				e.sawStopped(cl.ExternalID())
+				if e.watching(cl.ExternalID()) {
+					e.kick(ts.Tenant, cl) // a pause to verify yet: see whether its API went away
+					continue
+				}
 			}
 			if w.replicas > 0 || w.ann[discovery.AnnotationPausedBy] != pause.ByVBilling && w.ann[annPaused] != "true" {
 				log.Printf("[enforcement] %s: running while its tenant is paused, pausing it again", cl.ExternalID())
