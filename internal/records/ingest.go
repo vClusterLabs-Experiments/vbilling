@@ -58,6 +58,29 @@ func (o *Options) defaults() {
 	}
 }
 
+// Bounds of one pushed request. Every usage row of a record carries the
+// record's request ID and dimensions, so a record of many metrics is
+// stored many times over.
+const (
+	// MaxRequestIDLen bounds a pushed record's request ID, in bytes.
+	// Gateways use UUIDs and short prefixed IDs (chatcmpl-...).
+	MaxRequestIDLen = 256
+	// MaxStoredPerRequest bounds what one pushed request writes to the
+	// records ledger, estimated before anything is written: about 120,000
+	// usage rows. A gateway that batches (LiteLLM posts up to 512 records
+	// per request) stays far below it.
+	MaxStoredPerRequest = 64 << 20
+)
+
+// ErrTooLarge is returned for a push whose usage rows would take more than
+// MaxStoredPerRequest in the records ledger. Nothing was stored.
+type ErrTooLarge struct{ Bytes int }
+
+func (e ErrTooLarge) Error() string {
+	return fmt.Sprintf("these records would take about %d MiB in the records ledger, more than the %d MiB one request may write: send fewer records per request",
+		e.Bytes>>20, MaxStoredPerRequest>>20)
+}
+
 // TenantResolver maps an emitter's tenant value (a team ID, an API key
 // alias, a customer ID) to a billing tenant. known is false when nothing
 // matched, in which case tenant is the value itself.
@@ -84,9 +107,18 @@ type SKUGate func(tenant, sku string) (stored string, overflow bool)
 // before records are ingested.
 func (in *Ingester) UseSKUGate(g SKUGate) { in.skuGate = g }
 
-// recordValues checks a pushed record's values and dimensions, which reach
-// dashboards, exports and billing platforms.
+// HasFormat reports whether records can be sent in format.
+func (in *Ingester) HasFormat(format string) bool {
+	_, ok := in.formats[format]
+	return ok || format == Native
+}
+
+// recordValues checks a pushed record's request ID, values and dimensions,
+// which reach dashboards, exports and billing platforms.
 func recordValues(rec *Record) string {
+	if len(rec.ID) > MaxRequestIDLen {
+		return fmt.Sprintf("id is longer than %d bytes", MaxRequestIDLen)
+	}
 	for _, f := range []struct{ name, v string }{{"sku", rec.SKU}, {"region", rec.Region}, {"project", rec.Project}, {"tenant_cluster", rec.TenantCluster}} {
 		if err := usage.CheckValue(f.v); err != nil {
 			return f.name + " " + err.Error()
@@ -264,19 +296,40 @@ func (e ErrUnknownFormat) Error() string {
 	return fmt.Sprintf("unknown format %q (built in: %s; litellm with RECORDS_LITELLM=true; others in RECORDS_MAPPINGS_FILE)", e.Name, Native)
 }
 
-// Ingest maps, validates and durably stores a payload. boundTenant is the
-// tenant the caller's ingest token is bound to, or "" for an unbound token.
-// It returns only after the records are fsynced; a returned error means
-// nothing was stored and the emitter should retry.
+// Push identifies one pushed payload (POST /api/v1/records).
+type Push struct {
+	// Client names the emitter: X-VBilling-Client, or the format name.
+	Client string
+	// Bound is the tenant the caller's ingest token is bound to; "" for
+	// the shared ingest token.
+	Bound string
+	// Known reports whether a push of this client was accepted before.
+	// Metric series and health sources name a client only then, or once
+	// its push is accepted: a name that only ever comes with refused
+	// records costs nothing.
+	Known bool
+}
+
+// Ingest maps, validates and durably stores a payload pushed by a known
+// client. boundTenant is the tenant the caller's ingest token is bound to,
+// or "" for an unbound token.
 func (in *Ingester) Ingest(format, client, boundTenant string, body []byte) (Result, error) {
-	if _, ok := in.formats[format]; !ok && format != Native {
+	return in.IngestPush(format, Push{Client: client, Bound: boundTenant, Known: true}, body)
+}
+
+// IngestPush maps, validates and durably stores a pushed payload. It
+// returns only after the records are fsynced; a returned error means
+// nothing was stored and the emitter should retry, except ErrUnknownFormat
+// and ErrTooLarge.
+func (in *Ingester) IngestPush(format string, p Push, body []byte) (Result, error) {
+	if !in.HasFormat(format) {
 		return Result{Format: format}, ErrUnknownFormat{format}
 	}
 	objs, err := Parse(body)
 	if err != nil {
 		return Result{Format: format}, err
 	}
-	return in.ingest(format, client, boundTenant, objs, nil)
+	return in.ingest(ingestCall{format: format, client: p.Client, bound: p.Bound, known: p.Known}, objs)
 }
 
 // ingestPulled stores records a puller read from an emitter's own logs,
@@ -287,17 +340,27 @@ func (in *Ingester) Ingest(format, client, boundTenant string, body []byte) (Res
 // a trailing range on every pass. Pulled records do not touch the health
 // of the client's push source.
 func (in *Ingester) ingestPulled(format, client, boundTenant string, objs []map[string]any, stored *storedIndex) (Result, error) {
-	if _, ok := in.formats[format]; !ok && format != Native {
+	if !in.HasFormat(format) {
 		return Result{Format: format}, ErrUnknownFormat{format}
 	}
 	if stored == nil {
 		stored = &storedIndex{ids: map[string]struct{}{}}
 	}
-	return in.ingest(format, client, boundTenant, objs, stored)
+	return in.ingest(ingestCall{format: format, client: client, bound: boundTenant, stored: stored}, objs)
 }
 
-// ingest stores records; stored is non-nil for pulled records.
-func (in *Ingester) ingest(format, client, boundTenant string, objs []map[string]any, stored *storedIndex) (Result, error) {
+// ingestCall is one payload to store.
+type ingestCall struct {
+	format, client, bound string
+	// stored indexes the records ledger for pulled records; nil for pushes.
+	stored *storedIndex
+	// known: the pushing client had a push accepted before.
+	known bool
+}
+
+// ingest stores records.
+func (in *Ingester) ingest(c ingestCall, objs []map[string]any) (Result, error) {
+	client, boundTenant, stored := c.client, c.bound, c.stored
 	// Records sent with a token bound to a tenant (and rows a pull pins to
 	// one) get IDs in their own namespace. The tenant chooses the client
 	// name and can learn the gateway's request IDs from its own requests,
@@ -308,17 +371,18 @@ func (in *Ingester) ingest(format, client, boundTenant string, objs []map[string
 		idClient = "bound\x00" + client
 	}
 	pulled := stored != nil
-	res := Result{Format: format}
-	mapping := in.formats[format]
+	res := Result{Format: c.format}
+	mapping := in.formats[c.format]
 	res.Received = len(objs)
 	now := in.opts.Now().UTC()
 	source := "records:" + client
 	seen := map[string]bool{}
 	unknown := map[string]bool{}
 	noTime := 0
+	size := 0
 	var recs [][]usage.Event // usage rows per accepted record
 	for i, obj := range objs {
-		rec, skip, err := Map(format, mapping, obj)
+		rec, skip, err := Map(c.format, mapping, obj)
 		if skip {
 			res.Skipped++
 			continue
@@ -338,6 +402,9 @@ func (in *Ingester) ingest(format, client, boundTenant string, objs []map[string
 		if pulled {
 			makeSafe(&rec)
 		} else if msg := recordValues(&rec); msg != "" {
+			if len(rec.ID) > MaxRequestIDLen {
+				rec.ID = rec.ID[:MaxRequestIDLen] + "..." // keep the response small
+			}
 			reject(msg)
 			continue
 		}
@@ -436,8 +503,14 @@ func (in *Ingester) ingest(format, client, boundTenant string, objs []map[string
 			reject(strings.Join(problems, "; "))
 			continue
 		}
+		for i := range recRows {
+			size += rowSize(&recRows[i])
+		}
 		res.Accepted++
 		recs = append(recs, recRows)
+	}
+	if !pulled && size > MaxStoredPerRequest {
+		return Result{Format: c.format, Received: res.Received}, ErrTooLarge{Bytes: size}
 	}
 	if pulled {
 		var err error
@@ -463,9 +536,10 @@ func (in *Ingester) ingest(format, client, boundTenant string, objs []map[string
 	if overflow > 0 {
 		res.Warnings = append(res.Warnings, fmt.Sprintf("%d usage row(s) are billed under another SKU: their tenant sent too many distinct SKUs today", overflow))
 	}
+	report := pulled || c.known || res.Accepted > 0 // health and metrics may name the client
 	if len(rows) > 0 {
 		if _, err := in.spool.AppendBatch(source, rows); err != nil {
-			if !pulled {
+			if !pulled && c.known {
 				in.health.Fail(health.Name("records", client), "records", client, err, "the records ledger could not be written; the emitter must retry")
 			}
 			return res, fmt.Errorf("records ledger write failed: %w", err)
@@ -483,13 +557,15 @@ func (in *Ingester) ingest(format, client, boundTenant string, objs []map[string
 	sort.Strings(res.UnknownTenants)
 	if len(res.UnknownTenants) > 0 {
 		res.Warnings = append(res.Warnings, fmt.Sprintf("billed to tenants vBilling does not know (%s); map gateway identities with the vbilling.vcluster.com/aliases annotation or the format's tenantMap", strings.Join(res.UnknownTenants, ", ")))
-		in.health.Set(health.Name("records", client, "unknown-tenants"), "records", client, health.Empty,
-			"records for unknown tenants: "+strings.Join(res.UnknownTenants, ", "), "map them with the vbilling.vcluster.com/aliases annotation or tenantMap")
+		if report {
+			in.health.Set(health.Name("records", client, "unknown-tenants"), "records", client, health.Empty,
+				"records for unknown tenants: "+strings.Join(res.UnknownTenants, ", "), "map them with the vbilling.vcluster.com/aliases annotation or tenantMap")
+		}
 	}
 	if noTime > 0 {
 		res.Warnings = append(res.Warnings, fmt.Sprintf("%d record(s) had no time; the time each first arrived was used (a retry within an hour keeps it; send a time to be safe from later retries)", noTime))
 	}
-	if pulled {
+	if pulled || !report {
 		return res, nil // the puller reports its own health and counters
 	}
 	if res.Accepted > 0 {
@@ -499,6 +575,19 @@ func (in *Ingester) ingest(format, client, boundTenant string, objs []map[string
 	in.tel.Add("vbilling_records_accepted_total", "Per-request usage records durably stored.", map[string]string{"client": client}, float64(res.Accepted))
 	in.tel.Add("vbilling_records_rejected_total", "Per-request usage records refused.", map[string]string{"client": client}, float64(len(res.Rejected)))
 	return res, nil
+}
+
+// rowSize estimates the bytes a usage row takes in the records ledger: its
+// JSON, and the record envelope (sequence, time, hash chain) around it.
+func rowSize(ev *usage.Event) int {
+	n := 450 + len(ev.ID) + len(ev.Tenant) + len(ev.Metric) + len(ev.Unit) + len(ev.Region) + len(ev.Project) + len(ev.SKU) + len(ev.Source)
+	for k, v := range ev.Dimensions {
+		n += len(k) + len(v) + 6
+	}
+	if id, ok := ev.Properties["request_id"].(string); ok {
+		n += len(id)
+	}
+	return n
 }
 
 // storedIndex holds the IDs of the records stored for windows within

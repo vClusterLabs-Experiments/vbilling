@@ -3,9 +3,11 @@ package api
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"log"
 	"math"
 	"net/http"
+	"regexp"
 	"strconv"
 	"sync"
 	"time"
@@ -29,7 +31,8 @@ const (
 	// Every request body is read into memory first. POST /api/v1/events
 	// takes at most maxIngestEvents events in maxIngestBody bytes, and
 	// POST /api/v1/records at most maxRecordsBody bytes, enough for
-	// thousands of records per request.
+	// thousands of records per request (records.MaxStoredPerRequest bounds
+	// what one request writes to the records ledger).
 	maxIngestBody   = 10 << 20
 	maxIngestEvents = 5000
 	maxRecordsBody  = 16 << 20
@@ -42,6 +45,28 @@ const (
 	// dropped usage would let a tenant drop its own.
 	maxSKUsPerTenantPerDay = 100
 )
+
+// Client names. X-VBilling-Client names the emitter: it is part of record
+// IDs and ledger sources, and it labels metrics and health sources.
+// Whoever holds an ingest token chooses it, so it is short and plain, and
+// each token may use only a few.
+const (
+	// MaxHeaderBytes bounds the header of every API request (Go's default
+	// is 1 MiB). Ingest copies no header into the ledger, and none of
+	// vBilling's requests needs more.
+	MaxHeaderBytes = 64 << 10
+	// maxClientsPerBoundToken bounds the client names one tenant-bound
+	// token uses while vBilling runs: each name a request was accepted
+	// under keeps metric series and health sources until a restart. A
+	// tenant's gateway needs one or two.
+	maxClientsPerBoundToken = 16
+	// maxClientsPerSharedToken bounds them for the operator's shared
+	// token, which every gateway of the operator may use under its own
+	// name.
+	maxClientsPerSharedToken = 64
+)
+
+var clientNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
 // OverflowSKU is the SKU usage is billed under once its tenant brought in
 // maxSKUsPerTenantPerDay distinct SKUs in the day. Price it, or find out
@@ -86,8 +111,8 @@ func (l *rateLimiter) allow(key string, rate, burst float64) (bool, time.Duratio
 	return true, 0
 }
 
-// limitKey identifies an ingest token in the rate limiter without keeping
-// the token itself as a map key.
+// limitKey identifies an ingest token in the rate limiter and the client
+// names without keeping the token itself as a map key.
 func limitKey(token string) string {
 	sum := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(sum[:8])
@@ -107,6 +132,81 @@ func (s *Server) limitIngest(w http.ResponseWriter, token string, bound bool) bo
 	w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(max(wait.Seconds(), 1)))))
 	writeErr(w, http.StatusTooManyRequests, "too many requests for this ingest token (at most %.0f per second); retry later", rate)
 	return false
+}
+
+// clientNames counts the client names each ingest token uses. A name
+// counts once a request under it stored usage; requests in flight hold a
+// place, so concurrent requests cannot pass the cap together.
+type clientNames struct {
+	mu     sync.Mutex
+	tokens map[string]*tokenClients // limitKey(token) -> its names
+}
+
+type tokenClients struct {
+	accepted map[string]bool
+	pending  map[string]int // names of requests in flight, not accepted yet
+}
+
+func newClientNames() *clientNames { return &clientNames{tokens: map[string]*tokenClients{}} }
+
+// reserve lets a request of the token use name. known is whether a
+// request under it was accepted before; call done with whether this one
+// was. It refuses a name beyond the token's limit.
+func (c *clientNames) reserve(key, name string, limit int) (known bool, done func(accepted bool), err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	tc := c.tokens[key]
+	if tc == nil {
+		tc = &tokenClients{accepted: map[string]bool{}, pending: map[string]int{}}
+		c.tokens[key] = tc
+	}
+	if tc.accepted[name] {
+		return true, func(bool) {}, nil
+	}
+	if tc.pending[name] == 0 && len(tc.accepted)+len(tc.pending) >= limit {
+		return false, nil, fmt.Errorf("this ingest token already sent usage under %d client names (X-VBilling-Client), its limit while vBilling runs: "+
+			"name each emitter once and keep the name stable", limit)
+	}
+	tc.pending[name]++
+	var once sync.Once
+	return false, func(accepted bool) {
+		once.Do(func() {
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			if tc.pending[name]--; tc.pending[name] <= 0 {
+				delete(tc.pending, name)
+			}
+			if accepted {
+				tc.accepted[name] = true
+			}
+		})
+	}, nil
+}
+
+// ingestClient returns a request's client: X-VBilling-Client, or def
+// (configured, such as a format name) without the header. It answers 400
+// for a malformed name or one past the token's limit; otherwise call done
+// with whether the request stored usage. known reports whether the client
+// had a request accepted before: only such clients, and those of accepted
+// requests, get metric series and health sources.
+func (s *Server) ingestClient(w http.ResponseWriter, r *http.Request, c ingestCaller, def string) (client string, known bool, done func(bool), ok bool) {
+	client = r.Header.Get("X-VBilling-Client")
+	if client == "" {
+		client = def
+	} else if !clientNameRe.MatchString(client) {
+		writeErr(w, http.StatusBadRequest, "X-VBilling-Client must be 1 to 64 letters, digits, dots, dashes or underscores, starting with a letter or digit")
+		return "", false, nil, false
+	}
+	limit := maxClientsPerSharedToken
+	if c.bound != "" {
+		limit = maxClientsPerBoundToken
+	}
+	known, done, err := s.clients.reserve(c.key, client, limit)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "%v", err)
+		return "", false, nil, false
+	}
+	return client, known, done, true
 }
 
 // skuQuota counts the distinct SKUs each tenant brought in during the

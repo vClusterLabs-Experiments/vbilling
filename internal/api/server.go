@@ -69,6 +69,7 @@ type Server struct {
 	pricing *pricing.Service // nil: PRICE_CHECK=off
 
 	limiter *rateLimiter // requests per ingest token
+	clients *clientNames // client names per ingest token
 	skus    *skuQuota    // distinct SKUs per tenant and day
 }
 
@@ -95,7 +96,7 @@ func (s *Server) WithPricing(p *pricing.Service) *Server { s.pricing = p; return
 func New(cfg *config.Config, sp *spool.Spool, disp *pipeline.Dispatcher, tenants *pipeline.TenantRegistry,
 	ctrl Controller, enf *enforcement.Enforcer, tel *telemetry.Registry, version string) *Server {
 	s := &Server{cfg: cfg, spool: sp, disp: disp, tenants: tenants, ctrl: ctrl, enf: enf, tel: tel, version: version, now: time.Now, started: time.Now(),
-		limiter: newRateLimiter(time.Now)}
+		limiter: newRateLimiter(time.Now), clients: newClientNames()}
 	s.skus = newSKUQuota(func() time.Time { return s.now() })
 	return s
 }
@@ -453,31 +454,37 @@ func (s *Server) pricingReport(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, rep)
 }
 
+// ingestCaller is who sent an ingest request.
+type ingestCaller struct {
+	bound string // the tenant a tenant-bound token is bound to; "" for the shared token
+	key   string // the token's key in the rate limiter and the client names
+}
+
 // ingestAuth checks an ingest token and its request rate. A token from
 // INGEST_TOKENS is bound to a tenant: everything sent with it is billed to
 // that tenant. The API token is never an ingest token (PrepareTokens gives
 // ingest a token of its own).
-func (s *Server) ingestAuth(w http.ResponseWriter, r *http.Request) (boundTenant string, ok bool) {
+func (s *Server) ingestAuth(w http.ResponseWriter, r *http.Request) (ingestCaller, bool) {
 	if s.cfg.IngestToken == "" && len(s.cfg.IngestTokens) == 0 {
 		writeErr(w, http.StatusForbidden, "ingest is disabled: set INGEST_TOKEN, or INGEST_TOKENS for tokens bound to a tenant")
-		return "", false
+		return ingestCaller{}, false
 	}
 	got := bearer(r)
 	if s.cfg.IngestToken != "" && tokenOK(got, s.cfg.IngestToken) {
-		return "", s.limitIngest(w, got, false)
+		return ingestCaller{key: limitKey(got)}, s.limitIngest(w, got, false)
 	}
 	for tok, tenant := range s.cfg.IngestTokens {
 		if tokenOK(got, tok) {
-			return tenant, s.limitIngest(w, tok, true)
+			return ingestCaller{bound: tenant, key: limitKey(tok)}, s.limitIngest(w, tok, true)
 		}
 	}
 	if s.cfg.APIToken != "" && tokenOK(got, s.cfg.APIToken) {
 		writeErr(w, http.StatusUnauthorized, "the API token is not an ingest token: send the ingest token "+
 			"(INGEST_TOKEN, DATA_DIR/ingest-token, or the chart Secret's ingest-token key)")
-		return "", false
+		return ingestCaller{}, false
 	}
 	writeErr(w, http.StatusUnauthorized, "missing or invalid bearer token")
-	return "", false
+	return ingestCaller{}, false
 }
 
 // ingestRecords accepts per-request usage (one record per request) from
@@ -493,13 +500,8 @@ func (s *Server) ingestRecords(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "records ingest is not enabled")
 		return
 	}
-	bound, ok := s.ingestAuth(w, r)
+	caller, ok := s.ingestAuth(w, r)
 	if !ok {
-		return
-	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxRecordsBody+1))
-	if err != nil || len(body) > maxRecordsBody {
-		writeErr(w, http.StatusRequestEntityTooLarge, "body must be at most %d bytes", maxRecordsBody)
 		return
 	}
 	format := r.URL.Query().Get("format")
@@ -509,24 +511,39 @@ func (s *Server) ingestRecords(w http.ResponseWriter, r *http.Request) {
 	if format == "" {
 		format = records.Native
 	}
-	client := r.Header.Get("X-VBilling-Client")
-	if client == "" {
-		client = format
+	if !s.records.HasFormat(format) {
+		writeErr(w, http.StatusBadRequest, "%v", records.ErrUnknownFormat{Name: format})
+		return
+	}
+	client, known, done, ok := s.ingestClient(w, r, caller, format)
+	if !ok {
+		return
+	}
+	accepted := false
+	defer func() { done(accepted) }()
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxRecordsBody+1))
+	if err != nil || len(body) > maxRecordsBody {
+		writeErr(w, http.StatusRequestEntityTooLarge, "body must be at most %d bytes", maxRecordsBody)
+		return
 	}
 	// Until the first discovery, gateway identities cannot be mapped to
 	// tenants (vbilling.vcluster.com/aliases): ask the emitter to retry
 	// rather than bill a raw identity. Tokens bound to a tenant need no
 	// mapping. Never wait for longer than a short startup grace.
-	if bound == "" && s.ctrl != nil && !s.ctrl.Ready() && time.Since(s.started) < recordsStartupGrace {
+	if caller.bound == "" && s.ctrl != nil && !s.ctrl.Ready() && time.Since(s.started) < recordsStartupGrace {
 		w.Header().Set("Retry-After", "5")
 		writeErr(w, http.StatusServiceUnavailable, "vBilling is starting and has not discovered tenants yet; retry in a few seconds")
 		return
 	}
-	res, err := s.records.Ingest(format, client, bound, body)
+	res, err := s.records.IngestPush(format, records.Push{Client: client, Bound: caller.bound, Known: known}, body)
 	var unknown records.ErrUnknownFormat
+	var tooLarge records.ErrTooLarge
 	switch {
 	case errors.As(err, &unknown):
 		writeErr(w, http.StatusBadRequest, "%v", err)
+		return
+	case errors.As(err, &tooLarge):
+		writeErr(w, http.StatusRequestEntityTooLarge, "%v", err)
 		return
 	case err != nil && res.Received == 0:
 		writeErr(w, http.StatusBadRequest, "%v", err)
@@ -535,6 +552,7 @@ func (s *Server) ingestRecords(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, "%v", err)
 		return
 	}
+	accepted = res.Accepted > 0
 	status := http.StatusOK
 	if res.Received > 0 && res.Accepted == 0 && res.Skipped == 0 && res.DuplicatesInBatch == 0 {
 		status = http.StatusBadRequest
@@ -789,10 +807,17 @@ func valueProblems(e *usage.Event) []string {
 // one, and must not use a reserved prefix otherwise; an event without an id
 // gets IngestEventID.
 func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
-	bound, ok := s.ingestAuth(w, r)
+	caller, ok := s.ingestAuth(w, r)
 	if !ok {
 		return
 	}
+	bound := caller.bound
+	client, _, done, ok := s.ingestClient(w, r, caller, "api")
+	if !ok {
+		return
+	}
+	var accepted []string
+	defer func() { done(len(accepted) > 0) }()
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxIngestBody+1))
 	if err != nil || len(body) > maxIngestBody {
 		writeErr(w, http.StatusRequestEntityTooLarge, "body must be at most %d bytes", maxIngestBody)
@@ -816,10 +841,6 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 	if len(events) == 0 || len(events) > maxIngestEvents {
 		writeErr(w, http.StatusBadRequest, "send 1 to %d events", maxIngestEvents)
 		return
-	}
-	client := r.Header.Get("X-VBilling-Client")
-	if client == "" {
-		client = "api"
 	}
 	source := "ingest:" + client
 	now := s.now().UTC()
@@ -917,7 +938,7 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 		}
 		fresh = append(fresh, e)
 	}
-	var accepted, dups []string
+	var dups []string
 	if len(fresh) > 0 {
 		if accepted, dups, err = s.spool.AppendIngest(source, fresh); err != nil {
 			writeErr(w, http.StatusServiceUnavailable, "ledger write failed: %v", err)
@@ -929,7 +950,9 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 	if len(valid) == 0 {
 		status = http.StatusBadRequest
 	}
-	s.tel.Add("vbilling_ingested_events_total", "Events accepted through the ingest API.", map[string]string{"client": client}, float64(len(accepted)))
+	if len(accepted) > 0 { // a series per client only once it stored usage
+		s.tel.Add("vbilling_ingested_events_total", "Events accepted through the ingest API.", map[string]string{"client": client}, float64(len(accepted)))
+	}
 	out := map[string]any{"accepted": len(accepted), "duplicates": len(dups), "rejected": rejected, "ids": accepted}
 	silent := 0
 	for _, id := range dups {

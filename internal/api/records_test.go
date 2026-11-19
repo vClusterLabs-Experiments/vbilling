@@ -58,8 +58,9 @@ func setupRecords(t *testing.T) *recEnv {
 		_, ok := reg.Get(v)
 		return v, ok
 	}
-	in := records.NewIngester(rs, formats, records.Options{Window: time.Minute, Region: cfg.Region, Now: clock}, resolve, h, nil)
-	s := New(cfg, sp, nil, reg, nil, nil, telemetry.New(), "test").WithHealth(h).WithRecords(in)
+	tel := telemetry.New()
+	in := records.NewIngester(rs, formats, records.Options{Window: time.Minute, Region: cfg.Region, Now: clock}, resolve, h, tel)
+	s := New(cfg, sp, nil, reg, nil, nil, tel, "test").WithHealth(h).WithRecords(in)
 	s.now = clock
 	srv := httptest.NewServer(s.Handler())
 	t.Cleanup(srv.Close)

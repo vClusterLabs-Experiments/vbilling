@@ -357,6 +357,7 @@ func main() {
 		Addr:              cfg.ListenAddr,
 		Handler:           api.New(cfg, sp, disp, tenants, ctrl, enf, tel, version).WithHealth(sources).WithPauses(pauses).WithRecords(ingester).WithCrossChecks(checks).WithPricing(prices).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
+		MaxHeaderBytes:    api.MaxHeaderBytes,
 	}
 
 	var wg sync.WaitGroup

@@ -52,20 +52,38 @@ func postWithClient(t *testing.T, url, token, client string, body []byte) int {
 // default 1 MiB header limit and 5,000 events, one request asks for 5 GB in
 // one buffer (the chart's memory limit is 256Mi) or fills the 5Gi ledger
 // volume, and metering stops for every tenant.
+//
+// The fix bounds the name's length and character set and refuses anything
+// else with 400 (and the server's headers to 64 KiB), so this request is
+// refused and writes nothing. A valid name costs at most its own length
+// per event.
 func TestReview3ClientHeaderIsCopiedIntoEveryLedgerRecord(t *testing.T) {
 	e := setup(t, func(c *config.Config) { c.IngestTokens = map[string]string{"tok-acme": "acme"} })
 	body, _ := json.Marshal(gpuEvents(200, nil))
 	client := strings.Repeat("c", 64<<10) // 64 KiB, far below the 1 MiB header limit
 	before := e.sp.Stats().Bytes
-	if code := postWithClient(t, e.srv.URL+"/api/v1/events", "tok-acme", client, body); code != http.StatusOK {
-		t.Fatalf("ingest answered %d", code)
+	if code := postWithClient(t, e.srv.URL+"/api/v1/events", "tok-acme", client, body); code != http.StatusBadRequest {
+		t.Fatalf("ingest answered %d, want 400 for a 64 KiB client name", code)
 	}
 	grew := e.sp.Stats().Bytes - before
 	sent := int64(len(body) + len(client))
-	if grew > 4*sent {
+	if grew > 4*sent || grew != 0 {
 		t.Fatalf("a %d-byte request (%d of it the client header) grew the ledger by %d bytes (%.0fx): "+
 			"the header is stored with every event; bound its length and character set (or take the client from the token)",
 			sent, len(client), grew, float64(grew)/float64(sent))
+	}
+	// The longest valid name: each event stores it once, nothing more.
+	growth := func(client string) int64 {
+		e := setup(t, func(c *config.Config) { c.IngestTokens = map[string]string{"tok-acme": "acme"} })
+		before := e.sp.Stats().Bytes
+		if code := postWithClient(t, e.srv.URL+"/api/v1/events", "tok-acme", client, body); code != http.StatusOK {
+			t.Fatalf("client %q: ingest answered %d", client, code)
+		}
+		return e.sp.Stats().Bytes - before
+	}
+	long, short := growth(strings.Repeat("c", 64)), growth("")
+	if extra := long - short; extra > 200*2*64 {
+		t.Fatalf("a 64-character client name added %d bytes to 200 events, more than twice its length per event", extra)
 	}
 }
 
