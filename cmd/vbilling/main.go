@@ -163,8 +163,10 @@ func main() {
 	// A full ledger volume stops every commit: report it long before.
 	go diskspace.Watch(ctx, map[string]string{"ledger-volume": cfg.DataDir, "archive-volume": cfg.ArchiveDir}, sources, tel)
 	tenants := pipeline.NewTenantRegistry()
-	// Events held until their billing platform prices them (PRICE_CHECK=hold).
-	// Always opened, so whatever an earlier run held is released.
+	// Events held until their billing platform counts them (Metronome: a
+	// billable metric, unless PRICE_CHECK=off) or prices them
+	// (PRICE_CHECK=hold). Always opened, so whatever an earlier run held is
+	// released.
 	held, err := pipeline.OpenHeld(filepath.Join(cfg.DataDir, "held"), false)
 	if err != nil {
 		log.Fatalf("open held events: %v", err)

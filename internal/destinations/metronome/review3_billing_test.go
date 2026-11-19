@@ -1,12 +1,10 @@
 package metronome
 
 import (
-	"context"
 	"testing"
 	"time"
 
 	"github.com/vclusterlabs-experiments/vbilling/internal/config"
-	"github.com/vclusterlabs-experiments/vbilling/internal/destinations"
 	"github.com/vclusterlabs-experiments/vbilling/internal/kv"
 	"github.com/vclusterlabs-experiments/vbilling/internal/usage"
 )
@@ -25,19 +23,18 @@ import (
 // as a new custom or token metric) goes out and is never billed. The fake
 // attributes it to a billable metric created later, so the tests that cover
 // this path (TestDefaultModeNeverWritesToMetronome) pass.
+//
+// Since the fourth review the pricing gate holds such usage (the adapter
+// itself sends whatever reaches it), so this runs delivery as vBilling does.
 func TestReview3UsageWaitsForABillableMetricThatCountsIt(t *testing.T) {
-	f := newFake(t)
-	a := newReadOnly(t, f)
-	ctx := context.Background()
+	f := newRigFake(t)
 	if _, err := f.CreateCustomer("Acme AI", "org_1f2e", "tenant-acme"); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.Bootstrap(ctx, usage.Catalog()); err != nil {
-		t.Fatal(err)
-	}
-	if err := a.SendEvents(ctx, []usage.Event{gpu("tenant-acme", "c1", now.Add(-2*time.Minute), 1)}); err != nil {
-		t.Fatal(err)
-	}
+	r := newHoldRig(t, t.TempDir(), rigOptions{base: f.URL}) // PRICE_CHECK=warn, the default
+	at := rigNow()
+	r.commit(t, gpu("tenant-acme", "c1", at.Add(-2*time.Minute), 1))
+	waitFor(t, "the GPU usage delivered or held", func() bool { return r.delivered() })
 	sentBefore := len(f.Events())
 	// Finance applies the definition `vbilling metronome billable-metrics` prints.
 	financeMetric(t, f, usage.MetricGPUHours, "GPU hours")
@@ -45,16 +42,10 @@ func TestReview3UsageWaitsForABillableMetricThatCountsIt(t *testing.T) {
 		t.Errorf("%d event(s) of %s reached Metronome before any billable metric summed them: Metronome never attributes them to a billable metric created later",
 			sentBefore, usage.MetricGPUHours)
 	}
-	day := now.Truncate(24 * time.Hour)
-	totals, err := a.RecordedTotals(ctx, destinations.TotalsQuery{From: day, To: day.Add(24 * time.Hour),
-		Tenants: []usage.Tenant{{ID: "tenant-acme"}}, Metrics: []string{usage.MetricGPUHours}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, tot := range totals {
-		if tot.Quantity > 0 && sentBefore > 0 {
-			t.Errorf("the fake bills %v GPU-hours sent before their billable metric existed; Metronome documents 0 (the fake is retroactive, Metronome is not)", tot.Quantity)
-		}
+	r.check()
+	waitFor(t, "the held usage sent", func() bool { return len(f.Events()) == 1 && r.held.Count(rigDest) == 0 })
+	if got := r.counted(t, "tenant-acme", usage.MetricGPUHours, at); got != 1 {
+		t.Errorf("Metronome bills %v GPU-hours of the 1 sent once its billable metric existed", got)
 	}
 }
 

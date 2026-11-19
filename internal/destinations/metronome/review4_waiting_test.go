@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -20,14 +20,21 @@ import (
 	"github.com/vclusterlabs-experiments/vbilling/internal/config"
 	"github.com/vclusterlabs-experiments/vbilling/internal/destinations"
 	"github.com/vclusterlabs-experiments/vbilling/internal/destinations/metronome/metronometest"
-	"github.com/vclusterlabs-experiments/vbilling/internal/kv"
+	"github.com/vclusterlabs-experiments/vbilling/internal/health"
 	"github.com/vclusterlabs-experiments/vbilling/internal/pipeline"
+	"github.com/vclusterlabs-experiments/vbilling/internal/pricing"
 	"github.com/vclusterlabs-experiments/vbilling/internal/spool"
 	"github.com/vclusterlabs-experiments/vbilling/internal/usage"
 )
 
 // Fourth review: the waiting store for usage of metrics no billable metric
-// counts yet (waiting.go, commit 1286df1).
+// counts yet (waiting.go, commit 1286df1) stranded, lost and dropped usage.
+// It is gone: price coverage reports such usage as uncounted, and the
+// pricing gate holds it in vBilling's held store (DATA_DIR/held), in every
+// PRICE_CHECK mode but off and in both Metronome modes, releasing it in
+// order once a billable metric counts it, or unpriced after
+// pipeline.MaxUnpricedHold with failing health. These tests assert the
+// properties the review asked of the waiting store against that mechanism.
 
 // review4Proxy stands in front of the fake Metronome. Ingest requests go
 // through answer first (n counts them from 1): a non-zero status is returned
@@ -73,169 +80,116 @@ func review4Proxy(t *testing.T, f *metronometest.Server, answer func(n int, body
 	return p
 }
 
-// review4Open builds a default-mode adapter on base and dir at a fixed time
-// (a new instance, as after a restart, reads the billable metrics afresh).
-func review4Open(base, dir string, provision bool, at time.Time) *Adapter {
-	a := New(NewClient(base, metronometest.Token), &config.Config{DataDir: dir, MetronomeProvision: provision}, kv.Memory(), nil)
-	a.now = func() time.Time { return at }
-	return a
-}
-
-func review4Sent(f *metronometest.Server) map[string]bool {
-	sent := map[string]bool{}
-	for _, e := range f.Events() {
-		sent[e.TransactionID] = true
-	}
-	return sent
-}
-
-// Usage waits in default mode. The operator then lets vBilling create the
-// billable metrics: METRONOME_PROVISION=true, which docs/metronome.html
-// describes (metronome.stripeLink=true turns it on too). In provisioning
-// mode neither Bootstrap nor SendEvents calls releaseWaiting, so what waited
-// in DATA_DIR/metronome-waiting is never sent, and the dispatcher's cursor
-// is long past it.
+// Finding 7. Usage was held in default mode; the operator then turns on
+// METRONOME_PROVISION and vBilling creates the billable metrics. The waiting
+// store was read in default mode only, so what waited was never sent. Held
+// usage now sits in the held store, which every mode releases: once the
+// billable metric vBilling created counts it, it ships, and Metronome counts
+// it, since the metric existed before it arrived.
 func TestReview4WaitingUsageIsStrandedWhenProvisioningIsTurnedOn(t *testing.T) {
-	f := newFake(t)
+	f := newRigFake(t)
 	dir := t.TempDir()
-	ctx := context.Background()
+	at := rigNow()
 
-	waited := gpu("tenant-acme", "c1", now.Add(-3*time.Minute), 1)
-	a := review4Open(f.URL, dir, false, now)
-	if err := a.Bootstrap(ctx, usage.Catalog()); err != nil {
-		t.Fatal(err)
+	waited := gpu("tenant-acme", "c1", at.Add(-3*time.Minute), 1)
+	a := newHoldRig(t, dir, rigOptions{base: f.URL})
+	a.commit(t, waited)
+	waitFor(t, "the GPU usage held while no billable metric counts it", func() bool { return a.held.Count(rigDest) == 1 && a.delivered() })
+	if n := len(f.Events()); n != 0 {
+		t.Fatalf("precondition: %d event(s) sent before any billable metric counted GPU hours", n)
 	}
-	if err := a.SendEvents(ctx, []usage.Event{waited}); err != nil {
-		t.Fatal(err)
-	}
-	if len(f.Events()) != 0 {
-		t.Fatalf("precondition: %d event(s) sent before any billable metric counted GPU hours", len(f.Events()))
-	}
+	a.stop()
 
 	// Restart with METRONOME_PROVISION=true: vBilling creates the billable
-	// metrics and keeps delivering.
-	b := review4Open(f.URL, dir, true, now.Add(2*time.Minute))
-	if err := b.Bootstrap(ctx, usage.Catalog()); err != nil {
-		t.Fatal(err)
-	}
-	later := gpu("tenant-acme", "c1", now.Add(-time.Minute), 1)
-	if err := b.SendEvents(ctx, []usage.Event{later}); err != nil {
-		t.Fatal(err)
-	}
-
-	if sent := review4Sent(f); !sent[waited.ID] {
-		_, statErr := os.Stat(filepath.Join(dir, "metronome-waiting", usage.MetricGPUHours+".jsonl"))
-		t.Errorf("GPU usage that waited in default mode was never sent after METRONOME_PROVISION was turned on and vBilling created "+
-			"the GPU billable metric: Metronome received %d event(s), the waiting one (%s) not among them; its file is still in "+
-			"DATA_DIR/metronome-waiting (stat error: %v) and nothing in provisioning mode ever reads it",
-			len(f.Events()), waited.ID, statErr)
+	// metrics and keeps delivering. A price check that ran before they
+	// existed still says nothing counts GPU hours; the next one, within a
+	// minute while usage is held, finds them.
+	b := newHoldRig(t, dir, rigOptions{base: f.URL, provision: true})
+	waitFor(t, "the billable metrics created", func() bool {
+		st := b.disp.Statuses()
+		return len(st) == 1 && st[0].Ready
+	})
+	b.check()
+	later := gpu("tenant-acme", "c1", at.Add(-time.Minute), 1)
+	b.commit(t, later)
+	waitFor(t, "the usage held in default mode sent after the switch", func() bool {
+		sent := sentIDs(f)
+		return sent[waited.ID] && sent[later.ID] && b.held.Count(rigDest) == 0
+	})
+	if got := b.counted(t, "tenant-acme", usage.MetricGPUHours, at); got != 2 {
+		t.Errorf("Metronome bills %v GPU-hours, want both: the held one and the newer one", got)
 	}
 }
 
-// docs/metronome.html: on HTTP 400, 413 or 422 "the batch is split until
-// the rejected events are isolated. Those are dead-lettered; the rest are
-// delivered". SendEvents releases waiting usage first and returns the
-// release's error as its own, so when Metronome refuses a waiting event for
-// good, the dispatcher bisects and dead-letters the batch it was delivering
-// (other tenants' usage of a metric a billable metric counts), never the
-// refused event, which keeps waiting and does the same to every later batch.
+// Finding 10. A held event Metronome refuses for good is isolated and
+// dead-lettered on its own when it is released (the dispatcher bisects a
+// refused batch); the other tenants' batches before and after it are
+// delivered. docs/metronome.html: only the rejected events are
+// dead-lettered, the rest delivered.
 func TestReview4AWaitingEventMetronomeRefusesDeadLettersOtherTenantsUsage(t *testing.T) {
-	f := newFake(t)
+	f := newRigFake(t)
 	financeMetric(t, f, usage.MetricCPUCoreHours, "CPU hours")
-	dir := t.TempDir()
-
-	refused := gpu("tenant-acme", "c1", now.Add(-10*time.Minute), 1)
+	at := rigNow()
+	refused := gpu("tenant-acme", "c1", at.Add(-10*time.Minute), 1)
 	proxy := review4Proxy(t, f, func(_ int, body []byte) int {
 		if bytes.Contains(body, []byte(refused.ID)) {
 			return http.StatusBadRequest
 		}
 		return 0
 	})
-	// No billable metric counts GPU hours yet: the event waits.
-	if err := review4Open(proxy.URL, dir, false, now).SendEvents(context.Background(), []usage.Event{refused}); err != nil {
-		t.Fatal(err)
-	}
-	// Finance adds it; vBilling (restarted, or a minute later) releases.
-	financeMetric(t, f, usage.MetricGPUHours, "GPU hours")
-	a := review4Open(proxy.URL, dir, false, now.Add(2*time.Minute))
+	r := newHoldRig(t, t.TempDir(), rigOptions{base: proxy.URL, batch: 5})
+	// No billable metric counts GPU hours yet: the event is held.
+	r.commit(t, refused)
+	waitFor(t, "the GPU event held", func() bool { return r.held.Count(rigDest) == 1 && r.delivered() })
 
-	sp, err := spool.Open(t.TempDir(), spool.Options{NoSync: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { sp.Close() })
 	// Two later windows of CPU usage of two other tenants.
 	var cpu []usage.Event
 	for w, tenant := range []string{"tenant-beta", "tenant-gamma"} {
-		ws := now.Add(time.Duration(w-3) * time.Minute)
+		ws := at.Add(time.Duration(w-3) * time.Minute)
 		var window []usage.Event
 		for i := 0; i < 4; i++ {
 			e := usage.Event{Tenant: tenant, Metric: usage.MetricCPUCoreHours, Quantity: 2, Region: "ap-southeast-2",
-				WindowStart: ws, WindowEnd: ws.Add(time.Minute), Source: "collector", RecordedAt: now,
+				WindowStart: ws, WindowEnd: ws.Add(time.Minute), Source: "collector", RecordedAt: at,
 				Dimensions: map[string]string{usage.DimTenantCluster: fmt.Sprintf("%s-%d", tenant, i)}}
 			e.Finalize()
 			window = append(window, e)
 		}
-		if err := sp.AppendWindow(spool.SourceCollector, ws.Add(time.Minute), window, ""); err != nil {
-			t.Fatal(err)
-		}
+		r.commit(t, window...)
 		cpu = append(cpu, window...)
 	}
-	if err := sp.SetCursor(a.Name(), 0); err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	disp := pipeline.New(sp, []destinations.Destination{a}, pipeline.Options{BatchSize: 5, IdlePoll: 10 * time.Millisecond,
-		MinBackoff: 10 * time.Millisecond, MaxBackoff: 50 * time.Millisecond}, nil)
-	done := make(chan struct{})
-	go func() { defer close(done); disp.Run(ctx) }()
-	for deadline := time.Now().Add(10 * time.Second); sp.Cursor(a.Name()) < sp.Committed() && time.Now().Before(deadline); {
-		time.Sleep(10 * time.Millisecond)
-	}
-	cancel()
-	<-done
+	// Finance adds the GPU billable metric: the held event is released,
+	// and Metronome refuses it.
+	financeMetric(t, f, usage.MetricGPUHours, "GPU hours")
+	r.check()
+	waitFor(t, "the ledger delivered and the refused event dead-lettered", func() bool {
+		dls, _ := r.sp.DeadLetters(rigDest)
+		return r.delivered() && r.held.Count(rigDest) == 0 && len(dls) > 0
+	})
 
-	sent := review4Sent(f)
-	dls, err := sp.DeadLetters(a.Name())
+	sent := sentIDs(f)
+	for _, e := range cpu {
+		if !sent[e.ID] {
+			t.Errorf("CPU event of %s (%s) never reached Metronome", e.Tenant, e.Dimensions[usage.DimTenantCluster])
+		}
+	}
+	dls, err := r.sp.DeadLetters(rigDest)
 	if err != nil {
 		t.Fatal(err)
 	}
-	missing := 0
-	for _, e := range cpu {
-		if !sent[e.ID] {
-			missing++
-		}
-	}
-	refusedDead := false
-	for _, dl := range dls {
-		refusedDead = refusedDead || dl.Event.ID == refused.ID
-	}
-	if missing > 0 || !refusedDead {
-		reason := ""
-		if len(dls) > 0 {
-			reason = dls[0].Reason
-		}
-		left, _ := a.wait.pending()
-		t.Errorf("Metronome refused (HTTP 400) one GPU event that had waited for its billable metric. %d of the %d CPU events of "+
-			"tenant-beta and tenant-gamma (two later batches, of a metric a billable metric counts) never reached Metronome: %d dead "+
-			"letter(s), the first because %q. The refused GPU event is dead-lettered: %v; it still waits (%v), so every later batch "+
-			"is dead-lettered the same way. docs/metronome.html: only the rejected events are dead-lettered, the rest delivered",
-			missing, len(cpu), len(dls), reason, refusedDead, left)
+	if len(dls) != 1 || dls[0].Event.ID != refused.ID || !strings.Contains(dls[0].Reason, "400") {
+		t.Errorf("dead letters %+v, want only the GPU event Metronome refused, with its reason", dls)
 	}
 }
 
-// take reads a type's whole backlog into memory before it sends the first
-// slice of 100, and keeps it there until every slice is accepted (nothing is
-// recorded as sent before that). The chart limits vBilling to 256Mi, so a
-// backlog of one metric (a custom metric that waits a week for Finance, or
-// any metric no billable metric ever counts once it is 28 days deep, when
-// every delivery takes and rewrites it again) OOM-kills vBilling on release,
-// and the restart's Bootstrap releases, and is killed, again.
+// Finding 8. Releasing a backlog reads it from the held store a batch at a
+// time: what is live when the first slice reaches Metronome does not grow
+// with the backlog. (The waiting store read a type's whole backlog into
+// memory and kept it until every slice was accepted.)
 func TestReview4ReleaseHoldsTheWholeBacklogInMemory(t *testing.T) {
 	const n = 100_000
-	f := newFake(t)
+	f := newRigFake(t)
 	dir := t.TempDir()
-	ctx := context.Background()
+	at := rigNow()
 	var live atomic.Uint64
 	proxy := review4Proxy(t, f, func(call int, _ []byte) int {
 		if call == 1 {
@@ -247,197 +201,245 @@ func TestReview4ReleaseHoldsTheWholeBacklogInMemory(t *testing.T) {
 		return http.StatusServiceUnavailable // stop after the first slice; nothing is lost
 	})
 
-	// n GPU events wait (100 series, 1,000 one-minute windows each).
+	// An earlier run held n GPU events (100 clusters, 1,000 one-minute
+	// windows each) while no billable metric counted GPU hours.
 	func() {
-		evs := make([]usage.Event, 0, n)
-		for i := 0; i < n; i++ {
-			evs = append(evs, gpu("tenant-acme", fmt.Sprintf("c%d", i%100), now.Add(-time.Duration(i/100+1)*time.Minute), 1))
-		}
-		if err := review4Open(proxy.URL, dir, false, now).SendEvents(ctx, evs); err != nil {
+		held, err := pipeline.OpenHeld(filepath.Join(dir, "held"), true)
+		if err != nil {
 			t.Fatal(err)
+		}
+		a := New(NewClient(f.URL, metronometest.Token), &config.Config{}, nil, nil)
+		var batch []pipeline.HeldEntry
+		for i := 0; i < n; i++ {
+			e := gpu("tenant-acme", fmt.Sprintf("c%d", i%100), at.Add(-time.Duration(1000-i/100)*time.Minute), 1)
+			key := destinations.SeriesOf(a, aliasPlan+"tenant-acme", &e).Key()
+			batch = append(batch, pipeline.HeldEntry{Seq: uint64(i + 1), At: at, Series: key, Reason: "not counted yet", Event: e})
+			if len(batch) == 5000 || i == n-1 {
+				if _, err := held.Add(rigDest, batch); err != nil {
+					t.Fatal(err)
+				}
+				batch = batch[:0]
+			}
 		}
 	}()
 	financeMetric(t, f, usage.MetricGPUHours, "GPU hours")
-	a := review4Open(proxy.URL, dir, false, now.Add(2*time.Minute))
-	if _, err := a.wait.pending(); err != nil { // the index, before the baseline
-		t.Fatal(err)
+	r := openHoldRig(t, dir, rigOptions{base: proxy.URL})
+	if c := r.held.Count(rigDest); c != n {
+		t.Fatalf("precondition: %d events held, want %d", c, n)
 	}
 	runtime.GC()
 	var ms runtime.MemStats
 	runtime.ReadMemStats(&ms)
 	base := ms.HeapAlloc
 
-	err := a.SendEvents(ctx, nil)
-	if live.Load() == 0 {
-		t.Fatalf("the release sent no ingest request: %v", err)
-	}
+	r.start()
+	waitFor(t, "the first slice of the release sent", func() bool { return live.Load() != 0 })
+	r.stop()
 	held := int64(live.Load()) - int64(base)
 	if held > 16<<20 {
-		per := held / n
-		upper := (256 << 20) / per // live heap alone at the chart's limit
-		t.Errorf("releasing %d waiting events kept %d MiB live when the first slice of 100 went out (%d bytes per event): take "+
-			"loads a type's whole backlog, and SendEvents holds it until every slice is accepted. Live heap alone reaches the "+
-			"chart's 256Mi limit at %d events; with Go's default GC (heap up to twice the live size) and the rest of vBilling, "+
-			"about half that: %d events, %.0f series-days of one-minute windows (20 GPU series waiting %.1f days)",
-			n, held>>20, per, upper, upper/2, float64(upper/2)/1440, float64(upper/2)/1440/20)
+		t.Errorf("releasing %d held events kept %d MiB live when the first slice of 100 went out (%d bytes per event): the release must read the backlog a batch at a time",
+			n, held>>20, held/n)
+	}
+	if c := r.held.Count(rigDest); c != n {
+		t.Errorf("%d events held after Metronome failed the release, want all %d still held", c, n)
 	}
 }
 
-// add appends to the type's file with O_APPEND, and scanEvents skips a line
-// that does not parse ("torn by a crash: it was never acknowledged"). A
-// write cut short (vBilling killed mid-append, or ENOSPC) leaves a line
-// without its newline, and the dispatcher, which got no ack, delivers the
-// same batch again: its first event is appended onto the cut line, which is
-// skipped, so that event is acknowledged but never sent. (pipeline.HeldStore
-// cuts such a tail off when it opens; this store never does.)
+// Finding 22. A write cut short (vBilling killed mid-append, or ENOSPC)
+// leaves a line without its newline, and the dispatcher, which got no ack,
+// delivers the same batch again. The held store cuts such a tail off when it
+// opens, so the batch held again is whole: every event of both batches
+// reaches Metronome once a billable metric counts them. (The waiting store
+// appended onto the cut line and skipped it as torn, losing an event.)
 func TestReview4AnAppendAfterATornWriteLosesAnEvent(t *testing.T) {
-	f := newFake(t)
+	f := newRigFake(t)
 	dir := t.TempDir()
-	ctx := context.Background()
+	at := rigNow()
 
-	batch := []usage.Event{gpu("tenant-acme", "c1", now.Add(-5*time.Minute), 1), gpu("tenant-acme", "c2", now.Add(-5*time.Minute), 1)}
-	// The append of this batch was cut short inside its first line; the
-	// dispatcher never acknowledged it.
-	line, err := json.Marshal(batch[0])
+	first := []usage.Event{gpu("tenant-acme", "c1", at.Add(-5*time.Minute), 1), gpu("tenant-acme", "c2", at.Add(-5*time.Minute), 1)}
+	a := newHoldRig(t, dir, rigOptions{base: f.URL})
+	a.commit(t, first...)
+	waitFor(t, "the first batch held", func() bool { return a.held.Count(rigDest) == 2 && a.delivered() })
+	// The next batch is committed; vBilling is killed while holding it, its
+	// append cut short inside the first line, and the dispatcher never
+	// acknowledged the batch.
+	next := []usage.Event{gpu("tenant-acme", "c1", at.Add(-4*time.Minute), 1), gpu("tenant-acme", "c2", at.Add(-4*time.Minute), 1)}
+	a.cancel()
+	<-a.done
+	a.cancel = nil
+	a.commit(t, next...)
+	a.stop()
+	files, _ := filepath.Glob(filepath.Join(dir, "held", rigDest, "*.jsonl"))
+	if len(files) != 1 {
+		t.Fatalf("precondition: held files %v, want one series", files)
+	}
+	line, err := json.Marshal(pipeline.HeldEntry{Seq: 99, At: at, Series: "torn", Reason: "not counted yet", Event: next[0]})
 	if err != nil {
 		t.Fatal(err)
 	}
-	waitDir := filepath.Join(dir, "metronome-waiting")
-	if err := os.MkdirAll(waitDir, 0o750); err != nil {
+	fh, err := os.OpenFile(files[0], os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(waitDir, usage.MetricGPUHours+".jsonl"), line[:len(line)/2], 0o640); err != nil {
+	if _, err := fh.Write(line[:len(line)/2]); err != nil {
 		t.Fatal(err)
 	}
-	// After the restart the dispatcher delivers the same batch again: it waits.
-	if err := review4Open(f.URL, dir, false, now).SendEvents(ctx, batch); err != nil {
-		t.Fatal(err)
-	}
-	// Finance adds the billable metric: what waited is sent.
+	fh.Close()
+
+	// After the restart the dispatcher delivers the same batch again: it is
+	// held. Finance adds the billable metric: what was held is sent.
+	b := newHoldRig(t, dir, rigOptions{base: f.URL})
+	waitFor(t, "the second batch held again", func() bool { return b.held.Count(rigDest) == 4 && b.delivered() })
 	financeMetric(t, f, usage.MetricGPUHours, "GPU hours")
-	b := review4Open(f.URL, dir, false, now.Add(2*time.Minute))
-	if err := b.SendEvents(ctx, nil); err != nil {
-		t.Fatal(err)
-	}
-	sent := review4Sent(f)
-	left, _ := b.wait.pending()
-	for _, e := range batch {
+	b.check()
+	waitFor(t, "the held usage released", func() bool { return b.held.Count(rigDest) == 0 })
+	sent := sentIDs(f)
+	for _, e := range append(first, next...) {
 		if !sent[e.ID] {
-			t.Errorf("GPU event %s (cluster %s) was accepted into the waiting store and acknowledged, then never reached Metronome "+
-				"and no longer waits (waiting: %v): appended after a line a crash cut short, it shares that line, which scanEvents "+
-				"skips as torn", e.ID, e.Dimensions[usage.DimTenantCluster], left)
+			t.Errorf("GPU event %s (cluster %s, window %s) was held and never reached Metronome", e.ID, e.Dimensions[usage.DimTenantCluster], e.WindowStart.Format(time.RFC3339))
 		}
 	}
 }
 
-// docs/metronome.html: "Property filters may narrow one, for example to the
-// SKUs you sell". The waiting store asks only whether some billable metric
-// sums the event type, not whether one counts the event: usage of a new SKU
-// that every GPU billable metric's filter leaves out is sent at once, and the
-// billable metric Finance adds for it afterwards never counts it.
+// Finding 16. A billable metric's property filters decide what it bills,
+// for example the SKUs Finance sells: usage they leave out is a price gap,
+// reported unpriced and held only with PRICE_CHECK=hold. Only usage of an
+// event type no billable metric sums is held whatever PRICE_CHECK says
+// (but off), because Metronome would never count it.
 func TestReview4UsageAPropertyFilterLeavesOutDoesNotWait(t *testing.T) {
-	f := newFake(t)
-	ctx := context.Background()
+	f := newRigFake(t)
 	cus, err := f.CreateCustomer("Acme AI", "org_1f2e", "tenant-acme")
 	if err != nil {
 		t.Fatal(err)
 	}
-	narrow := func(sku string) func(*BillableMetric) {
-		return func(m *BillableMetric) {
-			for i := range m.PropertyFilters {
-				if m.PropertyFilters[i].Name == "sku" {
-					m.PropertyFilters[i].InValues = []string{sku}
+	h100 := financeMetric(t, f, usage.MetricGPUHours, "GPU hours H100", func(m *BillableMetric) {
+		for i := range m.PropertyFilters {
+			if m.PropertyFilters[i].Name == "sku" {
+				m.PropertyFilters[i].InValues = []string{"NVIDIA-H100-80GB-HBM3"}
+			}
+		}
+	})
+	prod := f.AddProduct("GPU Hours", h100, "sku")
+	card := f.AddRateCard("List")
+	f.AddRate(metronometest.Rate{RateCardID: card, ProductID: prod, Price: 300, PricingGroupValues: map[string]string{"sku": "NVIDIA-H100-80GB-HBM3"}})
+	f.AddContract(metronometest.Contract{CustomerID: cus, RateCardID: card, StartingAt: time.Now().AddDate(0, -1, 0)})
+
+	at := rigNow()
+	// A new GPU model goes live before Finance has a billable metric for it,
+	// and CPU usage no billable metric counts at all.
+	b200 := gpu("tenant-acme", "c1", at.Add(-3*time.Minute), 1)
+	b200.SKU, b200.ID = "NVIDIA-B200", ""
+	b200.Finalize()
+	cpu := cpuEvent("tenant-acme", at.Add(-3*time.Minute), 2)
+
+	for _, mode := range []string{pricing.ModeWarn, pricing.ModeHold} {
+		a := newReadOnly(t, f)
+		a.now = time.Now
+		sp, err := spool.Open(t.TempDir(), spool.Options{NoSync: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { sp.Close() })
+		svc := pricing.New(sp, []destinations.Destination{a}, nil, nil, nil, nil, pricing.Options{Mode: mode, DecideWait: 10 * time.Second})
+		dec := svc.Gate().Decide(context.Background(), rigDest, []usage.Event{b200, cpu})
+		if got := dec[0].Hold; got != (mode == pricing.ModeHold) {
+			t.Errorf("PRICE_CHECK=%s: B200 usage the property filter leaves out held %v, want %v: %+v", mode, got, mode == pricing.ModeHold, dec[0])
+		}
+		if !dec[1].Hold || !strings.Contains(dec[1].Reason, "not counted yet") {
+			t.Errorf("PRICE_CHECK=%s: CPU usage no billable metric counts must be held: %+v", mode, dec[1])
+		}
+		for _, d := range svc.Report().Destinations {
+			for _, row := range d.Series {
+				switch {
+				case row.Metric == usage.MetricGPUHours && row.SKU == "NVIDIA-B200":
+					if row.Status != destinations.PriceMissing || row.Uncounted || !strings.Contains(row.Detail, "property filters") {
+						t.Errorf("PRICE_CHECK=%s: B200 row %+v, want unpriced (a price gap, the property filters say why), not uncounted", mode, row)
+					}
+				case row.Metric == usage.MetricCPUCoreHours && !row.NoUsageYet:
+					if row.Status != destinations.PriceMissing || !row.Uncounted || row.Hint != noMetricHint {
+						t.Errorf("PRICE_CHECK=%s: CPU row %+v, want uncounted with the billable-metrics hint", mode, row)
+					}
 				}
 			}
 		}
 	}
-	financeMetric(t, f, usage.MetricGPUHours, "GPU hours H100", narrow("NVIDIA-H100-80GB-HBM3"))
-	a := newReadOnly(t, f)
+}
 
-	// A new GPU model goes live before Finance has a billable metric for it.
-	b200 := usage.Event{Tenant: "tenant-acme", Metric: usage.MetricGPUHours, Quantity: 1, SKU: "NVIDIA-B200", Region: "ap-southeast-2",
-		WindowStart: now.Add(-3 * time.Minute), WindowEnd: now.Add(-2 * time.Minute),
-		Dimensions: map[string]string{usage.DimTenantCluster: "c1", usage.DimCapacityType: usage.CapacityOnDemand}}
-	b200.Finalize()
-	if err := a.SendEvents(ctx, []usage.Event{b200}); err != nil {
-		t.Fatal(err)
-	}
-	// Finance adds the billable metric for B200; the next delivery releases.
-	bm := financeMetric(t, f, usage.MetricGPUHours, "GPU hours B200", narrow("NVIDIA-B200"))
-	a.now = func() time.Time { return now.Add(2 * time.Minute) }
-	if err := a.SendEvents(ctx, []usage.Event{gpu("tenant-acme", "c1", now.Add(-time.Minute), 1)}); err != nil {
-		t.Fatal(err)
-	}
+// Finding 15. A SQL billable metric may count any event type, and vBilling
+// cannot tell which: while one is active, usage no other billable metric
+// counts is reported unknown and never held, in any mode, so it is never
+// stalled into invoice periods Metronome finalized.
+func TestReview4UsageASQLBillableMetricBillsWaits(t *testing.T) {
+	f := newRigFake(t)
+	f.AddBillableMetric([]byte(`{"name":"GPU hours (SQL)","sql":"SELECT customer_id, SUM(CAST(properties.value AS DECIMAL)) AS value FROM events WHERE event_type = 'vcluster_gpu_hours' GROUP BY customer_id"}`))
+	at := rigNow()
+	ev := gpu("tenant-acme", "c1", at.Add(-2*time.Minute), 1)
 
-	day := now.Truncate(24 * time.Hour)
-	rows, err := a.c.Usage(ctx, UsageRequest{StartingOn: rfc3339(day), EndingBefore: rfc3339(day.Add(24 * time.Hour)), WindowSize: "day",
-		CustomerIDs: []string{cus}, BillableMetrics: []map[string]any{{"id": bm}}})
+	for _, mode := range []string{pricing.ModeWarn, pricing.ModeHold} {
+		r := newHoldRig(t, t.TempDir(), rigOptions{base: f.URL, mode: mode})
+		e := ev
+		e.Tenant, e.ID = "tenant-"+mode, ""
+		e.Finalize()
+		r.commit(t, e)
+		waitFor(t, "the GPU usage delivered", func() bool { return r.delivered() })
+		if !sentIDs(f)[e.ID] || r.held.Count(rigDest) != 0 {
+			t.Errorf("PRICE_CHECK=%s: GPU usage held (%d) although an active SQL billable metric may bill it", mode, r.held.Count(rigDest))
+		}
+		for _, d := range r.svc.Report().Destinations {
+			for _, row := range d.Series {
+				if row.Metric == usage.MetricGPUHours && !row.NoUsageYet && (row.Status != destinations.PriceUnknown || !strings.Contains(row.Detail, "SQL billable metric")) {
+					t.Errorf("PRICE_CHECK=%s: GPU row %+v, want unknown, naming the SQL billable metric", mode, row)
+				}
+			}
+		}
+		r.stop()
+	}
+}
+
+// Finding 31. Held usage never disappears. While Metronome cannot be
+// reached, it stays held; usage held for the longest hold is released
+// without a billable metric (with failing health), and an event Metronome
+// would refuse as older than 34 days is dead-lettered, so it shows in the
+// dead letters and in reconciliation.
+func TestReview4WaitingUsagePastMetronomesWindowVanishes(t *testing.T) {
+	f := newRigFake(t)
+	at := rigNow()
+	tooOld := gpu("tenant-acme", "c1", at.Add(-35*24*time.Hour), 1)
+	held := gpu("tenant-acme", "c1", at.Add(-2*24*time.Hour), 1)
+	var refusals atomic.Int32
+	proxy := review4Proxy(t, f, func(n int, _ []byte) int {
+		if n <= 3 { // Metronome cannot be reached at first
+			refusals.Add(1)
+			return http.StatusServiceUnavailable
+		}
+		return 0
+	})
+	r := newHoldRig(t, t.TempDir(), rigOptions{base: proxy.URL})
+	r.commit(t, tooOld, held)
+	waitFor(t, "the held usage released and delivered", func() bool { return r.delivered() && r.held.Count(rigDest) == 0 && sentIDs(f)[held.ID] })
+
+	if refusals.Load() != 3 {
+		t.Errorf("Metronome failed %d release(s), want 3 before it answered", refusals.Load())
+	}
+	dls, err := r.sp.DeadLetters(rigDest)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var counted float64
-	for _, r := range rows {
-		v, _ := r.Value.Float64()
-		counted += v
+	if len(dls) != 1 || dls[0].Event.ID != tooOld.ID || !strings.Contains(dls[0].Reason, "34-day") {
+		t.Errorf("dead letters %+v, want the event older than Metronome's 34-day window", dls)
 	}
-	if counted != 1 {
-		t.Errorf("usage of GPU SKU NVIDIA-B200, which the only GPU billable metric's property filter (sku in [NVIDIA-H100-80GB-HBM3]) "+
-			"leaves out, did not wait: it was sent at once, so the billable metric Finance added for B200 afterwards counts %v of its "+
-			"1 GPU-hour (Metronome counts only usage sent after a billable metric exists)", counted)
-	}
-}
-
-// summing ignores SQL billable metrics (price coverage documents them as not
-// covered). Before 1286df1 that only made the price check report a gap; now,
-// whatever PRICE_CHECK says, usage of a type only a SQL billable metric bills
-// waits 28 days and is sent long after Metronome finalized the invoices of
-// its periods (24 hours after a period ends, docs/metronome.html), so it is
-// never invoiced. Before, it was sent at once.
-func TestReview4UsageASQLBillableMetricBillsWaits(t *testing.T) {
-	f := newFake(t)
-	ctx := context.Background()
-	f.AddBillableMetric([]byte(`{"name":"GPU hours (SQL)","sql":"SELECT customer_id, SUM(CAST(properties.value AS DECIMAL)) AS value FROM events WHERE event_type = 'vcluster_gpu_hours' GROUP BY customer_id"}`))
-	a := newReadOnly(t, f) // PRICE_CHECK=warn, the default
-	ev := gpu("tenant-acme", "c1", now.Add(-2*time.Minute), 1)
-	if err := a.SendEvents(ctx, []usage.Event{ev}); err != nil {
-		t.Fatal(err)
-	}
-	if !review4Sent(f)[ev.ID] {
-		left, _ := a.wait.pending()
-		t.Errorf("GPU usage was held (waiting: %v) although Finance bills GPU hours with an active SQL billable metric: it goes "+
-			"out after 28 days, into invoice periods Metronome finalized long before, so it is never invoiced (before 1286df1 it "+
-			"was sent at once)", left)
-	}
-}
-
-// docs/metronome.html: "vBilling dead-letters older ones [than 34 days]
-// before sending them ... so a rewound cursor or a longer outage shows in
-// the dead-letter list and in reconciliation instead of disappearing".
-// Waiting usage that is past Metronome's window when it is finally released
-// (Metronome unreachable for the last days of its 28-day wait) is dropped
-// with a log line (after a "sent ... WITHOUT a billable metric" warning that
-// counts it as sent), and is not reported to the dispatcher.
-func TestReview4WaitingUsagePastMetronomesWindowVanishes(t *testing.T) {
-	f := newFake(t)
-	ctx := context.Background()
-	a := newReadOnly(t, f, func(c *config.Config) { c.DataDir = t.TempDir() })
-	ev := gpu("tenant-acme", "c1", now.Add(-27*24*time.Hour), 1)
-	if err := a.SendEvents(ctx, []usage.Event{ev}); err != nil {
-		t.Fatal(err)
-	}
-	if len(f.Events()) != 0 {
-		t.Fatal("precondition: sent before a billable metric counted it")
-	}
-	// Metronome cannot be reached for a week (an outage, a revoked token):
-	// nothing is released meanwhile.
-	a.now = func() time.Time { return now.Add(7 * 24 * time.Hour) }
-	err := a.SendEvents(ctx, nil)
-
-	var partial *destinations.PartialError
-	reported := errors.As(err, &partial) && partial.Rejected[ev.ID] != ""
-	left, _ := a.wait.pending()
-	if !review4Sent(f)[ev.ID] && !reported && len(left) == 0 {
-		t.Errorf("a GPU event that waited until it was 34 days old disappeared: not sent, no longer waiting, and SendEvents "+
-			"returned %v, so it is not dead-lettered either (the dead-letter list and reconciliation's dead_lettered never show it)", err)
+	// The dispatcher counts the release, and reports it to the gate, once
+	// the held store is drained.
+	var st pipeline.Status
+	waitFor(t, "the release counted and reported", func() bool {
+		st = r.disp.Statuses()[0]
+		failing := false
+		for _, s := range r.h.Problems() {
+			failing = failing || (s.Kind == "pricing" && s.Status == health.Failing && strings.Contains(s.Message, "released"))
+		}
+		return st.ReleasedUnpriced == 2 && failing
+	})
+	if st.DeadLettered != 1 || st.Delivered != 1 {
+		t.Errorf("status %+v: want both held events released without a billable metric, one delivered, one dead-lettered", st)
 	}
 }

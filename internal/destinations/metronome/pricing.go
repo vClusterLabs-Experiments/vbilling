@@ -31,6 +31,36 @@ import (
 // The rate cards are then the ones of the tenant's own customer's active
 // contracts, and a metric's billable metrics are found by their event type
 // filter and their SUM of value, whatever Finance named them.
+//
+// Metronome does not attribute usage to a billable metric created after it:
+// "When using streaming billable metrics, the billable metric must be
+// defined in Metronome before any usage can be associated with it. If usage
+// is sent before a streaming metric is defined, it isn't attributed to the
+// metric by default" (docs.metronome.com, guides/implement-metronome/
+// core-concepts/create-billable-metrics; a reflow needs Metronome support),
+// and "billable metrics only match usage events sent after the billable
+// metric is created" (guides/get-started/developer-sdks). Coverage of usage
+// no billable metric counts yet is therefore uncounted (Uncounted), and the
+// pricing gate holds it in every PRICE_CHECK mode but off. A SQL billable
+// metric may count any event type, and vBilling cannot read what it counts:
+// while one is active, no usage is uncounted.
+
+// Hints of coverage that says no billable metric counts a series' usage yet;
+// Uncounted recognizes them.
+const (
+	noMetricHint          = "no billable metric counts this event type yet: add it (vbilling metronome billable-metrics prints it)"
+	provisionNoMetricHint = "no billable metric counts this event type yet: vBilling creates it when the metronome destination bootstraps; " +
+		"check its last error in GET /api/v1/destinations"
+)
+
+// Uncounted reports whether a coverage answer says that no billable metric
+// counts a series' usage yet, so Metronome would never bill it
+// (pricing.UncountedReporter): the pricing gate holds such usage until one
+// does, in every PRICE_CHECK mode but off. A billable metric whose property
+// filters leave the series out is a price gap, not this.
+func (a *Adapter) Uncounted(c destinations.PriceCoverage) bool {
+	return c.Status == destinations.PriceMissing && (c.Hint == noMetricHint || c.Hint == provisionNoMetricHint)
+}
 
 // Product is the part of a contract-pricing product the check reads.
 type Product struct {
@@ -244,8 +274,9 @@ func (a *Adapter) PriceDims(metric string) []string {
 type pricingView struct {
 	now       time.Time
 	metricID  map[string]string           // provisioning: metric code -> billable metric ID
-	byType    map[string][]BillableMetric // default: metric code -> billable metrics summing value on its event type
+	byType    map[string][]BillableMetric // metric code -> billable metrics summing value on its event type
 	other     map[string][]BillableMetric // default: billable metrics on the event type that do not sum value
+	sql       []BillableMetric            // active SQL billable metrics: they may count any event type
 	products  map[string][]Product        // billable metric ID -> usage products
 	cards     []RateCard
 	cardsRead bool
@@ -281,6 +312,7 @@ func (a *Adapter) CheckPrices(ctx context.Context, series []destinations.PriceSe
 			byName[m.Name] = m.ID
 		}
 	}
+	v.sql = sqlMetrics(bms)
 	seen := map[string]bool{}
 	for _, s := range series {
 		if seen[s.Metric] {
@@ -291,8 +323,8 @@ func (a *Adapter) CheckPrices(ctx context.Context, series []destinations.PriceSe
 		if !ok {
 			continue
 		}
+		v.byType[s.Metric] = summing(bms, s.Metric)
 		if !a.provision() {
-			v.byType[s.Metric] = summing(bms, s.Metric)
 			v.other[s.Metric] = notSumming(bms, s.Metric)
 			continue
 		}
@@ -562,6 +594,18 @@ func summing(bms []BillableMetric, code string) []BillableMetric {
 	return out
 }
 
+// sqlMetrics returns the active SQL billable metrics. vBilling cannot tell
+// which event types one counts.
+func sqlMetrics(bms []BillableMetric) []BillableMetric {
+	var out []BillableMetric
+	for _, m := range bms {
+		if m.ArchivedAt == "" && m.SQL != "" {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
 // notSumming returns the active billable metrics on an event type that do
 // not sum its value (a COUNT, MAX or LATEST): they cannot bill quantities.
 func notSumming(bms []BillableMetric, code string) []BillableMetric {
@@ -681,14 +725,18 @@ func accepts(f PropertyFilter, p prop) bool {
 func (a *Adapter) billableMetrics(v *pricingView, s destinations.PriceSeries, def usage.MetricDef) ([]string, *destinations.PriceCoverage) {
 	if a.provision() {
 		id := v.metricID[s.Metric]
-		if id == "" {
-			return nil, &destinations.PriceCoverage{
-				Status: destinations.PriceMissing,
-				Detail: fmt.Sprintf("Metronome has no billable metric %q", metricName(def)),
-				Hint:   "vBilling creates billable metrics when the metronome destination bootstraps: check its last error in GET /api/v1/destinations",
-			}
+		if id != "" {
+			return []string{id}, nil
 		}
-		return []string{id}, nil
+		detail := fmt.Sprintf("Metronome has no billable metric %q", metricName(def))
+		if len(v.byType[s.Metric]) == 0 {
+			return nil, uncounted(v, detail, provisionNoMetricHint)
+		}
+		return nil, &destinations.PriceCoverage{ // another billable metric counts the usage
+			Status: destinations.PriceMissing,
+			Detail: detail,
+			Hint:   "vBilling creates billable metrics when the metronome destination bootstraps: check its last error in GET /api/v1/destinations",
+		}
 	}
 	typed := v.byType[s.Metric]
 	if len(typed) == 0 {
@@ -697,8 +745,7 @@ func (a *Adapter) billableMetrics(v *pricingView, s destinations.PriceSeries, de
 			detail += fmt.Sprintf(" (%s aggregates it with %s of %q, but vBilling's quantities must be summed)",
 				strconv.Quote(others[0].Name), strings.ToUpper(others[0].AggregationType), others[0].AggregationKey)
 		}
-		detail += ": vBilling holds this usage until one does, because Metronome never bills usage sent before its billable metric exists"
-		return nil, &destinations.PriceCoverage{Status: destinations.PriceMissing, Detail: detail, Hint: noMetricHint}
+		return nil, uncounted(v, detail, noMetricHint)
 	}
 	var ids, names []string
 	for _, m := range typed {
@@ -715,11 +762,38 @@ func (a *Adapter) billableMetrics(v *pricingView, s destinations.PriceSeries, de
 		}
 	}
 	if len(ids) == 0 {
-		return nil, &destinations.PriceCoverage{Status: destinations.PriceMissing,
-			Detail: fmt.Sprintf("the property filters of billable metric %s exclude %s, so no billable metric counts it", strings.Join(names, ", "), destinations.DescribeSeries(s)),
-			Hint:   fmt.Sprintf("widen the property filters of %s, or add a billable metric for this usage", names[0])}
+		detail := fmt.Sprintf("the property filters of billable metric %s exclude %s, so no billable metric counts it", strings.Join(names, ", "), destinations.DescribeSeries(s))
+		if cov := sqlMayCount(v, detail); cov != nil {
+			return nil, cov
+		}
+		// A price gap like any other (held only with PRICE_CHECK=hold): the
+		// event type has billable metrics, and a filter is how Finance chose
+		// what each one bills.
+		return nil, &destinations.PriceCoverage{Status: destinations.PriceMissing, Detail: detail,
+			Hint: fmt.Sprintf("widen the property filters of %s, or add a billable metric for this usage", names[0])}
 	}
 	return ids, nil
+}
+
+// uncounted answers for usage of an event type no billable metric sums: it
+// is uncounted, unless a SQL billable metric may count it.
+func uncounted(v *pricingView, detail, hint string) *destinations.PriceCoverage {
+	if cov := sqlMayCount(v, detail); cov != nil {
+		return cov
+	}
+	return &destinations.PriceCoverage{Status: destinations.PriceMissing, Hint: hint,
+		Detail: detail + ": vBilling holds this usage until one does, because Metronome never bills usage sent before its billable metric exists"}
+}
+
+// sqlMayCount answers unknown, never held, for usage no other billable
+// metric counts while a SQL billable metric is active: it may count the
+// usage, and vBilling cannot tell.
+func sqlMayCount(v *pricingView, detail string) *destinations.PriceCoverage {
+	if len(v.sql) == 0 {
+		return nil
+	}
+	return &destinations.PriceCoverage{Status: destinations.PriceUnknown,
+		Detail: fmt.Sprintf("%s, but SQL billable metric %q may count it: vBilling cannot check SQL billable metrics, so it never holds this usage", detail, v.sql[0].Name)}
 }
 
 // productsFor returns the usage products on the billable metrics that count a series.
@@ -761,7 +835,7 @@ func (a *Adapter) coverage(v *pricingView, s destinations.PriceSeries, tg target
 		return destinations.PriceCoverage{Status: destinations.PriceUnknown, Detail: "metric is not in vBilling's catalog"}
 	}
 	if !a.provision() && len(v.byType[s.Metric]) == 0 {
-		// No billable metric counts the event type: its usage waits, for
+		// No billable metric counts the event type: its usage is held, for
 		// every tenant, customer or not.
 		_, miss := a.billableMetrics(v, s, def)
 		return *miss
