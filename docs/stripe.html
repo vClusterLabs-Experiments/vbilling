@@ -508,7 +508,7 @@
       <p>Stripe's summaries are aligned to minutes and trail ingestion by a few minutes, so reconcile closed periods rather than the current hour. Run it daily and alert when <code>ok</code> is <code>false</code>.</p>
 
       <h2 id="webhooks">Webhooks and billing states</h2>
-      <p>Stripe's payment events tell vBilling which tenants are paid up. Add a webhook endpoint in Stripe for <code>https://&lt;your-host&gt;/webhooks/stripe</code> with the events below, then add its signing secret to the Secret and restart vBilling:</p>
+      <p>Stripe's payment events tell vBilling which tenants are paid up. An event only raises a tenant's billing hold; a positive one lowers it only when it settles what caused it (an invoice paid settles that invoice, a subscription back to <code>active</code> settles that subscription), or when Stripe, read again, shows nothing still owed. Paying one invoice of a subscription that is still unpaid lifts nothing: Stripe's <code>customer.subscription.updated</code> to <code>active</code> does. Add a webhook endpoint in Stripe for <code>https://&lt;your-host&gt;/webhooks/stripe</code> with the events below, then add its signing secret to the Secret and restart vBilling:</p>
       <div class="config-table-wrap">
         <table class="config-table">
           <thead><tr><th>Stripe event</th><th>Billing state</th></tr></thead>

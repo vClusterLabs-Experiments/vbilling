@@ -309,6 +309,8 @@ Point Stripe webhooks at `/webhooks/stripe` (`STRIPE_WEBHOOK_SECRET`) and Metron
 | `billing.alert.triggered`, Metronome `alerts.*` (spend, usage, low credit or commit balance) | `warning` |
 | `invoice.paid`, subscription `active`, Metronome `payment_gate.payment_status` paid | `active` |
 
+A webhook only raises the billing hold. A positive event lowers it only when it settles what caused it: an invoice paid settles that invoice, a subscription back to `active` settles that subscription, and a Metronome payment settles the alert once Metronome reports it cleared. Otherwise vBilling reads Stripe or Metronome again and lowers the hold only when nothing is still owed. Paying one invoice of a subscription that is still unpaid lifts nothing.
+
 Override any mapping with `ENFORCEMENT_RULES`, for example `alerts.spend_threshold_reached=suspended` for a hard spend cap.
 
 `ENFORCEMENT_MODE` controls what happens:

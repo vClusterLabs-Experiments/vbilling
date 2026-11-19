@@ -175,7 +175,10 @@ vcluster connect team-a -n team-a --driver helm -- kubectl run probe -n training
 sleep 10
 check "admission policy blocks new pods for the suspended tenant" '[ "$(kubectl get pods -n team-a --no-headers 2>/dev/null | grep -c "^probe-")" = "0" ]'
 check "running workloads keep running" '[ "$(kubectl get pods -n team-a --no-headers | grep trainer | grep -c Running)" = "2" ]'
+# Paying the invoice brings the subscription back; Stripe then sends the
+# subscription as active, which settles what caused the hold.
 send invoice.paid "" evt_e2e_2
+send customer.subscription.updated active evt_e2e_3
 sleep 20
 check "a paid invoice lifts the suspension and the pod starts" '[ "$(kubectl get pods -n team-a --no-headers | grep "^probe-" | grep -c Running)" = "1" ]'
 
