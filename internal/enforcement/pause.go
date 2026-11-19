@@ -265,7 +265,7 @@ func (e *Enforcer) drainOwn(ctx context.Context, cl discovery.TenantCluster, ts 
 	if err := e.policyInside(ctx, kube, ts); err != nil {
 		log.Printf("[enforcement] %s: admission policy before pause: %v", cl.ExternalID(), err)
 	}
-	d, err := e.drain(ctx, kube, false)
+	d, err := e.drain(ctx, kube, cl, false)
 	if err != nil {
 		return ownCheck{}, err
 	}
@@ -419,7 +419,7 @@ func (e *Enforcer) pauseExternal(ctx context.Context, cl discovery.TenantCluster
 	if err := e.policyInside(ctx, kube, ts); err != nil {
 		log.Printf("[enforcement] %s: admission policy: %v", id, err)
 	}
-	d, err := e.drain(ctx, kube, true)
+	d, err := e.drain(ctx, kube, cl, true)
 	if err != nil {
 		return fail("", fmt.Errorf("drain its nodes: %w", err))
 	}
@@ -899,18 +899,48 @@ type drained struct {
 // (shared and dedicated nodes, whose pods are the synced ones) are left
 // alone. The node rules are metering's: a node vBilling bills as the
 // cluster's own is one the drain empties.
-func (e *Enforcer) drain(ctx context.Context, kube kubernetes.Interface, external bool) (drained, error) {
-	host := map[string]bool{}
+func (e *Enforcer) drain(ctx context.Context, kube kubernetes.Interface, cl discovery.TenantCluster, external bool) (drained, error) {
+	// Which nodes are the cluster's own is decided as metering decides it
+	// (internal/metrics hostViews), never by a node's labels: the tenant
+	// writes those, and a node the drain skipped would run unbilled. A node
+	// the cluster reports is a control plane cluster node seen through it
+	// when a control plane cluster node has its name and either the same
+	// machine identity (a synced copy) or the cluster's synced pods on it
+	// (vCluster's placeholder, which has machine IDs of its own).
+	host := map[string]corev1.NodeSystemInfo{}
+	syncedOn := map[string]bool{}
 	if !external && e.kube != nil {
 		nodes, err := e.kube.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 		if err != nil {
 			return drained{}, fmt.Errorf("list control plane cluster nodes: %w", err)
 		}
 		for _, n := range nodes.Items {
-			host[n.Name] = true
+			host[n.Name] = n.Status.NodeInfo
+		}
+		pods, err := e.kube.CoreV1().Pods("").List(ctx, metav1.ListOptions{LabelSelector: labelManagedBy + "=" + cl.Name})
+		if err != nil {
+			return drained{}, fmt.Errorf("list pods the cluster synced: %w", err)
+		}
+		for _, p := range pods.Items {
+			if p.Spec.NodeName != "" && p.Labels[labelManagedBy] == cl.Name && cl.SyncedHere(p.Namespace) {
+				syncedOn[p.Spec.NodeName] = true
+			}
 		}
 	}
-	isOwn := func(n *corev1.Node) bool { return !host[n.Name] && n.Labels["vcluster.loft.sh/fake-node"] != "true" }
+	// Decided once per drain: synced pods go away during a pause, and a
+	// placeholder must not turn into an own node when they do.
+	decided := map[string]bool{}
+	isOwn := func(n *corev1.Node) bool {
+		if own, ok := decided[n.Name]; ok {
+			return own
+		}
+		own := true
+		if h, ok := host[n.Name]; ok && (sameMachine(h, n.Status.NodeInfo) || syncedOn[n.Name]) {
+			own = false
+		}
+		decided[n.Name] = own
+		return own
+	}
 	nodes, err := kube.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return drained{}, fmt.Errorf("list nodes: %w", err)
@@ -1257,4 +1287,11 @@ func (e *Enforcer) patchWorkload(ctx context.Context, cl discovery.TenantCluster
 		_, err = e.kube.AppsV1().StatefulSets(cl.Namespace).Patch(ctx, cl.Name, types.MergePatchType, b, metav1.PatchOptions{})
 	}
 	return err
+}
+
+// sameMachine reports whether two nodes report the same machine.
+func sameMachine(h, n corev1.NodeSystemInfo) bool {
+	hu, nu := strings.TrimSpace(h.SystemUUID), strings.TrimSpace(n.SystemUUID)
+	hm, nm := strings.TrimSpace(h.MachineID), strings.TrimSpace(n.MachineID)
+	return hu != "" && strings.EqualFold(hu, nu) || hm != "" && hm == nm
 }

@@ -185,7 +185,7 @@ func TestPausePrivateNodesDrainsBeforeStoppingTheControlPlane(t *testing.T) {
 	host := fake.NewSimpleClientset(
 		controlPlane("private-a", ns, 1, nil),
 		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}},
-		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "cp-worker-1"}},
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "cp-worker-1"}, Status: corev1.NodeStatus{NodeInfo: corev1.NodeSystemInfo{SystemUUID: "cp-worker-1-uuid"}}},
 	)
 	exists := corev1.Toleration{Operator: corev1.TolerationOpExists}
 	daemon := func(p *corev1.Pod) *corev1.Pod {
@@ -197,7 +197,9 @@ func TestPausePrivateNodesDrainsBeforeStoppingTheControlPlane(t *testing.T) {
 		Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}}}}
 	inside := fake.NewSimpleClientset(
 		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "gpu-1"}},
-		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "cp-worker-1"}}, // a control plane cluster node: never tainted
+		// A control plane cluster node seen through the cluster (vCluster's
+		// synced copy reports the same machine): never tainted.
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "cp-worker-1"}, Status: corev1.NodeStatus{NodeInfo: corev1.NodeSystemInfo{SystemUUID: "cp-worker-1-uuid"}}},
 		podOn("trainer", "research", "gpu-1"),
 		daemon(podOn("kube-proxy-abc", "kube-system", "gpu-1", exists)),
 		daemon(podOn("nvidia-driver-daemonset-x", "gpu-operator", "gpu-1")), // infrastructure: keeps running

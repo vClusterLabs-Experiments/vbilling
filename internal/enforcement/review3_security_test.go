@@ -15,6 +15,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
 	ktesting "k8s.io/client-go/testing"
 
@@ -134,5 +135,31 @@ func TestReview3PaymentOfAnotherInvoiceLiftsASuspensionForAnUnpaidSubscription(t
 	if st := e.StateOf("acme"); st.State != Suspended || nsLabels(t, kube)[LabelSuspended] != "true" {
 		t.Fatalf("paying invoice in_small_old lifted the suspension while subscription sub_metered is still unpaid "+
 			"(its latest invoice in_large is open): state %s, namespace labels %v", st.State, nsLabels(t, kube))
+	}
+}
+
+// The drain decides which nodes are the cluster's own as metering does,
+// never by a node's labels: a tenant labels its private node as vCluster's
+// placeholder, or names it like a control plane cluster node, and the drain
+// must still empty it, or the paused node would run unbilled.
+func TestDrainIgnoresLabelsAndNamesATenantChose(t *testing.T) {
+	ctx := context.Background()
+	cl := discovery.TenantCluster{Name: "private", Namespace: "tenant", Source: "statefulset"}
+	hostNode := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "cp-node-1"}, Status: corev1.NodeStatus{NodeInfo: corev1.NodeSystemInfo{SystemUUID: "host-uuid", MachineID: "host-machine"}}}
+	host := fake.NewSimpleClientset(controlPlane(cl.Name, cl.Namespace, 1, nil), hostNode, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: cl.Namespace}})
+	labeled := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "private-gpu", Labels: map[string]string{"vcluster.loft.sh/fake-node": "true"}}}
+	namesake := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "cp-node-1"}, Status: corev1.NodeStatus{NodeInfo: corev1.NodeSystemInfo{SystemUUID: "tenant-uuid", MachineID: "tenant-machine"}}}
+	inside := fake.NewSimpleClientset(labeled, namesake, podOn("train-0", "jobs", "private-gpu"), podOn("train-1", "jobs", "cp-node-1"))
+	spans := pause.Memory()
+	e := New(host, Options{Mode: "enforce", DrainTimeout: 50 * time.Millisecond, Pauses: spans,
+		Clusters:     func(string) []discovery.TenantCluster { return []discovery.TenantCluster{cl} },
+		TenantClient: func(context.Context, discovery.TenantCluster) (kubernetes.Interface, error) { return inside, nil },
+	})
+	if err := e.Set(ctx, "acme", Paused, "wallet empty", "api", "manual"); err != nil {
+		t.Fatal(err)
+	}
+	e.Wait()
+	if running := podNames(t, inside, "jobs"); len(running) > 0 {
+		t.Fatalf("pods %v still run on the cluster's own nodes after the drain", running)
 	}
 }
