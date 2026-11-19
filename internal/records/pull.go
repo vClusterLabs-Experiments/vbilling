@@ -19,6 +19,7 @@ import (
 
 	"github.com/vclusterlabs-experiments/vbilling/internal/health"
 	"github.com/vclusterlabs-experiments/vbilling/internal/kv"
+	"github.com/vclusterlabs-experiments/vbilling/internal/safehttp"
 	"github.com/vclusterlabs-experiments/vbilling/internal/telemetry"
 )
 
@@ -233,7 +234,18 @@ func NewPuller(in *Ingester, spec PullSpec, state *kv.Store, ready func() bool, 
 	if h == nil {
 		h = health.New(tel)
 	}
-	return &Puller{spec: spec, in: in, state: state, health: h, tel: tel, http: &http.Client{Timeout: time.Minute},
+	// A log may redirect (a CDN, a signed download URL). Redirects are
+	// followed, but the pull's headers, which carry its tokens, are only sent
+	// to the origin of the configured URL.
+	headers := func() []string {
+		names := make([]string, 0, len(spec.Headers))
+		for k := range spec.Headers {
+			names = append(names, k)
+		}
+		return names
+	}
+	hc := &http.Client{Timeout: time.Minute, CheckRedirect: safehttp.KeepHeadersOnOrigin(headers)}
+	return &Puller{spec: spec, in: in, state: state, health: h, tel: tel, http: hc,
 		now: time.Now, ready: ready, name: health.Name("records", spec.Client, "pull", spec.Name)}
 }
 

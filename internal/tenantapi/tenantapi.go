@@ -19,6 +19,9 @@
 // Kubeconfigs that point at localhost (the vCluster default) are rewritten to
 // the tenant cluster's Service, https://<name>.<namespace>.svc:443, verified
 // as <name>.<namespace> (a name vCluster's serving certificate includes).
+//
+// A tenant controls what its cluster's API answers, redirects included, so
+// no client built here follows a redirect (see internal/safehttp).
 package tenantapi
 
 import (
@@ -45,6 +48,7 @@ import (
 
 	"github.com/vclusterlabs-experiments/vbilling/internal/discovery"
 	"github.com/vclusterlabs-experiments/vbilling/internal/metrics"
+	"github.com/vclusterlabs-experiments/vbilling/internal/safehttp"
 )
 
 // DefaultSecretName is the Secret vBilling reads in a tenant cluster's namespace.
@@ -176,15 +180,19 @@ func (m *Manager) Conn(ctx context.Context, cl discovery.TenantCluster) (*metric
 		}
 		e.cancel() // credentials rotated
 	}
-	kube, err := kubernetes.NewForConfig(cfg)
+	hc, err := safehttp.KubeHTTPClient(cfg)
 	if err != nil {
 		return nil, err
 	}
-	dyn, err := dynamic.NewForConfig(cfg)
+	kube, err := kubernetes.NewForConfigAndClient(cfg, hc)
 	if err != nil {
 		return nil, err
 	}
-	mc, err := metricsclient.NewForConfig(cfg)
+	dyn, err := dynamic.NewForConfigAndClient(cfg, hc)
+	if err != nil {
+		return nil, err
+	}
+	mc, err := metricsclient.NewForConfigAndClient(cfg, hc)
 	if err != nil {
 		return nil, err
 	}

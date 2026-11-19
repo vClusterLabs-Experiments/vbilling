@@ -518,3 +518,37 @@ func fakeKube(t *testing.T, ns, name string) kubernetes.Interface {
 			CreationTimestamp: metav1.NewTime(old)}, Status: appsv1.StatefulSetStatus{ReadyReplicas: 1}},
 	)
 }
+
+// The access key is sent with every management API request. An answer
+// that redirects to another host comes back as an error; the key never
+// goes there.
+func TestManagementAPINeverFollowsARedirect(t *testing.T) {
+	var mu sync.Mutex
+	var leaked []string
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		leaked = append(leaked, r.Header.Get("Authorization"))
+		mu.Unlock()
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer other.Close()
+	plat := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL+r.URL.Path, http.StatusTemporaryRedirect)
+	}))
+	defer plat.Close()
+	c, err := NewClient(ClientOptions{URL: plat.URL, AccessKey: testKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.list(context.Background(), projectsGVR); err == nil {
+		t.Fatal("a redirected list must fail")
+	}
+	if _, err := c.servesTenants(); err == nil {
+		t.Fatal("a redirected discovery must fail")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(leaked) > 0 {
+		t.Fatalf("the access key followed a redirect to another host: %q", leaked)
+	}
+}

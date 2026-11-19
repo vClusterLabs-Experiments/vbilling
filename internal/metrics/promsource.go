@@ -192,12 +192,13 @@ func (p *PromSource) clientFor(ctx context.Context, t Target, raw string) (*prom
 	}
 	// PROMETHEUS_HEADERS and the bearer token belong to PROMETHEUS_URL. A
 	// cluster's own Prometheus on another host gets neither (put credentials
-	// for it in its URL), so an annotation can never send them elsewhere.
+	// for it in its URL), so an annotation can never send them elsewhere,
+	// and its redirects are never followed.
 	headers, token := p.c.opts.PromHeaders, p.c.opts.PromTokenFile
 	if !sameHost(raw, p.c.opts.PrometheusURL) {
 		headers, token = nil, ""
 	}
-	c := newPrometheusClient(raw, headers, token)
+	c := newClusterPrometheusClient(raw, headers, token)
 	p.clients[raw] = c
 	return c, nil
 }
