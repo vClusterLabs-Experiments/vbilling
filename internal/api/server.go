@@ -564,9 +564,9 @@ func (s *Server) ingestRecords(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, "%v", err)
 		return
 	}
-	accepted = res.Accepted > 0
+	accepted = res.Accepted > 0 || res.AlreadyStored > 0
 	status := http.StatusOK
-	if res.Received > 0 && res.Accepted == 0 && res.Skipped == 0 && res.DuplicatesInBatch == 0 {
+	if res.Received > 0 && res.Accepted == 0 && res.AlreadyStored == 0 && res.Skipped == 0 && res.DuplicatesInBatch == 0 {
 		status = http.StatusBadRequest
 	}
 	writeJSON(w, status, res)

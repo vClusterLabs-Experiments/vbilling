@@ -2,6 +2,7 @@ package records
 
 import (
 	"fmt"
+	"hash/fnv"
 	"sort"
 	"strings"
 	"sync"
@@ -96,6 +97,7 @@ type Ingester struct {
 	tel      *telemetry.Registry
 	skuGate  SKUGate
 	arrivals *arrivals
+	before   *storedBefore
 }
 
 // SKUGate bounds the new SKUs usage brings in, per source (SKUSource...)
@@ -199,7 +201,7 @@ func NewIngester(sp *spool.Spool, formats Formats, opts Options, resolve TenantR
 		tel = telemetry.New()
 	}
 	in := &Ingester{spool: sp, formats: formats, opts: opts, resolve: resolve, health: h, tel: tel, arrivals: newArrivals()}
-	in.arrivals.load(sp, opts.Now().UTC())
+	in.loadRecent(sp, opts.Now().UTC())
 	return in
 }
 
@@ -256,23 +258,8 @@ func (a *arrivals) forget(now time.Time) {
 	a.order = a.order[n:]
 }
 
-// load remembers the records without a time stored in the last
-// arrivalMemory, so a retry after a restart is recognized too.
-func (a *arrivals) load(sp *spool.Spool, now time.Time) {
-	if sp == nil {
-		return
-	}
-	var found []arrival
-	_ = sp.ScanAppended(now.Add(-arrivalMemory), now.Add(24*time.Hour), func(ev *usage.Event, _ time.Time) error {
-		if ev.Properties["arrival_time"] != true {
-			return nil
-		}
-		s, _ := ev.Properties["at"].(string)
-		if at, err := time.Parse(time.RFC3339Nano, s); err == nil {
-			found = append(found, arrival{ev.ID, at})
-		}
-		return nil
-	})
+// add remembers arrivals found in the records ledger.
+func (a *arrivals) add(found []arrival) {
 	sort.SliceStable(found, func(i, j int) bool { return found[i].at.Before(found[j].at) })
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -282,6 +269,62 @@ func (a *arrivals) load(sp *spool.Spool, now time.Time) {
 			a.order = append(a.order, f)
 		}
 	}
+}
+
+// storedBefore holds hashes of the IDs of the records stored in the hour
+// before this start, for an hour. Records sent with a tenant-bound token
+// get IDs of their own since v0.3.1, so a batch an emitter stored with
+// v0.3.0 and retries after the upgrade is recognized here by the ID v0.3.0
+// gave it.
+type storedBefore struct {
+	mu    sync.Mutex
+	until time.Time
+	ids   map[uint64]struct{}
+}
+
+func idHash(id string) uint64 {
+	h := fnv.New64a()
+	h.Write([]byte(id))
+	return h.Sum64()
+}
+
+// has reports whether id was stored before the start, while that is still
+// remembered.
+func (b *storedBefore) has(id string, now time.Time) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.ids == nil {
+		return false
+	}
+	if now.After(b.until) {
+		b.ids = nil // retries come within minutes; free the memory
+		return false
+	}
+	_, ok := b.ids[idHash(id)]
+	return ok
+}
+
+// loadRecent reads the records stored in the last arrivalMemory: when the
+// records without a time arrived, so a retry after a restart keeps its
+// time, and every ID, for storedBefore.
+func (in *Ingester) loadRecent(sp *spool.Spool, now time.Time) {
+	in.before = &storedBefore{until: now.Add(arrivalMemory), ids: map[uint64]struct{}{}}
+	if sp == nil {
+		return
+	}
+	var found []arrival
+	_ = sp.ScanAppended(now.Add(-arrivalMemory), now.Add(24*time.Hour), func(ev *usage.Event, _ time.Time) error {
+		in.before.ids[idHash(ev.ID)] = struct{}{}
+		if ev.Properties["arrival_time"] != true {
+			return nil
+		}
+		s, _ := ev.Properties["at"].(string)
+		if at, err := time.Parse(time.RFC3339Nano, s); err == nil {
+			found = append(found, arrival{ev.ID, at})
+		}
+		return nil
+	})
+	in.arrivals.add(found)
 }
 
 // Rejection explains why one record was refused.
@@ -302,8 +345,9 @@ type Result struct {
 	Rejected          []Rejection `json:"rejected,omitempty"`
 	UnknownTenants    []string    `json:"unknown_tenants,omitempty"`
 	Warnings          []string    `json:"warnings,omitempty"`
-	// AlreadyStored counts valid records a puller read again: every usage
-	// row of each was in the records ledger already, so none was stored.
+	// AlreadyStored counts valid records that were in the records ledger
+	// already, every usage row of each, so none was stored again: rows a
+	// puller read again, or a push retried across an upgrade.
 	AlreadyStored int `json:"already_stored,omitempty"`
 }
 
@@ -396,6 +440,10 @@ func (in *Ingester) ingest(c ingestCall, objs []map[string]any) (Result, error) 
 	source := "records:" + client
 	seen := map[string]bool{}
 	unknown := map[string]bool{}
+	// v030 maps the ID of a bound row to the ID v0.3.0 gave the same row,
+	// before bound rows had a namespace of their own: a row stored under it
+	// is the same request (see dropStored and storedBefore).
+	v030 := map[string]string{}
 	noTime := 0
 	size := 0
 	var recs [][]usage.Event // usage rows per accepted record
@@ -515,6 +563,9 @@ func (in *Ingester) ingest(c ingestCall, objs []map[string]any) (Result, error) 
 				problems = append(problems, err.Error())
 				continue
 			}
+			if boundTenant != "" {
+				v030[id] = RecordID(client, rec.TenantKey, rec.ID, metric)
+			}
 			recRows = append(recRows, ev)
 		}
 		if len(problems) > 0 {
@@ -532,12 +583,14 @@ func (in *Ingester) ingest(c ingestCall, objs []map[string]any) (Result, error) 
 	}
 	if pulled {
 		var err error
-		if recs, err = in.dropStored(recs, stored); err != nil {
+		if recs, err = in.dropStored(recs, stored, v030); err != nil {
 			return res, fmt.Errorf("read records ledger: %w", err)
 		}
-		res.AlreadyStored = res.Accepted - len(recs)
-		res.Accepted = len(recs)
+	} else if len(v030) > 0 {
+		recs = in.dropStoredBefore(recs, v030, now)
 	}
+	res.AlreadyStored = res.Accepted - len(recs)
+	res.Accepted = len(recs)
 	var rows []usage.Event
 	for _, r := range recs {
 		rows = append(rows, r...)
@@ -558,7 +611,7 @@ func (in *Ingester) ingest(c ingestCall, objs []map[string]any) (Result, error) 
 			}
 		}
 	}
-	report := pulled || c.known || res.Accepted > 0 // health and metrics may name the client
+	report := pulled || c.known || res.Accepted > 0 || res.AlreadyStored > 0 // health and metrics may name the client
 	if len(rows) > 0 {
 		if _, err := in.spool.AppendBatch(source, rows); err != nil {
 			if !pulled && c.known {
@@ -598,7 +651,7 @@ func (in *Ingester) ingest(c ingestCall, objs []map[string]any) (Result, error) 
 	if pulled || !report {
 		return res, nil // the puller reports its own health and counters
 	}
-	if res.Accepted > 0 {
+	if res.Accepted > 0 || res.AlreadyStored > 0 {
 		in.health.OK(health.Name("records", client), "records", client, res.Accepted)
 	}
 	in.tel.Add("vbilling_records_received_total", "Per-request usage records received.", map[string]string{"client": client}, float64(res.Received))
@@ -643,12 +696,14 @@ func (idx *storedIndex) covers(ev *usage.Event) bool {
 }
 
 // dropStored removes the usage rows already in the records ledger, and the
-// records left with none. Rows the index does not cover (a request longer
-// than the range the puller indexed) are looked up in the ledger. A row
-// stored between the scan and the append is stored twice, which the
-// aggregator's deduplication absorbs.
-func (in *Ingester) dropStored(recs [][]usage.Event, idx *storedIndex) ([][]usage.Event, error) {
-	have := func(ev *usage.Event) bool { _, ok := idx.ids[ev.ID]; return ok }
+// records left with none. A bound row also counts as stored under the ID
+// v0.3.0 gave it (v030), so a pinned pull that re-reads requests v0.3.0
+// stored, or that a push without the bound namespace stored, does not
+// store them again. Rows the index does not cover (a request longer than
+// the range the puller indexed) are looked up in the ledger. A row stored
+// between the scan and the append is stored twice, which the aggregator's
+// deduplication absorbs.
+func (in *Ingester) dropStored(recs [][]usage.Event, idx *storedIndex, v030 map[string]string) ([][]usage.Event, error) {
 	want := map[string]bool{}
 	var from, to time.Time
 	for _, r := range recs {
@@ -658,6 +713,9 @@ func (in *Ingester) dropStored(recs [][]usage.Event, idx *storedIndex) ([][]usag
 				continue
 			}
 			want[ev.ID] = false
+			if old := v030[ev.ID]; old != "" {
+				want[old] = false
+			}
 			if from.IsZero() || ev.WindowStart.Before(from) {
 				from = ev.WindowStart
 			}
@@ -677,11 +735,15 @@ func (in *Ingester) dropStored(recs [][]usage.Event, idx *storedIndex) ([][]usag
 			return nil, err
 		}
 	}
+	have := func(id string) bool {
+		_, ok := idx.ids[id]
+		return ok || want[id]
+	}
 	kept := recs[:0]
 	for _, r := range recs {
 		var left []usage.Event
 		for i := range r {
-			if !have(&r[i]) && !want[r[i].ID] {
+			if old := v030[r[i].ID]; !have(r[i].ID) && (old == "" || !have(old)) {
 				left = append(left, r[i])
 			}
 		}
@@ -690,4 +752,23 @@ func (in *Ingester) dropStored(recs [][]usage.Event, idx *storedIndex) ([][]usag
 		}
 	}
 	return kept, nil
+}
+
+// dropStoredBefore removes the bound rows of a push that were stored before
+// this start under the ID v0.3.0 gave them (a batch retried across the
+// upgrade), and the records left with none.
+func (in *Ingester) dropStoredBefore(recs [][]usage.Event, v030 map[string]string, now time.Time) [][]usage.Event {
+	kept := recs[:0]
+	for _, r := range recs {
+		var left []usage.Event
+		for i := range r {
+			if old := v030[r[i].ID]; old == "" || !in.before.has(old, now) {
+				left = append(left, r[i])
+			}
+		}
+		if len(left) > 0 {
+			kept = append(kept, left)
+		}
+	}
+	return kept
 }
