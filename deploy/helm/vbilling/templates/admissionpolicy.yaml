@@ -1,6 +1,10 @@
 {{- if .Values.enforcement.admissionPolicy.enabled }}
 # Blocks new pods in namespaces vBilling labeled suspended (ENFORCEMENT_MODE=enforce).
-# Running workloads keep running; the tenant cluster's own control plane may restart.
+# Running workloads keep running; the cluster's own control plane may restart:
+# its pods are the ones a StatefulSet (or, for a Deployment, a ReplicaSet)
+# creates as their controller, which no tenant can create here, and never
+# carry the vcluster.loft.sh/managed-by label the syncer puts on every pod it
+# syncs. No label a tenant can give its pods (app: vcluster, for one) exempts them.
 # Clusters of several tenants can share a namespace: vBilling then annotates
 # it vbilling.vcluster.com/active.<cluster> for each cluster whose tenant is
 # not blocked, and that cluster's synced pods (labeled
@@ -24,11 +28,12 @@ spec:
         resources: ["pods"]
   validations:
     - expression: >-
-        has(object.metadata.labels) && (
-        ('app' in object.metadata.labels && object.metadata.labels['app'] == 'vcluster') ||
-        ('vcluster.loft.sh/managed-by' in object.metadata.labels &&
-        has(namespaceObject.metadata.annotations) &&
-        ('vbilling.vcluster.com/active.' + object.metadata.labels['vcluster.loft.sh/managed-by']) in namespaceObject.metadata.annotations))
+        (has(object.metadata.labels) && 'vcluster.loft.sh/managed-by' in object.metadata.labels)
+        ? (has(namespaceObject.metadata.annotations) &&
+        ('vbilling.vcluster.com/active.' + object.metadata.labels['vcluster.loft.sh/managed-by']) in namespaceObject.metadata.annotations)
+        : (has(object.metadata.ownerReferences) &&
+        object.metadata.ownerReferences.exists(r, r.apiVersion == 'apps/v1' &&
+        (r.kind == 'StatefulSet' || r.kind == 'ReplicaSet') && has(r.controller) && r.controller == true))
       message: "This tenant is suspended for billing. New workloads are blocked until the account is current; running workloads are not affected."
       reason: Forbidden
 ---
