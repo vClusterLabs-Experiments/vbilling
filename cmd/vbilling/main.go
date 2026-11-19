@@ -53,6 +53,9 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "ledger" {
 		os.Exit(runLedgerCmd(os.Args[2:]))
 	}
+	if len(os.Args) > 1 && os.Args[1] == "metronome" {
+		os.Exit(runMetronomeCmd(os.Args[2:]))
+	}
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	log.Printf("vBilling %s: usage metering for tenant clusters", version)
 
