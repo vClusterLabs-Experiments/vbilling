@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Security - vBilling Docs</title>
+  <meta name="description" content="vBilling's threat model: what tenants and operators control, what the API token, ingest tokens, event ID namespaces, quotas, redirect handling and Platform mode guarantee, and what operators must do.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Roboto+Mono:wght@500&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    :root {
+      --primary: #FF6600;
+      --primary-dark: #CC5100;
+      --primary-darker: #993D00;
+      --primary-light: #FFF5EB;
+      --primary-light-2: #FFE0CC;
+      --accent: #FF8433;
+      --text-dark: #050B24;
+      --text-gray: #505466;
+      --text-light: #828592;
+      --white: #ffffff;
+      --bg-code: #050B24;
+      --border: #E6E7E9;
+      --shadow-sm: 0 1px 2px rgba(0,0,0,0.05);
+      --shadow-md: 0 4px 6px -1px rgba(0,0,0,0.07), 0 2px 4px -2px rgba(0,0,0,0.05);
+      --shadow-lg: 0 10px 15px -3px rgba(0,0,0,0.08), 0 4px 6px -4px rgba(0,0,0,0.04);
+      --radius: 12px;
+      --radius-lg: 16px;
+      --sidebar-width: 260px;
+    }
+
+    html { scroll-behavior: smooth; scroll-padding-top: 80px; }
+
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      color: var(--text-dark);
+      line-height: 1.6;
+      background: var(--white);
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ── Header ── */
+    .header {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 1000;
+      background: rgba(255,255,255,0.92);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+    }
+    .header.scrolled { box-shadow: var(--shadow-md); }
+    .header-inner {
+      max-width: 1400px; margin: 0 auto; padding: 0 24px;
+      display: flex; align-items: center; justify-content: space-between; height: 64px;
+    }
+    .header-logo {
+      display: flex; align-items: center; gap: 10px;
+      text-decoration: none; color: var(--text-dark);
+    }
+    .header-logo-icon {
+      width: 32px; height: 32px; border-radius: 8px;
+      background: linear-gradient(135deg, var(--primary-dark), var(--primary));
+      display: flex; align-items: center; justify-content: center;
+      color: var(--white); font-weight: 700; font-size: 0.9rem;
+    }
+    .header-logo-text { font-size: 1.15rem; font-weight: 700; letter-spacing: -0.5px; }
+    .header-logo-text span { color: var(--primary-dark); }
+    .header-nav { display: flex; align-items: center; gap: 20px; }
+    .header-nav a {
+      text-decoration: none; color: var(--text-gray); font-size: 0.88rem;
+      font-weight: 500; transition: color 0.2s;
+    }
+    .header-nav a:hover { color: var(--primary-dark); }
+    .header-nav .gh-link {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: var(--bg-code); color: var(--white); padding: 6px 14px;
+      border-radius: 8px; font-size: 0.82rem; font-weight: 600; transition: opacity 0.2s;
+    }
+    .header-nav .gh-link:hover { opacity: 0.85; color: var(--white); }
+
+    /* ── Layout ── */
+    .docs-layout {
+      display: flex; margin-top: 64px; min-height: calc(100vh - 64px);
+    }
+
+    /* ── Sidebar ── */
+    .sidebar {
+      width: var(--sidebar-width); flex-shrink: 0;
+      border-right: 1px solid var(--border); background: var(--primary-light);
+      padding: 32px 0; position: fixed; top: 64px; bottom: 0;
+      overflow-y: auto;
+    }
+    .sidebar-section { margin-bottom: 28px; }
+    .sidebar-label {
+      padding: 0 24px; font-size: 0.72rem; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 1px; color: var(--primary-darker);
+      margin-bottom: 8px;
+    }
+    .sidebar a {
+      display: block; padding: 7px 24px; text-decoration: none;
+      font-size: 0.88rem; color: var(--text-gray); font-weight: 500;
+      transition: all 0.15s; border-left: 3px solid transparent;
+    }
+    .sidebar a:hover { color: var(--primary-dark); background: var(--primary-light-2); }
+    .sidebar a.active {
+      color: var(--primary-dark); background: var(--primary-light-2);
+      border-left-color: var(--primary); font-weight: 600;
+    }
+    .sidebar-back {
+      display: flex; align-items: center; gap: 6px; margin: 0 24px 24px;
+      padding: 8px 12px; border-radius: 8px; text-decoration: none;
+      font-size: 0.85rem; color: var(--text-light); font-weight: 500;
+      border: 1px solid var(--border); transition: all 0.2s;
+    }
+    .sidebar-back:hover { border-color: var(--primary); color: var(--primary-dark); }
+
+    /* ── Content ── */
+    .content {
+      flex: 1; min-width: 0; margin-left: var(--sidebar-width);
+      padding: 48px 64px 80px; max-width: 900px;
+    }
+    .content h1 {
+      font-size: 2.2rem; font-weight: 800; letter-spacing: -1px;
+      margin-bottom: 12px; color: var(--text-dark);
+    }
+    .content .subtitle {
+      font-size: 1.1rem; color: var(--text-gray); line-height: 1.7;
+      margin-bottom: 40px; max-width: 640px;
+    }
+    .content h2 {
+      font-size: 1.5rem; font-weight: 700; letter-spacing: -0.5px;
+      margin: 48px 0 16px; color: var(--text-dark);
+      padding-bottom: 8px; border-bottom: 2px solid var(--primary-light-2);
+    }
+    .content h3 {
+      font-size: 1.15rem; font-weight: 700; margin: 32px 0 12px;
+      color: var(--text-dark);
+    }
+    .content p {
+      font-size: 0.95rem; color: var(--text-gray); line-height: 1.7;
+      margin-bottom: 16px;
+    }
+    .content ul, .content ol {
+      margin: 0 0 16px 24px; color: var(--text-gray); font-size: 0.95rem;
+    }
+    .content li { margin-bottom: 6px; line-height: 1.6; }
+    .content code {
+      background: var(--primary-light-2); padding: 2px 7px; border-radius: 4px;
+      font-family: 'Roboto Mono', 'SF Mono', 'Fira Code', monospace;
+      font-size: 0.85rem; color: var(--primary-darker); overflow-wrap: anywhere;
+    }
+    .content a { color: var(--primary-dark); text-decoration: none; font-weight: 500; }
+    .content a:hover { text-decoration: underline; }
+
+    /* ── Code Blocks ── */
+    .code-block {
+      background: var(--bg-code); border-radius: var(--radius);
+      padding: 20px 24px; overflow-x: auto; margin-bottom: 20px;
+      position: relative;
+    }
+    .code-block code {
+      color: #e2e8f0; background: none; padding: 0;
+      font-family: 'Roboto Mono', 'SF Mono', 'Fira Code', monospace;
+      font-size: 0.84rem; line-height: 1.7; white-space: pre;
+    }
+    .code-block .comment { color: #64748b; }
+    .code-block .cmd { color: #FF8433; }
+    .code-block .flag { color: #a5b4fc; }
+    .code-block .string { color: #86efac; }
+    .code-block .output { color: #94a3b8; }
+    .code-label {
+      display: inline-block; background: rgba(255,255,255,0.08);
+      color: #94a3b8; font-size: 0.75rem; font-weight: 600;
+      padding: 2px 10px; border-radius: 4px; margin-bottom: 12px;
+      text-transform: uppercase; letter-spacing: 0.5px;
+    }
+    .code-copy {
+      position: absolute; top: 12px; right: 12px;
+      background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 6px; padding: 5px 10px; color: #94a3b8;
+      font-size: 0.72rem; cursor: pointer; transition: all 0.2s;
+    }
+    .code-copy:hover { background: rgba(255,255,255,0.15); color: #e2e8f0; }
+
+    /* ── Callouts ── */
+    .callout {
+      padding: 16px 20px; border-radius: var(--radius); margin-bottom: 20px;
+      font-size: 0.9rem; line-height: 1.6; display: flex; gap: 12px;
+    }
+    .callout-icon { flex-shrink: 0; font-size: 1.1rem; margin-top: 1px; }
+    .callout-info {
+      background: #eff6ff; border: 1px solid #bfdbfe; color: #1e40af;
+    }
+    .callout-warn {
+      background: var(--primary-light); border: 1px solid var(--primary-light-2); color: var(--primary-darker);
+    }
+    .callout-success {
+      background: #f0fdf4; border: 1px solid #bbf7d0; color: #166534;
+    }
+
+    /* ── Step markers ── */
+    .step-marker {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 32px; height: 32px; border-radius: 50%;
+      background: linear-gradient(135deg, var(--primary-dark), var(--primary));
+      color: var(--white); font-weight: 700; font-size: 0.85rem;
+      margin-right: 10px; flex-shrink: 0; vertical-align: middle;
+    }
+
+    /* ── Mobile sidebar toggle ── */
+    .mobile-sidebar-toggle {
+      display: none; position: fixed; bottom: 24px; right: 24px; z-index: 999;
+      width: 48px; height: 48px; border-radius: 50%;
+      background: linear-gradient(135deg, var(--primary-dark), var(--primary));
+      color: var(--white); border: none; font-size: 1.3rem; cursor: pointer;
+      box-shadow: var(--shadow-lg);
+    }
+
+    .config-table-wrap {
+      overflow-x: auto; border-radius: var(--radius); border: 1px solid var(--border);
+      box-shadow: var(--shadow-sm); margin-bottom: 24px;
+    }
+    .config-table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+    .config-table thead { background: var(--primary-light); }
+    .config-table th {
+      padding: 12px 16px; text-align: left; font-weight: 700;
+      color: var(--primary-darker); font-size: 0.78rem;
+      text-transform: uppercase; letter-spacing: 0.5px;
+      border-bottom: 2px solid var(--primary-light-2);
+    }
+    .config-table td {
+      padding: 10px 16px; border-bottom: 1px solid var(--border);
+      color: var(--text-gray); vertical-align: top;
+    }
+    .config-table tr:last-child td { border-bottom: none; }
+    .config-table tr:hover td { background: var(--primary-light); }
+
+    /* ── Responsive ── */
+    @media (max-width: 900px) {
+      .sidebar {
+        transform: translateX(-100%); transition: transform 0.3s ease;
+        z-index: 900; width: 280px;
+      }
+      .sidebar.open { transform: translateX(0); }
+      .content { margin-left: 0; padding: 32px 24px 80px; }
+      .mobile-sidebar-toggle { display: flex; align-items: center; justify-content: center; }
+      .content h1 { font-size: 1.7rem; }
+      .content h2 { font-size: 1.3rem; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <header class="header" id="header">
+    <div class="header-inner">
+      <a href="index.html" class="header-logo">
+        <svg width="28" height="28" viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0"><path d="M4 7L14 21L24 7" stroke="#FF6600" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <div class="header-logo-text">v<span>Billing</span> Docs</div>
+      </a>
+      <nav class="header-nav">
+        <a href="index.html">Home</a>
+        <a href="getting-started.html">Guide</a>
+        <a href="https://github.com/vClusterLabs-Experiments/vbilling" class="gh-link" target="_blank">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <!-- Layout -->
+  <div class="docs-layout">
+
+    <!-- Sidebar -->
+    <nav class="sidebar" id="sidebar">
+      <a href="index.html" class="sidebar-back">&#8592; Back to main site</a>
+      <div class="sidebar-section">
+        <div class="sidebar-label">Documentation</div>
+        <a href="getting-started.html">Getting Started</a>
+        <a href="how-metering-works.html">How Metering Works</a>
+        <a href="pricing-models.html">Pricing Models</a>
+        <a href="configuration.html">Configuration</a>
+        <a href="metrics.html">Metrics Reference</a>
+        <a href="usage-sources.html">Usage Sources</a>
+        <a href="private-nodes.html">Dedicated and Private Nodes</a>
+        <a href="example-gke.html">Example: GKE with GPUs</a>
+        <a href="security.html" class="active">Security</a>
+        <a href="troubleshooting.html">Troubleshooting</a>
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-label">Billing Adapters</div>
+        <a href="stripe.html">Stripe</a>
+        <a href="metronome.html">Metronome</a>
+        <a href="lago.html">Lago</a>
+        <a href="custom-adapter.html">Custom Billing Adapter</a>
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-label">Resources</div>
+        <a href="https://github.com/vClusterLabs-Experiments/vbilling" target="_blank">GitHub Repository</a>
+        <a href="https://www.vcluster.com/docs" target="_blank">vCluster Docs</a>
+        <a href="https://docs.stripe.com/billing/subscriptions/usage-based" target="_blank">Stripe Billing Docs</a>
+        <a href="https://docs.metronome.com/" target="_blank">Metronome Docs</a>
+        <a href="https://www.getlago.com/docs" target="_blank">Lago Docs</a>
+      </div>
+    </nav>
+
+    <!-- Content -->
+    <main class="content">
+      <h1>Security</h1>
+      <p class="subtitle">vBilling bills tenants for the clusters they use, so it treats tenants as untrusted. This page says who controls what, what each control in vBilling guarantees, and what operators must do.</p>
+
+      <h2 id="threat-model">Threat model</h2>
+      <p>vBilling runs in the control plane cluster. Operators and tenants control different things.</p>
+      <h3>Tenants control</h3>
+      <ul>
+        <li>their clusters' <code>vcluster.yaml</code>, and with it the labels and annotations of each cluster's StatefulSet and the targets of its <code>exportKubeConfig</code>;</li>
+        <li>everything inside their own clusters, where they are cluster admin: pods, Services and the HTTP answers those Services return, and labels on their own nodes;</li>
+        <li>the content of the events and records they send with ingest tokens bound to them;</li>
+        <li>their identities in AI gateways.</li>
+      </ul>
+      <h3>Operators control</h3>
+      <p>vBilling's configuration, the control plane cluster, vCluster Platform Tenants and Projects, and the billing platform accounts.</p>
+      <h3>A tenant must never be able to</h3>
+      <ul>
+        <li>lower or stop its own bill;</li>
+        <li>bill another tenant;</li>
+        <li>change another tenant's state;</li>
+        <li>read other tenants' data;</li>
+        <li>obtain vBilling or vCluster Platform credentials;</li>
+        <li>degrade vBilling for other tenants.</li>
+      </ul>
+
+      <h2 id="controls">What each control guarantees</h2>
+
+      <h3 id="api-token">API token</h3>
+      <ul>
+        <li>Every endpoint except <code>/healthz</code> and <code>/readyz</code> needs the API token: usage and exports, billing states, destinations and cursors, reconciliation, ledger verification, <code>/metrics</code>, and every data call of the dashboard. Stripe and Metronome webhooks are checked by their signatures instead, and ingest by ingest tokens.</li>
+        <li>The API is never open. Without <code>API_TOKEN</code>, vBilling generates a random token at startup, writes it to <code>DATA_DIR/api-token</code> with mode 0600, reuses that file on later starts and logs the file's path, never the token.</li>
+        <li>The Helm chart puts a random token in its Secret when neither <code>api.token</code> nor <code>api.existingSecret</code> is set, and keeps it across upgrades. The ServiceMonitor sends it to <code>/metrics</code>. Tools that render the chart without access to the cluster (<code>helm template</code>) cannot keep a generated token: set <code>api.token</code> or <code>api.existingSecret</code> with them.</li>
+        <li>The dashboard's page loads without the token and asks for it. The page shows every value as text, never as HTML, and is served with a Content-Security-Policy that allows only its own script and style, by their hash.</li>
+        <li>vBilling refuses to start when a tenant's ingest token equals the API token or the shared ingest token.</li>
+      </ul>
+      <div class="code-block">
+        <div class="code-label">Read the token the chart generated</div>
+        <code><span class="cmd">kubectl</span> <span class="flag">-n</span> vbilling-system get secret vbilling <span class="flag">-o</span> jsonpath=<span class="string">'{.data.api-token}'</span> | <span class="cmd">base64</span> <span class="flag">-d</span></code>
+      </div>
+
+      <h3 id="ingest-tokens">Ingest tokens</h3>
+      <ul>
+        <li><code>INGEST_TOKEN</code> (by default the API token) is the shared ingest token. It is for the operator's gateways and emitters, which report usage for many tenants. Never hand it to a tenant.</li>
+        <li>A token in <code>INGEST_TOKENS</code> is bound to one tenant. Everything sent with it is billed to that tenant, whatever the payload says. It can ingest and nothing else. Give each tenant's own gateway its own token.</li>
+        <li>SKUs and dimension values sent to <code>POST /api/v1/events</code> and <code>POST /api/v1/records</code> must not contain control characters or any of <code>&lt; &gt; " ' ` &amp;</code>, and must be at most 256 bytes. Events and records that break this are refused, and a request with nothing valid gets 400. Values vBilling reads itself (Prometheus labels, gateway logs it pulls, labels of nodes) are made safe instead, so their usage is still billed.</li>
+        <li>The built-in <code>litellm</code> format bills a request to its virtual key's team only. Fields the client sends, such as <code>end_user</code>, never decide who pays. Give every virtual key a team: a request whose key has none is refused.</li>
+      </ul>
+
+      <h3 id="event-ids">Event ID namespaces</h3>
+      <p>Billing platforms deduplicate on event IDs and keep the first event with an ID. vBilling gives each source its own namespace, so an event sent through ingest can never take the ID of usage vBilling measured:</p>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead><tr><th>Events</th><th>ID</th></tr></thead>
+          <tbody>
+            <tr><td>Measured by vBilling: the collector, Prometheus, the records aggregator, fills after an outage of a cluster's API</td><td>Derived from the usage's identity, prefix <code>vb1_</code></td></tr>
+            <tr><td>Ingested without an id</td><td>Derived from the identity, the ingest source, the bound tenant and the client, prefix <code>ie1_</code></td></tr>
+            <tr><td>Ingested with an id, tenant-bound token</td><td>The id scoped to the tenant and the client, prefix <code>te1_</code></td></tr>
+            <tr><td>Ingested with an id, shared ingest token</td><td>The id as sent. It may not start with <code>vb1_</code>, <code>te1_</code> or <code>ie1_</code>.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>A retry gets the same ID, so it is counted once. Per-request records get IDs scoped to their client and tenant, and are summed into vBilling's own events.</p>
+
+      <h3 id="quotas">Quotas</h3>
+      <p>Ingest limits are constants, far above what real emitters need. They stop one token or one tenant from taking vBilling from the others.</p>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead><tr><th>Limit</th><th>Value</th><th>Why</th></tr></thead>
+          <tbody>
+            <tr><td>Requests, shared ingest token</td><td>5,000 per second, bursts of 10,000</td><td>The operator's gateways post for every tenant.</td></tr>
+            <tr><td>Requests, each tenant-bound token</td><td>500 per second, bursts of 1,000</td><td>One tenant cannot take the API from the others. A batching gateway reports far more requests than that.</td></tr>
+            <tr><td>Request body</td><td>10 MB and 5,000 events per <code>POST /api/v1/events</code>, 16 MB per <code>POST /api/v1/records</code></td><td>Bodies are read into memory.</td></tr>
+            <tr><td>Distinct SKUs per tenant</td><td>100 per UTC day</td><td>Each new SKU can create a meter in the billing platform. Usage past the cap is billed under SKU <code>sku-limit-exceeded</code>, never dropped.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Over a request rate, vBilling answers 429 with <code>Retry-After</code>. The SKU count is kept in memory and starts again after a restart.</p>
+
+      <h3 id="redirects">Redirects</h3>
+      <p>A tenant controls what its cluster's API, its Services and its own Prometheus answer. vBilling never follows a redirect from them, from the vCluster Platform API or proxy, or from a URL a cluster's settings name: the redirect comes back as an error, so no credential is sent to a host the answer names. Pulls of a gateway's own request log (<code>RECORDS_PULL_FILE</code>) follow redirects, but send their headers only to the origin of the configured URL.</p>
+
+      <h3 id="platform-mode">Platform mode</h3>
+      <p>With <code>TENANT_SOURCE=platform</code>:</p>
+      <ul>
+        <li>Who pays, and every <code>vbilling.vcluster.com/</code> setting, come from the vCluster Platform Tenant, else the Project, and from the operator's configuration. Settings on a cluster's workload, namespace or VirtualClusterInstance are ignored, including <code>prometheus-url</code>, <code>prometheus-matchers</code> and <code>prometheus-source</code>. Put those on the Tenant or Project.</li>
+        <li>Clusters are reached only through the Platform proxy, with the Platform access key. A <code>vbilling-kubeconfig</code> Secret in a cluster's namespace is not read, because the cluster's <code>vcluster.yaml</code> can write one that points anywhere. vBilling does not reach the API of a cluster the Platform does not know.</li>
+      </ul>
+      <p>With <code>TENANT_SOURCE=cluster</code> or <code>project</code>, settings on the workload and namespace apply, and so does the <code>vbilling-kubeconfig</code> Secret. Use those modes only when operators write every <code>vcluster.yaml</code>.</p>
+
+      <h2 id="operators">What operators must do</h2>
+      <ol>
+        <li><strong>Keep the dashboard and the API on an operator network.</strong> The chart's Service is ClusterIP; do not expose it to tenants' networks or workloads. If a tenant's gateway must reach vBilling, expose only <code>POST /api/v1/events</code> and <code>POST /api/v1/records</code> to it, and give it a tenant-bound token. Never give a tenant the API token or the shared ingest token.</li>
+        <li><strong>Use <code>TENANT_SOURCE=platform</code> when tenants write their own <code>vcluster.yaml</code>.</strong> In the other modes, per-cluster settings and <code>vbilling-kubeconfig</code> Secrets decide how a cluster is metered, and whoever writes <code>vcluster.yaml</code> writes them.</li>
+        <li><strong>Run one replica.</strong> Each replica keeps its own ledger, billing state and quotas, so replicas would split usage and state between them. The chart's default <code>replicaCount</code> is 1.</li>
+        <li><strong>Keep <code>DATA_DIR</code> on a persistent volume.</strong> It holds the ledger, and the generated API token when <code>API_TOKEN</code> is not set.</li>
+        <li><strong>Watch the ledger's disk.</strong> Rates and body sizes bound each token, not the total a tenant-bound token can send over time. Alert on <code>vbilling_ledger_bytes</code> against the volume's size.</li>
+      </ol>
+
+    </main>
+  </div>
+
+  <button class="mobile-sidebar-toggle" id="mobileSidebarToggle" aria-label="Toggle sidebar">&#9776;</button>
+
+  <script>
+    // Header scroll shadow
+    const header = document.getElementById('header');
+    window.addEventListener('scroll', () => {
+      header.classList.toggle('scrolled', window.scrollY > 10);
+    });
+
+    // Mobile sidebar toggle
+    const sidebar = document.getElementById('sidebar');
+    const toggle = document.getElementById('mobileSidebarToggle');
+    toggle.addEventListener('click', () => {
+      sidebar.classList.toggle('open');
+    });
+    document.addEventListener('click', (e) => {
+      if (!sidebar.contains(e.target) && !toggle.contains(e.target)) {
+        sidebar.classList.remove('open');
+      }
+    });
+  </script>
+</body>
+</html>
