@@ -3,6 +3,7 @@ package metrics
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -39,6 +40,8 @@ type httpTransport struct {
 	httpClient *http.Client
 	headers    map[string]string
 	tokenFile  string // re-read on every query so rotated tokens keep working
+	// limit bounds one answer (0: maxPromAnswer).
+	limit int64
 }
 
 func (h *httpTransport) String() string { return redactURL(h.baseURL) }
@@ -63,27 +66,47 @@ func (h *httpTransport) get(ctx context.Context, path string, params url.Values)
 		return nil, 0, fmt.Errorf("prometheus query: %w", err)
 	}
 	defer resp.Body.Close()
-	body, err := readAnswer(resp.Body, h)
+	body, err := readAnswer(resp.Body, h, h.limit)
 	return body, resp.StatusCode, err
 }
 
-// maxPromAnswer bounds what vBilling reads of one Prometheus answer, on
-// either transport. The Prometheus can be a tenant's (a Service inside its
-// cluster, or a URL its settings name), so no answer is trusted to end:
-// an endless or huge one would exhaust vBilling's memory, and every
-// collection would ask again. 16 MiB holds the raw samples of a window for
-// tens of thousands of series; a larger answer fails the read, which the
-// source health reports.
+// maxPromAnswer bounds what vBilling reads of one answer from a Prometheus
+// a tenant influences: a URL a cluster's settings name
+// (vbilling.vcluster.com/prometheus-url), or a Service inside its cluster
+// (tenant-service://). No such answer is trusted to end: an endless or
+// huge one would exhaust vBilling's memory, and every collection would ask
+// again. 16 MiB holds the raw samples of a window for tens of thousands of
+// series; a larger answer fails the read, which the source health reports.
 const maxPromAnswer = 16 << 20
 
-// readAnswer reads a Prometheus answer, failing once it passes maxPromAnswer.
-func readAnswer(r io.Reader, from fmt.Stringer) ([]byte, error) {
-	body, err := io.ReadAll(io.LimitReader(r, maxPromAnswer+1))
+// maxOperatorPromAnswer bounds one answer of the operator's PROMETHEUS_URL.
+// Its long reads (a backfill after an outage, a counter catching up) are
+// made in time chunks (rawChunk, rangeChunkSteps), and a chunk whose answer
+// is still larger is halved, so a busy cluster's backfill is read whole.
+const maxOperatorPromAnswer = 64 << 20
+
+// answerTooLarge is the error of an answer past its transport's bound.
+type answerTooLarge struct {
+	from  string
+	limit int64
+}
+
+func (e *answerTooLarge) Error() string {
+	return fmt.Sprintf("prometheus answer from %s is larger than %d MiB: not read", e.from, e.limit>>20)
+}
+
+// readAnswer reads a Prometheus answer, failing once it passes limit
+// (maxPromAnswer when 0).
+func readAnswer(r io.Reader, from fmt.Stringer, limit int64) ([]byte, error) {
+	if limit <= 0 {
+		limit = maxPromAnswer
+	}
+	body, err := io.ReadAll(io.LimitReader(r, limit+1))
 	if err != nil {
 		return nil, fmt.Errorf("read prometheus answer from %s: %w", from, err)
 	}
-	if len(body) > maxPromAnswer {
-		return nil, fmt.Errorf("prometheus answer from %s is larger than %d MiB: not read", from, maxPromAnswer>>20)
+	if int64(len(body)) > limit {
+		return nil, &answerTooLarge{from: from.String(), limit: limit}
 	}
 	return body, nil
 }
@@ -128,7 +151,7 @@ func (k *kubeProxyTransport) get(ctx context.Context, path string, params url.Va
 		return nil, 0, fmt.Errorf("prometheus via %s: %w", k, err)
 	}
 	defer resp.Body.Close()
-	body, err := readAnswer(resp.Body, k)
+	body, err := readAnswer(resp.Body, k, maxPromAnswer)
 	return body, resp.StatusCode, err
 }
 
@@ -160,23 +183,31 @@ func redactURL(raw string) string {
 // prometheusClient runs Prometheus HTTP API queries over a transport.
 type prometheusClient struct {
 	t promTransport
+	// split: long reads are made in time chunks (the operator's Prometheus,
+	// see maxOperatorPromAnswer).
+	split bool
 }
 
+// newPrometheusClient reaches the operator's PROMETHEUS_URL.
 func newPrometheusClient(baseURL string, headers map[string]string, tokenFile string) *prometheusClient {
 	return &prometheusClient{t: &httpTransport{
 		baseURL:    strings.TrimRight(baseURL, "/"),
 		httpClient: &http.Client{Timeout: 15 * time.Second},
 		headers:    headers,
 		tokenFile:  tokenFile,
-	}}
+		limit:      maxOperatorPromAnswer,
+	}, split: true}
 }
 
 // newClusterPrometheusClient reaches a Prometheus a cluster named in its
 // own settings (vbilling.vcluster.com/prometheus-url). Its answers can
-// redirect anywhere, so redirects are never followed.
+// redirect anywhere, so redirects are never followed, and one answer is
+// read up to maxPromAnswer.
 func newClusterPrometheusClient(baseURL string, headers map[string]string, tokenFile string) *prometheusClient {
 	c := newPrometheusClient(baseURL, headers, tokenFile)
-	c.t.(*httpTransport).httpClient.CheckRedirect = safehttp.RefuseRedirect
+	tr := c.t.(*httpTransport)
+	tr.httpClient.CheckRedirect = safehttp.RefuseRedirect
+	tr.limit, c.split = maxPromAnswer, false
 	return c
 }
 
@@ -267,10 +298,55 @@ func (p *prometheusClient) Query(ctx context.Context, query string, at time.Time
 	return out, nil
 }
 
+const (
+	// rawChunk is the longest span one raw read of the operator's
+	// Prometheus asks for; minChunk the shortest a chunk whose answer is
+	// still too large is halved to.
+	rawChunk = time.Hour
+	minChunk = time.Minute
+	// rangeChunkSteps is how many evaluations one range query of the
+	// operator's Prometheus asks for.
+	rangeChunkSteps = 60
+)
+
 // QueryRaw returns the raw samples of a series selector over (at-rng, at].
 // It is an instant query of a range vector, which Prometheus answers with
-// the stored samples, unextrapolated.
+// the stored samples, unextrapolated. The operator's Prometheus is read in
+// chunks of at most rawChunk, each halved while its answer is too large.
 func (p *prometheusClient) QueryRaw(ctx context.Context, selector string, rng time.Duration, at time.Time) ([]promSeries, error) {
+	if !p.split {
+		return p.queryRaw(ctx, selector, rng, at)
+	}
+	m := newSeriesMerge()
+	from := at.Add(-rng)
+	for start := from; start.Before(at); start = start.Add(rawChunk) {
+		if err := p.queryRawSpan(ctx, selector, start, minTime(start.Add(rawChunk), at), m); err != nil {
+			return nil, err
+		}
+	}
+	return m.series(), nil
+}
+
+// queryRawSpan reads (from, to] into m, in halves while an answer is too
+// large.
+func (p *prometheusClient) queryRawSpan(ctx context.Context, selector string, from, to time.Time, m *seriesMerge) error {
+	series, err := p.queryRaw(ctx, selector, to.Sub(from), to)
+	var big *answerTooLarge
+	if errors.As(err, &big) && to.Sub(from) > minChunk {
+		mid := from.Add(to.Sub(from) / 2).Truncate(time.Second)
+		if err := p.queryRawSpan(ctx, selector, from, mid, m); err != nil {
+			return err
+		}
+		return p.queryRawSpan(ctx, selector, mid, to, m)
+	}
+	if err != nil {
+		return err
+	}
+	m.add(series)
+	return nil
+}
+
+func (p *prometheusClient) queryRaw(ctx context.Context, selector string, rng time.Duration, at time.Time) ([]promSeries, error) {
 	params := url.Values{}
 	params.Set("query", fmt.Sprintf("%s[%ds]", selector, int(rng.Seconds())))
 	params.Set("time", strconv.FormatInt(at.Unix(), 10))
@@ -284,8 +360,86 @@ func (p *prometheusClient) QueryRaw(ctx context.Context, selector string, rng ti
 	return decodeMatrix(pr.Data.Result)
 }
 
+func minTime(a, b time.Time) time.Time {
+	if a.Before(b) {
+		return a
+	}
+	return b
+}
+
+// seriesMerge joins the series of consecutive chunks, in time order. A
+// sample on a chunk boundary that two chunks return counts once.
+type seriesMerge struct {
+	order []string
+	by    map[string]*promSeries
+}
+
+func newSeriesMerge() *seriesMerge { return &seriesMerge{by: map[string]*promSeries{}} }
+
+func (m *seriesMerge) add(series []promSeries) {
+	for _, s := range series {
+		k := fingerprint(s.Labels)
+		cur, ok := m.by[k]
+		if !ok {
+			c := promSeries{Labels: s.Labels, Samples: append([]promSample(nil), s.Samples...)}
+			m.by[k] = &c
+			m.order = append(m.order, k)
+			continue
+		}
+		for _, smp := range s.Samples {
+			if n := len(cur.Samples); n == 0 || smp.T.After(cur.Samples[n-1].T) {
+				cur.Samples = append(cur.Samples, smp)
+			}
+		}
+	}
+}
+
+func (m *seriesMerge) series() []promSeries {
+	out := make([]promSeries, 0, len(m.order))
+	for _, k := range m.order {
+		out = append(out, *m.by[k])
+	}
+	return out
+}
+
 // QueryRange evaluates a query at every step from start to end inclusive.
+// The operator's Prometheus is asked for at most rangeChunkSteps steps at a
+// time, each run halved while its answer is too large.
 func (p *prometheusClient) QueryRange(ctx context.Context, query string, start, end time.Time, step time.Duration) ([]promSeries, error) {
+	if !p.split || step <= 0 {
+		return p.queryRange(ctx, query, start, end, step)
+	}
+	m := newSeriesMerge()
+	for s := start; !s.After(end); {
+		e := minTime(s.Add(time.Duration(rangeChunkSteps-1)*step), end)
+		if err := p.queryRangeSpan(ctx, query, s, e, step, m); err != nil {
+			return nil, err
+		}
+		s = e.Add(step)
+	}
+	return m.series(), nil
+}
+
+// queryRangeSpan evaluates the steps from s to e into m, in halves while an
+// answer is too large.
+func (p *prometheusClient) queryRangeSpan(ctx context.Context, query string, s, e time.Time, step time.Duration, m *seriesMerge) error {
+	series, err := p.queryRange(ctx, query, s, e, step)
+	var big *answerTooLarge
+	if errors.As(err, &big) && e.After(s) {
+		mid := s.Add(time.Duration(int64(e.Sub(s)/step)/2) * step)
+		if err := p.queryRangeSpan(ctx, query, s, mid, step, m); err != nil {
+			return err
+		}
+		return p.queryRangeSpan(ctx, query, mid.Add(step), e, step, m)
+	}
+	if err != nil {
+		return err
+	}
+	m.add(series)
+	return nil
+}
+
+func (p *prometheusClient) queryRange(ctx context.Context, query string, start, end time.Time, step time.Duration) ([]promSeries, error) {
 	params := url.Values{}
 	params.Set("query", query)
 	params.Set("start", strconv.FormatInt(start.Unix(), 10))
