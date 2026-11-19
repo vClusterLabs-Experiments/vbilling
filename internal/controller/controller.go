@@ -599,6 +599,7 @@ func (c *Controller) fillTenantGaps(ctx context.Context, st metrics.Stats, windo
 		for _, w := range missed {
 			evs = append(evs, byWindow[w.End]...)
 		}
+		saltFill(evs)
 		accepted, dups, err := c.spool.AppendIngest(SourceTenantFill, evs)
 		if err != nil {
 			log.Printf("[controller] %s: fill %d window(s): %v", id, len(missed), err)
@@ -608,6 +609,24 @@ func (c *Controller) fillTenantGaps(ctx context.Context, st metrics.Stats, windo
 		log.Printf("[controller] %s: filled %d window(s) missed during a tenant API outage (%d events, %d already in the ledger)",
 			id, len(missed), len(accepted), len(dups))
 		c.tel.Add("vbilling_tenant_api_filled_windows_total", "Windows filled after a tenant API outage.", nil, float64(len(missed)))
+	}
+}
+
+// saltFill gives events filled after a tenant API outage IDs of their own,
+// as late records get. The window was committed with what the control plane
+// cluster shows, and a cluster's own volumes and load balancers are built
+// from the same template as that part's (tenant, metric, window, SKU,
+// resource ID, dimensions): unsalted, a fill event can carry the ID of a
+// committed one, and billing platforms drop it as a duplicate. A fill
+// repeated after a crash gets the same salted IDs, so AppendIngest still
+// deduplicates it.
+func saltFill(evs []usage.Event) {
+	for i := range evs {
+		evs[i].ID = usage.DeriveIDWith(&evs[i], "fill")
+		if evs[i].Properties == nil {
+			evs[i].Properties = map[string]any{}
+		}
+		evs[i].Properties["filled"] = true
 	}
 }
 
