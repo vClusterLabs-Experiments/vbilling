@@ -140,6 +140,7 @@ type Spool struct {
 	watermarks map[string]time.Time
 	cursors    map[string]uint64
 	recentIDs  map[string]time.Time
+	deadIDs    map[string]map[string]bool // destination -> dead-lettered event IDs, loaded on first use
 	changed    chan struct{}
 	closed     bool
 
@@ -1126,10 +1127,30 @@ func (s *Spool) deadLetterPath(dest string) string {
 	return filepath.Join(s.dir, "deadletter-"+dest+".log")
 }
 
-// AddDeadLetter parks a rejected event for operator review.
+// AddDeadLetter parks a rejected event for operator review, once per event
+// ID: a batch retried after a transient error rejects the same events
+// again, and reconciliation subtracts each dead letter from the totals.
 func (s *Spool) AddDeadLetter(dest string, ev usage.Event, reason string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.deadIDs == nil {
+		s.deadIDs = map[string]map[string]bool{}
+	}
+	ids := s.deadIDs[dest]
+	if ids == nil {
+		dls, err := s.deadLettersLocked(dest)
+		if err != nil {
+			return err
+		}
+		ids = map[string]bool{}
+		for _, dl := range dls {
+			ids[dl.Event.ID] = true
+		}
+		s.deadIDs[dest] = ids
+	}
+	if ids[ev.ID] {
+		return nil
+	}
 	b, err := json.Marshal(DeadLetter{At: s.opts.Now().UTC(), Reason: reason, Event: ev})
 	if err != nil {
 		return err
@@ -1139,14 +1160,22 @@ func (s *Spool) AddDeadLetter(dest string, ev usage.Event, reason string) error 
 		return err
 	}
 	defer f.Close()
-	_, err = f.Write(append(b, '\n'))
-	return err
+	if _, err := f.Write(append(b, '\n')); err != nil {
+		return err
+	}
+	ids[ev.ID] = true
+	return nil
 }
 
-// DeadLetters lists parked events for a destination.
+// DeadLetters lists parked events for a destination, each event ID once
+// (the first time it was parked).
 func (s *Spool) DeadLetters(dest string) ([]DeadLetter, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.deadLettersLocked(dest)
+}
+
+func (s *Spool) deadLettersLocked(dest string) ([]DeadLetter, error) {
 	b, err := os.ReadFile(s.deadLetterPath(dest))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -1155,12 +1184,14 @@ func (s *Spool) DeadLetters(dest string) ([]DeadLetter, error) {
 		return nil, err
 	}
 	var out []DeadLetter
+	seen := map[string]bool{}
 	for _, line := range bytes.Split(b, []byte("\n")) {
 		if len(line) == 0 {
 			continue
 		}
 		var dl DeadLetter
-		if err := json.Unmarshal(line, &dl); err == nil {
+		if err := json.Unmarshal(line, &dl); err == nil && !seen[dl.Event.ID] {
+			seen[dl.Event.ID] = true
 			out = append(out, dl)
 		}
 	}
@@ -1171,6 +1202,7 @@ func (s *Spool) DeadLetters(dest string) ([]DeadLetter, error) {
 func (s *Spool) ClearDeadLetters(dest string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	delete(s.deadIDs, dest)
 	err := os.Remove(s.deadLetterPath(dest))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
