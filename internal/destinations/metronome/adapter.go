@@ -84,6 +84,8 @@ type Adapter struct {
 	plans   map[string]*tenantPlan // tenant -> rate cards of its customer's contracts (price coverage)
 	known   map[string]bool        // tenants recorded as vBilling ingest aliases
 	warned  map[string]bool        // tenants told that their pinned customer is not used
+
+	reservedSeen map[string]bool // dimension names logged for colliding with a reserved property
 }
 
 type aliasEntry struct {
@@ -94,7 +96,8 @@ type aliasEntry struct {
 // New builds the adapter (exported for tests). link may be nil.
 func New(c *Client, cfg *config.Config, state *kv.Store, link *stripe.Adapter) *Adapter {
 	return &Adapter{c: c, cfg: cfg, state: state, stripe: link, now: time.Now, metrics: map[string]string{},
-		aliases: map[string]aliasEntry{}, plans: map[string]*tenantPlan{}, known: map[string]bool{}, warned: map[string]bool{}}
+		aliases: map[string]aliasEntry{}, plans: map[string]*tenantPlan{}, known: map[string]bool{}, warned: map[string]bool{},
+		reservedSeen: map[string]bool{}}
 }
 
 func (a *Adapter) Name() string { return "metronome" }
@@ -694,28 +697,40 @@ func (a *Adapter) TenantForCustomer(ctx context.Context, customerID string) (str
 	return mapped[0], true
 }
 
-// ToIngest converts a canonical event to Metronome's wire format.
+// reservedProps are the properties ToIngest sets from the event itself.
+// Billable metrics sum value and price on sku: a dimension of the same name
+// (an emitter chooses dimension keys) must never replace one, or Metronome
+// would bill another quantity or SKU than the ledger holds.
+var reservedProps = map[string]bool{"value": true, "unit": true, "window_start": true, "window_end": true, "schema_version": true,
+	"region": true, "project": true, "sku": true, "resource_id": true, "source": true, "accuracy": true}
+
+// ToIngest converts a canonical event to Metronome's wire format. The
+// dimensions go first, then the reserved properties, which a dimension
+// never replaces (one that collides is dropped and logged).
 func (a *Adapter) ToIngest(e *usage.Event) IngestEvent {
-	props := map[string]string{
-		"value":          strconv.FormatFloat(e.Quantity, 'f', -1, 64),
-		"unit":           e.Unit,
-		"window_start":   rfc3339(e.WindowStart),
-		"window_end":     rfc3339(e.WindowEnd),
-		"schema_version": e.SchemaVersion,
-	}
+	props := map[string]string{}
 	set := func(k, v string) {
 		if v != "" {
 			props[k] = v
 		}
 	}
+	for k, v := range e.Dimensions {
+		if reservedProps[k] {
+			a.warnReserved(e.Metric, k)
+			continue
+		}
+		set(k, v)
+	}
+	props["value"] = strconv.FormatFloat(e.Quantity, 'f', -1, 64)
+	props["unit"] = e.Unit
+	props["window_start"] = rfc3339(e.WindowStart)
+	props["window_end"] = rfc3339(e.WindowEnd)
+	props["schema_version"] = e.SchemaVersion
 	set("region", e.Region)
 	set("project", e.Project)
 	set("sku", e.SKU)
 	set("resource_id", e.ResourceID)
 	set("source", e.Source)
-	for k, v := range e.Dimensions {
-		set(k, v)
-	}
 	if def, ok := usage.Lookup(e.Metric); ok {
 		for _, k := range GroupKeys(def) {
 			if props[k] == "" {
@@ -738,6 +753,19 @@ func (a *Adapter) ToIngest(e *usage.Event) IngestEvent {
 		EventType:     e.Metric,
 		Timestamp:     rfc3339(e.WindowStart),
 		Properties:    props,
+	}
+}
+
+// warnReserved logs, once per key, a dimension named like a property
+// vBilling sets itself.
+func (a *Adapter) warnReserved(metric, key string) {
+	a.mu.Lock()
+	first := !a.reservedSeen[key]
+	a.reservedSeen[key] = true
+	a.mu.Unlock()
+	if first {
+		log.Printf("[metronome] WARNING: events of %s carry a dimension %q, the name of a property vBilling sets from the event itself: "+
+			"the dimension is not sent (logged once per name)", metric, key)
 	}
 }
 

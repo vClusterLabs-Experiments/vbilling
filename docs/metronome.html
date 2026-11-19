@@ -386,7 +386,7 @@
           </tbody>
         </table>
       </div>
-      <p>A group-key property an event does not carry is sent as <code>none</code>, so every event passes the billable metric's filters. Metronome accepts events up to 34 days old: vBilling dead-letters older ones before sending them (with an hour of margin), so a rewound cursor or a longer outage shows in the dead-letter list and in reconciliation instead of disappearing.</p>
+      <p>A dimension never replaces a property vBilling sets from the event itself (<code>value</code>, <code>unit</code>, <code>window_start</code>, <code>window_end</code>, <code>schema_version</code>, <code>region</code>, <code>project</code>, <code>sku</code>, <code>resource_id</code>, <code>source</code>, <code>accuracy</code>): one with such a name is not sent, and the log says so once per name. A group-key property an event does not carry is sent as <code>none</code>, so every event passes the billable metric's filters. Metronome accepts events up to 34 days old: vBilling dead-letters older ones before sending them (with an hour of margin), so a rewound cursor or a longer outage shows in the dead-letter list and in reconciliation instead of disappearing.</p>
       <div class="config-table-wrap">
         <table class="config-table">
           <thead><tr><th>Case</th><th>What happens</th></tr></thead>
