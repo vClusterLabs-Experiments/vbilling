@@ -586,7 +586,7 @@ func (p *PromSource) counter(ctx context.Context, client *prometheusClient, m Pr
 				} else {
 					prev, samples = &samples[0], samples[1:]
 				}
-			case appeared(s) && evidence.startedSince(s, prevObserved):
+			case appeared(s) && evidence.startedSince(s, prevObserved, first.End.Sub(first.Start)):
 				// Its process started after the last read: everything it
 				// counted is usage since then, including samples taken while
 				// this cluster's Prometheus could not be read.
@@ -700,7 +700,7 @@ func (p *PromSource) startEvidence(ctx context.Context, client *prometheusClient
 
 // startedSince reports whether the evidence shows that the process behind s
 // started at or after since, read at the series' first sample. Without
-// evidence it reports false.
+// evidence it reports false. window is the length of a metering window.
 //
 // A series' own _created sample is strong evidence: it is when that counter
 // started. process_start_time_seconds is only when the process exposing it
@@ -709,7 +709,7 @@ func (p *PromSource) startEvidence(ctx context.Context, client *prometheusClient
 // hardware's or the kernel's whole count, under a new instance label. So it
 // counts only when the series' first value could have been counted since
 // that process started (countedSince).
-func (e *startEvidence) startedSince(s promSeries, since time.Time) bool {
+func (e *startEvidence) startedSince(s promSeries, since time.Time, window time.Duration) bool {
 	if e == nil || len(s.Samples) == 0 {
 		return false
 	}
@@ -718,12 +718,30 @@ func (e *startEvidence) startedSince(s promSeries, since time.Time) bool {
 		return !unixSeconds(smp.V).Before(since)
 	}
 	if job, inst := s.Labels["job"], s.Labels["instance"]; job != "" && inst != "" {
-		if smp, ok := nearest(e.process[job+"\x00"+inst], first); ok {
+		process := e.process[job+"\x00"+inst]
+		if smp, ok := nearest(process, first); ok {
 			started := unixSeconds(smp.V)
-			return !started.Before(since) && countedSince(s, started)
+			// The process's own series is scraped from the same target, as
+			// often as the counter.
+			near := window
+			if every := scrapeInterval(process); every > 0 {
+				near = 2 * every
+			}
+			return !started.Before(since) && countedSince(s, started, near)
 		}
 	}
 	return false
+}
+
+// scrapeInterval is the shortest gap between samples (0 with fewer than two).
+func scrapeInterval(samples []promSample) time.Duration {
+	var every time.Duration
+	for i := 1; i < len(samples); i++ {
+		if d := samples[i].T.Sub(samples[i-1].T); d > 0 && (every == 0 || d < every) {
+			every = d
+		}
+	}
+	return every
 }
 
 // startRateSlack is how much faster than its own average rate a counter may
@@ -735,19 +753,26 @@ const startRateSlack = 2
 // countedSince reports whether a series' first value could have been
 // counted since started: no more than startRateSlack times the series' own
 // average rate over the samples read, for the time from started to its
-// first sample. With one sample there is no rate to judge by, and a first
-// sample older than started is another process's: neither counts. The
+// first sample. A first sample older than started is another process's. The
 // bound is conservative: a burst larger than that before the first scrape
 // is billed from the first sample, losing at most that scrape interval,
 // whereas a wrong "from zero" bills a counter's whole history again.
-func countedSince(s promSeries, started time.Time) bool {
+//
+// With one sample there is no rate to judge by (a process started since the
+// last read and scraped once per window shows one): it counts when that
+// sample is the process's first scrape, within near (two scrape intervals,
+// or a window) of its start.
+func countedSince(s promSeries, started time.Time, near time.Duration) bool {
 	first := s.Samples[0]
 	if first.V <= 0 {
 		return true // nothing counted yet: from zero bills nothing twice
 	}
 	elapsed := first.T.Sub(started).Seconds()
-	if elapsed <= 0 || len(s.Samples) < 2 {
+	if elapsed <= 0 {
 		return false
+	}
+	if len(s.Samples) < 2 {
+		return first.T.Sub(started) <= near
 	}
 	var grown float64
 	prev := first
