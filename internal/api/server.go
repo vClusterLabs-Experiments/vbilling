@@ -89,12 +89,14 @@ func New(cfg *config.Config, sp *spool.Spool, disp *pipeline.Dispatcher, tenants
 	return &Server{cfg: cfg, spool: sp, disp: disp, tenants: tenants, ctrl: ctrl, enf: enf, tel: tel, version: version, now: time.Now, started: time.Now()}
 }
 
-// Handler returns the routed handler.
+// Handler returns the routed handler. Everything but /healthz, /readyz,
+// the billing webhooks (signed by the billing platform), ingest (ingest
+// tokens) and the dashboard's static page needs the API token.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "ok\n") })
 	mux.HandleFunc("GET /readyz", s.readyz)
-	mux.HandleFunc("GET /metrics", s.metrics)
+	mux.HandleFunc("GET /metrics", s.auth(s.metrics))
 
 	mux.HandleFunc("GET /api/v1/status", s.auth(s.status))
 	mux.HandleFunc("GET /api/v1/catalog", s.auth(s.catalog))
@@ -146,10 +148,13 @@ func tokenOK(got, want string) bool {
 	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
 }
 
-// auth protects read and admin endpoints with API_TOKEN when it is set.
+// auth requires the API token on read and admin endpoints. Without a
+// configured token nothing passes: the API is never open (PrepareTokens
+// generates one at startup when API_TOKEN is not set).
 func (s *Server) auth(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if s.cfg.APIToken != "" && !tokenOK(bearer(r), s.cfg.APIToken) {
+		if s.cfg.APIToken == "" || !tokenOK(bearer(r), s.cfg.APIToken) {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="vbilling"`)
 			writeErr(w, http.StatusUnauthorized, "missing or invalid bearer token")
 			return
 		}

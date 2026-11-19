@@ -14,4 +14,10 @@ spec:
     - port: http
       path: /metrics
       interval: {{ .Values.serviceMonitor.interval }}
+      # /metrics needs the API token, like every endpoint but the probes.
+      authorization:
+        type: Bearer
+        credentials:
+          name: {{ include "vbilling.apiTokenSecret" . }}
+          key: api-token
 {{- end }}

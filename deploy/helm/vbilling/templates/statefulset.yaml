@@ -250,7 +250,8 @@ spec:
               value: {{ .Values.prometheus.sourceLabel | quote }}
             - name: PROMETHEUS_LOOKBACK
               value: {{ .Values.prometheus.lookback | quote }}
-            {{- include "vbilling.secretEnv" (dict "env" "API_TOKEN" "existing" .Values.api.existingSecret "key" "api-token" "inline" .Values.api.token "chartKey" "api-token" "root" .) | nindent 12 }}
+            {{- /* The chart's Secret always holds api-token (given or generated) unless api.existingSecret is set. */}}
+            {{- include "vbilling.secretEnv" (dict "env" "API_TOKEN" "existing" .Values.api.existingSecret "key" "api-token" "inline" true "chartKey" "api-token" "root" .) | nindent 12 }}
             {{- include "vbilling.secretEnv" (dict "env" "INGEST_TOKEN" "existing" .Values.api.existingSecret "key" "ingest-token" "inline" .Values.api.ingestToken "chartKey" "ingest-token" "root" .) | nindent 12 }}
             {{- include "vbilling.secretEnv" (dict "env" "INGEST_TOKENS" "existing" .Values.api.existingSecret "key" "ingest-tokens" "inline" .Values.api.tenantIngestTokens "chartKey" "ingest-tokens" "root" .) | nindent 12 }}
             {{- if has "lago" $adapters }}

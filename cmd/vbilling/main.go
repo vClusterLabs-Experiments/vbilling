@@ -320,13 +320,19 @@ func main() {
 		}
 	}
 
+	// The API is never open: without API_TOKEN, a token is generated in
+	// DATA_DIR (log its path, never the token).
+	tokenFile, err := api.PrepareTokens(cfg)
+	if err != nil {
+		log.Fatalf("API token: %v", err)
+	}
+	if tokenFile != "" {
+		log.Printf("API_TOKEN is not set: the API requires the token vBilling keeps in %s", tokenFile)
+	}
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
 		Handler:           api.New(cfg, sp, disp, tenants, ctrl, enf, tel, version).WithHealth(sources).WithPauses(pauses).WithRecords(ingester).WithCrossChecks(checks).WithPricing(prices).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
-	}
-	if cfg.APIToken == "" {
-		log.Printf("WARNING: API_TOKEN is not set; usage and admin endpoints on %s are unauthenticated (keep the Service internal)", cfg.ListenAddr)
 	}
 
 	var wg sync.WaitGroup

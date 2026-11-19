@@ -83,3 +83,31 @@ Args: dict "env" NAME "existing" SECRET "key" KEY "inline" VALUE "chartKey" KEY 
       key: {{ .chartKey }}
 {{- end }}
 {{- end }}
+
+{{/*
+API token stored in the chart's Secret: api.token when set, else the token
+the Secret already holds (helm lookup, so upgrades keep it), else a new
+random one. Tools that render without cluster access (helm template) get a
+new token on every render: set api.token or api.existingSecret with them.
+*/}}
+{{- define "vbilling.apiToken" -}}
+{{- if .Values.api.token -}}
+{{- .Values.api.token -}}
+{{- else -}}
+{{- $prev := lookup "v1" "Secret" .Release.Namespace (include "vbilling.fullname" .) -}}
+{{- $data := dict -}}
+{{- if $prev }}{{ $data = $prev.data | default dict }}{{ end -}}
+{{- if hasKey $data "api-token" -}}
+{{- index $data "api-token" | b64dec -}}
+{{- else -}}
+{{- randAlphaNum 48 -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Secret that holds the API token (key api-token).
+*/}}
+{{- define "vbilling.apiTokenSecret" -}}
+{{- .Values.api.existingSecret | default (include "vbilling.fullname" .) -}}
+{{- end }}
