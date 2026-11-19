@@ -195,6 +195,11 @@ const store = {
 };
 let token = store.get("vbilling-token") || "";
 let range = "24h";
+// Usage over 7 days or the month to date reads that whole range of the
+// ledger: the minute refresh reads it again every 10 minutes only, a click
+// at once.
+const LARGE_RANGE_REFRESH = 10 * 60e3;
+let usageAt = 0;
 let names = new Map(); // tenant ID -> display name
 
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -407,6 +412,7 @@ async function loadTenants() {
 }
 async function loadUsage() {
   await loadCatalog();
+  usageAt = Date.now();
   const u = await json("/api/v1/usage?" + qs({ group_by: "tenant,sku" }));
   const totals = new Map(), bySku = new Map(); // tenant -> metric -> quantity; tenant -> SKU -> metric -> quantity
   const add = (m, key, metric, q) => {
@@ -512,7 +518,7 @@ async function loadStates() {
 async function refresh() {
   try {
     await Promise.all([loadStatus(), loadTenants(), loadLedger(), loadStates(), loadSources(), loadPricing()]);
-    await loadUsage();
+    if (range === "24h" || Date.now() - usageAt >= LARGE_RANGE_REFRESH) await loadUsage();
     $("#auth").classList.remove("show");
   } catch (e) {
     if (e.message !== "unauthorized") $("#meta").replaceChildren(el("span", { class: "err" }, e.message));

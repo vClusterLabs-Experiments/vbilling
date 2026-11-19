@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
@@ -25,7 +26,7 @@ func usageServer(t *testing.T, sp *spool.Spool, held *pipeline.HeldStore) *env {
 	s.now = func() time.Time { return now }
 	srv := httptest.NewServer(s.Handler())
 	t.Cleanup(srv.Close)
-	return &env{srv: srv, sp: sp, dest: dest, disp: disp, token: adminToken}
+	return &env{srv: srv, server: s, sp: sp, dest: dest, disp: disp, token: adminToken}
 }
 
 func gpuHour(tenant, sku string, ws time.Time, q float64) usage.Event {
@@ -174,4 +175,62 @@ func TestUsageMonthToDateSurvivesCompaction(t *testing.T) {
 	if len(rows) != 1 || rows[0].Quantity != 8 || rows[0].Events != 4 {
 		t.Fatalf("month to date after compaction: %+v, want 8 GPU-hours over 4 events", rows)
 	}
+}
+
+// Counting each event ID once must not keep every ID of the range: the
+// dashboard reads a month to date, which for a large installation is
+// millions of collector events. Only IDs that can repeat are kept for the
+// whole range (ingested events, fills); measured windows keep theirs for
+// the last few hours of the scan.
+func TestUsageKeepsFewIDsForALargeRange(t *testing.T) {
+	sp, err := spool.Open(t.TempDir(), spool.Options{NoSync: true, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sp.Close()
+	e := usageServer(t, sp, nil)
+	const days, perWindow, ingested = 3, 10, 50
+	start := now.Add(-days * 24 * time.Hour).Truncate(time.Minute)
+	windows := days * 24 * 60
+	for w := 0; w < windows; w++ {
+		ws := start.Add(time.Duration(w) * time.Minute)
+		evs := make([]usage.Event, perWindow)
+		for i := range evs {
+			evs[i] = gpuHour(fmt.Sprintf("tenant-%d", i), "H100", ws, 1)
+		}
+		if err := sp.AppendWindow(spool.SourceCollector, ws.Add(time.Minute), evs, ""); err != nil {
+			t.Fatal(err)
+		}
+		if w == windows/2 { // the same window measured again under another source: one copy is usage
+			if err := sp.AppendWindow("prometheus", ws.Add(time.Minute), evs[:1], ""); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	var in []usage.Event
+	for i := 0; i < ingested; i++ {
+		ev := gpuHour("acme", "H100", start.Add(time.Duration(i)*time.Hour), 1)
+		ev.ID, ev.Source = fmt.Sprintf("gw-%d", i), "ingest:gw"
+		in = append(in, ev)
+	}
+	if _, _, err := sp.AppendIngest("ingest:gw", in); err != nil {
+		t.Fatal(err)
+	}
+	// The same ID ingested again after the ingest index forgot it (48h).
+	if _, err := sp.AppendBatch("ingest:gw", in[:1]); err != nil {
+		t.Fatal(err)
+	}
+	events := 0
+	dups, kept, err := e.server.scanUsageStats(start, now, func(*usage.Event) error { events++; return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if events != windows*perWindow+ingested || dups != 2 {
+		t.Fatalf("%d events counted and %d repeats skipped, want %d and 2", events, dups, windows*perWindow+ingested)
+	}
+	limit := ingested + perWindow*int(sameWindowSpan/time.Minute+2)
+	if kept > limit {
+		t.Fatalf("kept %d IDs at once for %d events (about %d KiB), want at most %d", kept, events, kept*16>>10, limit)
+	}
+	t.Logf("%d events, at most %d IDs kept at once (%d%%)", events, kept, kept*100/events)
 }
