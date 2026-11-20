@@ -1128,6 +1128,8 @@ type reconcileRow struct {
 	Recorded     float64 `json:"recorded"`
 	Difference   float64 `json:"difference"`
 	Match        bool    `json:"match"`
+	// Note says why the backend has no total for the tenant, when it says.
+	Note string `json:"note,omitempty"`
 }
 
 type reconcileResult struct {
@@ -1230,6 +1232,7 @@ func (s *Server) reconcileOne(ctx context.Context, d destinations.Destination, r
 	sort.Slice(q.Tenants, func(i, j int) bool { return q.Tenants[i].ID < q.Tenants[j].ID })
 	sort.Strings(q.Metrics)
 	recorded := map[key]float64{}
+	notes := map[string]string{}
 	if len(q.Tenants) > 0 {
 		totals, err := rec.RecordedTotals(ctx, q)
 		if err != nil {
@@ -1237,6 +1240,12 @@ func (s *Server) reconcileOne(ctx context.Context, d destinations.Destination, r
 			return res
 		}
 		for _, t := range totals {
+			if t.Metric == "" {
+				if t.Note != "" {
+					notes[t.Tenant] = t.Note
+				}
+				continue
+			}
 			recorded[key{t.Tenant, t.Metric}] += t.Quantity
 		}
 	}
@@ -1256,7 +1265,7 @@ func (s *Server) reconcileOne(ctx context.Context, d destinations.Destination, r
 		match := math.Abs(diff) <= math.Max(1e-6, 1e-3*math.Abs(expected))
 		res.OK = res.OK && match
 		res.Rows = append(res.Rows, reconcileRow{Tenant: k.tenant, Metric: k.metric, Ledger: usage.Round(ledger[k]), DeadLettered: usage.Round(dead[k]),
-			Expected: usage.Round(expected), Recorded: usage.Round(recorded[k]), Difference: usage.Round(diff), Match: match})
+			Expected: usage.Round(expected), Recorded: usage.Round(recorded[k]), Difference: usage.Round(diff), Match: match, Note: notes[k.tenant]})
 	}
 	sort.Slice(res.Rows, func(i, j int) bool {
 		if res.Rows[i].Tenant != res.Rows[j].Tenant {
@@ -1400,11 +1409,28 @@ func (s *Server) setCursor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Seq *uint64 `json:"seq"`
+		Seq  *uint64 `json:"seq"`
+		From string  `json:"from"`
 	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req); err != nil || req.Seq == nil {
-		writeErr(w, http.StatusBadRequest, `body must be {"seq": <number>}`)
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req); err != nil || (req.Seq == nil) == (req.From == "") {
+		writeErr(w, http.StatusBadRequest, `body must be {"seq": <number>} or {"from": "<RFC 3339 time>"}`)
 		return
+	}
+	if req.From != "" {
+		// From a time: the destination receives again everything the ledger
+		// committed since then, which holds every window that ended since
+		// (late usage of older windows too, which it dedupes).
+		from, err := time.Parse(time.RFC3339Nano, req.From)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "from: %v", err)
+			return
+		}
+		seq, err := s.firstSeqSince(from)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "%v", err)
+			return
+		}
+		req.Seq = &seq
 	}
 	if validator, ok := dest.(destinations.ReplayValidator); ok {
 		if err := validator.ValidateReplay(r.Context(), s.spool.Cursor(name), *req.Seq); err != nil {
@@ -1418,6 +1444,25 @@ func (s *Server) setCursor(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("[api] cursor for %s set to %d", name, *req.Seq)
 	writeJSON(w, http.StatusOK, map[string]any{"destination": name, "cursor": s.spool.Cursor(name)})
+}
+
+// firstSeqSince returns the cursor that replays every event the ledger
+// committed at or after t: the sequence number just before the first one.
+// With none since t, it is the ledger's head (nothing to replay).
+func (s *Server) firstSeqSince(t time.Time) (uint64, error) {
+	errFound := errors.New("found")
+	var first uint64
+	err := s.spool.ScanAppendedSeq(t, time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC), func(_ *usage.Event, _ time.Time, seq uint64) error {
+		first = seq
+		return errFound
+	})
+	if err != nil && !errors.Is(err, errFound) {
+		return 0, err
+	}
+	if first == 0 {
+		return s.spool.Committed(), nil
+	}
+	return first - 1, nil
 }
 
 // --- billing state ---

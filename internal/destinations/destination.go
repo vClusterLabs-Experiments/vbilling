@@ -87,6 +87,9 @@ type Total struct {
 	Tenant   string  `json:"tenant"`
 	Metric   string  `json:"metric"`
 	Quantity float64 `json:"quantity"`
+	// Note, on a Total with no Metric, says why the backend reports no
+	// total for the tenant (no customer holds its ID yet, say).
+	Note string `json:"note,omitempty"`
 }
 
 // CustomerResolver maps a backend customer ID (cus_..., a Metronome UUID)

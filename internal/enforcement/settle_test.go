@@ -28,7 +28,7 @@ type account struct {
 	asked []string // the customer of each read ("" for the tenant's own)
 }
 
-func (a *account) Owed(_ context.Context, _, customer string, _ func(string) bool) ([]string, error) {
+func (a *account) Owed(_ context.Context, _, customer string, _ func(...string) bool) ([]string, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.reads++

@@ -532,6 +532,14 @@ func (c *Collector) collectTarget(ctx context.Context, t Target, nodes map[strin
 		if !c.opts.PauseKeep[pause.KeepControlPlane] {
 			until = t.Paused[n-1].From
 		}
+	} else if at, stopped := c.stoppedAt(cl); !cl.Ready && cl.Paused && stopped {
+		// vBilling scaled the control plane down for a pause it has not
+		// verified yet, or cannot: it ran until that second. A window
+		// collected in between would otherwise bill none of it.
+		bill = true
+		if !c.opts.PauseKeep[pause.KeepControlPlane] {
+			until = at
+		}
 	}
 	if bill {
 		for _, w := range windows {

@@ -250,6 +250,18 @@ func (n *nodeInfo) physicalGPUs() float64 {
 	return max(n.advertisedGPUs(), n.gpuFloor)
 }
 
+// instanceGPUs is the GPU count of the instance a node is: the GPUs it
+// bills (physicalGPUs), or the GPUs GPU Feature Discovery counts installed
+// (nvidia.com/gpu.count) when that is more, as while the driver or device
+// plugin starts after a boot and the node advertises none yet: an A100
+// instance is an A100 instance from its first minute, not a CPU node until
+// its driver is ready. Its SKU and gpu_count follow it. It is never below
+// what the node bills, so no label written inside the cluster lowers them;
+// the GPUs not advertised are GPU downtime, not GPU hours.
+func (n *nodeInfo) instanceGPUs() float64 {
+	return max(n.physicalGPUs(), n.expectedGPUs())
+}
+
 // advertisedGPUs is physicalGPUs from what the node advertises now alone.
 func (n *nodeInfo) advertisedGPUs() float64 {
 	shared := 0.0
@@ -266,7 +278,7 @@ func (n *nodeInfo) instanceAttributes() map[string]string {
 	return map[string]string{
 		usage.DimVCPUs:     strconv.FormatFloat(n.cpuCapacity, 'f', -1, 64),
 		usage.DimMemoryGiB: strings.TrimSuffix(strconv.FormatFloat(n.memCapacity/gib, 'f', 1, 64), ".0"),
-		usage.DimGPUCount:  strconv.FormatFloat(n.physicalGPUs(), 'f', -1, 64),
+		usage.DimGPUCount:  strconv.FormatFloat(n.instanceGPUs(), 'f', -1, 64),
 		usage.DimPublicIP:  strconv.FormatBool(n.externalIP),
 	}
 }
@@ -429,8 +441,8 @@ func nodeSKU(n *nodeInfo) string {
 		return n.sku
 	case n.instanceType != "":
 		return n.instanceType
-	case n.physicalGPUs() > 0:
-		return strconv.FormatFloat(n.physicalGPUs(), 'f', -1, 64) + "x" + n.gpuType
+	case n.instanceGPUs() > 0:
+		return strconv.FormatFloat(n.instanceGPUs(), 'f', -1, 64) + "x" + n.gpuType
 	default:
 		return "cpu-node"
 	}

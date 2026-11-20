@@ -279,3 +279,35 @@ func TestPrivateNodeGPUsNotAllocatableAreDowntime(t *testing.T) {
 		t.Errorf("the Ready node itself is still billed: node hours = %v", got)
 	}
 }
+
+// Seen live on a spot A100 after a restart: while its driver rebuilt, a
+// private node without an instance-type label billed as "cpu-node" with no
+// GPUs, though GPU Feature Discovery's labels counted the A100 and the same
+// windows billed it as GPU downtime. The instance is an A100 instance from
+// its first minute: its node-hours carry the GPU SKU and count, while its
+// GPU hours stay downtime until the GPU is allocatable.
+func TestAPrivateGPUNodeKeepsItsInstanceShapeWhileItsDriverLoads(t *testing.T) {
+	loading := node("gpu-a100-3", map[string]string{"nvidia.com/gpu.product": "NVIDIA-A100-SXM4-40GB", "nvidia.com/gpu.count": "1"}, 0, true)
+	out, _ := collectWith(t, Options{}, nil, latest(), func(c *Collector) {
+		c.UseTenantAPI(fakeTenantAPI{conns: map[string]*TenantConn{"gpu": tenantConn(loading)}})
+	})
+	evs := out[we]
+	if _, n := find(evs, usage.MetricGPUHours); n != 0 {
+		t.Fatal("GPUs that are not allocatable were billed as GPU hours")
+	}
+	if got, n := find(evs, usage.MetricGPUDowntimeHours, "resource_id", "gpu-a100-3"); n != 1 || !near(got, usage.Round(1.0/60)) {
+		t.Errorf("GPU downtime = %v (%d events), want one GPU for the window", got, n)
+	}
+	var nodeHours *usage.Event
+	for i := range evs {
+		if evs[i].Metric == usage.MetricPrivateNodeHours && evs[i].ResourceID == "gpu-a100-3" {
+			nodeHours = &evs[i]
+		}
+	}
+	if nodeHours == nil {
+		t.Fatal("no node-hour event for the loading GPU node")
+	}
+	if nodeHours.SKU != "1xNVIDIA-A100-SXM4-40GB" || nodeHours.Dim(usage.DimGPUCount) != "1" {
+		t.Fatalf("node hours SKU %q, gpu_count %q: want the A100 instance (1xNVIDIA-A100-SXM4-40GB, 1)", nodeHours.SKU, nodeHours.Dim(usage.DimGPUCount))
+	}
+}

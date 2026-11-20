@@ -430,6 +430,15 @@ func (c *Collector) meterTenant(ctx context.Context, t Target, conn *TenantConn,
 // UsePauses lets the collector keep the inventory of paused clusters.
 func (c *Collector) UsePauses(p *pause.Store) { c.pauses = p }
 
+// stoppedAt returns when vBilling scaled a cluster's control plane down for a
+// pause whose span is not open yet.
+func (c *Collector) stoppedAt(cl discovery.TenantCluster) (time.Time, bool) {
+	if c.pauses == nil {
+		return time.Time{}, false
+	}
+	return c.pauses.Stopped(cl.ExternalID())
+}
+
 // Freeze reads a cluster's own API now and stores its inventory, to meter
 // it from while it is paused. vBilling calls it right before stopping the
 // control plane. It is a no-op for clusters without tenant API access.

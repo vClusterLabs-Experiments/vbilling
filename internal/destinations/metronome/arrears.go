@@ -50,18 +50,37 @@ func webhookTypes(alertType string) []string {
 	return out
 }
 
+// alertRulePrefix starts a rule key that names one threshold notification
+// (enforcement.AlertRulePrefix, which this package cannot import).
+const alertRulePrefix = "alert:"
+
+// ruleKeys lists a threshold notification's rule keys, most specific
+// first: its ID, its name, then each webhook type it can arrive as.
+func ruleKeys(al CustomerAlert) []string {
+	var keys []string
+	if al.Alert.ID != "" {
+		keys = append(keys, alertRulePrefix+al.Alert.ID)
+	}
+	if al.Alert.Name != "" {
+		keys = append(keys, alertRulePrefix+al.Alert.Name)
+	}
+	return append(keys, webhookTypes(al.Alert.Type)...)
+}
+
 // Owed reads what a customer owes at Metronome now: each of its threshold
 // notifications that counts and is not ok for the customer (in alarm, still
 // evaluating, or not evaluated). A notification counts when counts reports
-// one of its webhook types (alerts.<type>, and the other names of the
-// low-balance credit types) as mapped by a rule to a state above warning:
-// those are what pause or suspend a tenant, the prepaid wallet's
-// low-balance commit and credit notifications above all. With no
-// customerID, the customer is the one that holds the tenant ID as an
-// ingest alias; a tenant no customer holds owes nothing here. A customer
+// it, by its rule keys (alert:<ID>, alert:<name>, then its webhook types:
+// alerts.<type> and the other names of the low-balance credit types), as
+// mapped by a rule to a state above warning: those are what pause or
+// suspend a tenant, the prepaid wallet's low-balance commit and credit
+// notifications above all, while a warning rule on one notification (a
+// low-balance warning above the zero-balance pause) keeps it from counting.
+// With no customerID, the customer is the one that holds the tenant ID as
+// an ingest alias; a tenant no customer holds owes nothing here. A customer
 // Metronome does not know confirms nothing, and is owed. An error means
 // Metronome could not be read, and the webhook that asked is retried.
-func (a *Adapter) Owed(ctx context.Context, tenant, customerID string, counts func(eventType string) bool) ([]string, error) {
+func (a *Adapter) Owed(ctx context.Context, tenant, customerID string, counts func(keys ...string) bool) ([]string, error) {
 	if customerID == "" {
 		cus, err := a.c.FindCustomerByAlias(ctx, tenant)
 		if err != nil {
@@ -85,7 +104,7 @@ func (a *Adapter) Owed(ctx context.Context, tenant, customerID string, counts fu
 		if al.CustomerStatus != nil {
 			status = strings.ReplaceAll(*al.CustomerStatus, "_", " ")
 		}
-		if status == "ok" || counts == nil || !slices.ContainsFunc(webhookTypes(al.Alert.Type), counts) {
+		if status == "ok" || counts == nil || !counts(ruleKeys(al)...) {
 			continue
 		}
 		owed = append(owed, fmt.Sprintf("threshold notification %q (%s) %s", al.Alert.Name, al.Alert.Type, status))
