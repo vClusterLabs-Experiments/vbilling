@@ -255,6 +255,12 @@ func TestHoldUnpricedSeriesAndReleaseInOrder(t *testing.T) {
 	if files, _ := os.ReadDir(filepath.Join(dir, "held", "metronome")); len(files) != 0 {
 		t.Fatalf("drained series left files: %v", files)
 	}
+	// The destination has every event once; the dispatcher acknowledges
+	// and counts each batch just after its send returns.
+	waitFor(t, "the dispatcher's status caught up", func() bool {
+		st := r.d.Statuses()[0]
+		return st.Delivered == 20 && st.LagRecords == 0
+	})
 	st := r.d.Statuses()[0]
 	if st.Held != 0 || st.Released < 9 || st.Delivered != 20 {
 		t.Fatalf("status %+v", st)
