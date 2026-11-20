@@ -9,7 +9,7 @@ replicaCount: 1
 
 image:
   repository: ghcr.io/vclusterlabs-experiments/vbilling
-  tag: v0.3.1
+  tag: v0.3.2
   # Explicit immutable image override. Published charts pin their default
   # repository and tag through Chart.yaml annotations, including upgrades
   # with --reuse-values. Custom repositories and tags remain usable.
@@ -290,7 +290,10 @@ enforcement:
   # clusters and label their namespaces. enforce: also label suspended
   # namespaces so the admission policy below blocks new pods.
   mode: observe
-  rules: "" # "event.type=state,..." e.g. "alerts.spend_threshold_reached=suspended"
+  # "key=state,...": a key is a webhook event type, or alert:<name or ID> for
+  # one Metronome threshold notification (it wins over its type), e.g.
+  # "alerts.low_remaining_commit_balance_reached=paused,alert:Wallet below $50=warning"
+  rules: ""
   # enforce mode: block a suspended or paused tenant's LiteLLM teams (its
   # tenant ID and vbilling.vcluster.com/aliases) and unblock them when it is
   # active again; blocks set by an administrator are never lifted. Uses

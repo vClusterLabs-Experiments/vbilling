@@ -203,10 +203,10 @@ Stripe acquired Metronome in January 2026. Both paths are supported here: Billin
 
 ## Quick start
 
-Images for `linux/amd64` and `linux/arm64` are published to `ghcr.io/vclusterlabs-experiments/vbilling`, the chart's default. Install from a release tag: `main` can be ahead of the published image. Each [release](https://github.com/vClusterLabs-Experiments/vbilling/releases) also has the packaged chart attached (`helm upgrade --install vbilling https://github.com/vClusterLabs-Experiments/vbilling/releases/download/v0.3.1/vbilling-0.3.1.tgz ...`). Keep billing keys in Secrets, never in `--set` flags or values files:
+Images for `linux/amd64` and `linux/arm64` are published to `ghcr.io/vclusterlabs-experiments/vbilling`, the chart's default. Install from a release tag: `main` can be ahead of the published image. Each [release](https://github.com/vClusterLabs-Experiments/vbilling/releases) also has the packaged chart attached (`helm upgrade --install vbilling https://github.com/vClusterLabs-Experiments/vbilling/releases/download/v0.3.2/vbilling-0.3.2.tgz ...`). Keep billing keys in Secrets, never in `--set` flags or values files:
 
 ```bash
-git clone --branch v0.3.1 https://github.com/vClusterLabs-Experiments/vbilling.git && cd vbilling
+git clone --branch v0.3.2 https://github.com/vClusterLabs-Experiments/vbilling.git && cd vbilling
 kubectl create namespace vbilling-system
 ```
 
@@ -494,6 +494,31 @@ Most installs set about ten settings: `ADAPTERS`, that billing platform's creden
 
 v0.3.1 removed 35 settings that tuned internals with one right value (window size, lookbacks, retention, timeouts) or opened ways to get billing wrong. A removed setting that is still set only logs a warning. See [Removed in v0.3.1](https://vclusterlabs-experiments.github.io/vbilling/configuration.html#removed).
 
+## Upgrading to v0.3.2
+
+v0.3.2 is the release run end to end against a live Metronome sandbox, with vCluster Platform on GKE, three teams' clusters and their inference tokens, and a dedicated A100 cluster. It fixes what that run found and ships the readiness fixes the v0.3.1 artifacts were rebuilt with on 2026-11-19. Run `helm upgrade` with the v0.3.2 chart and keep the PVC.
+
+**Act on these:**
+
+- **Leases.** Host and tenant-reader roles need `get,list` on Leases (stale node Leases briefly hold a window). For spot or preemptible GPUs keep `billing.collectionDelay: 75s`.
+- **Backups before you upgrade.** The ingest index is rewritten in a compact format that older binaries cannot read: take a consistent backup of the data directory (with `source.json` and destination state) and do not downgrade in place.
+- **A low-balance warning next to the pause.** If your Metronome account has a warning notification of the same type as the one that pauses, give it a rule of its own: `ENFORCEMENT_RULES="alerts.low_remaining_commit_balance_reached=paused,alert:<its name or ID>=warning"`. Before v0.3.2 a rule on the type paused at both thresholds.
+
+**Behavior that changed:**
+
+- **Pauses through vCluster Platform.** With `TENANT_SOURCE=platform`, the Platform proxy holds calls to a stopped cluster until they time out instead of refusing them, so a pause of a cluster with its own nodes was never verified, and its nodes and GPUs kept billing while paused (found live on the A100). A call that gets no answer now counts as the API gone once the control plane cluster shows no pod of the cluster's control plane left.
+- **Wallets refilled without a payment.** A commit or credit Finance adds to the contract sends no payment webhook. Every minute vBilling reads Metronome for tenants a threshold notification paused, and lifts the hold once nothing that counts is in alarm. Holds a failed payment raised still wait for a payment; holds set by an operator or through the API (a portal's "awaiting first payment") are never lifted this way.
+- **Rules per notification.** `ENFORCEMENT_RULES` takes `alert:<name or ID>=state` for one Metronome threshold notification, which wins over a rule on its type.
+- **Instance shape while a GPU driver loads.** A node whose GPUs GPU Feature Discovery counts but whose device plugin advertises none yet (after a boot, while the driver loads) carried the SKU `cpu-node` and `gpu_count` 0 on its node-hour events. It now carries its GPU SKU and count from its first minute; its GPU hours are still GPU downtime until the GPUs are allocatable.
+- **Rewinding a destination by time.** `POST /api/v1/destinations/<name>/cursor` takes `{"from": "<RFC 3339 time>"}`: everything the ledger committed since then is sent again.
+- **Reconciliation notes.** Rows of a tenant no Metronome customer holds yet, or of tenants that share a customer, say so in `note`.
+- **Independent collectors.** Automatic aggregates include the persisted metering source, separating two hosts billing the same customer, model and window. Keep the whole data directory, including `source.json` and destination state, together in backups.
+- **Stripe delivery recovery.** Attempts and confirmations are persisted before network calls and cursor acknowledgement. An uncertain outcome older than 23 hours is parked for reconciliation instead of blindly retried. Provider acceptance is separate from inclusion on a finalized invoice. See [Stripe recovery](https://vclusterlabs-experiments.github.io/vbilling/stripe.html#delivery).
+- **Stripe split meters.** New meter names include a digest of the original split keys and values, so `org/model`, `org-model` and case differences remain separate. Existing names are retained when the available ledger history identifies one split identity. Ambiguous names, or names without retained evidence, get separate meters and need price coverage checked before use. Existing prices are not rewritten.
+- **Ingest memory.** The 48-hour index uses 128-bit hashes and integer timestamps. Existing indexes load automatically; compaction rewrites them to the new format. Old binaries cannot read the rewritten index: take a consistent backup before upgrading and do not downgrade in place.
+- **Namespace ownership and node failures.** Cross-namespace objects retain their owner's attribution; mixed Prometheus namespaces require pod and namespace labels. Stale node Leases briefly hold affected windows. Update tenant-reader roles to allow `get,list` on Leases. For spot capacity keep `billing.collectionDelay: 75s`, since a failure just before collection can still look fresh.
+- **Production sizing.** [production-values.yaml](deploy/helm/production-values.yaml) provides an initial configuration with archival, price holds, tenant validation and larger resource allocations. Size it from measured request volume and retention; raw request rows often dominate the ledger.
+
 ## Upgrading to v0.3.1
 
 v0.3.1 closes the issues a second independent review found in v0.3.0: tenants can no longer lower their own bill, the API is never open, and the Metronome adapter no longer assumes it owns your Metronome account. Run `helm upgrade` with the v0.3.1 chart and keep the PVC.
@@ -522,22 +547,9 @@ v0.3.1 closes the issues a second independent review found in v0.3.0: tenants ca
 - **Volume health.** The ledger volume, and the archive volume when set, report in source health and fail at 85% full: a full ledger volume stops every commit.
 - **Node-hour events.** They carry `vcpus`, `memory_gib`, `gpu_count` and `public_ip`, so their IDs differ from v0.3.0's. Committed windows are never sent again, so nothing is billed twice.
 
-**Readiness fixes in this source tree (version remains 0.3.1):**
-
-- **Independent collectors.** Automatic aggregates include the persisted metering source, separating two hosts billing the same customer, model and window. Keep the whole data directory, including `source.json` and destination state, together in backups.
-- **Stripe delivery recovery.** Attempts and confirmations are persisted before network calls and cursor acknowledgement. An uncertain outcome older than 23 hours is parked for reconciliation instead of blindly retried. Provider acceptance is separate from inclusion on a finalized invoice. See [Stripe recovery](https://vclusterlabs-experiments.github.io/vbilling/stripe.html#delivery).
-- **Stripe split meters.** New meter names include a digest of the original split keys and values, so `org/model`, `org-model` and case differences remain separate. Existing names are retained when the available ledger history identifies one split identity. Ambiguous names, or names without retained evidence, get separate meters and need price coverage checked before use. Existing prices are not rewritten.
-- **Ingest memory.** The 48-hour index uses 128-bit hashes and integer timestamps. Existing indexes load automatically; compaction rewrites them to the new format. Old binaries cannot read the rewritten index: take a consistent backup before upgrading and do not downgrade in place.
-- **Namespace ownership and node failures.** Cross-namespace objects retain their owner's attribution; mixed Prometheus namespaces require pod and namespace labels. Stale node Leases briefly hold affected windows. Update tenant-reader roles to allow `get,list` on Leases. For spot capacity keep `billing.collectionDelay: 75s`, since a failure just before collection can still look fresh.
-- **Production sizing.** [production-values.yaml](deploy/helm/production-values.yaml) provides an initial configuration with archival, price holds, tenant validation and larger resource allocations. Size it from measured request volume and retention; raw request rows often dominate the ledger.
-
-The v0.3.1 GitHub release was already published before these edits. These changes do not replace its tag, image or chart artifact automatically. The live Metronome sandbox acceptance run (#15), vMetal physical pause and trusted inventory (#16, #18), and shared-ledger HA (#17) remain open.
-
-**Rebuilding an existing release.** After the release tag points to the intended commit and CI has passed that commit, run `gh workflow run release.yml --ref v0.3.1 -f tag=v0.3.1`. The workflow rebuilds `linux/amd64` and `linux/arm64`, updates the version, minor-version and commit image tags (and `latest` when this is the latest release), and replaces the chart on the existing GitHub release. `release-metadata.json` records the source commit and image digest, and `SHA256SUMS` covers the chart and metadata. The published chart pins its default image through chart annotations, so `helm upgrade --reuse-values` picks the rebuilt image even when a node has the old version tag cached. Explicit image digests and custom repositories or tags remain supported. Existing pods need a Helm upgrade to use a rebuilt image.
-
 ## Upgrading from v0.2
 
-Run `helm upgrade` with the v0.3.1 chart and keep the PVC. A ledger written by v0.2 opens, verifies and keeps its destination cursors and ingest dedupe, so nothing is billed twice or skipped. The chart adds read access to node Leases, and in `enforce` mode, delete access to pods.
+Run `helm upgrade` with the v0.3.2 chart and keep the PVC. A ledger written by v0.2 opens, verifies and keeps its destination cursors and ingest dedupe, so nothing is billed twice or skipped. The chart adds read access to node Leases, and in `enforce` mode, delete access to pods.
 
 - **CPU and memory now bill requests.** `CPU_MEMORY_BASIS` (`metering.cpuMemoryBasis`) defaults to `requests`, which is exact. v0.2 defaulted to `usage`, a metrics-server reading per window. Set `metering.cpuMemoryBasis=usage` to keep v0.2 quantities. Pods that request nothing bill no CPU or memory under `requests`; `vbilling_pods_without_requests` counts them.
 - **Egress is a counter.** Without `prometheus.egressQuery`, egress is read from `container_network_transmit_bytes_total` as an exact counter, not with `increase()` at the window end. Expect small differences from v0.2's estimate. A custom `egressQuery` stays an estimate.
@@ -580,6 +592,8 @@ internal/api/            HTTP API and dashboard
 ```
 
 To add a destination, implement `destinations.Destination` (and optionally `Reconciler`, `CustomerResolver`, `EventFilter`), then register it in `init()`.
+
+**Rebuilding a release.** After a release tag points to the intended commit and CI has passed that commit, run `gh workflow run release.yml --ref vX.Y.Z -f tag=vX.Y.Z`. The workflow rebuilds `linux/amd64` and `linux/arm64`, updates the version, minor-version and commit image tags (and `latest` when this is the latest release), and replaces the chart on the existing GitHub release. `release-metadata.json` records the source commit and image digest, and `SHA256SUMS` covers the chart and metadata. The published chart pins its default image through chart annotations, so `helm upgrade --reuse-values` picks the rebuilt image even when a node has the old version tag cached. Existing pods need a Helm upgrade to use a rebuilt image.
 
 ## Roadmap
 

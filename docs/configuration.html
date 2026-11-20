@@ -527,7 +527,7 @@
             </tr>
             <tr>
               <td><code>ENFORCEMENT_RULES</code></td>
-              <td>Overrides, <code>event.type=state,...</code> (for example <code>alerts.spend_threshold_reached=suspended</code>, or <code>alerts.low_remaining_commit_balance_reached=paused</code> to pause a tenant whose prepaid commit balance runs out; <code>alerts.low_remaining_contract_credit_balance_reached</code> watches credits only).</td>
+              <td>Overrides, <code>event.type=state,...</code> (for example <code>alerts.spend_threshold_reached=suspended</code>, or <code>alerts.low_remaining_commit_balance_reached=paused</code> to pause a tenant whose prepaid commit balance runs out; <code>alerts.low_remaining_contract_credit_balance_reached</code> watches credits only). A key <code>alert:&lt;name or ID&gt;</code> names one Metronome threshold notification and wins over a rule on its type, for a low-balance warning next to a zero-balance pause: <code>alert:Wallet below $50=warning</code>.</td>
               <td class="td-default">(none)</td>
             </tr>
             <tr>
@@ -1020,7 +1020,7 @@
             <tr>
               <td><code>image.repository / tag / pullPolicy</code></td>
               <td>Container image</td>
-              <td class="td-default">ghcr.io/vclusterlabs-experiments/vbilling / v0.3.1</td>
+              <td class="td-default">ghcr.io/vclusterlabs-experiments/vbilling / v0.3.2</td>
             </tr>
           </tbody>
         </table>
