@@ -19,7 +19,14 @@ func TestOwedReadsTheCustomersThresholdNotifications(t *testing.T) {
 	cus, _ := f.CreateCustomer("Acme AI", "org_1f2e", "tenant-acme")
 	other, _ := f.CreateCustomer("Globex", "tenant-globex")
 	rules := map[string]bool{"alerts.low_remaining_commit_balance_reached": true, "alerts.low_remaining_credit_balance_reached": true}
-	counts := func(eventType string) bool { return rules[eventType] }
+	counts := func(keys ...string) bool {
+		for _, k := range keys {
+			if v, ok := rules[k]; ok {
+				return v
+			}
+		}
+		return false
+	}
 	owed := func(tenant, customer string) string {
 		t.Helper()
 		got, err := a.Owed(ctx, tenant, customer, counts)

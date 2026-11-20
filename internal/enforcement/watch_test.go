@@ -2,6 +2,7 @@ package enforcement
 
 import (
 	"context"
+	"errors"
 	"net"
 	"os"
 	"strings"
@@ -207,5 +208,96 @@ func TestThrottledChecksLeaveThePauseUnverified(t *testing.T) {
 	}
 	if st := onlyStatus(t, e); st.Verified || !strings.Contains(st.Unverified, "could not be checked") || e.watching(cl.ExternalID()) {
 		t.Fatalf("status %+v, want unverified for good", st)
+	}
+}
+
+// Through vCluster Platform's proxy (TENANT_SOURCE=platform), a stopped
+// cluster's API never refuses: the proxy holds each call until it times
+// out. A timeout counts as the API gone once the control plane cluster
+// shows no control plane pod left, so the pause of a cluster with its own
+// nodes is verified, and its nodes stop billing, in the pass that stops it.
+// While a control plane pod is still there (terminating, say), a timeout
+// proves nothing; the pass after it is gone completes the pause.
+func TestTimeoutsThroughAProxyCountOnceTheControlPlanePodsAreGone(t *testing.T) {
+	for _, podLeft := range []bool{false, true} {
+		name := "no control plane pod left"
+		if podLeft {
+			name = "a control plane pod still terminating"
+		}
+		t.Run(name, func(t *testing.T) {
+			api := &apiAfterStop{mode: "times out"}
+			cl := discovery.TenantCluster{Name: "private", Namespace: "tenant", Source: "statefulset"}
+			cp := controlPlane(cl.Name, cl.Namespace, 1, nil)
+			cp.Spec.Selector = &metav1.LabelSelector{MatchLabels: map[string]string{"app": "vcluster", "release": cl.Name}}
+			objs := []runtime.Object{cp, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: cl.Namespace}}}
+			cpPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: cl.Name + "-0", Namespace: cl.Namespace,
+				Labels: map[string]string{"app": "vcluster", "release": cl.Name}}, Status: corev1.PodStatus{Phase: corev1.PodRunning}}
+			if podLeft {
+				objs = append(objs, cpPod)
+			}
+			host := fake.NewSimpleClientset(objs...)
+			inside := fake.NewSimpleClientset(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "gpu-1"}}, podOn("inference", "default", "gpu-1"))
+			var mu sync.Mutex
+			stopping := false
+			host.PrependReactor("patch", "statefulsets", func(a ktesting.Action) (bool, runtime.Object, error) {
+				if strings.Contains(string(a.(ktesting.PatchActionImpl).Patch), `"replicas":0`) {
+					mu.Lock()
+					stopping = true
+					mu.Unlock()
+				}
+				return false, nil, nil
+			})
+			inside.PrependReactor("*", "*", api.react(func() bool { mu.Lock(); defer mu.Unlock(); return stopping }))
+			clock := newClock()
+			spans := pause.Memory()
+			e := New(host, Options{Mode: "enforce", Now: clock.Now, DrainTimeout: 20 * time.Millisecond, Pauses: spans,
+				Clusters: func(string) []discovery.TenantCluster { return []discovery.TenantCluster{cl} }, TenantClient: clientFor(inside)})
+			if err := e.Set(context.Background(), "acme", Paused, "wallet empty", "metronome", "alerts.low_remaining_commit_balance_reached"); err != nil {
+				t.Fatal(err)
+			}
+			e.Wait()
+			if !podLeft {
+				sp, open := spans.Current(cl.ExternalID())
+				if st := onlyStatus(t, e); !open || !st.Verified || !sp.From.Equal(clock.Now()) {
+					t.Fatalf("span %+v (open %t), status %+v: want the pause verified in the pass that stopped it", sp, open, st)
+				}
+				return
+			}
+			if _, open := spans.Current(cl.ExternalID()); open {
+				t.Fatalf("a span opened while a control plane pod was still there: status %+v", e.Pauses())
+			}
+			if st := onlyStatus(t, e); st.Verified {
+				t.Fatalf("status %+v: verified while a control plane pod was still there", st)
+			}
+			if err := host.CoreV1().Pods(cl.Namespace).Delete(context.Background(), cpPod.Name, metav1.DeleteOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			clock.add(15 * time.Second)
+			e.Guard(context.Background())
+			e.Wait()
+			sp, open := spans.Current(cl.ExternalID())
+			if st := onlyStatus(t, e); !open || !st.Verified || !sp.From.Equal(clock.Now()) {
+				t.Fatalf("span %+v (open %t), status %+v: want it verified by the pass after the pod was gone", sp, open, st)
+			}
+		})
+	}
+}
+
+func TestUnreachableSaysNoAnswer(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want bool
+	}{
+		{context.DeadlineExceeded, true},
+		{errors.New(`Get "https://loft.vcluster-platform.svc/kubernetes/project/default/virtualcluster/pilot-a100/api/v1/nodes": context deadline exceeded`), true},
+		{errors.New("net/http: request canceled (Client.Timeout exceeded while awaiting headers)"), true},
+		{apierrors.NewTimeoutError("list", 1), true},
+		{apierrors.NewForbidden(corev1.Resource("pods"), "", errors.New("revoked")), false},
+		{apierrors.NewTooManyRequests("throttled", 1), false},
+		{nil, false},
+	} {
+		if got := unreachable(tc.err); got != tc.want {
+			t.Errorf("unreachable(%v) = %t, want %t", tc.err, got, tc.want)
+		}
 	}
 }

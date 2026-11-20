@@ -97,7 +97,7 @@ func invoiceOwed(inv Invoice, now time.Time) string {
 // customer owes nothing here. counts is not used: Stripe's usage alerts
 // have no standing to read. An error means Stripe could not be read, and
 // the webhook that asked is retried.
-func (a *Adapter) Owed(ctx context.Context, tenant, customerID string, _ func(string) bool) ([]string, error) {
+func (a *Adapter) Owed(ctx context.Context, tenant, customerID string, _ func(...string) bool) ([]string, error) {
 	if customerID == "" {
 		id, ok := a.state.Get("cus/" + tenant)
 		if !ok {

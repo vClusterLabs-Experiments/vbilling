@@ -11,6 +11,8 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 REPOSITORY = "ghcr.io/vclusterlabs-experiments/vbilling"
 DIGEST = "sha256:" + "a" * 64
+# The chart's own version, so the tests follow each release bump.
+VERSION = re.search(r"^version:\s*(\S+)", (ROOT / "deploy/helm/vbilling/Chart.yaml").read_text(), re.MULTILINE)[1]
 
 
 class ReleasePackagingTests(unittest.TestCase):
@@ -20,7 +22,7 @@ class ReleasePackagingTests(unittest.TestCase):
         self.chart = Path(self.work.name) / "chart"
         shutil.copytree(ROOT / "deploy/helm/vbilling", self.chart)
         self.metadata = Path(self.work.name) / "release-metadata.json"
-        self.env = dict(os.environ, RELEASE_TAG="v0.3.1", SOURCE_COMMIT="b" * 40,
+        self.env = dict(os.environ, RELEASE_TAG="v" + VERSION, SOURCE_COMMIT="b" * 40,
                         IMAGE_REPOSITORY=REPOSITORY, IMAGE_DIGEST=DIGEST)
 
     def prepare(self):
@@ -53,13 +55,13 @@ class ReleasePackagingTests(unittest.TestCase):
         self.assertEqual(self.prepare().returncode, 0)
         self.assertEqual(self.render_image("--set", "image.tag=development"), f"{REPOSITORY}:development")
         self.assertEqual(self.render_image("--set", "image.repository=registry.example.com/custom"),
-                         "registry.example.com/custom:v0.3.1")
+                         "registry.example.com/custom:v" + VERSION)
         override = "sha256:" + "c" * 64
         self.assertEqual(self.render_image("--set", "image.digest=" + override), f"{REPOSITORY}@{override}")
 
     def test_mismatched_release_version_cannot_be_packaged(self):
         before = (self.chart / "Chart.yaml").read_text()
-        self.env["RELEASE_TAG"] = "v0.3.2"
+        self.env["RELEASE_TAG"] = "v99.0.0"
         self.assertNotEqual(self.prepare().returncode, 0)
         self.assertEqual((self.chart / "Chart.yaml").read_text(), before)
         self.assertFalse(self.metadata.exists())

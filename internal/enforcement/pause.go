@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
+	"net/http"
 	"sort"
 	"strconv"
 	"strings"
@@ -140,6 +142,11 @@ func (e *Enforcer) pauseCluster(ctx context.Context, cl discovery.TenantCluster,
 	}
 	if err := e.patchWorkload(ctx, cl, map[string]any{"spec": map[string]any{"replicas": 0}}); err != nil {
 		return pauseOutcome{}, fmt.Errorf("scale control plane down: %w", err)
+	}
+	if e.opts.Pauses != nil {
+		// Metering bills the control plane until this second while the
+		// pause is not verified yet: it ran until now.
+		e.opts.Pauses.MarkStopped(id, e.opts.Now().UTC())
 	}
 	if e.opts.OnPause != nil {
 		e.opts.OnPause(id, true)
@@ -407,7 +414,10 @@ func (e *Enforcer) confirmStopped(ctx context.Context, cl discovery.TenantCluste
 				return ownCheck{why: "its own nodes could not be checked while its control plane stopped (" + changed + ")"}, down
 			case err == nil:
 				clean, answered = true, true
-			case apiGone(err) && down:
+			case down && (apiGone(err) || unreachable(err) && e.controlPlaneGone(ctx, cl)):
+				// Through vCluster Platform's proxy a stopped cluster's API
+				// does not refuse: the proxy holds the call until it times
+				// out. With no control plane pod left, nothing answers it.
 				if clean {
 					return ownCheck{ok: true}, true // its API went away with the control plane
 				}
@@ -476,6 +486,68 @@ func (e *Enforcer) checkOwn(ctx context.Context, own ownCheck) (pods []corev1.Po
 // admins can do either, so such a pause stays unverified.
 func refusedCheck(err error) bool {
 	return apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err) || apierrors.IsTooManyRequests(err)
+}
+
+// unreachable reports whether a call to a cluster's API got no answer: it
+// timed out, or a gateway in front of it gave up (502, 504). It says
+// nothing about the API by itself; with the control plane's pods gone
+// (controlPlaneGone) it means the API went away.
+func unreachable(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || apierrors.IsTimeout(err) || apierrors.IsServerTimeout(err) {
+		return true
+	}
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		return true
+	}
+	var st apierrors.APIStatus
+	if errors.As(err, &st) {
+		if c := st.Status().Code; c == http.StatusBadGateway || c == http.StatusGatewayTimeout {
+			return true
+		}
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "Client.Timeout exceeded") || strings.Contains(msg, "context deadline exceeded") || strings.Contains(msg, "i/o timeout")
+}
+
+// controlPlaneGone reports whether no pod of a cluster's control plane is
+// left on the control plane cluster: none wanted, none ready, and none
+// still running or terminating. Nothing can answer for its API then, so a
+// call that gets no answer means the API went away. Read from the control
+// plane cluster, which the tenant cannot write; without a selector to find
+// the pods by, it proves nothing.
+func (e *Enforcer) controlPlaneGone(ctx context.Context, cl discovery.TenantCluster) bool {
+	var sel *metav1.LabelSelector
+	if cl.Source == "deployment" {
+		d, err := e.kube.AppsV1().Deployments(cl.Namespace).Get(ctx, cl.Name, metav1.GetOptions{})
+		if err != nil || d.Spec.Replicas == nil || *d.Spec.Replicas != 0 || d.Status.ReadyReplicas != 0 {
+			return false
+		}
+		sel = d.Spec.Selector
+	} else {
+		s, err := e.kube.AppsV1().StatefulSets(cl.Namespace).Get(ctx, cl.Name, metav1.GetOptions{})
+		if err != nil || s.Spec.Replicas == nil || *s.Spec.Replicas != 0 || s.Status.ReadyReplicas != 0 {
+			return false
+		}
+		sel = s.Spec.Selector
+	}
+	selector, err := metav1.LabelSelectorAsSelector(sel)
+	if sel == nil || err != nil || selector.Empty() {
+		return false
+	}
+	pods, err := e.kube.CoreV1().Pods(cl.Namespace).List(ctx, metav1.ListOptions{LabelSelector: selector.String()})
+	if err != nil {
+		return false
+	}
+	for _, p := range pods.Items {
+		if p.Status.Phase != corev1.PodSucceeded && p.Status.Phase != corev1.PodFailed {
+			return false
+		}
+	}
+	return true
 }
 
 // apiGone reports whether a call failed because the cluster's API went away
@@ -766,6 +838,9 @@ func (e *Enforcer) resumeCluster(ctx context.Context, cl discovery.TenantCluster
 		if _, err := e.opts.Pauses.End(id, now); err != nil {
 			log.Printf("[enforcement] %s: record resume: %v", id, err)
 		}
+	}
+	if e.opts.Pauses != nil {
+		e.opts.Pauses.ClearStopped(id)
 	}
 	if e.opts.OnPause != nil {
 		e.opts.OnPause(id, false)

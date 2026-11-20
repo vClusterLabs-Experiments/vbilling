@@ -344,15 +344,15 @@
 
       <!-- Step 2 -->
       <h2 id="step-2"><span class="step-marker">2</span>Install vBilling</h2>
-      <p>The chart defaults to the published image <code>ghcr.io/vclusterlabs-experiments/vbilling:v0.3.1</code> (<code>linux/amd64</code> and <code>linux/arm64</code>). Keep billing keys in Secrets, never in <code>--set</code> flags or values files. Install from a release tag, because <code>main</code> can be ahead of the published image. From a clone of the repository, with Stripe as the example:</p>
-      <div class="code-block"><code><span class="cmd">git</span> clone --branch v0.3.1 https://github.com/vClusterLabs-Experiments/vbilling.git &amp;&amp; <span class="cmd">cd</span> vbilling
+      <p>The chart defaults to the published image <code>ghcr.io/vclusterlabs-experiments/vbilling:v0.3.2</code> (<code>linux/amd64</code> and <code>linux/arm64</code>). Keep billing keys in Secrets, never in <code>--set</code> flags or values files. Install from a release tag, because <code>main</code> can be ahead of the published image. From a clone of the repository, with Stripe as the example:</p>
+      <div class="code-block"><code><span class="cmd">git</span> clone --branch v0.3.2 https://github.com/vClusterLabs-Experiments/vbilling.git &amp;&amp; <span class="cmd">cd</span> vbilling
 <span class="cmd">kubectl</span> create namespace vbilling-system
 <span class="cmd">kubectl</span> <span class="flag">-n</span> vbilling-system create secret generic vbilling-stripe <span class="flag">--from-file</span>=api-key=./stripe-test-key
 <span class="cmd">helm</span> upgrade <span class="flag">--install</span> vbilling deploy/helm/vbilling <span class="flag">-n</span> vbilling-system \
   <span class="flag">--set</span> adapters=<span class="string">'{stripe}'</span> \
   <span class="flag">--set</span> stripe.existingSecret=vbilling-stripe \
   <span class="flag">--set</span> region=us-east-1</code></div>
-      <p>Each <a href="https://github.com/vClusterLabs-Experiments/vbilling/releases">release</a> also has the packaged chart attached, so you can install without a clone: replace <code>deploy/helm/vbilling</code> with <code>https://github.com/vClusterLabs-Experiments/vbilling/releases/download/v0.3.1/vbilling-0.3.1.tgz</code>.</p>
+      <p>Each <a href="https://github.com/vClusterLabs-Experiments/vbilling/releases">release</a> also has the packaged chart attached, so you can install without a clone: replace <code>deploy/helm/vbilling</code> with <code>https://github.com/vClusterLabs-Experiments/vbilling/releases/download/v0.3.2/vbilling-0.3.2.tgz</code>.</p>
       <p>The other adapters take the same shape:</p>
       <div class="config-table-wrap">
         <table class="config-table">
@@ -403,6 +403,30 @@ API listening on :8080
         <div>Once the destinations report deliveries, the usage is in your billing platform: meters and customers in Stripe, customers and usage in Metronome, or customers and subscriptions in Lago. A platform outage never loses usage: the ledger keeps it until the adapter catches up.</div>
       </div>
 
+      <h2 id="upgrading-v032">Upgrading to v0.3.2</h2>
+      <p>v0.3.2 is the release run end to end against a live Metronome sandbox, with vCluster Platform on GKE, three teams' clusters and their inference tokens, and a dedicated A100 cluster. It fixes what that run found and ships the readiness fixes the v0.3.1 artifacts were rebuilt with on 2026-11-19. Run <code>helm upgrade</code> with the v0.3.2 chart and keep the PVC.</p>
+      <p><strong>Act on these:</strong></p>
+      <ul>
+        <li><strong>Leases.</strong> Host and tenant-reader roles need <code>get,list</code> on Leases (stale node Leases briefly hold a window). For spot or preemptible GPUs keep <code>billing.collectionDelay: 75s</code>.</li>
+        <li><strong>Backups before you upgrade.</strong> The ingest index is rewritten in a compact format that older binaries cannot read: take a consistent backup of the data directory (with <code>source.json</code> and destination state) and do not downgrade in place.</li>
+        <li><strong>A low-balance warning next to the pause.</strong> If your Metronome account has a warning notification of the same type as the one that pauses, give it a rule of its own: <code>ENFORCEMENT_RULES="alerts.low_remaining_commit_balance_reached=paused,alert:&lt;its name or ID&gt;=warning"</code>. Before v0.3.2 a rule on the type paused at both thresholds.</li>
+      </ul>
+      <p><strong>Behavior that changed:</strong></p>
+      <ul>
+        <li><strong>Pauses through vCluster Platform.</strong> With <code>TENANT_SOURCE=platform</code>, the Platform proxy holds calls to a stopped cluster until they time out instead of refusing them, so a pause of a cluster with its own nodes was never verified, and its nodes and GPUs kept billing while paused (found live on the A100). A call that gets no answer now counts as the API gone once the control plane cluster shows no pod of the cluster's control plane left.</li>
+        <li><strong>Wallets refilled without a payment.</strong> A commit or credit Finance adds to the contract sends no payment webhook. Every minute vBilling reads Metronome for tenants a threshold notification paused, and lifts the hold once nothing that counts is in alarm. Holds a failed payment raised still wait for a payment; holds set by an operator or through the API (a portal's "awaiting first payment") are never lifted this way.</li>
+        <li><strong>Rules per notification.</strong> <code>ENFORCEMENT_RULES</code> takes <code>alert:&lt;name or ID&gt;=state</code> for one Metronome threshold notification, which wins over a rule on its type.</li>
+        <li><strong>Instance shape while a GPU driver loads.</strong> A node whose GPUs GPU Feature Discovery counts but whose device plugin advertises none yet (after a boot, while the driver loads) carried the SKU <code>cpu-node</code> and <code>gpu_count</code> 0 on its node-hour events. It now carries its GPU SKU and count from its first minute; its GPU hours are still GPU downtime until the GPUs are allocatable.</li>
+        <li><strong>Rewinding a destination by time.</strong> <code>POST /api/v1/destinations/&lt;name&gt;/cursor</code> takes <code>{"from": "&lt;RFC 3339 time&gt;"}</code>: everything the ledger committed since then is sent again.</li>
+        <li><strong>Reconciliation notes.</strong> Rows of a tenant no Metronome customer holds yet, or of tenants that share a customer, say so in <code>note</code>.</li>
+        <li><strong>Independent collectors.</strong> Automatic aggregates include the persisted metering source, separating two hosts billing the same customer, model and window. Keep the whole data directory, including <code>source.json</code> and destination state, together in backups.</li>
+        <li><strong>Stripe delivery recovery.</strong> Attempts and confirmations are persisted before network calls and cursor acknowledgement. An uncertain outcome older than 23 hours is parked for reconciliation instead of blindly retried. Provider acceptance is separate from inclusion on a finalized invoice. See <a href="https://vclusterlabs-experiments.github.io/vbilling/stripe.html#delivery">Stripe recovery</a>.</li>
+        <li><strong>Stripe split meters.</strong> New meter names include a digest of the original split keys and values, so <code>org/model</code>, <code>org-model</code> and case differences remain separate. Existing names are retained when the available ledger history identifies one split identity. Ambiguous names, or names without retained evidence, get separate meters and need price coverage checked before use. Existing prices are not rewritten.</li>
+        <li><strong>Ingest memory.</strong> The 48-hour index uses 128-bit hashes and integer timestamps. Existing indexes load automatically; compaction rewrites them to the new format. Old binaries cannot read the rewritten index: take a consistent backup before upgrading and do not downgrade in place.</li>
+        <li><strong>Namespace ownership and node failures.</strong> Cross-namespace objects retain their owner's attribution; mixed Prometheus namespaces require pod and namespace labels. Stale node Leases briefly hold affected windows. Update tenant-reader roles to allow <code>get,list</code> on Leases. For spot capacity keep <code>billing.collectionDelay: 75s</code>, since a failure just before collection can still look fresh.</li>
+        <li><strong>Production sizing.</strong> <a href="https://github.com/vClusterLabs-Experiments/vbilling/blob/main/deploy/helm/production-values.yaml">production-values.yaml</a> provides an initial configuration with archival, price holds, tenant validation and larger resource allocations. Size it from measured request volume and retention; raw request rows often dominate the ledger.</li>
+      </ul>
+
       <h2 id="upgrading-v031">Upgrading to v0.3.1</h2>
       <p>v0.3.1 closes the issues a second independent review found in v0.3.0: tenants can no longer lower their own bill, the API is never open, and the Metronome adapter no longer assumes it owns your Metronome account. Run <code>helm upgrade</code> with the v0.3.1 chart and keep the PVC.</p>
       <p><strong>Act on these:</strong></p>
@@ -431,7 +455,7 @@ API listening on :8080
       </ul>
 
       <h2 id="upgrading">Upgrading from v0.2</h2>
-      <p>Run <code>helm upgrade</code> with the v0.3.1 chart and keep the PVC. A ledger written by v0.2 opens, verifies and keeps its destination cursors and ingest dedupe, so nothing is billed twice or skipped. The chart adds read access to node Leases, and in <code>enforce</code> mode, delete access to pods.</p>
+      <p>Run <code>helm upgrade</code> with the v0.3.2 chart and keep the PVC. A ledger written by v0.2 opens, verifies and keeps its destination cursors and ingest dedupe, so nothing is billed twice or skipped. The chart adds read access to node Leases, and in <code>enforce</code> mode, delete access to pods.</p>
       <ul>
         <li><strong>CPU and memory now bill requests.</strong> <code>CPU_MEMORY_BASIS</code> (<code>metering.cpuMemoryBasis</code>) defaults to <code>requests</code>, which is exact. v0.2 defaulted to <code>usage</code>, a metrics-server reading per window. Set <code>metering.cpuMemoryBasis=usage</code> to keep v0.2 quantities. Pods that request nothing bill no CPU or memory under <code>requests</code>; <code>vbilling_pods_without_requests</code> counts them.</li>
         <li><strong>Egress is a counter.</strong> Without <code>prometheus.egressQuery</code>, egress is read from <code>container_network_transmit_bytes_total</code> as an exact counter, not with <code>increase()</code> at the window end. Expect small differences from v0.2's estimate. A custom <code>egressQuery</code> stays an estimate.</li>

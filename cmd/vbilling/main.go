@@ -52,7 +52,7 @@ import (
 	_ "github.com/vclusterlabs-experiments/vbilling/internal/destinations/webhook"
 )
 
-var version = "0.3.1"
+var version = "0.3.2"
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "ledger" {
@@ -417,6 +417,9 @@ func main() {
 	// next start.
 	go every(ctx, 2*time.Minute, enf.Resync)
 	go every(ctx, 15*time.Second, enf.Guard)
+	// A wallet refilled without a payment webhook (a commit or credit added
+	// to the contract) lifts the pause its threshold notification raised.
+	go every(ctx, enforcement.RecheckInterval, enf.RecheckHolds)
 	go func() {
 		defer wg.Done()
 		compactLoop(ctx, recSpool, nil)

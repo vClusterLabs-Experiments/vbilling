@@ -269,7 +269,7 @@ type r4AskedReader struct {
 	asked [][]string
 }
 
-func (r *r4AskedReader) Owed(_ context.Context, tenant, customer string, _ func(string) bool) ([]string, error) {
+func (r *r4AskedReader) Owed(_ context.Context, tenant, customer string, _ func(...string) bool) ([]string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.asked = append(r.asked, []string{tenant, customer})

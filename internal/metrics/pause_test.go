@@ -216,3 +216,31 @@ func TestPausedWorkloadsStopBillingAtTheSecondOfThePause(t *testing.T) {
 		t.Errorf("GPU hours after resume = %v, want 45s", got)
 	}
 }
+
+// Seen live: a window collected in the second or two between vBilling
+// scaling a control plane down and verifying the pause found the cluster
+// neither ready nor paused by a span, and billed none of its control plane
+// for the window, though it ran all of it. The control plane is billed
+// until the second vBilling stopped it, whether the pause is verified a
+// second later or never.
+func TestControlPlaneHoursRunUntilTheStopWhileThePauseIsVerified(t *testing.T) {
+	c := pausedCollector(t, pause.DefaultKeep, nil)
+	tg := target("gpu", false)
+	tg.Cluster.Paused = true
+	c.pauses.MarkStopped(tg.Cluster.ExternalID(), we.Add(-3*time.Second))
+	out, _, err := c.Collect(context.Background(), []Target{tg}, latest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := find(out[we], usage.MetricInstanceHours); !near(got, usage.Round(57.0/3600)) {
+		t.Fatalf("control plane hours = %v, want 57s (stopped 3s before the window ended)", got)
+	}
+	// Resumed: the mark is gone, and a cluster not ready for another reason
+	// is not billed.
+	c.pauses.ClearStopped(tg.Cluster.ExternalID())
+	tg.Cluster.Paused = false
+	out, _, _ = c.Collect(context.Background(), []Target{tg}, latest())
+	if got, _ := find(out[we], usage.MetricInstanceHours); got != 0 {
+		t.Fatalf("control plane hours while asleep = %v", got)
+	}
+}

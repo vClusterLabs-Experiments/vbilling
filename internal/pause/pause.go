@@ -92,6 +92,36 @@ type Store struct {
 	mu      sync.Mutex
 	kv      *kv.Store
 	snapDir string
+	// stopped is when vBilling scaled a cluster's control plane down for a
+	// pause whose span is not open yet (in memory): the control plane ran
+	// until then, whether the pause is verified a second later or never.
+	stopped map[string]time.Time
+}
+
+// MarkStopped records when vBilling scaled a cluster's control plane down.
+func (s *Store) MarkStopped(id string, at time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.stopped == nil {
+		s.stopped = map[string]time.Time{}
+	}
+	s.stopped[id] = at
+}
+
+// Stopped returns when vBilling last scaled a cluster's control plane down,
+// if it has not resumed it since.
+func (s *Store) Stopped(id string) (time.Time, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	at, ok := s.stopped[id]
+	return at, ok
+}
+
+// ClearStopped forgets the stop time of a cluster vBilling resumed.
+func (s *Store) ClearStopped(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.stopped, id)
 }
 
 // Open loads the span store under dir (DATA_DIR). An empty dir keeps

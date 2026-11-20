@@ -114,7 +114,41 @@ type Signal struct {
 	// read the billing platforms again (ArrearsReader), and the billing hold
 	// clears only when they show nothing owed.
 	Positive bool `json:"positive,omitempty"`
+	// Notification names the threshold notification a Metronome alert
+	// webhook is about (its ID and name), so a rule can pick it out from
+	// others of its type: a low-balance warning and a zero-balance pause
+	// are both alerts.low_remaining_commit_balance_reached.
+	NotificationID   string `json:"notification_id,omitempty"`
+	NotificationName string `json:"notification_name,omitempty"`
 }
+
+// ruleKeys lists the keys ENFORCEMENT_RULES can match a signal by, most
+// specific first: its threshold notification's ID, then its name, then its
+// event type.
+func (s *Signal) ruleKeys() []string {
+	return RuleKeys(s.Type, s.NotificationID, s.NotificationName)
+}
+
+// RuleKeys lists the ENFORCEMENT_RULES keys of a webhook event type, and of
+// the threshold notification it is about when one is named, most specific
+// first: alert:<notification ID>, alert:<notification name>, the event type.
+func RuleKeys(eventType, notificationID, notificationName string) []string {
+	var keys []string
+	if notificationID != "" {
+		keys = append(keys, AlertRulePrefix+notificationID)
+	}
+	if notificationName != "" {
+		keys = append(keys, AlertRulePrefix+notificationName)
+	}
+	if eventType != "" {
+		keys = append(keys, eventType)
+	}
+	return keys
+}
+
+// AlertRulePrefix starts an ENFORCEMENT_RULES key that names one threshold
+// notification by its ID or name instead of an event type.
+const AlertRulePrefix = "alert:"
 
 // TenantState is the current standing of one tenant: the most severe of
 // its holds.
@@ -269,11 +303,11 @@ type ArrearsReader interface {
 	// thing described; nothing when it owes nothing. customerID is the
 	// customer a webhook named; empty, the platform reads the customer it
 	// bills the tenant as, and a tenant it has no customer for owes nothing
-	// there. counts reports whether ENFORCEMENT_RULES map a webhook event
-	// type to a state above warning (for Metronome, the threshold
-	// notifications that count). An error means the platform could not be
-	// read.
-	Owed(ctx context.Context, tenant, customerID string, counts func(eventType string) bool) ([]string, error)
+	// there. counts reports whether ENFORCEMENT_RULES map a threshold
+	// notification to a state above warning, given its rule keys most
+	// specific first (RuleKeys: alert:<ID>, alert:<name>, its webhook event
+	// types). An error means the platform could not be read.
+	Owed(ctx context.Context, tenant, customerID string, counts func(keys ...string) bool) ([]string, error)
 }
 
 // The billing adapters are the customer resolvers (cmd/vbilling wires
@@ -370,7 +404,10 @@ func New(kube kubernetes.Interface, opts Options) *Enforcer {
 	return e
 }
 
-// ParseRules parses "event.type=state,..." (ENFORCEMENT_RULES).
+// ParseRules parses "key=state,..." (ENFORCEMENT_RULES). A key is a webhook
+// event type, or alert:<ID or name> for one Metronome threshold
+// notification, which wins over a rule on its event type. A name may hold
+// "=" but not ",".
 func ParseRules(spec string) (map[string]State, error) {
 	out := map[string]State{}
 	for _, item := range strings.Split(spec, ",") {
@@ -378,13 +415,27 @@ func ParseRules(spec string) (map[string]State, error) {
 		if item == "" {
 			continue
 		}
-		k, v, ok := strings.Cut(item, "=")
-		if !ok || !State(v).valid() {
-			return nil, fmt.Errorf("enforcement rule %q must be event.type=active|warning|delinquent|suspended|paused", item)
+		i := strings.LastIndex(item, "=")
+		if i < 0 {
+			return nil, fmt.Errorf("enforcement rule %q must be event.type=state or alert:<notification ID or name>=state (states: active, warning, delinquent, suspended, paused)", item)
 		}
-		out[strings.TrimSpace(k)] = State(strings.TrimSpace(v))
+		k, v := strings.TrimSpace(item[:i]), State(strings.TrimSpace(item[i+1:]))
+		if k == "" || k == AlertRulePrefix || !v.valid() {
+			return nil, fmt.Errorf("enforcement rule %q must be event.type=state or alert:<notification ID or name>=state (states: active, warning, delinquent, suspended, paused)", item)
+		}
+		out[k] = v
 	}
 	return out, nil
+}
+
+// ruleFor returns the state the most specific matching rule maps keys to.
+func (e *Enforcer) ruleFor(keys []string) (State, bool) {
+	for _, k := range keys {
+		if s, ok := e.opts.Rules[k]; ok {
+			return s, true
+		}
+	}
+	return "", false
 }
 
 // Errors the webhook handlers map to HTTP status codes.
@@ -491,8 +542,9 @@ func (e *Enforcer) HandleMetronome(ctx context.Context, body []byte, date, signa
 	switch {
 	case strings.HasPrefix(ev.Type, "alerts."):
 		sig.State, sig.Reason = Warning, strings.ReplaceAll(strings.TrimPrefix(ev.Type, "alerts."), "_", " ")
-		if name := str("alert_name"); name != "" {
-			sig.Reason = name
+		sig.NotificationID, sig.NotificationName = str("alert_id"), str("alert_name")
+		if sig.NotificationName != "" {
+			sig.Reason = sig.NotificationName
 		}
 	case ev.Type == "payment_gate.payment_status":
 		switch ev.Properties["payment_status"] {
@@ -521,7 +573,7 @@ func firstTime(values ...string) (time.Time, bool) {
 // is then a duplicate, and clusters that could not be reached converge at
 // the next resync (the error still reaches the provider).
 func (e *Enforcer) apply(ctx context.Context, sig *Signal) error {
-	if override, ok := e.opts.Rules[sig.Type]; ok {
+	if override, ok := e.ruleFor(sig.ruleKeys()); ok {
 		sig.State = override
 		sig.Reason += " (rule: " + string(override) + ")"
 	}
@@ -612,11 +664,14 @@ type readResult struct {
 	err  error
 }
 
-// countsAbove reports whether ENFORCEMENT_RULES map a webhook event type to
-// a state above warning: the threshold notifications that keep a billing
-// hold while they are in alarm.
-func (e *Enforcer) countsAbove(eventType string) bool {
-	s, ok := e.opts.Rules[eventType]
+// countsAbove reports whether ENFORCEMENT_RULES map a threshold
+// notification to a state above warning: the notifications that keep a
+// billing hold while they are in alarm. keys are its rule keys, most
+// specific first (RuleKeys): the first that has a rule decides, so a
+// warning rule on one notification keeps it from counting even when its
+// type pauses.
+func (e *Enforcer) countsAbove(keys ...string) bool {
+	s, ok := e.ruleFor(keys)
 	return ok && severity[s] > severity[Warning]
 }
 
@@ -1239,6 +1294,66 @@ func orActive(s State) State {
 	}
 	return s
 }
+
+// RecheckInterval is how often RecheckHolds reads Metronome for the billing
+// holds its threshold notifications raised.
+const RecheckInterval = time.Minute
+
+// RecheckHolds lowers a billing hold that a Metronome threshold
+// notification raised once Metronome, read again, shows nothing owed: the
+// notification is ok again because the wallet was refilled, however that
+// happened. A payment-gated top-up also sends a payment webhook, but a
+// commit or credit Finance adds to the contract, or a promotional grant,
+// sends none, and the tenant would otherwise stay paused. Only holds whose
+// newest event is an alerts.* webhook from Metronome are read: a hold a
+// failed payment raised waits for a payment, and holds an operator set are
+// never touched. Like a payment, the read clears the hold only when no
+// billing platform shows anything owed; one that cannot be read leaves the
+// hold until the next round.
+func (e *Enforcer) RecheckHolds(ctx context.Context) {
+	if _, ok := e.opts.Resolvers["metronome"]; !ok {
+		return
+	}
+	for _, ts := range e.States() {
+		// A warning blocks nothing, and stays while it says what Metronome
+		// says (a low-balance warning in alarm): only a pause, suspension or
+		// delinquency a notification raised is lifted here.
+		h, held := ts.Holds[HoldBilling]
+		if !held || severity[orActive(h.State)] <= severity[Warning] || h.Source != "metronome" || !strings.HasPrefix(h.EventType, "alerts.") {
+			continue
+		}
+		now := e.opts.Now().UTC()
+		sig := Signal{Source: "metronome", Type: RecheckEventType, Tenant: ts.Tenant, Tenants: []string{ts.Tenant},
+			State: Active, Reason: "Metronome shows the threshold notifications clear again", At: now, EventAt: now, Positive: true}
+		owed, read, err := e.stillOwed(ctx, ts.Tenant, &sig, map[string]readResult{})
+		if errors.Is(err, ErrNotSettled) {
+			continue // a notification that counts is still in alarm
+		}
+		if err != nil {
+			log.Printf("[enforcement] recheck tenant %s: %v", ts.Tenant, err)
+			continue
+		}
+		if !read || len(owed) > 0 {
+			continue
+		}
+		next, prev, res, err := e.store(ts.Tenant, update{hold: HoldBilling, state: Active, reason: sig.Reason, source: sig.Source,
+			eventType: sig.Type, webhook: true, positive: true, at: now, read: true})
+		if err != nil {
+			log.Printf("[enforcement] recheck tenant %s: %v", ts.Tenant, err)
+			continue
+		}
+		if res.kind != outChanged {
+			continue
+		}
+		if err := e.reflectState(ctx, prev, next, sig.Source, sig.Type); err != nil {
+			log.Printf("[enforcement] recheck tenant %s: %v", ts.Tenant, err)
+		}
+	}
+}
+
+// RecheckEventType is the event type RecheckHolds records when it lowers a
+// hold.
+const RecheckEventType = "threshold_notifications_clear"
 
 // Resync re-applies every recorded state to its tenant's clusters, without
 // emitting events. A cluster created while its tenant was suspended, or one

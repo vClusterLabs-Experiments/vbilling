@@ -836,6 +836,7 @@ func (a *Adapter) RecordedTotals(ctx context.Context, q destinations.TotalsQuery
 	req := UsageRequest{StartingOn: rfc3339(from), EndingBefore: rfc3339(to), WindowSize: "day"}
 	tenantOf := map[string]string{}
 	codeOf := map[string]string{}
+	notes := map[string]string{} // tenant -> why Metronome reports no total for it
 	if a.provision() {
 		for _, t := range q.Tenants {
 			if id, ok := a.state.Get("cus/" + t.ID); ok {
@@ -849,11 +850,17 @@ func (a *Adapter) RecordedTotals(ctx context.Context, q destinations.TotalsQuery
 				codeOf[id] = m
 			}
 		}
-	} else if err := a.totalsTargets(ctx, q, &req, tenantOf, codeOf); err != nil {
+	} else if err := a.totalsTargets(ctx, q, &req, tenantOf, codeOf, notes); err != nil {
 		return nil, err
 	}
+	var out []destinations.Total
+	for _, t := range q.Tenants {
+		if n, ok := notes[t.ID]; ok {
+			out = append(out, destinations.Total{Tenant: t.ID, Note: n})
+		}
+	}
 	if len(req.CustomerIDs) == 0 || len(req.BillableMetrics) == 0 {
-		return nil, nil
+		return out, nil
 	}
 	rows, err := a.c.Usage(ctx, req)
 	if err != nil {
@@ -867,7 +874,6 @@ func (a *Adapter) RecordedTotals(ctx context.Context, q destinations.TotalsQuery
 		}
 		sums[[2]string{tenantOf[r.CustomerID], codeOf[r.BillableMetricID]}] += v
 	}
-	var out []destinations.Total
 	for k, v := range sums {
 		if k[0] == "" || k[1] == "" {
 			continue
@@ -885,7 +891,7 @@ func (a *Adapter) RecordedTotals(ctx context.Context, q destinations.TotalsQuery
 
 // totalsTargets finds, read-only, the customers (by ingest alias) and the
 // billable metrics (by event type) a reconciliation compares.
-func (a *Adapter) totalsTargets(ctx context.Context, q destinations.TotalsQuery, req *UsageRequest, tenantOf, codeOf map[string]string) error {
+func (a *Adapter) totalsTargets(ctx context.Context, q destinations.TotalsQuery, req *UsageRequest, tenantOf, codeOf, notes map[string]string) error {
 	shared := map[string]bool{}
 	for _, t := range q.Tenants {
 		cus, err := a.c.FindCustomerByAlias(ctx, t.ID)
@@ -893,13 +899,18 @@ func (a *Adapter) totalsTargets(ctx context.Context, q destinations.TotalsQuery,
 			return fmt.Errorf("find customer %s: %w", t.ID, err)
 		}
 		if cus == nil {
-			continue // no customer holds the alias yet: nothing is attributed
+			// No customer holds the alias yet: Metronome keeps the usage under
+			// it, and counts it for the customer that gets the alias later.
+			notes[t.ID] = fmt.Sprintf("no Metronome customer has the ingest alias %q yet: Metronome keeps the usage and bills it to the customer that gets the alias", t.ID)
+			continue
 		}
 		a.remember(t.ID, cus.ID)
 		if other, dup := tenantOf[cus.ID]; dup || shared[cus.ID] {
 			if dup {
 				log.Printf("[metronome] tenants %s and %s are aliases of one customer %s, which Metronome reports one total for: neither is reconciled", other, t.ID, cus.ID)
+				notes[other] = fmt.Sprintf("an alias of customer %s with other tenants, which Metronome reports one total for: not reconciled per tenant", cus.ID)
 			}
+			notes[t.ID] = fmt.Sprintf("an alias of customer %s with other tenants, which Metronome reports one total for: not reconciled per tenant", cus.ID)
 			shared[cus.ID] = true
 			delete(tenantOf, cus.ID)
 			continue
