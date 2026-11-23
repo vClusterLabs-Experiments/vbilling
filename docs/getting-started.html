@@ -8,266 +8,22 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Roboto+Mono:wght@500&display=swap" rel="stylesheet">
-  <style>
-    *, *::before, *::after {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-    }
-
-    :root {
-      --primary: #FF6600;
-      --primary-dark: #CC5100;
-      --primary-darker: #993D00;
-      --primary-light: #FFF5EB;
-      --primary-light-2: #FFE0CC;
-      --accent: #FF8433;
-      --text-dark: #050B24;
-      --text-gray: #505466;
-      --text-light: #828592;
-      --white: #ffffff;
-      --bg-code: #050B24;
-      --border: #E6E7E9;
-      --shadow-sm: 0 1px 2px rgba(0,0,0,0.05);
-      --shadow-md: 0 4px 6px -1px rgba(0,0,0,0.07), 0 2px 4px -2px rgba(0,0,0,0.05);
-      --shadow-lg: 0 10px 15px -3px rgba(0,0,0,0.08), 0 4px 6px -4px rgba(0,0,0,0.04);
-      --radius: 12px;
-      --radius-lg: 16px;
-      --sidebar-width: 260px;
-    }
-
-    html { scroll-behavior: smooth; scroll-padding-top: 80px; }
-
-    body {
-      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      color: var(--text-dark);
-      line-height: 1.6;
-      background: var(--white);
-      -webkit-font-smoothing: antialiased;
-    }
-
-    /* ── Header ── */
-    .header {
-      position: fixed; top: 0; left: 0; right: 0; z-index: 1000;
-      background: rgba(255,255,255,0.92);
-      backdrop-filter: blur(12px);
-      -webkit-backdrop-filter: blur(12px);
-      border-bottom: 1px solid var(--border);
-    }
-    .header.scrolled { box-shadow: var(--shadow-md); }
-    .header-inner {
-      max-width: 1400px; margin: 0 auto; padding: 0 24px;
-      display: flex; align-items: center; justify-content: space-between; height: 64px;
-    }
-    .header-logo {
-      display: flex; align-items: center; gap: 10px;
-      text-decoration: none; color: var(--text-dark);
-    }
-    .header-logo-icon {
-      width: 32px; height: 32px; border-radius: 8px;
-      background: linear-gradient(135deg, var(--primary-dark), var(--primary));
-      display: flex; align-items: center; justify-content: center;
-      color: var(--white); font-weight: 700; font-size: 0.9rem;
-    }
-    .header-logo-text { font-size: 1.15rem; font-weight: 700; letter-spacing: -0.5px; }
-    .header-logo-text span { color: var(--primary-dark); }
-    .header-nav { display: flex; align-items: center; gap: 20px; }
-    .header-nav a {
-      text-decoration: none; color: var(--text-gray); font-size: 0.88rem;
-      font-weight: 500; transition: color 0.2s;
-    }
-    .header-nav a:hover { color: var(--primary-dark); }
-    .header-nav .gh-link {
-      display: inline-flex; align-items: center; gap: 6px;
-      background: var(--bg-code); color: var(--white); padding: 6px 14px;
-      border-radius: 8px; font-size: 0.82rem; font-weight: 600; transition: opacity 0.2s;
-    }
-    .header-nav .gh-link:hover { opacity: 0.85; color: var(--white); }
-
-    /* ── Layout ── */
-    .docs-layout {
-      display: flex; margin-top: 64px; min-height: calc(100vh - 64px);
-    }
-
-    /* ── Sidebar ── */
-    .sidebar {
-      width: var(--sidebar-width); flex-shrink: 0;
-      border-right: 1px solid var(--border); background: var(--primary-light);
-      padding: 32px 0; position: fixed; top: 64px; bottom: 0;
-      overflow-y: auto;
-    }
-    .sidebar-section { margin-bottom: 28px; }
-    .sidebar-label {
-      padding: 0 24px; font-size: 0.72rem; font-weight: 700;
-      text-transform: uppercase; letter-spacing: 1px; color: var(--primary-darker);
-      margin-bottom: 8px;
-    }
-    .sidebar a {
-      display: block; padding: 7px 24px; text-decoration: none;
-      font-size: 0.88rem; color: var(--text-gray); font-weight: 500;
-      transition: all 0.15s; border-left: 3px solid transparent;
-    }
-    .sidebar a:hover { color: var(--primary-dark); background: var(--primary-light-2); }
-    .sidebar a.active {
-      color: var(--primary-dark); background: var(--primary-light-2);
-      border-left-color: var(--primary); font-weight: 600;
-    }
-    .sidebar-back {
-      display: flex; align-items: center; gap: 6px; margin: 0 24px 24px;
-      padding: 8px 12px; border-radius: 8px; text-decoration: none;
-      font-size: 0.85rem; color: var(--text-light); font-weight: 500;
-      border: 1px solid var(--border); transition: all 0.2s;
-    }
-    .sidebar-back:hover { border-color: var(--primary); color: var(--primary-dark); }
-
-    /* ── Content ── */
-    .content {
-      flex: 1; min-width: 0; margin-left: var(--sidebar-width);
-      padding: 48px 64px 80px; max-width: 900px;
-    }
-    .content h1 {
-      font-size: 2.2rem; font-weight: 800; letter-spacing: -1px;
-      margin-bottom: 12px; color: var(--text-dark);
-    }
-    .content .subtitle {
-      font-size: 1.1rem; color: var(--text-gray); line-height: 1.7;
-      margin-bottom: 40px; max-width: 640px;
-    }
-    .content h2 {
-      font-size: 1.5rem; font-weight: 700; letter-spacing: -0.5px;
-      margin: 48px 0 16px; color: var(--text-dark);
-      padding-bottom: 8px; border-bottom: 2px solid var(--primary-light-2);
-    }
-    .content h3 {
-      font-size: 1.15rem; font-weight: 700; margin: 32px 0 12px;
-      color: var(--text-dark);
-    }
-    .content p {
-      font-size: 0.95rem; color: var(--text-gray); line-height: 1.7;
-      margin-bottom: 16px;
-    }
-    .content ul, .content ol {
-      margin: 0 0 16px 24px; color: var(--text-gray); font-size: 0.95rem;
-    }
-    .content li { margin-bottom: 6px; line-height: 1.6; }
-    .content code {
-      background: var(--primary-light-2); padding: 2px 7px; border-radius: 4px;
-      font-family: 'Roboto Mono', 'SF Mono', 'Fira Code', monospace;
-      font-size: 0.85rem; color: var(--primary-darker); overflow-wrap: anywhere;
-    }
-    .content a { color: var(--primary-dark); text-decoration: none; font-weight: 500; }
-    .content a:hover { text-decoration: underline; }
-
-    /* ── Code Blocks ── */
-    .code-block {
-      background: var(--bg-code); border-radius: var(--radius);
-      padding: 20px 24px; overflow-x: auto; margin-bottom: 20px;
-      position: relative;
-    }
-    .code-block code {
-      color: #e2e8f0; background: none; padding: 0;
-      font-family: 'Roboto Mono', 'SF Mono', 'Fira Code', monospace;
-      font-size: 0.84rem; line-height: 1.7; white-space: pre;
-    }
-    .code-block .comment { color: #64748b; }
-    .code-block .cmd { color: #FF8433; }
-    .code-block .flag { color: #a5b4fc; }
-    .code-block .string { color: #86efac; }
-    .code-block .output { color: #94a3b8; }
-    .code-label {
-      display: inline-block; background: rgba(255,255,255,0.08);
-      color: #94a3b8; font-size: 0.75rem; font-weight: 600;
-      padding: 2px 10px; border-radius: 4px; margin-bottom: 12px;
-      text-transform: uppercase; letter-spacing: 0.5px;
-    }
-    .code-copy {
-      position: absolute; top: 12px; right: 12px;
-      background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.1);
-      border-radius: 6px; padding: 5px 10px; color: #94a3b8;
-      font-size: 0.72rem; cursor: pointer; transition: all 0.2s;
-    }
-    .code-copy:hover { background: rgba(255,255,255,0.15); color: #e2e8f0; }
-
-    /* ── Callouts ── */
-    .callout {
-      padding: 16px 20px; border-radius: var(--radius); margin-bottom: 20px;
-      font-size: 0.9rem; line-height: 1.6; display: flex; gap: 12px;
-    }
-    .callout-icon { flex-shrink: 0; font-size: 1.1rem; margin-top: 1px; }
-    .callout-info {
-      background: #eff6ff; border: 1px solid #bfdbfe; color: #1e40af;
-    }
-    .callout-warn {
-      background: var(--primary-light); border: 1px solid var(--primary-light-2); color: var(--primary-darker);
-    }
-    .callout-success {
-      background: #f0fdf4; border: 1px solid #bbf7d0; color: #166534;
-    }
-
-    /* ── Step markers ── */
-    .step-marker {
-      display: inline-flex; align-items: center; justify-content: center;
-      width: 32px; height: 32px; border-radius: 50%;
-      background: linear-gradient(135deg, var(--primary-dark), var(--primary));
-      color: var(--white); font-weight: 700; font-size: 0.85rem;
-      margin-right: 10px; flex-shrink: 0; vertical-align: middle;
-    }
-
-    /* ── Mobile sidebar toggle ── */
-    .mobile-sidebar-toggle {
-      display: none; position: fixed; bottom: 24px; right: 24px; z-index: 999;
-      width: 48px; height: 48px; border-radius: 50%;
-      background: linear-gradient(135deg, var(--primary-dark), var(--primary));
-      color: var(--white); border: none; font-size: 1.3rem; cursor: pointer;
-      box-shadow: var(--shadow-lg);
-    }
-
-    .config-table-wrap {
-      overflow-x: auto; border-radius: var(--radius); border: 1px solid var(--border);
-      box-shadow: var(--shadow-sm); margin-bottom: 24px;
-    }
-    .config-table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
-    .config-table thead { background: var(--primary-light); }
-    .config-table th {
-      padding: 12px 16px; text-align: left; font-weight: 700;
-      color: var(--primary-darker); font-size: 0.78rem;
-      text-transform: uppercase; letter-spacing: 0.5px;
-      border-bottom: 2px solid var(--primary-light-2);
-    }
-    .config-table td {
-      padding: 10px 16px; border-bottom: 1px solid var(--border);
-      color: var(--text-gray); vertical-align: top;
-    }
-    .config-table tr:last-child td { border-bottom: none; }
-    .config-table tr:hover td { background: var(--primary-light); }
-
-    /* ── Responsive ── */
-    @media (max-width: 900px) {
-      .sidebar {
-        transform: translateX(-100%); transition: transform 0.3s ease;
-        z-index: 900; width: 280px;
-      }
-      .sidebar.open { transform: translateX(0); }
-      .content { margin-left: 0; padding: 32px 24px 80px; }
-      .mobile-sidebar-toggle { display: flex; align-items: center; justify-content: center; }
-      .content h1 { font-size: 1.7rem; }
-      .content h2 { font-size: 1.3rem; }
-    }
-  </style>
+  <link rel="stylesheet" href="docs.css">
 </head>
 <body>
 
   <!-- Header -->
   <header class="header" id="header">
     <div class="header-inner">
-      <a href="index.html" class="header-logo">
-        <svg width="28" height="28" viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0"><path d="M4 7L14 21L24 7" stroke="#FF6600" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        <div class="header-logo-text">v<span>Billing</span> Docs</div>
+      <a href="index.html" class="header-logo" aria-label="vBilling home">
+        <svg role="img" aria-label="vCluster" viewBox="0 0 110 28" fill="none" xmlns="http://www.w3.org/2000/svg"> <g clip-path="url(#vcluster-logo-clip)"> <path fill-rule="evenodd" clip-rule="evenodd" d="M29.0572 1.74222L22.896 12.6176L22.8585 12.6848L19.9943 17.7397L16.477 11.5348L20.5709 4.33138V4.3267C20.6303 4.21888 20.6912 4.11263 20.7538 4.0095C20.7538 4.0095 20.7538 4.0095 20.7538 4.00637L20.7569 4.00168C21.8147 2.26724 23.6914 1.08907 25.8508 1.00469C25.9321 1.00156 26.0149 1 26.0977 1C26.1805 1 26.2633 1 26.3446 1.00469C27.3228 1.04219 28.2431 1.3047 29.0556 1.74378L29.0572 1.74222Z" fill="#FF6600"/> <path fill-rule="evenodd" clip-rule="evenodd" d="M18.2944 2.21569L14.7614 8.42843H6.19387C4.14691 8.42843 2.24528 7.41902 1.0968 5.75489C1.08742 5.74239 1.07961 5.72989 1.07179 5.71895C1.05461 5.69395 1.03742 5.66895 1.02179 5.64395C0.945225 5.52832 0.873354 5.40956 0.804601 5.28924L0.740531 5.17518C0.267075 4.30171 -0.00012207 3.30323 -0.00012207 2.24069C-0.00012207 2.23287 -0.00012207 2.22506 -0.00012207 2.21725H18.2959L18.2944 2.21569Z" fill="#FF6600"/> <path fill-rule="evenodd" clip-rule="evenodd" d="M18.1226 22.1399C18.1226 24.44 16.8601 26.4463 14.9897 27.5026L5.94245 11.5254H13.0084L17.2695 19.0132C17.2726 19.0179 17.2742 19.021 17.2773 19.0257L17.3195 19.0992C17.4726 19.3664 17.6023 19.6429 17.7117 19.9258C17.7179 19.9414 17.7242 19.9586 17.7304 19.9742C17.9836 20.6477 18.1226 21.3789 18.1226 22.1415V22.1399Z" fill="#FF6600"/> <path d="M38.3235 18.1755L36.2813 11.944C36.0234 11.158 35.289 10.6252 34.4624 10.6252H33.1608L36.7766 20.4912H39.8392L43.4894 10.6252H42.1878C41.3596 10.6252 40.6252 11.1565 40.3689 11.944L38.3266 18.1755H38.3235Z" fill="#050B24"/> <path d="M70.5015 15.7895C70.5015 16.3005 70.4124 16.7567 70.2343 17.1599C70.0562 17.563 69.7999 17.8802 69.4686 18.1131C69.1358 18.3443 68.7452 18.4599 68.2936 18.4599C67.6404 18.4599 67.1123 18.2443 66.7092 17.8099C66.306 17.3771 66.1029 16.763 66.1029 15.9677V10.6253H63.609V16.3942C63.609 17.2849 63.7622 18.0443 64.0715 18.674C64.3794 19.3037 64.8216 19.785 65.3982 20.1163C65.9732 20.4491 66.6529 20.6147 67.4373 20.6147C68.0436 20.6147 68.5967 20.4631 69.103 20.16C69.6077 19.8569 70.0234 19.385 70.3499 18.7443C70.4046 18.6365 70.4546 18.524 70.5015 18.4068V19.1537C70.5015 19.5569 70.6234 19.8803 70.8656 20.1241C71.1093 20.3678 71.4328 20.4881 71.8359 20.4881H73.0297V10.6221H70.5015V15.7895Z" fill="#050B24"/> <path d="M81.5503 15.3629C81.1284 15.1488 80.6815 14.98 80.2065 14.855C79.7315 14.73 79.2831 14.6113 78.8627 14.4988C78.4408 14.3863 78.0971 14.2503 77.8299 14.0894C77.5627 13.9284 77.4298 13.7003 77.4298 13.4034C77.4298 13.1065 77.5486 12.8909 77.7861 12.7175C78.0236 12.5456 78.3674 12.4596 78.819 12.4596C79.294 12.4596 79.6643 12.5706 79.9315 12.7893C80.1987 13.0097 80.3862 13.3269 80.4925 13.7425L82.7723 13.1362C82.6426 12.6018 82.4035 12.1362 82.0597 11.7377C81.716 11.3393 81.2769 11.0346 80.7425 10.8205C80.2081 10.6064 79.5909 10.5002 78.8909 10.5002C78.083 10.5002 77.3892 10.6314 76.808 10.8924C76.2267 11.1533 75.7782 11.5096 75.4626 11.9612C75.1485 12.4128 74.9907 12.905 74.9907 13.4394C74.9907 14.0456 75.1235 14.5285 75.3907 14.891C75.6579 15.2535 76.0048 15.5379 76.4329 15.7457C76.8611 15.9535 77.3111 16.1192 77.7861 16.2442C78.2611 16.3692 78.7096 16.4817 79.1315 16.5832C79.5518 16.6848 79.8971 16.8145 80.1643 16.9754C80.4315 17.1364 80.5644 17.3645 80.5644 17.6614C80.5644 17.9583 80.4362 18.1833 80.1815 18.3739C79.9268 18.5646 79.5502 18.6583 79.0502 18.6583C78.6221 18.6583 78.2486 18.5427 77.9283 18.3114C77.608 18.0802 77.3939 17.7677 77.2877 17.377L74.9376 17.9114C75.0907 18.4224 75.3579 18.8849 75.7392 19.3005C76.1189 19.7162 76.5939 20.0396 77.1642 20.2709C77.7346 20.5021 78.3752 20.6178 79.0877 20.6178C79.8831 20.6178 80.5722 20.4865 81.1535 20.2256C81.7347 19.9646 82.1863 19.6115 82.5066 19.1661C82.8269 18.7208 82.9879 18.2317 82.9879 17.6973C82.9879 17.0911 82.8551 16.6051 82.5879 16.2379C82.3207 15.8707 81.9769 15.5785 81.555 15.366L81.5503 15.3629Z" fill="#050B24"/> <path d="M99.2511 17.8818C98.937 18.113 98.5948 18.2943 98.2276 18.4255C97.8588 18.5568 97.4791 18.6209 97.0885 18.6209C96.6369 18.6209 96.2166 18.5459 95.8244 18.3974C95.4322 18.249 95.1025 18.038 94.8353 17.7661C94.5681 17.4927 94.3993 17.1974 94.3274 16.8755C94.3618 16.8755 94.4368 16.8786 94.5493 16.8849C94.6618 16.8911 94.7899 16.8942 94.9321 16.8942C95.0743 16.8942 95.1993 16.9005 95.3056 16.913C95.9822 16.9364 96.6713 16.9036 97.3713 16.8145C98.0713 16.7255 98.7151 16.5598 99.3042 16.3161C99.8917 16.0723 100.364 15.7442 100.72 15.3285C101.076 14.9129 101.254 14.3973 101.254 13.7785C101.254 13.3035 101.143 12.8644 100.925 12.4612C100.704 12.0581 100.396 11.7112 99.998 11.419C99.5995 11.1284 99.1401 10.9034 98.6182 10.7424C98.0963 10.5815 97.5369 10.5018 96.9447 10.5018C96.2431 10.5018 95.579 10.6237 94.9509 10.8659C94.3212 11.1096 93.7634 11.4565 93.2774 11.9081C92.7899 12.3597 92.4102 12.8988 92.1383 13.5285C91.8648 14.1582 91.7289 14.8582 91.7289 15.6301C91.7289 16.402 91.8617 17.0583 92.1289 17.6693C92.3961 18.2802 92.7696 18.8052 93.2508 19.2443C93.7321 19.6834 94.2946 20.0225 94.9431 20.26C95.59 20.4975 96.2931 20.6163 97.0526 20.6163C97.6698 20.6163 98.2635 20.5397 98.8339 20.385C99.4026 20.2319 99.937 19.9897 100.435 19.6647C100.934 19.3381 101.373 18.9256 101.753 18.4271L100.025 17.1271C99.823 17.4005 99.5651 17.6521 99.2511 17.8849V17.8818ZM94.5759 13.8222C94.8134 13.4238 95.1431 13.1019 95.565 12.8519C95.9853 12.6034 96.4697 12.4784 97.0166 12.4784C97.3604 12.4784 97.6666 12.5347 97.9338 12.6472C98.201 12.7597 98.4151 12.9081 98.5745 13.0925C98.7354 13.2769 98.8151 13.4878 98.8151 13.7238C98.8151 14.0082 98.7104 14.2426 98.5042 14.4269C98.2963 14.6113 98.0229 14.7535 97.6854 14.8551C97.3463 14.9567 96.9791 15.0238 96.5822 15.0598C96.1838 15.0957 95.79 15.1129 95.3978 15.1129C95.1603 15.1129 94.9353 15.1067 94.7212 15.0942C94.5071 15.0832 94.329 15.0707 94.1868 15.0582C94.2102 14.6301 94.3415 14.2191 94.579 13.8207L94.5759 13.8222Z" fill="#050B24"/> <path d="M62.4152 19.4881C62.6199 19.9037 62.8652 20.2803 63.1512 20.6162H60.5417C59.1479 20.6162 58.0182 19.4865 58.0182 18.0927V7.93761H60.5292V17.7693C60.5292 18.113 60.8073 18.3911 61.1511 18.3911H62.0089C62.1121 18.7802 62.248 19.1459 62.4168 19.4896L62.4152 19.4881Z" fill="#050B24"/> <path d="M92.0053 20.6069C91.335 19.9943 90.8068 19.2537 90.4365 18.4068C90.4334 18.4005 90.4318 18.3958 90.4303 18.3896H88.8896C88.5302 18.3896 88.238 18.0974 88.238 17.738V12.6737H90.499C90.8553 11.894 91.3412 11.2065 91.9475 10.6268H87.188C87.2536 10.6127 87.3161 10.594 87.377 10.5705C87.452 10.5424 87.5239 10.508 87.5895 10.4674C87.6427 10.4361 87.6911 10.4002 87.7395 10.3596C87.8302 10.283 87.9099 10.1986 87.977 10.1049C88.0255 10.0393 88.0677 9.9705 88.1052 9.89706C88.1177 9.8705 88.1302 9.84394 88.1411 9.81894C88.2052 9.66737 88.238 9.5158 88.238 9.36267V7.93761H85.7442V9.77206C85.7442 9.983 85.6957 10.1565 85.5988 10.2986C85.5754 10.333 85.5504 10.3658 85.5207 10.3955C85.4988 10.4174 85.477 10.4377 85.4535 10.4565C85.3129 10.569 85.1301 10.6268 84.9082 10.6268H84.1597V12.6737H85.691V18.3896C85.691 19.0037 85.941 19.5599 86.3426 19.9631C86.7458 20.3662 87.302 20.6147 87.9161 20.6147H92.0147C92.0147 20.6147 92.0085 20.6084 92.0053 20.6053V20.6069Z" fill="#050B24"/> <path d="M53.8633 16.0191H56.5259C56.4571 16.2926 56.3696 16.5567 56.2665 16.8145C55.9524 17.5911 55.5102 18.263 54.9399 18.8255C54.3695 19.3896 53.7023 19.8287 52.9366 20.1427C52.1772 20.4552 51.3288 20.6131 50.435 20.6146C49.5412 20.6115 48.7146 20.4552 47.9536 20.1427C47.188 19.8287 46.5192 19.3896 45.9504 18.8255C45.3801 18.2614 44.9379 17.5911 44.6238 16.8145C44.3082 16.0363 44.1519 15.1847 44.1519 14.2581C44.1519 13.3315 44.3113 12.4831 44.6316 11.7111C44.952 10.9392 45.3973 10.272 45.9676 9.70794C46.538 9.14386 47.2052 8.7079 47.9708 8.39852C48.7302 8.09226 49.5506 7.93756 50.4334 7.936H50.4537C51.3366 7.93912 52.1569 8.09226 52.9163 8.39852C53.682 8.70634 54.3508 9.14386 54.9195 9.70794C55.4899 10.272 55.9336 10.9392 56.2555 11.7111C56.3649 11.9752 56.4571 12.2502 56.529 12.5315H53.8679C53.8117 12.383 53.7476 12.2393 53.6742 12.1018C53.3539 11.4971 52.9116 11.0236 52.3476 10.6861C51.7991 10.3564 51.1741 10.1877 50.4725 10.1798H50.4147C49.7146 10.1892 49.088 10.358 48.5396 10.6877C47.9755 11.0267 47.5333 11.4986 47.213 12.1034C46.8927 12.7096 46.7317 13.4268 46.7317 14.2581C46.7317 15.0894 46.8895 15.8129 47.2036 16.4301C47.5177 17.0473 47.9536 17.5254 48.513 17.863C49.0693 18.202 49.71 18.3708 50.4319 18.3708C51.1553 18.3708 51.8163 18.202 52.3726 17.863C52.9304 17.5239 53.3664 17.0473 53.682 16.4301C53.7492 16.2973 53.8101 16.1598 53.8617 16.0176L53.8633 16.0191Z" fill="#050B24"/> <path d="M110 10.6533L108.95 12.8956C108.664 12.7643 108.341 12.7002 107.98 12.7002C107.522 12.7002 107.125 12.8174 106.787 13.0518C106.45 13.2862 106.19 13.6081 106.011 14.0175C105.83 14.4269 105.739 14.8894 105.739 15.4066V20.6396H104.905C103.948 20.6396 103.172 19.8646 103.172 18.9099V10.6439H104.383C104.792 10.6439 105.12 10.7674 105.367 11.0142C105.614 11.2611 105.737 11.5893 105.737 11.9971V12.7534C105.784 12.6346 105.836 12.5206 105.89 12.4112C106.222 11.7611 106.644 11.283 107.156 10.9767C107.669 10.6705 108.231 10.5173 108.845 10.5173C109.258 10.5173 109.642 10.5627 109.998 10.6533H110Z" fill="#050B24"/> </g> <defs> <clipPath id="vcluster-logo-clip"> <rect width="110" height="28" fill="white"/> </clipPath> </defs> </svg>
+        <span class="header-product">vBilling</span>
       </a>
-      <nav class="header-nav">
+      <nav class="header-nav" aria-label="Site">
         <a href="index.html">Home</a>
-        <a href="getting-started.html">Guide</a>
-        <a href="https://github.com/vClusterLabs-Experiments/vbilling" class="gh-link" target="_blank">GitHub</a>
+        <a href="https://github.com/vClusterLabs-Experiments/vbilling/releases" target="_blank" rel="noopener">Releases <svg class="external-icon" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M21 13v10h-21v-19h12v2h-10v15h17v-8h2zm3-12h-10.988l4.035 4-6.977 7.07 2.828 2.828 6.977-7.07 4.125 4.172v-11z"/></svg></a>
+        <a href="https://slack.loft.sh/" class="icon-link" target="_blank" rel="noopener" aria-label="Community Slack"><svg width="24" height="24" aria-hidden="true" viewBox="0 0 28 28" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><g clip-path="url(#nvi3-clip0_3525_879)"><path fill-rule="evenodd" clip-rule="evenodd" d="M10.221 0.0688477C9.85459 0.0691879 9.49179 0.141711 9.15337 0.282276C8.81495 0.422841 8.50754 0.628694 8.24868 0.888079C7.98983 1.14746 7.7846 1.4553 7.64473 1.79401C7.50486 2.13271 7.43307 2.49566 7.43348 2.86211C7.43314 3.22851 7.50497 3.5914 7.64488 3.93005C7.78478 4.26869 7.99002 4.57647 8.24887 4.8358C8.50771 5.09513 8.81511 5.30094 9.15349 5.44147C9.49188 5.582 9.85463 5.65451 10.221 5.65485H13.0086V2.86211C13.009 2.49566 12.9372 2.13271 12.7973 1.79401C12.6575 1.4553 12.4523 1.14746 12.1934 0.888079C11.9345 0.628694 11.6271 0.422841 11.2887 0.282276C10.9503 0.141711 10.5875 0.0691879 10.221 0.0688477ZM10.221 7.51737H2.78756C2.42115 7.51771 2.0584 7.59021 1.72001 7.73075C1.38162 7.87128 1.07423 8.07708 0.815384 8.33641C0.556535 8.59574 0.3513 8.90352 0.211397 9.24217C0.0714932 9.58081 -0.000338886 9.9437 1.736e-06 10.3101C-0.000407028 10.6766 0.0713748 11.0395 0.211248 11.3782C0.351121 11.7169 0.556345 12.0247 0.8152 12.2841C1.07406 12.5435 1.38147 12.7494 1.71989 12.8899C2.05831 13.0305 2.42111 13.103 2.78756 13.1034H10.221C10.5875 13.103 10.9503 13.0305 11.2887 12.8899C11.6271 12.7494 11.9345 12.5435 12.1934 12.2841C12.4523 12.0247 12.6575 11.7169 12.7973 11.3782C12.9372 11.0395 13.009 10.6766 13.0086 10.3101C13.0089 9.9437 12.9371 9.58081 12.7972 9.24217C12.6573 8.90352 12.4521 8.59574 12.1932 8.33641C11.9344 8.07708 11.627 7.87128 11.2886 7.73075C10.9502 7.59021 10.5874 7.51771 10.221 7.51737Z" fill="currentColor"></path><path fill-rule="evenodd" clip-rule="evenodd" d="M27.8758 10.3101C27.8761 9.9437 27.8043 9.58081 27.6644 9.24217C27.5245 8.90352 27.3192 8.59574 27.0604 8.33641C26.8016 8.07708 26.4942 7.87128 26.1558 7.73075C25.8174 7.59021 25.4546 7.51771 25.0882 7.51737C24.7218 7.51771 24.3591 7.59021 24.0207 7.73075C23.6823 7.87128 23.3749 8.07708 23.1161 8.33641C22.8572 8.59574 22.652 8.90352 22.5121 9.24217C22.3722 9.58081 22.3003 9.9437 22.3007 10.3101V13.1034H25.0882C25.4547 13.103 25.8175 13.0305 26.1559 12.8899C26.4943 12.7494 26.8017 12.5435 27.0606 12.2841C27.3194 12.0247 27.5247 11.7169 27.6645 11.3782C27.8044 11.0395 27.8762 10.6766 27.8758 10.3101ZM20.4423 10.3101V2.86211C20.4427 2.49566 20.3709 2.13271 20.2311 1.79401C20.0912 1.4553 19.886 1.14746 19.6271 0.888079C19.3682 0.628694 19.0608 0.422841 18.7224 0.282276C18.384 0.141711 18.0212 0.0691879 17.6547 0.0688477C17.2883 0.0691879 16.9255 0.141711 16.5871 0.282276C16.2487 0.422841 15.9412 0.628694 15.6824 0.888079C15.4235 1.14746 15.2183 1.4553 15.0784 1.79401C14.9386 2.13271 14.8668 2.49566 14.8672 2.86211V10.3101C14.8668 10.6766 14.9386 11.0395 15.0784 11.3782C15.2183 11.7169 15.4235 12.0247 15.6824 12.2841C15.9412 12.5435 16.2487 12.7494 16.5871 12.8899C16.9255 13.0305 17.2883 13.103 17.6547 13.1034C18.0212 13.103 18.384 13.0305 18.7224 12.8899C19.0608 12.7494 19.3682 12.5435 19.6271 12.2841C19.886 12.0247 20.0912 11.7169 20.2311 11.3782C20.3709 11.0395 20.4427 10.6766 20.4423 10.3101Z" fill="currentColor"></path><path fill-rule="evenodd" clip-rule="evenodd" d="M17.6547 27.9999C18.0212 27.9995 18.384 27.927 18.7224 27.7864C19.0608 27.6459 19.3682 27.44 19.6271 27.1806C19.886 26.9212 20.0912 26.6134 20.2311 26.2747C20.3709 25.936 20.4427 25.573 20.4423 25.2066C20.4426 24.8402 20.3708 24.4773 20.2309 24.1386C20.091 23.8 19.8858 23.4922 19.6269 23.2329C19.3681 22.9736 19.0607 22.7678 18.7223 22.6272C18.3839 22.4867 18.0212 22.4142 17.6547 22.4139H14.8672V25.2066C14.8668 25.573 14.9386 25.936 15.0784 26.2747C15.2183 26.6134 15.4235 26.9212 15.6824 27.1806C15.9412 27.44 16.2487 27.6459 16.5871 27.7864C16.9255 27.927 17.2883 27.9995 17.6547 27.9999ZM17.6547 20.5513H25.0882C25.4546 20.551 25.8174 20.4785 26.1558 20.338C26.4942 20.1974 26.8016 19.9916 27.0604 19.7323C27.3192 19.473 27.5245 19.1652 27.6644 18.8265C27.8043 18.4879 27.8761 18.125 27.8758 17.7586C27.8762 17.3921 27.8044 17.0292 27.6645 16.6905C27.5247 16.3518 27.3194 16.0439 27.0606 15.7846C26.8017 15.5252 26.4943 15.3193 26.1559 15.1788C25.8175 15.0382 25.4547 14.9657 25.0882 14.9653H17.6547C17.2883 14.9657 16.9255 15.0382 16.5871 15.1788C16.2487 15.3193 15.9412 15.5252 15.6824 15.7846C15.4235 16.0439 15.2183 16.3518 15.0784 16.6905C14.9386 17.0292 14.8668 17.3921 14.8672 17.7586C14.8668 18.125 14.9387 18.4879 15.0786 18.8265C15.2185 19.1652 15.4237 19.473 15.6826 19.7323C15.9414 19.9916 16.2488 20.1974 16.5872 20.338C16.9256 20.4785 17.2883 20.551 17.6547 20.5513Z" fill="currentColor"></path><path fill-rule="evenodd" clip-rule="evenodd" d="M2.36262e-06 17.7586C-0.00033826 18.125 0.0714938 18.4879 0.211397 18.8265C0.351301 19.1652 0.556536 19.473 0.815384 19.7323C1.07423 19.9916 1.38163 20.1974 1.72001 20.338C2.0584 20.4785 2.42115 20.551 2.78756 20.5513C3.15397 20.551 3.51672 20.4785 3.8551 20.338C4.19349 20.1974 4.50088 19.9916 4.75973 19.7323C5.01858 19.473 5.22381 19.1652 5.36372 18.8265C5.50362 18.4879 5.57545 18.125 5.57511 17.7586V14.9653H2.78756C2.42106 14.9657 2.05823 15.0382 1.71977 15.1788C1.38132 15.3194 1.07388 15.5253 0.815017 15.7847C0.556155 16.0442 0.350942 16.3521 0.211099 16.6909C0.0712569 17.0296 -0.000474559 17.3921 2.36262e-06 17.7586ZM7.43348 17.7586V25.2066C7.43308 25.573 7.50486 25.936 7.64473 26.2747C7.7846 26.6134 7.98983 26.9212 8.24868 27.1806C8.50754 27.44 8.81495 27.6459 9.15337 27.7864C9.49179 27.927 9.85459 27.9995 10.221 27.9999C10.5875 27.9995 10.9503 27.927 11.2887 27.7864C11.6271 27.6459 11.9345 27.44 12.1934 27.1806C12.4523 26.9212 12.6575 26.6134 12.7973 26.2747C12.9372 25.936 13.009 25.573 13.0086 25.2066V17.7591C13.009 17.3927 12.9372 17.0297 12.7973 16.691C12.6575 16.3523 12.4523 16.0445 12.1934 15.7851C11.9345 15.5257 11.6271 15.3198 11.2887 15.1793C10.9503 15.0387 10.5875 14.9662 10.221 14.9659C9.85459 14.9662 9.49179 15.0387 9.15337 15.1793C8.81495 15.3198 8.50754 15.5257 8.24868 15.7851C7.98983 16.0445 7.7846 16.3523 7.64473 16.691C7.50486 17.0297 7.43308 17.3921 7.43348 17.7586Z" fill="currentColor"></path></g><defs><clipPath id="nvi3-clip0_3525_879"><rect width="28" height="28" fill="currentColor"></rect></clipPath></defs></svg></a>
+        <a href="https://github.com/vClusterLabs-Experiments/vbilling" class="icon-link" target="_blank" rel="noopener" aria-label="vBilling on GitHub"><svg width="24" height="24" aria-hidden="true" viewBox="0 0 51 51" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><path d="M25.5888 3.13232C13.4743 3.13232 3.66211 12.9445 3.66211 25.059C3.66211 34.7616 9.93862 42.9566 18.6545 45.8619C19.7508 46.0538 20.1619 45.396 20.1619 44.8204C20.1619 44.2997 20.1345 42.5729 20.1345 40.7366C14.6254 41.7507 13.2002 39.3936 12.7617 38.1602C12.515 37.5298 11.4461 35.5838 10.5142 35.063C9.74676 34.6519 8.65043 33.6378 10.4868 33.6104C12.2135 33.583 13.4469 35.2001 13.858 35.8579C15.8314 39.1743 18.9834 38.2424 20.2442 37.6668C20.436 36.2416 21.0116 35.2823 21.642 34.7341C16.7633 34.186 11.6653 32.2948 11.6653 23.9079C11.6653 21.5233 12.515 19.5499 13.9128 18.0151C13.6936 17.4669 12.9261 15.2194 14.1321 12.2045C14.1321 12.2045 15.9685 11.6289 20.1619 14.452C21.9161 13.9586 23.7798 13.7119 25.6436 13.7119C27.5074 13.7119 29.3711 13.9586 31.1253 14.452C35.3187 11.6015 37.1551 12.2045 37.1551 12.2045C38.3611 15.2194 37.5936 17.4669 37.3744 18.0151C38.7722 19.5499 39.6219 21.4959 39.6219 23.9079C39.6219 32.3222 34.4965 34.186 29.6178 34.7341C30.4126 35.4194 31.0979 36.735 31.0979 38.7906C31.0979 41.7233 31.0704 44.0804 31.0704 44.8204C31.0704 45.396 31.4816 46.0812 32.5779 45.8619C36.9308 44.3925 40.7132 41.5949 43.3928 37.8631C46.0724 34.1313 47.5143 29.6532 47.5155 25.059C47.5155 12.9445 37.7033 3.13232 25.5888 3.13232Z" fill="currentColor"></path></svg></a>
       </nav>
     </div>
   </header>
@@ -277,7 +33,11 @@
 
     <!-- Sidebar -->
     <nav class="sidebar" id="sidebar">
-      <a href="index.html" class="sidebar-back">&#8592; Back to main site</a>
+      <div class="sidebar-switch">
+        <a href="index.html" aria-label="vBilling home"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M10 19v-5h4v5c0 .55.45 1 1 1h3c.55 0 1-.45 1-1v-7h1.7c.46 0 .68-.57.33-.87L12.67 3.6c-.38-.34-.96-.34-1.34 0l-8.36 7.53c-.34.3-.13.87.33.87H5v7c0 .55.45 1 1 1h3c.55 0 1-.45 1-1z"/></svg></a>
+        <a href="https://www.vcluster.com/docs" target="_blank" rel="noopener">vCluster Docs</a>
+        <span class="sidebar-switch-active">vBilling</span>
+      </div>
       <div class="sidebar-section">
         <div class="sidebar-label">Documentation</div>
         <a href="getting-started.html" class="active">Getting Started</a>
@@ -480,24 +240,6 @@ API listening on :8080
 
   <button class="mobile-sidebar-toggle" id="mobileSidebarToggle" aria-label="Toggle sidebar">&#9776;</button>
 
-  <script>
-    // Header scroll shadow
-    const header = document.getElementById('header');
-    window.addEventListener('scroll', () => {
-      header.classList.toggle('scrolled', window.scrollY > 10);
-    });
-
-    // Mobile sidebar toggle
-    const sidebar = document.getElementById('sidebar');
-    const toggle = document.getElementById('mobileSidebarToggle');
-    toggle.addEventListener('click', () => {
-      sidebar.classList.toggle('open');
-    });
-    document.addEventListener('click', (e) => {
-      if (!sidebar.contains(e.target) && !toggle.contains(e.target)) {
-        sidebar.classList.remove('open');
-      }
-    });
-  </script>
+  <script src="docs.js"></script>
 </body>
 </html>
