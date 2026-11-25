@@ -351,7 +351,7 @@
         </div>
       </div>
       <ol>
-        <li><strong>Windows.</strong> Every <code>billing.collectionInterval</code> (60 seconds by default), vBilling measures the window that just closed. Each quantity is the overlap of a resource's lifetime with the window, to the second.</li>
+        <li><strong>Windows.</strong> Every 60 seconds vBilling measures the window that just closed. The window length is fixed. Each quantity is the overlap of a resource's lifetime with the window, to the second.</li>
         <li><strong>Ledger.</strong> The window's events are committed to an append-only, hash-chained ledger in one write. An event's ID is derived from what it measures, so measuring the same window twice produces the same IDs, and billing platforms drop the repeat.</li>
         <li><strong>Delivery.</strong> Each billing platform reads the ledger from its own cursor. An outage of one platform holds up nothing else, and nothing is lost while it is down.</li>
         <li><strong>Checks.</strong> <code>GET /api/v1/reconcile</code> compares the ledger with what each platform recorded, cross-checks compare two sources of the same usage (gateway tokens against the engine's own counter), and <code>GET /api/v1/sources</code> reports any source that is failing.</li>
