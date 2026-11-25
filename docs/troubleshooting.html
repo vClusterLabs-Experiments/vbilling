@@ -360,10 +360,12 @@
 <span class="comment"># vBilling checks these labels in order:</span>
 <span class="comment"># 1. nvidia.com/gpu.product         (NVIDIA GPU Operator)</span>
 <span class="comment"># 2. nvidia.com/gpu.machine          (alternative)</span>
-<span class="comment"># 3. accelerator                     (GKE generic)</span>
+<span class="comment"># 3. amd.com/gpu.product-name        (AMD GPU Operator)</span>
 <span class="comment"># 4. cloud.google.com/gke-accelerator (GKE specific)</span>
 <span class="comment"># 5. k8s.amazonaws.com/accelerator   (EKS)</span>
-<span class="comment"># 6. node.kubernetes.io/instance-type (fallback)</span></code></div>
+<span class="comment"># 6. accelerator                     (generic)</span>
+<span class="comment"># The first label present wins. The instance type is not a fallback:</span>
+<span class="comment"># a node with none of these labels has the GPU type "unknown".</span></code></div>
 
           <h4><span class="fix-label">Fix</span> Install the NVIDIA GPU Operator</h4>
           <p>The easiest way to get GPU labels is to install the NVIDIA GPU Operator, which automatically labels nodes with <code>nvidia.com/gpu.product</code>:</p>
@@ -463,7 +465,7 @@ vcluster.loft.sh/cluster=<span class="string">team-gpu</span>
           <h4><span class="fix-label">Fix</span> Turn on enforcement inside the cluster</h4>
           <div class="code-block"><code><span class="cmd">helm</span> upgrade vbilling deploy/helm/vbilling <span class="flag">-n</span> vbilling-system <span class="flag">--reuse-values</span> \
   <span class="flag">--set</span> enforcement.mode=enforce <span class="flag">--set</span> enforcement.inCluster=true</code></div>
-          <p>vBilling then installs a ValidatingAdmissionPolicy and binding named <code>vbilling-suspended</code> inside each of the tenant's clusters, through the cluster's own API. It needs <code>tenantAPI.enabled=true</code> (the default) and the cluster's <code>vbilling-kubeconfig</code> Secret.</p>
+          <p>vBilling then installs a ValidatingAdmissionPolicy and binding named <code>vbilling-suspended</code> inside each of the tenant's clusters, through the cluster's own API. It needs <code>enforcement.inCluster=true</code> and write access for those two objects inside the cluster: the extra rules for the <code>vbilling-reader</code> role in <a href="private-nodes.html#enforcement">Billing-state enforcement inside the cluster</a>, reached through the cluster's <code>vbilling-kubeconfig</code> Secret or, in Platform mode, through the role the template's access rule binds. Nothing grants them automatically: a cluster created from a template without those rules is metered but not enforced inside. There is no <code>tenantAPI.enabled</code> value any more; clusters with their own nodes are always read through their API.</p>
 
           <h4><span class="fix-label">Fix</span> Let the exported service account manage the policy</h4>
           <p>The read-only service account vCluster exports for vBilling cannot write admission policies. Grant it that with the ClusterRole and binding in <a href="private-nodes.html#enforcement">Billing-state enforcement inside the cluster</a>. Until then, the state change reports an error like:</p>
