@@ -1,0 +1,26 @@
+{
+  "segments": [
+    {
+      "first": 10,
+      "last": 12,
+      "first_at": "2026-10-05T10:04:00Z",
+      "last_at": "2026-10-05T10:04:00Z",
+      "last_hash": "fa3956552a2f34b8b81a90b21e0ec50cadabb29415b390902615656df150a4d7",
+      "size": 1227,
+      "name": "seg-00000000000000000010.log"
+    },
+    {
+      "first": 13,
+      "last": 15,
+      "first_at": "2026-10-05T10:05:00Z",
+      "last_at": "2026-10-05T10:05:00Z",
+      "last_hash": "47a2c966afe3e77557cefb5cc9b207b56ea072a7d00bc6ad835714ed44d3d08b",
+      "size": 1227,
+      "name": "seg-00000000000000000013.log"
+    }
+  ],
+  "watermarks": {
+    "collector": "2026-10-05T10:06:00Z"
+  },
+  "anchor": "e0b7ef2af80868a8f7a574c8b8bc08f7499f355fe627bff755da1e5297f109f8"
+}

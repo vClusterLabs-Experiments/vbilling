@@ -23,7 +23,7 @@ func (s *Spool) ScanAllSeq(from, to time.Time, fn func(ev *usage.Event, seq uint
 	}
 	archiveMu.Lock() // no segment moves from the ledger to the archive meanwhile
 	defer archiveMu.Unlock()
-	idx, err := readArchiveIndex(s.opts.ArchiveDir)
+	idx, err := cachedArchiveIndex(s.opts.ArchiveDir)
 	if err != nil {
 		return err
 	}
@@ -84,7 +84,7 @@ func (s *Spool) ScanAllSeq(from, to time.Time, fn func(ev *usage.Event, seq uint
 			}
 		}
 		if next != e.Last+1 {
-			return fmt.Errorf("%s ends at seq %d, %s says %d", e.File(), next-1, ArchiveIndexFile, e.Last)
+			return fmt.Errorf("%s ends at seq %d, %s says %d", e.File(), next-1, e.source(), e.Last)
 		}
 	}
 	return retainedScan()

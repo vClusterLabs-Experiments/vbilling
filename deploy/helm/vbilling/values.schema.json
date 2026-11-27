@@ -269,8 +269,25 @@
             },
             "mountPath": {"type": "string"},
             "mirror": {
-              "description": "LEDGER_MIRROR: the live copy of the data volume kept on the archive volume. auto keeps it except on a bucket mounted through FUSE. A bare on or off in YAML is a boolean and means the same.",
+              "description": "LEDGER_MIRROR: the live copy of the data volume, kept on persistence.mirror's volume or else on the archive volume. auto keeps it except where its directory is a bucket mounted through FUSE. A bare on or off in YAML is a boolean and means the same.",
               "enum": ["auto", "on", "off", true, false]
+            }
+          }
+        },
+        "mirror": {
+          "description": "A volume of the ledger mirror's own (LEDGER_MIRROR_DIR), mounted at /var/lib/vbilling-mirror: the way to keep a mirror when the archive is a bucket.",
+          "type": "object",
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "size": {"type": ["string", "integer"]},
+            "storageClass": {
+              "description": "Storage class of the mirror volume: another failure domain than the data volume's, such as a regional disk or a file share.",
+              "type": "string"
+            },
+            "accessModes": {
+              "type": "array",
+              "minItems": 1,
+              "items": {"enum": ["ReadWriteOnce", "ReadWriteOncePod", "ReadWriteMany"]}
             }
           }
         }

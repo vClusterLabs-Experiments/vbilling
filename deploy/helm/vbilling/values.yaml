@@ -410,18 +410,21 @@ persistence:
   size: 5Gi
   storageClass: "" # empty: the cluster's default class. Never a node-local one in production
   # Long-term archive for invoice disputes (ARCHIVE_DIR). Before compaction
-  # deletes a ledger segment older than 7 days, vBilling gzips it and records
-  # it in archive.jsonl (about 86 bytes per usage event). Without this
-  # volume there is no archive: an archive inside the ledger volume would grow
-  # until it stopped metering.
+  # deletes a ledger segment older than 7 days, vBilling gzips it into the
+  # archive (about 86 bytes per usage event) with a small index file of its
+  # own. Without this volume there is no archive: an archive inside the ledger
+  # volume would grow until it stopped metering.
   # vBilling never deletes from it: keep it as long as invoices can be disputed,
   # 13 months or more. `vbilling ledger verify` proves it unaltered and
   # `vbilling ledger export` reads usage back (docs: Retention and disputes).
   #
   # A bucket mounted through a CSI driver is the expected way to reach object
   # storage, e.g. Cloud Storage FUSE (GCS) or Mountpoint for Amazon S3: bind a
-  # PersistentVolumeClaim to the bucket and set existingClaim. The mount must
-  # let the pod user (65532) create files, rename them and append to them.
+  # PersistentVolumeClaim to the bucket and set existingClaim. vBilling writes
+  # every archive file once, under its final name, and never renames, appends
+  # to or overwrites one, so the mount only has to let the pod user (65532)
+  # create files and directories. Deleting old files (retention) needs
+  # Mountpoint's allow-delete. Mount options: docs, Retention and disputes.
   # vBilling writes to <mountPath>/<pod name>.
   #
   # Without existingClaim, the chart adds a volumeClaimTemplate. Kubernetes
@@ -429,28 +432,46 @@ persistence:
   # `kubectl delete statefulset <name> --cascade=orphan` (pods, volumes and
   # data stay) before the upgrade that enables it.
   #
-  # The ledger mirror (LEDGER_MIRROR) lives on the same volume, in
-  # <mountPath>/<pod name>/mirror: a live copy of everything on the data
+  # The ledger mirror (LEDGER_MIRROR) is a live copy of everything on the data
   # volume (both ledgers, cursors, held events, counter baselines, billing
   # states), a second or two behind. When the data volume is lost, vBilling
   # restores itself from it at the next start and continues the same ledger;
-  # `vbilling ledger restore` does the same by hand.
-  #   auto  kept, except where the archive is a bucket mounted through FUSE:
-  #         the mirror appends to its files after every window, and a bucket
-  #         uploads the whole object again for that
+  # `vbilling ledger restore` does the same by hand. It lives on a volume of
+  # its own with persistence.mirror (below), otherwise on this volume, in
+  # <mountPath>/<pod name>/mirror.
+  #   auto  kept, except where the mirror's directory is a bucket mounted
+  #         through FUSE: the mirror appends to its files after every window,
+  #         and a bucket uploads the whole object again for that, or refuses
   #   on    kept on any filesystem
   #   off   not kept: losing the data volume then loses every record that is
   #         not archived or delivered yet
-  # Size the volume for the archive plus a copy of the data volume. The mirror
-  # leaves a tenth of the volume to the archive and stops copying before that.
-  # It holds the API and ingest tokens: protect this volume like the data volume.
+  # With the mirror on this volume, size it for the archive plus a copy of the
+  # data volume. The mirror leaves a tenth of the volume to the archive and
+  # stops copying before that. It holds the API and ingest tokens: protect the
+  # mirror's volume like the data volume.
   archive:
     enabled: false
     existingClaim: "" # PVC to mount, e.g. one bound to a bucket by a CSI driver
     size: 20Gi # volumeClaimTemplate size when existingClaim is empty
     storageClass: "" # volumeClaimTemplate class: not the data volume's class, see above
     mountPath: /var/lib/vbilling-archive
-    mirror: auto # auto | on | off, see above
+    mirror: auto # LEDGER_MIRROR: auto | on | off, see above; also for persistence.mirror
+  # The ledger mirror on a volume of its own (LEDGER_MIRROR_DIR): the way to
+  # keep a mirror when the archive is a bucket, which holds no mirror. The
+  # chart adds a PersistentVolumeClaim per pod, mounts it at
+  # /var/lib/vbilling-mirror and keeps the mirror in
+  # /var/lib/vbilling-mirror/<pod name>. Put it in another failure domain than
+  # the data volume: a regional disk, or a file share such as Filestore, EFS or
+  # Azure Files. Size it for a copy of the data volume: the mirror leaves a
+  # tenth of it free. A mirror kept earlier in <archive>/mirror is no longer
+  # updated: vBilling names it in its log and never restores it by itself.
+  # Like the archive's, this volumeClaimTemplate cannot be added to an existing
+  # StatefulSet: `kubectl delete statefulset <name> --cascade=orphan` first.
+  mirror:
+    enabled: false
+    size: 10Gi
+    storageClass: "" # a class in another failure domain than persistence.storageClass
+    accessModes: [ReadWriteOnce] # ReadWriteMany for a file share that offers only that
 
 # Configuration check. Before every install and upgrade, a Job runs
 # `vbilling check-config` with the new values: the same settings and files the

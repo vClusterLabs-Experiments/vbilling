@@ -1,7 +1,6 @@
 package spool
 
 import (
-	"bufio"
 	"bytes"
 	"compress/gzip"
 	"crypto/sha256"
@@ -13,6 +12,8 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -21,19 +22,61 @@ import (
 // Long-term archive.
 //
 // Retention bounds how long consumed segments stay on the ledger volume. With
-// Options.ArchiveDir set, Compact first writes each segment it is about to
-// delete to <ArchiveDir>/seg-<first>.log.gz, a gzip of the segment's exact
-// bytes, and appends one line describing it to <ArchiveDir>/archive.jsonl.
-// Only then is the segment deleted. A segment that fails to archive stays on
-// the volume and is retried by the next compaction.
+// Options.ArchiveDir set, Compact first archives each segment it is about to
+// delete, and deletes it only once its archived copy and its index entry are
+// durable. A segment that fails to archive stays on the volume and is retried
+// by the next compaction.
+//
+// The archive is written once. Every file in it is created under its final
+// name, written from start to end, fsynced and closed, and never renamed,
+// appended to or overwritten. That is all a bucket mounted through FUSE
+// offers (Mountpoint for Amazon S3 refuses appends, and renames on general
+// purpose buckets; Cloud Storage FUSE uploads the whole object again for
+// either), and no crash can tear a file that is in the archive already:
+//
+//	<ArchiveDir>/seg-<first>.log.gz      a gzip of the segment's exact bytes
+//	<ArchiveDir>/index/seg-<first>.json  its index entry (ArchiveEntry)
+//
+// The index entry is written after the data file is durable: it is what
+// makes the data file count. A data file without an entry, or an index file
+// that is not a valid entry (a crash in the middle of writing either), is
+// ignored, and the segment is written again under the next name no file has:
+// seg-<first>-2.log.gz and index/seg-<first>-2.json, and so on. The index is
+// read by listing index/. vBilling never deletes a file it finished writing.
+// Retention, which is up to the operator, deletes whole files, the oldest
+// segments first: a segment's index entry, then its data file.
+//
+// Archives written before v0.3.3 have one index, archive.jsonl, with a line
+// per segment and data files named seg-<first>.log.gz. They are read with the
+// entries in index/; nothing is written to archive.jsonl any more.
 //
 // Archived lines keep their hashes and their links to the record before them,
 // so VerifyChain (chain.go) checks the archive and the live ledger as one
 // chain, offline, long after the ledger itself has moved on, and ScanLedger
 // reads the usage events behind an invoice back from both.
 
-// ArchiveIndexFile is the append-only index of archived segments.
+// ArchiveIndexDir is the directory in an archive directory that holds one
+// index entry file per archived segment.
+const ArchiveIndexDir = "index"
+
+// ArchiveIndexFile is the index of archives written before v0.3.3: one line
+// per archived segment. It is read, never written.
 const ArchiveIndexFile = "archive.jsonl"
+
+const (
+	// archiveDataExt and archiveIndexExt end the names of a segment's data
+	// file and index entry file.
+	archiveDataExt  = ".log.gz"
+	archiveIndexExt = ".json"
+	// maxArchiveCopies bounds the names one segment's files can take: every
+	// copy a crash left unfinished keeps its name.
+	maxArchiveCopies = 1000
+	// maxIndexFileBytes bounds an index file; an entry is a few hundred bytes.
+	maxIndexFileBytes = 64 << 10
+	// indexReaders is how many index files a read opens at once: on a bucket
+	// every file is a request.
+	indexReaders = 16
+)
 
 // archiveLevel trades compaction CPU for archive size (BenchmarkArchiveSegment).
 const archiveLevel = gzip.BestCompression
@@ -41,9 +84,9 @@ const archiveLevel = gzip.BestCompression
 // ErrNoArchive is returned by archive operations when ArchiveDir is not set.
 var ErrNoArchive = errors.New("no archive directory configured (ARCHIVE_DIR)")
 
-// archiveMu serializes compactions that archive with archive verifications in
-// this process, so a verification never sees a segment halfway between the
-// live ledger and the archive.
+// archiveMu serializes compactions that archive with archive verifications
+// and reads in this process, so a verification never sees a segment halfway
+// between the live ledger and the archive. It also guards indexCaches.
 var archiveMu sync.Mutex
 
 // EnsureArchiveDir creates the archive directory, parents included, and does
@@ -63,7 +106,8 @@ func EnsureArchiveDir(dir string) error {
 	return os.MkdirAll(dir, 0o750)
 }
 
-// ArchiveEntry is one line of archive.jsonl: one archived segment.
+// ArchiveEntry describes one archived segment: the content of its file in
+// index/, or a line of archive.jsonl.
 type ArchiveEntry struct {
 	Name       string    `json:"name"`        // segment file name, seg-<first>.log
 	First      uint64    `json:"first"`       // first sequence number
@@ -75,15 +119,90 @@ type ArchiveEntry struct {
 	GzSHA256   string    `json:"gz_sha256"`   // sha256 of the .gz file
 	GzBytes    int64     `json:"gz_bytes"`    // size of the .gz file
 	ArchivedAt time.Time `json:"archived_at"` // when compaction archived the segment
+	// GzFile is the data file: seg-<first>.log.gz, or seg-<first>-<n>.log.gz
+	// when a copy a crash left had taken the name. Lines of archive.jsonl
+	// have none: their data file is <name>.gz.
+	GzFile string `json:"file,omitempty"`
+
+	from string // where the entry was read, for messages
 }
 
-// File is the archived segment's file name in the archive directory.
-func (e ArchiveEntry) File() string { return e.Name + ".gz" }
+// File is the archived segment's data file name in the archive directory.
+func (e ArchiveEntry) File() string {
+	if e.GzFile != "" {
+		return e.GzFile
+	}
+	return e.Name + ".gz"
+}
 
-// ReadArchive reads archive.jsonl in dir and returns its entries in sequence
-// order. Lines that are not valid entries, such as one torn by a crash before
-// it was fsynced, are skipped and described in skipped. A directory without
-// an index is an empty archive. Two different entries for one segment are an
+// source names where the entry was read: index/<file>, or a line of
+// archive.jsonl.
+func (e ArchiveEntry) source() string {
+	if e.from != "" {
+		return e.from
+	}
+	return ArchiveIndexFile
+}
+
+// archiveCopyName is the name of copy n (from 1) of a segment's data file or
+// index entry: seg-<first><ext>, then seg-<first>-<n><ext>.
+func archiveCopyName(first uint64, n int, ext string) string {
+	if n > 1 {
+		return fmt.Sprintf("seg-%020d-%d%s", first, n, ext)
+	}
+	return fmt.Sprintf("seg-%020d%s", first, ext)
+}
+
+// parseArchiveCopyName reads a name archiveCopyName made.
+func parseArchiveCopyName(name, ext string) (first uint64, n int, ok bool) {
+	rest, ok := strings.CutSuffix(name, ext)
+	if !ok {
+		return 0, 0, false
+	}
+	if rest, ok = strings.CutPrefix(rest, "seg-"); !ok || len(rest) < 20 {
+		return 0, 0, false
+	}
+	digits, copyNo := rest[:20], rest[20:]
+	for _, c := range digits {
+		if c < '0' || c > '9' {
+			return 0, 0, false
+		}
+	}
+	first, err := strconv.ParseUint(digits, 10, 64)
+	if err != nil || first == 0 {
+		return 0, 0, false
+	}
+	n = 1
+	if copyNo != "" {
+		c, ok := strings.CutPrefix(copyNo, "-")
+		if !ok {
+			return 0, 0, false
+		}
+		if n, err = strconv.Atoi(c); err != nil || n < 2 || strconv.Itoa(n) != c {
+			return 0, 0, false
+		}
+	}
+	return first, n, true
+}
+
+// validEntry reports whether e can describe an archived segment. The chain
+// walk then checks it against its data file.
+func validEntry(e ArchiveEntry) bool {
+	if e.Name == "" || e.First == 0 || e.Last < e.First {
+		return false
+	}
+	if e.GzFile != "" {
+		first, _, ok := parseArchiveCopyName(e.GzFile, archiveDataExt)
+		return ok && first == e.First
+	}
+	return true
+}
+
+// ReadArchive reads the index of the archive in dir, the entries in index/
+// and the lines of archive.jsonl, and returns its entries in sequence order.
+// Index files and lines that are not valid entries, such as one a crash left
+// unfinished, are skipped and described in skipped. A directory without an
+// index is an empty archive. Two different entries for one segment are an
 // error.
 func ReadArchive(dir string) (entries []ArchiveEntry, skipped []string, err error) {
 	idx, err := readArchiveIndex(dir)
@@ -99,49 +218,37 @@ func ReadArchive(dir string) (entries []ArchiveEntry, skipped []string, err erro
 type archiveIndex struct {
 	entries   []ArchiveEntry // valid entries in sequence order
 	byName    map[string]ArchiveEntry
-	skipped   []string // lines that are not valid entries
-	conflicts []string // segments recorded twice with different contents
-	exists    bool     // archive.jsonl exists
-	newline   bool     // archive.jsonl is empty or ends with a newline
+	files     map[string]bool // data files some valid entry names, repeats included
+	skipped   []string        // index files and lines that are not valid entries, and repeats
+	conflicts []string        // segments recorded twice with different contents
+	exists    bool            // archive.jsonl or an index file exists
 }
 
 func emptyArchiveIndex() *archiveIndex {
-	return &archiveIndex{byName: map[string]ArchiveEntry{}, newline: true}
+	return &archiveIndex{byName: map[string]ArchiveEntry{}, files: map[string]bool{}}
 }
 
-func readArchiveIndex(dir string) (*archiveIndex, error) {
-	idx := emptyArchiveIndex()
-	b, err := os.ReadFile(filepath.Join(dir, ArchiveIndexFile))
-	if errors.Is(err, os.ErrNotExist) {
-		return idx, nil
+// add takes one index file or line into the index.
+func (idx *archiveIndex) add(f indexFile) {
+	if f.bad != "" {
+		idx.skipped = append(idx.skipped, f.bad)
+		return
 	}
-	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", ArchiveIndexFile, err)
+	e := f.entry
+	idx.files[e.File()] = true
+	if seen, dup := idx.byName[e.Name]; dup {
+		// Two copies of one segment hold the same records; two entries for
+		// one file must also agree on its bytes.
+		if seen.First != e.First || seen.Last != e.Last || seen.Prev != e.Prev || seen.LastHash != e.LastHash ||
+			(seen.File() == e.File() && (seen.GzSHA256 != e.GzSHA256 || seen.GzBytes != e.GzBytes)) {
+			idx.conflicts = append(idx.conflicts, fmt.Sprintf("%s records %s again with different contents than %s", e.source(), e.Name, seen.source()))
+		} else {
+			idx.skipped = append(idx.skipped, fmt.Sprintf("%s repeats the entry for %s in %s and was ignored", e.source(), e.Name, seen.source()))
+		}
+		return
 	}
-	idx.exists = true
-	idx.newline = len(b) == 0 || b[len(b)-1] == '\n'
-	for i, line := range bytes.Split(b, []byte("\n")) {
-		if len(bytes.TrimSpace(line)) == 0 {
-			continue
-		}
-		var e ArchiveEntry
-		if err := json.Unmarshal(line, &e); err != nil || e.Name == "" || e.First == 0 || e.Last < e.First {
-			idx.skipped = append(idx.skipped, fmt.Sprintf("%s line %d is not a valid entry and was ignored", ArchiveIndexFile, i+1))
-			continue
-		}
-		if seen, dup := idx.byName[e.Name]; dup {
-			if seen.First != e.First || seen.Last != e.Last || seen.LastHash != e.LastHash || seen.GzSHA256 != e.GzSHA256 {
-				idx.conflicts = append(idx.conflicts, fmt.Sprintf("%s line %d records %s again with different contents", ArchiveIndexFile, i+1, e.Name))
-			} else {
-				idx.skipped = append(idx.skipped, fmt.Sprintf("%s line %d repeats the entry for %s and was ignored", ArchiveIndexFile, i+1, e.Name))
-			}
-			continue
-		}
-		idx.byName[e.Name] = e
-		idx.entries = append(idx.entries, e)
-	}
-	sort.SliceStable(idx.entries, func(i, j int) bool { return idx.entries[i].First < idx.entries[j].First })
-	return idx, nil
+	idx.byName[e.Name] = e
+	idx.entries = append(idx.entries, e)
 }
 
 // hashBefore returns the archived hash of the record before seq, when seq
@@ -156,6 +263,244 @@ func (idx *archiveIndex) hashBefore(seq uint64) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// --- reading the index ---
+
+// indexFile is one index file, or one line of archive.jsonl, as read.
+type indexFile struct {
+	entry ArchiveEntry
+	bad   string // why it is not a valid entry; "" when it is one
+}
+
+// indexCache keeps the index of one archive directory as this process read
+// and wrote it. An index file never changes once written, so a read lists
+// index/ and opens only the files it has not seen; archive.jsonl is read
+// again when its size or time changed. Guarded by archiveMu.
+type indexCache struct {
+	files      map[string]indexFile
+	legacy     []indexFile
+	legacyRead bool
+	legacySize int64
+	legacyMod  time.Time
+}
+
+// indexCaches holds the cache of every archive directory a ledger of this
+// process archives into. Guarded by archiveMu.
+var indexCaches = map[string]*indexCache{}
+
+// cachedArchiveIndex reads the index of the archive in dir through this
+// process's cache. The caller holds archiveMu.
+func cachedArchiveIndex(dir string) (*archiveIndex, error) {
+	c := indexCaches[dir]
+	if c == nil {
+		c = &indexCache{}
+		indexCaches[dir] = c
+	}
+	return loadArchiveIndex(dir, c, 0)
+}
+
+// readArchiveIndex reads the whole index of the archive in dir, every file
+// of it.
+func readArchiveIndex(dir string) (*archiveIndex, error) {
+	return loadArchiveIndex(dir, &indexCache{}, 0)
+}
+
+// loadArchiveIndex reads the index of the archive in dir: the lines of
+// archive.jsonl, then the files in index/. With only set it reads the index
+// files of the segment starting at that sequence number only.
+func loadArchiveIndex(dir string, c *indexCache, only uint64) (*archiveIndex, error) {
+	legacy, legacyFound, err := c.readLegacy(dir)
+	if err != nil {
+		return nil, err
+	}
+	files, indexFound, err := c.readIndexDir(dir, only)
+	if err != nil {
+		return nil, err
+	}
+	idx := emptyArchiveIndex()
+	idx.exists = legacyFound || indexFound
+	for _, f := range legacy {
+		if only == 0 || f.bad == "" && f.entry.First == only {
+			idx.add(f)
+		}
+	}
+	for _, f := range files {
+		idx.add(f)
+	}
+	sort.SliceStable(idx.entries, func(i, j int) bool { return idx.entries[i].First < idx.entries[j].First })
+	return idx, nil
+}
+
+// readLegacy reads archive.jsonl, the index of archives written before
+// v0.3.3.
+func (c *indexCache) readLegacy(dir string) ([]indexFile, bool, error) {
+	path := filepath.Join(dir, ArchiveIndexFile)
+	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		c.legacy, c.legacyRead = nil, false
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("read %s: %w", ArchiveIndexFile, err)
+	}
+	if c.legacyRead && info.Size() == c.legacySize && info.ModTime().Equal(c.legacyMod) {
+		return c.legacy, true, nil
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, false, fmt.Errorf("read %s: %w", ArchiveIndexFile, err)
+	}
+	var out []indexFile
+	for i, line := range bytes.Split(b, []byte("\n")) {
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		where := fmt.Sprintf("%s line %d", ArchiveIndexFile, i+1)
+		var e ArchiveEntry
+		if err := json.Unmarshal(line, &e); err != nil || !validEntry(e) {
+			out = append(out, indexFile{bad: where + " is not a valid entry and was ignored"})
+			continue
+		}
+		e.from = where
+		out = append(out, indexFile{entry: e})
+	}
+	c.legacy, c.legacyRead, c.legacySize, c.legacyMod = out, true, info.Size(), info.ModTime()
+	return out, true, nil
+}
+
+// readIndexDir lists index/ and reads the index files the cache does not
+// hold, a few at a time. found reports whether index/ holds any file.
+func (c *indexCache) readIndexDir(dir string, only uint64) (files []indexFile, found bool, err error) {
+	indexDir := filepath.Join(dir, ArchiveIndexDir)
+	list, err := os.ReadDir(indexDir)
+	if errors.Is(err, os.ErrNotExist) {
+		c.files = nil
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("list %s: %w", indexDir, err)
+	}
+	type named struct {
+		name  string
+		first uint64
+		n     int
+	}
+	var names []named
+	var bad []indexFile
+	for _, de := range list {
+		if de.IsDir() {
+			continue
+		}
+		found = true
+		first, n, ok := parseArchiveCopyName(de.Name(), archiveIndexExt)
+		if !ok {
+			if only == 0 {
+				bad = append(bad, indexFile{bad: fmt.Sprintf("%s/%s is not an index entry file and was ignored", ArchiveIndexDir, de.Name())})
+			}
+			continue
+		}
+		if only == 0 || first == only {
+			names = append(names, named{de.Name(), first, n})
+		}
+	}
+	sort.Slice(names, func(i, j int) bool {
+		if names[i].first != names[j].first {
+			return names[i].first < names[j].first
+		}
+		return names[i].n < names[j].n
+	})
+	if c.files == nil {
+		c.files = map[string]indexFile{}
+	}
+	var todo []named
+	for _, nm := range names {
+		if _, ok := c.files[nm.name]; !ok {
+			todo = append(todo, nm)
+		}
+	}
+	read := make([]indexFile, len(todo))
+	errs := make([]error, len(todo))
+	var wg sync.WaitGroup
+	slots := make(chan struct{}, indexReaders)
+	for i, nm := range todo {
+		wg.Add(1)
+		slots <- struct{}{}
+		go func() {
+			defer func() { <-slots; wg.Done() }()
+			read[i], errs[i] = readIndexFile(indexDir, nm.name, nm.first)
+		}()
+	}
+	wg.Wait()
+	for i, nm := range todo {
+		switch {
+		case errors.Is(errs[i], os.ErrNotExist):
+			// Removed since the listing: retention.
+		case errs[i] != nil:
+			return nil, found, errs[i]
+		default:
+			c.files[nm.name] = read[i]
+		}
+	}
+	if only == 0 {
+		listed := make(map[string]bool, len(names))
+		for _, nm := range names {
+			listed[nm.name] = true
+		}
+		for name := range c.files {
+			if !listed[name] {
+				delete(c.files, name)
+			}
+		}
+	}
+	files = bad
+	for _, nm := range names {
+		if f, ok := c.files[nm.name]; ok {
+			files = append(files, f)
+		}
+	}
+	return files, found, nil
+}
+
+// readIndexFile reads one index entry file. One that does not hold a valid
+// entry for the segment its name gives is reported as bad, not as an error:
+// a crash in the middle of writing it leaves such a file.
+func readIndexFile(dir, name string, first uint64) (indexFile, error) {
+	where := ArchiveIndexDir + "/" + name
+	f, err := os.Open(filepath.Join(dir, name))
+	if err != nil {
+		return indexFile{}, err
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, maxIndexFileBytes+1))
+	if err != nil {
+		return indexFile{}, fmt.Errorf("read %s: %w", where, err)
+	}
+	var e ArchiveEntry
+	if len(b) > maxIndexFileBytes || json.Unmarshal(b, &e) != nil || !validEntry(e) {
+		return indexFile{bad: where + " is not a valid entry (a write that did not finish) and was ignored"}, nil
+	}
+	if e.First != first || e.Name != segName(first) {
+		return indexFile{bad: fmt.Sprintf("%s describes %s, not the segment its name gives, and was ignored", where, e.Name)}, nil
+	}
+	e.from = where
+	return indexFile{entry: e}, nil
+}
+
+// unindexedFiles lists the data files in dir that no entry of idx names:
+// copies a crash left, or one being written right now.
+func unindexedFiles(dir string, idx *archiveIndex) ([]string, error) {
+	list, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, de := range list {
+		if _, _, ok := parseArchiveCopyName(de.Name(), archiveDataExt); ok && !de.IsDir() && !idx.files[de.Name()] {
+			out = append(out, de.Name())
+		}
+	}
+	return out, nil
 }
 
 // --- compaction ---
@@ -253,7 +598,7 @@ func (s *Spool) archiveSegments(segs []segment) (int, error) {
 	if err := EnsureArchiveDir(dir); err != nil {
 		return 0, fmt.Errorf("archive: %w", err)
 	}
-	idx, err := readArchiveIndex(dir)
+	idx, err := cachedArchiveIndex(dir)
 	if err != nil {
 		return 0, fmt.Errorf("archive: %w", err)
 	}
@@ -268,65 +613,72 @@ func (s *Spool) archiveSegments(segs []segment) (int, error) {
 	return len(segs), nil
 }
 
-// archiveSegment makes sure a closed segment is in the archive: recorded in
-// archive.jsonl, with an intact copy. It is idempotent, so a crash between
-// archiving and deleting only repeats the check.
+// archiveSegment makes sure a closed segment is in the archive: an index
+// entry for it whose data file is intact. It is idempotent, so a crash
+// between archiving and deleting only repeats the check. Nothing it writes
+// replaces a file: copies a crash left unfinished stay where they are, in no
+// index entry, and the segment is written again under new names.
 func (s *Spool) archiveSegment(idx *archiveIndex, sg *segment) error {
 	dir := s.opts.ArchiveDir
 	if e, ok := idx.byName[sg.Name]; ok {
 		if e.First != sg.First || e.Last != sg.Last || e.LastHash != sg.LastHash {
 			return fmt.Errorf("%s already records a different %s (seq %d-%d, last hash %s; this ledger has seq %d-%d, last hash %s): give each ledger its own ARCHIVE_DIR",
-				ArchiveIndexFile, sg.Name, e.First, e.Last, e.LastHash, sg.First, sg.Last, sg.LastHash)
+				e.source(), sg.Name, e.First, e.Last, e.LastHash, sg.First, sg.Last, sg.LastHash)
 		}
 		if _, err := readArchivedFile(dir, e, nil); err != nil {
-			return fmt.Errorf("recorded in %s, but the archived copy is not intact: %w", ArchiveIndexFile, err)
+			return fmt.Errorf("recorded in %s, but the archived copy %s is not intact: %w", e.source(), e.File(), err)
 		}
 		return nil
 	}
-	path := filepath.Join(dir, sg.Name+".gz")
-	if _, err := os.Stat(path); err == nil {
-		// Left over from a crash between the rename and the index append?
-		// Replace it only if it holds this very segment.
-		if h, herr := lastGzipLineHash(path); herr != nil || h != sg.LastHash {
-			return fmt.Errorf("%s exists, is not recorded in %s and does not hold this segment: move it away", path, ArchiveIndexFile)
-		}
-	}
-	e, err := s.writeArchiveFile(sg, path)
+	gz, e, err := s.gzipSegment(sg)
 	if err != nil {
 		return err
 	}
-	return appendArchiveIndex(dir, idx, e, s.opts.NoSync)
+	if e.GzFile, err = writeArchiveCopy(dir, sg.First, archiveDataExt, gz, s.opts.NoSync); err != nil {
+		return fmt.Errorf("write its archived copy: %w", err)
+	}
+	b, err := json.Marshal(e)
+	if err != nil {
+		return err
+	}
+	indexDir := filepath.Join(dir, ArchiveIndexDir)
+	if err := ensureDir(indexDir, s.opts.NoSync); err != nil {
+		return err
+	}
+	name, err := writeArchiveCopy(indexDir, sg.First, archiveIndexExt, append(b, '\n'), s.opts.NoSync)
+	if err != nil {
+		// The data file stays: should the entry have reached the volume after
+		// all, it names that file.
+		return fmt.Errorf("write the index entry of %s: %w", e.GzFile, err)
+	}
+	e.from = ArchiveIndexDir + "/" + name
+	idx.add(indexFile{entry: e})
+	if c := indexCaches[dir]; c != nil {
+		if c.files == nil {
+			c.files = map[string]indexFile{}
+		}
+		c.files[name] = indexFile{entry: e}
+	}
+	return nil
 }
 
-// writeArchiveFile gzips a closed segment's bytes to path through a temporary
-// file (fsync, rename, fsync the directory). It checks the segment while
-// copying it: every line must match its hash, carry the next sequence number
-// and link to the line before it, and the segment must end at the record the
-// spool has on file for it.
-func (s *Spool) writeArchiveFile(sg *segment, path string) (ArchiveEntry, error) {
+// gzipSegment reads a closed segment, checks it and returns its gzip and its
+// index entry, without writing anything: a segment that does not verify
+// leaves no file behind, also on a bucket, where every file opened for
+// writing becomes an object. Every line must match its hash, carry the next
+// sequence number and link to the line before it, and the segment must end
+// at the record the spool has on file for it.
+func (s *Spool) gzipSegment(sg *segment) ([]byte, ArchiveEntry, error) {
 	src, err := os.Open(filepath.Join(s.dir, sg.Name))
 	if err != nil {
-		return ArchiveEntry{}, err
+		return nil, ArchiveEntry{}, err
 	}
 	defer src.Close()
 
-	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o640)
+	var buf bytes.Buffer
+	zw, err := gzip.NewWriterLevel(&buf, archiveLevel)
 	if err != nil {
-		return ArchiveEntry{}, err
-	}
-	renamed := false
-	defer func() {
-		if !renamed {
-			f.Close()
-			os.Remove(tmp)
-		}
-	}()
-	sum := sha256.New()
-	out := &countingWriter{w: io.MultiWriter(f, sum)}
-	zw, err := gzip.NewWriterLevel(out, archiveLevel)
-	if err != nil {
-		return ArchiveEntry{}, err
+		return nil, ArchiveEntry{}, err
 	}
 	zw.Name, zw.ModTime = sg.Name, sg.LastAt // a stable header: same segment, same bytes
 
@@ -334,87 +686,82 @@ func (s *Spool) writeArchiveFile(sg *segment, path string) (ArchiveEntry, error)
 	w.next = sg.First
 	st, err := w.segment(sg.Name, io.TeeReader(io.LimitReader(src, sg.Size), zw), false, noBound)
 	if err != nil {
-		return ArchiveEntry{}, err
+		return nil, ArchiveEntry{}, err
 	}
 	if len(w.errs) > 0 {
-		return ArchiveEntry{}, fmt.Errorf("segment does not verify: %s", w.errs[0])
+		return nil, ArchiveEntry{}, fmt.Errorf("segment does not verify: %s", w.errs[0])
 	}
 	if st.records == 0 || st.first != sg.First || st.last != sg.Last || st.lastHash != sg.LastHash {
-		return ArchiveEntry{}, fmt.Errorf("segment holds seq %d-%d ending in %s, the manifest says %d-%d ending in %s",
+		return nil, ArchiveEntry{}, fmt.Errorf("segment holds seq %d-%d ending in %s, the manifest says %d-%d ending in %s",
 			st.first, st.last, st.lastHash, sg.First, sg.Last, sg.LastHash)
 	}
 	if err := zw.Close(); err != nil {
-		return ArchiveEntry{}, err
+		return nil, ArchiveEntry{}, err
 	}
-	if !s.opts.NoSync {
-		if err := f.Sync(); err != nil {
-			return ArchiveEntry{}, err
-		}
-	}
-	if err := f.Close(); err != nil {
-		return ArchiveEntry{}, err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		return ArchiveEntry{}, err
-	}
-	renamed = true
-	if !s.opts.NoSync {
-		if err := syncDir(filepath.Dir(path)); err != nil {
-			return ArchiveEntry{}, err
-		}
-	}
-	return ArchiveEntry{
+	sum := sha256.Sum256(buf.Bytes())
+	return buf.Bytes(), ArchiveEntry{
 		Name: sg.Name, First: st.first, Last: st.last, FirstAt: st.firstAt, LastAt: st.lastAt,
 		Prev: st.firstPrev, LastHash: st.lastHash,
-		GzSHA256: hex.EncodeToString(sum.Sum(nil)), GzBytes: out.n,
+		GzSHA256: hex.EncodeToString(sum[:]), GzBytes: int64(buf.Len()),
 		ArchivedAt: s.opts.Now().UTC(),
 	}, nil
 }
 
-// appendArchiveIndex appends one entry to archive.jsonl and fsyncs it. The
-// entry is what makes an archived file count: a .gz without one is replaced
-// by the next compaction.
-func appendArchiveIndex(dir string, idx *archiveIndex, e ArchiveEntry, noSync bool) error {
-	b, err := json.Marshal(e)
-	if err != nil {
-		return err
-	}
-	line := make([]byte, 0, len(b)+2)
-	if !idx.newline {
-		line = append(line, '\n') // end a line a crash left torn, so this entry stands alone
-	}
-	line = append(append(line, b...), '\n')
-	f, err := os.OpenFile(filepath.Join(dir, ArchiveIndexFile), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o640)
-	if err != nil {
-		return err
-	}
-	if _, err := f.Write(line); err != nil {
-		f.Close()
-		return fmt.Errorf("append to %s: %w", ArchiveIndexFile, err)
-	}
-	if !noSync {
-		if err := f.Sync(); err != nil {
-			f.Close()
-			return fmt.Errorf("fsync %s: %w", ArchiveIndexFile, err)
+// writeArchiveCopy writes b to a new file in dir, under the first copy name
+// of the segment starting at first that no file has, and returns that name.
+// The file is created for this write alone (O_EXCL), written from start to
+// end, fsynced and closed, and never opened for writing again; then dir is
+// fsynced. A file that is there already is a copy a crash left, or one in no
+// index entry: it is never opened, replaced or removed. A copy this call
+// fails to write is removed where the filesystem allows that (a bucket
+// mounted without delete keeps it, in no index entry).
+func writeArchiveCopy(dir string, first uint64, ext string, b []byte, noSync bool) (string, error) {
+	for n := 1; n <= maxArchiveCopies; n++ {
+		name := archiveCopyName(first, n, ext)
+		path := filepath.Join(dir, name)
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o640)
+		if errors.Is(err, os.ErrExist) {
+			continue
 		}
+		if err != nil {
+			return "", err
+		}
+		_, err = f.Write(b)
+		if err == nil && !noSync {
+			err = f.Sync()
+		}
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+		if err == nil && !noSync {
+			err = syncDir(dir)
+		}
+		if err != nil {
+			_ = os.Remove(path)
+			return "", fmt.Errorf("%s: %w", path, err)
+		}
+		return name, nil
 	}
-	if err := f.Close(); err != nil {
+	return "", fmt.Errorf("%s holds %d copies of %s already: remove the ones no index entry names", dir, maxArchiveCopies, archiveCopyName(first, 1, ext))
+}
+
+// ensureDir creates dir when it is missing and makes its name durable.
+func ensureDir(dir string, noSync bool) error {
+	if _, err := os.Stat(dir); err == nil {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return err
 	}
-	if !idx.exists && !noSync {
-		if err := syncDir(dir); err != nil { // a new file is durable once its directory entry is
-			return err
-		}
+	if noSync {
+		return nil
 	}
-	idx.exists, idx.newline = true, true
-	idx.byName[e.Name] = e
-	idx.entries = append(idx.entries, e)
-	return nil
+	return syncDir(filepath.Dir(dir))
 }
 
 // syncDir makes renames and new files in dir durable. Filesystems that cannot
 // fsync a directory (some FUSE and network mounts) report EINVAL or "not
-// supported"; there the rename is as durable as it gets.
+// supported"; there the new name is as durable as it gets.
 func syncDir(dir string) error {
 	d, err := os.Open(dir)
 	if err != nil {
@@ -425,46 +772,6 @@ func syncDir(dir string) error {
 		return fmt.Errorf("fsync %s: %w", dir, err)
 	}
 	return nil
-}
-
-// lastGzipLineHash returns the hash of the last complete line of a gzipped
-// segment.
-func lastGzipLineHash(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	zr, err := gzip.NewReader(f)
-	if err != nil {
-		return "", err
-	}
-	br := bufio.NewReaderSize(zr, 1<<20)
-	var buf []byte
-	last := ""
-	for {
-		line, err := readLine(br, &buf)
-		if err != nil && err != io.EOF {
-			return "", err
-		}
-		if len(line) == 0 || line[len(line)-1] != '\n' {
-			return last, nil
-		}
-		if len(line) > 65 && line[64] == '\t' {
-			last = string(line[:64])
-		}
-	}
-}
-
-type countingWriter struct {
-	w io.Writer
-	n int64
-}
-
-func (c *countingWriter) Write(p []byte) (int, error) {
-	n, err := c.w.Write(p)
-	c.n += int64(n)
-	return n, err
 }
 
 // readArchivedFile reads an archived segment into buf (reused when large
@@ -483,7 +790,7 @@ func readArchivedFile(dir string, e ArchiveEntry, buf []byte) ([]byte, error) {
 		return nil, err
 	}
 	if info.Size() != e.GzBytes {
-		return nil, fmt.Errorf("file is %d bytes, %s says %d", info.Size(), ArchiveIndexFile, e.GzBytes)
+		return nil, fmt.Errorf("file is %d bytes, %s says %d", info.Size(), e.source(), e.GzBytes)
 	}
 	if int64(cap(buf)) < info.Size() {
 		buf = make([]byte, info.Size())
@@ -494,7 +801,7 @@ func readArchivedFile(dir string, e ArchiveEntry, buf []byte) ([]byte, error) {
 	}
 	sum := sha256.Sum256(buf)
 	if hex.EncodeToString(sum[:]) != e.GzSHA256 {
-		return nil, fmt.Errorf("sha256 does not match %s: the file was changed", ArchiveIndexFile)
+		return nil, fmt.Errorf("sha256 does not match %s: the file was changed", e.source())
 	}
 	return buf, nil
 }

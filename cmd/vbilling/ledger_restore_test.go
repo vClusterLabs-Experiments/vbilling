@@ -393,6 +393,17 @@ func TestLedgerRestoreRefusesALedgerWithoutForce(t *testing.T) {
 	if rep := spool.VerifyChain(fresh, ""); !rep.OK || rep.LastSeq != v.head {
 		t.Fatalf("the ledger restored with the pod's defaults: %+v", rep)
 	}
+	// With LEDGER_MIRROR_DIR, the mirror is there, not in ARCHIVE_DIR/mirror.
+	fresh = filepath.Join(t.TempDir(), "data")
+	t.Setenv("DATA_DIR", fresh)
+	t.Setenv("ARCHIVE_DIR", t.TempDir())
+	t.Setenv("LEDGER_MIRROR_DIR", v.mirror)
+	if code, out, errOut := runLedger("restore"); code != 0 || !strings.Contains(out, "Restored "+fresh+" from "+v.mirror) {
+		t.Fatalf("restore from LEDGER_MIRROR_DIR: exit %d, %s%s", code, out, errOut)
+	}
+	if rep := spool.VerifyChain(fresh, ""); !rep.OK || rep.LastSeq != v.head {
+		t.Fatalf("the ledger restored from LEDGER_MIRROR_DIR: %+v", rep)
+	}
 }
 
 func TestLedgerRestoreUsageErrors(t *testing.T) {

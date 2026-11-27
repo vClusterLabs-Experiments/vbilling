@@ -48,10 +48,16 @@ it refuses at start-up stops all metering until the release is rolled back.
 {{- end }}
 {{- $dataClass := .Values.persistence.storageClass | default "" }}
 {{- $archive := .Values.persistence.archive }}
+{{- $mirrorVolume := (.Values.persistence.mirror).enabled }}
 {{- if not .Values.persistence.enabled }}
 
 WARNING: persistence is disabled. The ledger is the durable outbox for usage that
 has not reached your billing platform yet; without a volume it is lost on restart.
+{{- else if and (not $archive.enabled) $mirrorVolume }}
+
+WARNING: there is no archive volume (persistence.archive.enabled). The ledger mirror keeps a
+second copy of the newest records, but segments older than 7 days are deleted without a copy
+for invoice disputes. Enable the archive, for example in a bucket through a CSI driver.
 {{- else if not $archive.enabled }}
 
 WARNING: there is no archive volume (persistence.archive.enabled). The data volume holds
@@ -60,7 +66,7 @@ node-local, loses the ledger, and segments older than 7 days are deleted without
 for invoice disputes. Enable the archive on storage that does not fail together with the
 data volume (another storage class or failure domain): it then also holds the ledger mirror,
 a live copy from which vBilling restores itself. A bucket through a CSI driver holds the
-archive, but no mirror.
+archive; the mirror then needs a volume of its own (persistence.mirror).
 {{- else if and (not $archive.existingClaim) (eq $dataClass ($archive.storageClass | default "")) }}
 
 WARNING: the data volume and the archive volume use the same storage class ({{ $dataClass | default "the cluster's default" }}).
@@ -68,7 +74,13 @@ If that class is node-local, or all of it sits in one failure domain, one failur
 ledger and its archive together. Give the archive another class (persistence.archive.storageClass)
 or a claim on other storage (persistence.archive.existingClaim).
 {{- end }}
-{{- if and .Values.persistence.enabled $archive.enabled (eq (include "vbilling.ledgerMirror" .) "off") }}
+{{- if and .Values.persistence.enabled $mirrorVolume (eq $dataClass ((.Values.persistence.mirror).storageClass | default "")) }}
+
+WARNING: the data volume and the mirror volume use the same storage class ({{ $dataClass | default "the cluster's default" }}).
+vBilling restores itself from the mirror when the data volume is lost: put the mirror in
+another failure domain (persistence.mirror.storageClass), such as a regional disk or a file share.
+{{- end }}
+{{- if and .Values.persistence.enabled (or $archive.enabled $mirrorVolume) (eq (include "vbilling.ledgerMirror" .) "off") }}
 
 WARNING: the ledger mirror is off (persistence.archive.mirror). The archive holds segments
 older than 7 days only: losing the data volume loses every newer record that has not

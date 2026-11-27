@@ -394,6 +394,15 @@ bare on or off as a boolean, so both spellings are taken.
 {{- end -}}
 {{- end -}}
 
+{{/*
+Where the mirror volume (persistence.mirror) is mounted. LEDGER_MIRROR_DIR is
+<this path>/<pod name>: a directory of the mirror's own on that volume, which
+it can set aside next to itself.
+*/}}
+{{- define "vbilling.mirrorMountPath" -}}
+/var/lib/vbilling-mirror
+{{- end -}}
+
 {{- define "vbilling.env" -}}
 {{- $root := .root -}}
 {{- $check := .check | default false -}}
@@ -410,13 +419,21 @@ bare on or off as a boolean, so both spellings are taken.
   value: {{ .Values.tenantSource | quote }}
 - name: DATA_DIR
   value: /var/lib/vbilling
-{{- if .Values.persistence.archive.enabled }}
+{{- if or .Values.persistence.archive.enabled (.Values.persistence.mirror).enabled }}
 - name: POD_NAME
   valueFrom:
     fieldRef:
       fieldPath: metadata.name
+{{- end }}
+{{- if .Values.persistence.archive.enabled }}
 - name: ARCHIVE_DIR
   value: {{ printf "%s/$(POD_NAME)" (trimSuffix "/" .Values.persistence.archive.mountPath) | quote }}
+{{- end }}
+{{- if (.Values.persistence.mirror).enabled }}
+- name: LEDGER_MIRROR_DIR
+  value: {{ printf "%s/$(POD_NAME)" (include "vbilling.mirrorMountPath" .) | quote }}
+{{- end }}
+{{- if or .Values.persistence.archive.enabled (.Values.persistence.mirror).enabled }}
 - name: LEDGER_MIRROR
   value: {{ include "vbilling.ledgerMirror" . | quote }}
 {{- end }}

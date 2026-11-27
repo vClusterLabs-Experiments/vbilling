@@ -76,7 +76,8 @@ type Options struct {
 	// has consumed them. Zero keeps data forever.
 	Retention time.Duration
 	// ArchiveDir, when set, receives a gzipped copy of each segment before
-	// compaction deletes it, recorded in archive.jsonl (see archive.go).
+	// compaction deletes it, recorded in an index entry of its own (see
+	// archive.go).
 	ArchiveDir string
 	// DedupeWindow bounds how long ingested event IDs are remembered.
 	DedupeWindow time.Duration

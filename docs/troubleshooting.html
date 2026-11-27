@@ -449,13 +449,14 @@ skuLabel: model_name</code></div>
 
           <h4>Cause and fix</h4>
           <ul>
-            <li><strong>The volume has no room.</strong> The mirror leaves a tenth of the archive volume to the archive and stops copying before it would take that. The message says how much it still has to copy and how much is free. Grow the archive volume; the mirror continues by itself.</li>
-            <li><strong>The volume is not mounted, read-only or not writable</strong> by vBilling's user (65532 in the chart). The hint names which. The source <code>archive-volume</code> fails for the same reason.</li>
+            <li><strong>The volume has no room.</strong> The mirror leaves a tenth of its volume free (on the archive volume, for the archive) and stops copying before it would take that. The message says how much it still has to copy and how much is free. Grow the volume the hint names; the mirror continues by itself.</li>
+            <li><strong>The volume is not mounted, read-only or not writable</strong> by vBilling's user (65532 in the chart). The hint names which. For a mirror on the archive volume, the source <code>archive-volume</code> fails for the same reason.</li>
             <li><strong>A pass hangs.</strong> "A pass has been running for ... without writing anything" means the volume does not answer; look at the storage behind it.</li>
-            <li><strong>Paused: the archive is a bucket.</strong> With <code>LEDGER_MIRROR=auto</code> no mirror is kept on a FUSE mount. Give the archive a disk or a file share to have one, or set <code>persistence.archive.mirror=on</code> for a FUSE filesystem that appends and renames in place.</li>
+            <li><strong>Paused: the mirror's directory is a bucket.</strong> With <code>LEDGER_MIRROR=auto</code> no mirror is kept on a FUSE mount. With the archive in a bucket, give the mirror a volume of its own (<code>persistence.mirror</code>, <code>LEDGER_MIRROR_DIR</code>) on a disk or a file share, or set <code>persistence.archive.mirror=on</code> for a FUSE filesystem that appends and renames in place.</li>
             <li><strong>Paused: switched off.</strong> <code>LEDGER_MIRROR=off</code>, or <code>persistence.archive.mirror: off</code>.</li>
-            <li><strong>On the same filesystem as the ledger.</strong> The source is <code>ok</code> but says so: such a mirror protects against a damaged file, not a lost node or disk. Put the archive volume on other storage.</li>
-            <li><strong><code>ledger-mirror-set-aside</code>.</strong> vBilling found a mirror of another ledger, kept it unchanged under <code>mirror-set-aside-&lt;time&gt;</code> and started a new one. Restore it with <code>vbilling ledger restore</code> if it is the ledger to keep, otherwise delete the directory.</li>
+            <li><strong>On the same filesystem as the ledger.</strong> The source is <code>ok</code> but says so: such a mirror protects against a damaged file, not a lost node or disk. Put the mirror's volume on other storage.</li>
+            <li><strong><code>ledger-mirror-set-aside</code>.</strong> vBilling found a mirror of another ledger, kept it unchanged under <code>&lt;mirror directory&gt;-set-aside-&lt;time&gt;</code> and started a new one. Restore it with <code>vbilling ledger restore</code> if it is the ledger to keep, otherwise delete the directory.</li>
+            <li><strong>"holds a copy from when the mirror was kept there".</strong> A warning in the log, not in source health: an earlier mirror (in <code>ARCHIVE_DIR/mirror</code> once <code>LEDGER_MIRROR_DIR</code> is set, or one that is no longer kept) is not updated any more and never restored by itself. Delete it, or restore it by hand.</li>
           </ul>
           <p>See <a href="configuration.html#ledger-mirror">The ledger mirror</a> for what a restore brings back.</p>
         </div>

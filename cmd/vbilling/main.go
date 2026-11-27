@@ -102,21 +102,25 @@ func main() {
 	// A start-up error from here on ends the process with log.Fatal, which
 	// skips the deferred release: give the Lease up first (see fatal.go).
 	startupOver := releaseOnFatal(guard.Release)
-	// The live second copy of the data directory, on the archive volume
-	// (LEDGER_MIRROR). Where none is kept, an earlier copy is never restored
-	// by itself: nothing says how old it is.
-	mirrorPlan := spool.PlanMirror(cfg.LedgerMirror, cfg.ArchiveDir)
-	mirrorDir := mirrorPlan.Dir
+	// The live second copy of the data directory (LEDGER_MIRROR), on a volume
+	// of its own (LEDGER_MIRROR_DIR) or on the archive volume. A copy where
+	// none is kept any more is never restored by itself: nothing says how old
+	// it is.
+	mirrorPlan := spool.PlanMirror(cfg.LedgerMirror, cfg.ArchiveDir, cfg.LedgerMirrorDir)
+	mirrorDir, mirrorSubject := mirrorPlan.Dir, cfg.ArchiveDir
+	if cfg.LedgerMirrorDir != "" {
+		mirrorSubject = cfg.LedgerMirrorDir
+	}
 	if mirrorPlan.Reason != "" {
 		log.Printf("[mirror] %s. %s", mirrorPlan.Reason, mirrorPlan.Hint)
-		if mirrorPlan.Unused != "" {
-			log.Printf("[mirror] WARNING: %s holds a copy from when the mirror was kept. It is not updated any more and vBilling never restores it by itself: delete it, or restore it by hand with vbilling ledger restore", mirrorPlan.Unused)
-		}
+	}
+	for _, dir := range mirrorPlan.Unused {
+		log.Printf("[mirror] WARNING: %s holds a copy from when the mirror was kept there. It is not updated any more and vBilling never restores it by itself: delete it, or restore it by hand with vbilling ledger restore", dir)
 	}
 	// A data volume that was lost: DATA_DIR holds no ledger, but this pod's
-	// mirror on the archive volume does. It comes back before anything is
-	// opened, metering source identity included, so vBilling continues the
-	// ledger instead of starting a new one next to its copy.
+	// mirror does. It comes back before anything is opened, metering source
+	// identity included, so vBilling continues the ledger instead of starting
+	// a new one next to its copy.
 	if _, err := spool.RestoreIfLost(mirrorDir, cfg.DataDir, log.Printf); err != nil {
 		log.Fatalf("restore the ledger: %s holds none and its mirror in %s could not be restored: %v. vBilling does not start as a new install next to the copy of a ledger it lost: "+
 			"fix what the error names and restart, or run vbilling ledger restore. To give that ledger up and start as a new install, move %s away", cfg.DataDir, mirrorDir, err, mirrorDir)
@@ -170,13 +174,13 @@ func main() {
 		diskspace.LedgerVolume(cfg.DataDir),
 		diskspace.ArchiveVolume(cfg.ArchiveDir, spool.EnsureArchiveDir),
 	}, sources, tel)
-	// The second copy: the archive volume also holds a live mirror of both
-	// ledgers and of every other file of DATA_DIR, a few seconds behind. It
-	// runs next to metering and never in its way (nil when none is kept;
-	// source health then says why).
-	mirrorPlan.Report(sources, cfg.ArchiveDir)
-	mirror := spool.NewMirror(spool.MirrorOptions{DataDir: cfg.DataDir, Dir: mirrorDir, Ledgers: []*spool.Spool{sp, recSpool},
-		Identity: cfg.MeteringSource, Exclude: []string{cfg.ArchiveDir}, Health: sources, Tel: tel})
+	// The second copy: a live mirror of both ledgers and of every other file
+	// of DATA_DIR, a few seconds behind, in LEDGER_MIRROR_DIR or on the
+	// archive volume. It runs next to metering and never in its way (nil
+	// when none is kept; source health then says why).
+	mirrorPlan.Report(sources, mirrorSubject)
+	mirror := spool.NewMirror(spool.MirrorOptions{DataDir: cfg.DataDir, Dir: mirrorDir, OwnVolume: cfg.LedgerMirrorDir != "",
+		Ledgers: []*spool.Spool{sp, recSpool}, Identity: cfg.MeteringSource, Exclude: []string{cfg.ArchiveDir}, Health: sources, Tel: tel})
 	go mirror.Run(ctx)
 	tenants := pipeline.NewTenantRegistry()
 	// Events held until their billing platform counts them (Metronome: a
@@ -449,7 +453,7 @@ func main() {
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				mirrorPlan.Report(sources, cfg.ArchiveDir) // stated once, so stated again
+				mirrorPlan.Report(sources, mirrorSubject) // stated once, so stated again
 				sources.Prune(time.Now().Add(-6 * time.Hour))
 			}
 		}

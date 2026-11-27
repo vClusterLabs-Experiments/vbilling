@@ -62,6 +62,10 @@ spec:
             - name: archive
               mountPath: {{ .Values.persistence.archive.mountPath }}
             {{- end }}
+            {{- if (.Values.persistence.mirror).enabled }}
+            - name: mirror
+              mountPath: {{ include "vbilling.mirrorMountPath" . }}
+            {{- end }}
             {{- with include "vbilling.configVolumeMounts" (dict "root" . "check" false) | trimPrefix "\n" }}
             {{- . | nindent 12 }}
             {{- end }}
@@ -88,7 +92,8 @@ spec:
       {{- . | nindent 6 }}
       {{- end }}
   {{- $archiveTemplate := and .Values.persistence.archive.enabled (not .Values.persistence.archive.existingClaim) }}
-  {{- if or .Values.persistence.enabled $archiveTemplate }}
+  {{- $mirrorTemplate := (.Values.persistence.mirror).enabled }}
+  {{- if or .Values.persistence.enabled $archiveTemplate $mirrorTemplate }}
   volumeClaimTemplates:
     {{- if .Values.persistence.enabled }}
     - metadata:
@@ -113,5 +118,17 @@ spec:
         resources:
           requests:
             storage: {{ .Values.persistence.archive.size }}
+    {{- end }}
+    {{- if $mirrorTemplate }}
+    - metadata:
+        name: mirror
+      spec:
+        accessModes: {{ (.Values.persistence.mirror).accessModes | default (list "ReadWriteOnce") | toJson }}
+        {{- with (.Values.persistence.mirror).storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ (.Values.persistence.mirror).size | default "10Gi" }}
     {{- end }}
   {{- end }}

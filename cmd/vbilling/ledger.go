@@ -94,16 +94,16 @@ func parseFlags(fs *flag.FlagSet, args []string, stderr io.Writer) (int, bool) {
 func ledgerVerify(args []string, stdout, stderr io.Writer) int {
 	fs, dir, archive := ledgerFlags("verify", `Usage: vbilling ledger verify [--dir DIR] [--archive DIR]
 
-Verifies every archived segment (the gzip file's sha256 from archive.jsonl,
+Verifies every archived segment (the gzip file's sha256 from its index entry,
 each record's hash, the chain links across segments), then the live ledger,
 which must continue exactly where the archive ends. Prints a JSON report and
 exits 1 if anything fails.
 
---dir also takes a mirror directory (ARCHIVE_DIR/mirror): the mirrored ledger
-is verified the same way, and "mirror" in the report says whether the
-mirror's recovery point, what "vbilling ledger restore" would restore, is
-complete: the records of each ledger up to the recorded position and the
-sha256 of every state file.
+--dir also takes a mirror directory (LEDGER_MIRROR_DIR, or ARCHIVE_DIR/mirror
+without it): the mirrored ledger is verified the same way, and "mirror" in
+the report says whether the mirror's recovery point, what "vbilling ledger
+restore" would restore, is complete: the records of each ledger up to the
+recorded position and the sha256 of every state file.
 
 `, stderr)
 	if code, done := parseFlags(fs, args, stderr); done {
@@ -138,17 +138,22 @@ sha256 of every state file.
 func ledgerRestore(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("vbilling ledger restore", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	from := fs.String("from", spool.MirrorDir(os.Getenv("ARCHIVE_DIR")), "mirror directory, ARCHIVE_DIR/mirror, or a copy that was set aside next to it")
+	defFrom := os.Getenv("LEDGER_MIRROR_DIR")
+	if defFrom == "" {
+		defFrom = spool.MirrorDir(os.Getenv("ARCHIVE_DIR"))
+	}
+	from := fs.String("from", defFrom, "mirror directory (LEDGER_MIRROR_DIR, or ARCHIVE_DIR/mirror without it), or a copy that was set aside next to it")
 	to := fs.String("to", os.Getenv("DATA_DIR"), "data directory to restore (DATA_DIR)")
 	force := fs.Bool("force", false, "replace the ledger the data directory already holds, and everything else in it")
 	fs.Usage = func() {
 		fmt.Fprint(stderr, `Usage: vbilling ledger restore --from MIRROR_DIR --to DATA_DIR [--force]
 
 Restores a data directory from its mirror after the data volume was lost. The
-mirror (ARCHIVE_DIR/mirror) is a copy of the ledgers and of every other file
-of DATA_DIR, a few seconds behind. restore verifies it, copies its recovery
-point, the state of DATA_DIR when the mirror last completed a pass, verifies
-the restored ledgers and prints what it restored and what vBilling does next.
+mirror (LEDGER_MIRROR_DIR, or ARCHIVE_DIR/mirror without it) is a copy of the
+ledgers and of every other file of DATA_DIR, a few seconds behind. restore
+verifies it, copies its recovery point, the state of DATA_DIR when the mirror
+last completed a pass, verifies the restored ledgers and prints what it
+restored and what vBilling does next.
 
 vBilling restores by itself when it starts on a data directory without a
 ledger and finds its mirror. Use this command to restore somewhere else, from
@@ -172,7 +177,7 @@ first, and keep a copy if the ledger there may be needed.
 	if err != nil {
 		fmt.Fprintf(stderr, "restore failed: %v\n", err)
 		if errors.Is(err, spool.ErrNoRecoveryPoint) {
-			fmt.Fprintln(stderr, "the mirror directory is ARCHIVE_DIR/mirror; one that was set aside is ARCHIVE_DIR/mirror-set-aside-<time>")
+			fmt.Fprintln(stderr, "the mirror directory is LEDGER_MIRROR_DIR, or ARCHIVE_DIR/mirror without it; a copy that was set aside is next to it, as <mirror directory>-set-aside-<time>")
 		}
 		return 1
 	}
@@ -309,7 +314,7 @@ export checks each event's hash, not the whole chain.
 	}
 	fmt.Fprintf(stderr, "exported %d event(s) from retained records %d-%d\n", n, sum.FirstSeq, sum.LastSeq)
 	if sum.Anchor != "" && from.Before(sum.FirstAt) {
-		fmt.Fprintf(stderr, "warning: the oldest retained record was written at %s, after --from; usage recorded before then was deleted before archiving was enabled\n",
+		fmt.Fprintf(stderr, "warning: the oldest retained record was written at %s, after --from; usage recorded before then is not retained: it was deleted before archiving was enabled, or removed from the archive\n",
 			sum.FirstAt.UTC().Format(time.RFC3339))
 	}
 	return 0

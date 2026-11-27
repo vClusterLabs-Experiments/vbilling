@@ -3,6 +3,7 @@ package spool
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -35,12 +36,12 @@ func TestPlanMirror(t *testing.T) {
 	archive := filepath.Join(root, "archive", "vbilling-0") // created by its first use: not there yet
 
 	for _, mode := range []string{"", MirrorAuto, MirrorOn, MirrorOff} {
-		if p := PlanMirror(mode, ""); p != (MirrorPlan{}) {
+		if p := PlanMirror(mode, "", ""); !reflect.DeepEqual(p, MirrorPlan{}) {
 			t.Fatalf("mode %q without an archive directory: %+v", mode, p)
 		}
 	}
 	for _, mode := range []string{"", MirrorAuto, MirrorOn} {
-		if p := PlanMirror(mode, archive); p.Dir != MirrorDir(archive) || p.Reason != "" || p.Hint != "" || p.Unused != "" {
+		if p := PlanMirror(mode, archive, ""); p.Dir != MirrorDir(archive) || p.Reason != "" || p.Hint != "" || len(p.Unused) != 0 {
 			t.Fatalf("mode %q on a disk: %+v", mode, p)
 		}
 	}
@@ -54,25 +55,26 @@ func TestPlanMirror(t *testing.T) {
 		}
 	}
 
-	off := PlanMirror(MirrorOff, archive)
-	if off.Dir != "" || !strings.Contains(off.Reason, "LEDGER_MIRROR=off") || off.Hint == "" || off.Unused != "" {
+	off := PlanMirror(MirrorOff, archive, "")
+	if off.Dir != "" || !strings.Contains(off.Reason, "LEDGER_MIRROR=off") || off.Hint == "" || len(off.Unused) != 0 {
 		t.Fatalf("off: %+v", off)
 	}
 
 	// The archive is a bucket: no mirror by default, one when asked for.
 	fuse = true
-	bucket := PlanMirror(MirrorAuto, archive)
-	if bucket.Dir != "" || !strings.Contains(bucket.Reason, "FUSE") || !strings.Contains(bucket.Reason, archive) || !strings.Contains(bucket.Hint, "LEDGER_MIRROR=on") {
+	bucket := PlanMirror(MirrorAuto, archive, "")
+	if bucket.Dir != "" || !strings.Contains(bucket.Reason, "FUSE") || !strings.Contains(bucket.Reason, archive) || !strings.Contains(bucket.Hint, "LEDGER_MIRROR=on") ||
+		!strings.Contains(bucket.Hint, "LEDGER_MIRROR_DIR (Helm: persistence.mirror)") {
 		t.Fatalf("auto on a bucket: %+v", bucket)
 	}
-	if p := PlanMirror(MirrorOn, archive); p.Dir != MirrorDir(archive) || p.Reason != "" {
+	if p := PlanMirror(MirrorOn, archive, ""); p.Dir != MirrorDir(archive) || p.Reason != "" {
 		t.Fatalf("on, on a bucket: %+v", p)
 	}
 
 	// Source health says that no second copy is kept, as a setup and not as
 	// a fault. A plan with a mirror reports nothing: the mirror does.
 	h := health.New(telemetry.New())
-	PlanMirror(MirrorOn, archive).Report(h, archive)
+	PlanMirror(MirrorOn, archive, "").Report(h, archive)
 	MirrorPlan{}.Report(h, "")
 	if got := h.List(); len(got) != 0 {
 		t.Fatalf("sources of a plan with a mirror, or without an archive: %+v", got)
@@ -99,8 +101,8 @@ func TestMirrorThatIsNoLongerKeptIsNotRestoredByItself(t *testing.T) {
 	archive := filepath.Dir(r.dir)
 	for _, mode := range []string{MirrorOff, MirrorAuto} {
 		fuse = mode == MirrorAuto // auto: the archive volume became a bucket
-		p := PlanMirror(mode, archive)
-		if p.Dir != "" || p.Unused != r.dir {
+		p := PlanMirror(mode, archive, "")
+		if p.Dir != "" || !reflect.DeepEqual(p.Unused, []string{r.dir}) {
 			t.Fatalf("%s: %+v, want no mirror and the earlier copy named", mode, p)
 		}
 		// main hands the plan's directory to RestoreIfLost: there is none, so
@@ -113,7 +115,7 @@ func TestMirrorThatIsNoLongerKeptIsNotRestoredByItself(t *testing.T) {
 			t.Fatalf("%s: the data directory was touched: %v", mode, entries)
 		}
 		checkMirror(t, r.dir)
-		if _, err := RestoreMirror(p.Unused, data, RestoreOptions{NoSync: true}); err != nil {
+		if _, err := RestoreMirror(p.Unused[0], data, RestoreOptions{NoSync: true}); err != nil {
 			t.Fatalf("%s: restore by hand: %v", mode, err)
 		}
 	}

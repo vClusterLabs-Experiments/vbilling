@@ -6,6 +6,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -33,10 +34,13 @@ type Config struct {
 	DataDir    string
 	Retention  time.Duration
 	ArchiveDir string // ARCHIVE_DIR: gzipped copies of compacted segments, kept for disputes
-	// LedgerMirror (LEDGER_MIRROR) is whether ARCHIVE_DIR also holds a live
-	// copy of the data directory: auto (yes, except on a bucket mounted
-	// through FUSE), on or off.
+	// LedgerMirror (LEDGER_MIRROR) is whether a live copy of the data
+	// directory is kept, in LedgerMirrorDir or else in ARCHIVE_DIR/mirror:
+	// auto (yes, except on a bucket mounted through FUSE), on or off.
 	LedgerMirror string
+	// LedgerMirrorDir (LEDGER_MIRROR_DIR) gives the mirror a volume of its
+	// own, so the archive can stay in a bucket.
+	LedgerMirrorDir string
 
 	// Collection. CollectionInterval is the metering window size.
 	CollectionInterval time.Duration
@@ -312,6 +316,8 @@ func Load() *Config {
 		ArchiveDir:   os.Getenv("ARCHIVE_DIR"),
 		LedgerMirror: envOr("LEDGER_MIRROR", "auto"),
 
+		LedgerMirrorDir: os.Getenv("LEDGER_MIRROR_DIR"),
+
 		CollectionInterval: windowSize,
 		ReconcileInterval:  reconcileInterval,
 		MaxBackfill:        maxBackfill,
@@ -531,11 +537,19 @@ func (c *Config) Validate() error {
 	switch c.LedgerMirror {
 	case "auto", "off":
 	case "on":
-		if c.ArchiveDir == "" {
-			return fmt.Errorf("LEDGER_MIRROR=on needs ARCHIVE_DIR: the mirror is kept on the archive volume")
+		if c.ArchiveDir == "" && c.LedgerMirrorDir == "" {
+			return fmt.Errorf("LEDGER_MIRROR=on needs ARCHIVE_DIR or LEDGER_MIRROR_DIR: the mirror is kept in LEDGER_MIRROR_DIR, or else on the archive volume")
 		}
 	default:
 		return fmt.Errorf("LEDGER_MIRROR %q must be auto, on or off", c.LedgerMirror)
+	}
+	// The mirror copies DATA_DIR and, set aside, is renamed as a whole: a
+	// mirror directory that holds the data or the archive directory would
+	// copy the ledger onto itself, or move the archive.
+	for _, d := range []struct{ name, dir string }{{"DATA_DIR", c.DataDir}, {"ARCHIVE_DIR", c.ArchiveDir}} {
+		if c.LedgerMirrorDir != "" && d.dir != "" && dirWithin(c.LedgerMirrorDir, d.dir) {
+			return fmt.Errorf("LEDGER_MIRROR_DIR %s holds %s %s: give the mirror a directory of its own, on a volume of its own", c.LedgerMirrorDir, d.name, d.dir)
+		}
 	}
 	if c.RecordsRetention < 2*time.Hour {
 		return fmt.Errorf("RECORDS_RETENTION %s must be at least 2h", c.RecordsRetention)
@@ -643,6 +657,17 @@ func (c *Config) validatePricingKeys() error {
 // secretEnv reads a key or token. Secrets mounted from files usually end in a
 // newline, which would make every request's Authorization header invalid.
 func secretEnv(key string) string { return strings.TrimSpace(os.Getenv(key)) }
+
+// dirWithin reports whether path is dir or a directory under it.
+func dirWithin(dir, path string) bool {
+	absDir, errDir := filepath.Abs(dir)
+	absPath, errPath := filepath.Abs(path)
+	if errDir != nil || errPath != nil {
+		return false
+	}
+	rel, err := filepath.Rel(absDir, absPath)
+	return err == nil && (rel == "." || filepath.IsLocal(rel))
+}
 
 func envOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {

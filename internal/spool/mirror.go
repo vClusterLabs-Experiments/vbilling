@@ -6,8 +6,9 @@ package spool
 // and the state files next to it (cursors, held events, counter baselines,
 // the metering source identity) are what lets vBilling continue without
 // billing twice or skipping. All of it sits on one volume. The mirror keeps a
-// copy on the archive volume, in <ARCHIVE_DIR>/mirror, a few seconds behind,
-// so losing the data volume or its node loses seconds, not the ledger.
+// copy on another one, a few seconds behind: in LEDGER_MIRROR_DIR, a volume
+// of its own, or else in <ARCHIVE_DIR>/mirror, on the archive volume. Losing
+// the data volume or its node then loses seconds, not the ledger.
 // "vbilling ledger restore" (mirror_restore.go) puts it back.
 //
 // # What spool.go guarantees, and the mirror relies on
@@ -192,9 +193,10 @@ const (
 	conflictWindow = 10 * time.Minute
 )
 
-// MirrorDir is where the mirror of the ledger archived in archiveDir lives:
-// its own directory inside the archive's per-pod directory, so two pods never
-// share one. It is empty when there is no archive directory.
+// MirrorDir is where the mirror of the ledger archived in archiveDir lives
+// when it has no volume of its own (LEDGER_MIRROR_DIR): its own directory
+// inside the archive's per-pod directory, so two pods never share one. It is
+// empty when there is no archive directory.
 func MirrorDir(archiveDir string) string {
 	if archiveDir == "" {
 		return ""
@@ -206,8 +208,11 @@ func MirrorDir(archiveDir string) string {
 type MirrorOptions struct {
 	// DataDir is DATA_DIR: every file under it is mirrored.
 	DataDir string
-	// Dir is the mirror directory (see MirrorDir).
+	// Dir is the mirror directory: LEDGER_MIRROR_DIR, or MirrorDir.
 	Dir string
+	// OwnVolume says that Dir is LEDGER_MIRROR_DIR, a volume of the mirror's
+	// own, rather than the archive volume it shares with the archive.
+	OwnVolume bool
 	// Ledgers are the open ledgers under DataDir, the usage ledger first.
 	Ledgers []*Spool
 	// Identity is the metering source identity of DataDir's ledger. A mirror
@@ -859,7 +864,7 @@ func (m *Mirror) conflict(onDisk []byte) error {
 		who = fmt.Sprintf("writer %s at %s", other.Writer, other.WrittenAt.Format(time.RFC3339))
 	}
 	return &mirrorError{msg: fmt.Sprintf("%s in %s was changed by %s while this vBilling mirrors into it", MirrorManifestFile, m.opts.Dir, who),
-		hint: "two vBilling instances must never share one mirror directory: give each its own ARCHIVE_DIR"}
+		hint: "two vBilling instances must never share one mirror directory: give each its own " + m.mirrorSetting()}
 }
 
 // mirrorError carries the hint shown with a failing health source.
@@ -1819,8 +1824,12 @@ func (m *Mirror) checkSameFilesystem() {
 	m.mu.Unlock()
 	if same && !m.warnedFS {
 		m.warnedFS = true
-		m.opts.Logf("[mirror] WARNING: the ledger mirror %s is on the same filesystem as the ledger in %s: it does not survive losing that volume. Mount a volume of its own at ARCHIVE_DIR, on other storage than the data volume",
-			m.opts.Dir, m.opts.DataDir)
+		fix := "Mount a volume of its own at ARCHIVE_DIR, or give the mirror one with LEDGER_MIRROR_DIR, on other storage than the data volume"
+		if m.opts.OwnVolume {
+			fix = "Put LEDGER_MIRROR_DIR on a volume of its own, on other storage than the data volume"
+		}
+		m.opts.Logf("[mirror] WARNING: the ledger mirror %s is on the same filesystem as the ledger in %s: it does not survive losing that volume. %s",
+			m.opts.Dir, m.opts.DataDir, fix)
 	}
 }
 
@@ -1926,8 +1935,9 @@ func (m *Mirror) setAside(man *MirrorManifest, reason string) error {
 	if man != nil && man.Writer != "" && !strings.HasPrefix(man.Writer, m.host+"/") {
 		if age := m.opts.Now().Sub(man.WrittenAt); age < conflictWindow {
 			return &mirrorError{
-				msg:  fmt.Sprintf("the mirror in %s is not this ledger's (%s) and %s wrote it %s ago: it may be in use", m.opts.Dir, reason, man.Writer, age.Round(time.Second)),
-				hint: fmt.Sprintf("two vBilling instances must never share one mirror directory: give each its own ARCHIVE_DIR. If no other instance writes it, it is set aside %s after its last write", conflictWindow),
+				msg: fmt.Sprintf("the mirror in %s is not this ledger's (%s) and %s wrote it %s ago: it may be in use", m.opts.Dir, reason, man.Writer, age.Round(time.Second)),
+				hint: fmt.Sprintf("two vBilling instances must never share one mirror directory: give each its own %s. If no other instance writes it, it is set aside %s after its last write",
+					m.mirrorSetting(), conflictWindow),
 			}
 		}
 	}
@@ -2260,8 +2270,21 @@ const (
 	mirrorLagHelp      = "Age of the oldest committed ledger record that is not in the mirror yet (0 when in step)."
 	mirrorErrorsMetric = "vbilling_ledger_mirror_errors_total"
 	mirrorErrorsHelp   = "Mirror passes that failed. Metering and delivery are not affected: the mirror falls behind."
-	mirrorDefaultHint  = "check that the archive volume is mounted, writable by vBilling's user and not full. Metering and delivery continue; only the second copy of the ledger falls behind"
+	mirrorFallsBehind  = "Metering and delivery continue; only the second copy of the ledger falls behind"
 )
+
+// mirrorSetting names the setting that gives the mirror its directory.
+func (m *Mirror) mirrorSetting() string {
+	if m.opts.OwnVolume {
+		return "LEDGER_MIRROR_DIR"
+	}
+	return "ARCHIVE_DIR"
+}
+
+// defaultHint is the hint for a pass that failed for no reason known.
+func (m *Mirror) defaultHint() string {
+	return "check that " + m.mirrorVolume() + " is mounted, writable by vBilling's user and not full. " + mirrorFallsBehind
+}
 
 // finish records the outcome of a pass and reports it.
 func (m *Mirror) finish(err error) {
@@ -2279,7 +2302,7 @@ func (m *Mirror) finish(err error) {
 			m.st.files = len(m.man.Files)
 		}
 	} else {
-		m.st.hint = mirrorHint(err)
+		m.st.hint = m.hint(err)
 	}
 	first := err == nil && m.man != nil && !m.announced
 	if first {
@@ -2303,17 +2326,17 @@ func (m *Mirror) positions() string {
 	return strings.Join(parts, ", ")
 }
 
-func mirrorHint(err error) string {
+func (m *Mirror) hint(err error) string {
 	var me *mirrorError
 	switch {
 	case errors.As(err, &me):
 		return me.hint
 	case errors.Is(err, syscall.ENOSPC), errors.Is(err, syscall.EDQUOT):
-		return "the archive volume is full: grow it. Metering and delivery continue; only the second copy of the ledger falls behind"
+		return m.mirrorVolume() + " is full: grow it. " + mirrorFallsBehind
 	case errors.Is(err, syscall.EROFS), errors.Is(err, os.ErrPermission):
-		return "the archive volume is read-only or not writable by vBilling's user. Metering and delivery continue; only the second copy of the ledger falls behind"
+		return m.mirrorVolume() + " is read-only or not writable by vBilling's user. " + mirrorFallsBehind
 	}
-	return mirrorDefaultHint
+	return m.defaultHint()
 }
 
 // lag is the age of the oldest committed record the recovery point does not
@@ -2391,7 +2414,7 @@ func (m *Mirror) report(afterPass bool) {
 	case stalled:
 		m.opts.Health.Set(mirrorHealthName, mirrorHealthKind, m.opts.Dir, health.Failing,
 			fmt.Sprintf("a pass has been running for %s without writing anything: the mirror volume does not answer%s", now.Sub(st.running).Round(time.Second), behind),
-			mirrorDefaultHint)
+			m.defaultHint())
 	case st.err != nil:
 		m.opts.Health.Set(mirrorHealthName, mirrorHealthKind, m.opts.Dir, health.Failing, st.err.Error()+behind, st.hint)
 	default:

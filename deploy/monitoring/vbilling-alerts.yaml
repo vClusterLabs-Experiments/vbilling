@@ -223,8 +223,8 @@ spec:
             description: >-
               Records newer than the copy exist on the data volume alone: losing that volume or its node now loses
               them. Check the source ledger-mirror in GET /api/v1/sources, which says why the mirror is behind and
-              what to do: the archive volume is not mounted or not writable, or it has less than a tenth free, which
-              the mirror leaves to the archive (grow the volume).
+              what to do: the mirror's volume (LEDGER_MIRROR_DIR, or the archive volume) is not mounted or not
+              writable, or it has less than a tenth free, which the mirror leaves free (grow the volume).
 
         # --- Enforcement: do billing states reach tenants? ---
         # vBilling retries a failed block or unblock every 2 minutes, so a call

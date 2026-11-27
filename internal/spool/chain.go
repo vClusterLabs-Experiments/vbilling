@@ -393,11 +393,10 @@ func (w *chainWalk) segment(name string, r io.Reader, active bool, upto uint64) 
 }
 
 // archived walks one archived segment after checking its file against its
-// archive.jsonl entry, then checks that the entry describes what the file
-// holds.
+// index entry, then checks that the entry describes what the file holds.
 func (w *chainWalk) archived(dir string, e ArchiveEntry) {
 	if e.Name != segName(e.First) {
-		w.fail("%s: entry %s does not match its first seq %d", ArchiveIndexFile, e.Name, e.First)
+		w.fail("%s: entry %s does not match its first seq %d", e.source(), e.Name, e.First)
 	}
 	zr, err := w.openArchived(dir, e)
 	if err != nil {
@@ -414,11 +413,11 @@ func (w *chainWalk) archived(dir string, e ArchiveEntry) {
 		w.fail("%s: holds no records", e.File())
 		w.skip(e)
 	case st.first != e.First || st.last != e.Last:
-		w.fail("%s: holds seq %d-%d, %s says %d-%d", e.File(), st.first, st.last, ArchiveIndexFile, e.First, e.Last)
+		w.fail("%s: holds seq %d-%d, %s says %d-%d", e.File(), st.first, st.last, e.source(), e.First, e.Last)
 	case st.firstPrev != e.Prev || st.lastHash != e.LastHash:
-		w.fail("%s: its hashes do not match %s", e.File(), ArchiveIndexFile)
+		w.fail("%s: its hashes do not match %s", e.File(), e.source())
 	case !st.firstAt.Equal(e.FirstAt) || !st.lastAt.Equal(e.LastAt):
-		w.fail("%s: its record times do not match %s", e.File(), ArchiveIndexFile)
+		w.fail("%s: its record times do not match %s", e.File(), e.source())
 	}
 }
 
@@ -515,9 +514,14 @@ func readOptional(path string) ([]byte, error) {
 	return b, err
 }
 
-// archivedSince looks a segment up in a fresh read of the archive index.
+// archivedSince looks a segment up in a fresh read of the archive index: its
+// lines of archive.jsonl and its own index files only.
 func archivedSince(dir, name string) (ArchiveEntry, bool) {
-	idx, err := readArchiveIndex(dir)
+	first, ok := parseSegName(name)
+	if !ok || first == 0 {
+		return ArchiveEntry{}, false
+	}
+	idx, err := loadArchiveIndex(dir, &indexCache{}, first)
 	if err != nil {
 		return ArchiveEntry{}, false
 	}
@@ -528,10 +532,11 @@ func archivedSince(dir, name string) (ArchiveEntry, bool) {
 // VerifyChain verifies a ledger offline: every segment archived in
 // archiveDir, then the live ledger in dir (or DATA_DIR above it), as one hash
 // chain. Either directory may be empty. Archived files must match the sha256
-// in archive.jsonl, every record must match its hash, carry the next sequence
-// number and link to the record before it, and the live ledger, whose anchor
-// must be the archived hash before it, must continue where the archive ends.
-// It only reads files, so it can run next to a live vBilling or on a copy.
+// in their index entry, every record must match its hash, carry the next
+// sequence number and link to the record before it, and the live ledger,
+// whose anchor must be the archived hash before it, must continue where the
+// archive ends. It only reads files, so it can run next to a live vBilling or
+// on a copy.
 func VerifyChain(dir, archiveDir string) ChainReport {
 	var live *liveLedger
 	if dir != "" {
@@ -575,13 +580,18 @@ func verifyChain(live *liveLedger, archiveDir string) ChainReport {
 			return w.report(rep, live)
 		}
 		if !idx.exists {
-			w.warn("%s has no %s: nothing has been archived there yet", archiveDir, ArchiveIndexFile)
+			w.warn("%s has no index (%s/ or %s): nothing has been archived there yet", archiveDir, ArchiveIndexDir, ArchiveIndexFile)
 		}
 		for _, m := range idx.skipped {
 			w.warn("%s", m)
 		}
 		for _, m := range idx.conflicts {
 			w.fail("%s", m)
+		}
+		if names, err := unindexedFiles(archiveDir, idx); err == nil {
+			for _, name := range names {
+				w.warn("%s is in no index entry and was ignored: a copy a crash left, or one being archived right now. A copy a crash left can be removed", name)
+			}
 		}
 		if len(idx.entries) > 0 {
 			w.start(idx.entries[0].Prev, idx.entries[0].First)
@@ -701,9 +711,9 @@ type ScanSummary struct {
 // ScanLedger visits, in sequence order, the committed usage events whose
 // window overlaps [from, to) in the archive in archiveDir and the live ledger
 // in dir (either may be empty). It only reads files, so it can run next to a
-// live vBilling or on a copy. Archived files must match archive.jsonl and each
-// visited event's line must match its hash; missing sequence numbers fail the
-// scan rather than shorten it. VerifyChain checks the whole chain.
+// live vBilling or on a copy. Archived files must match their index entries
+// and each visited event's line must match its hash; missing sequence numbers
+// fail the scan rather than shorten it. VerifyChain checks the whole chain.
 func ScanLedger(dir, archiveDir string, from, to time.Time, fn func(*usage.Event) error) (ScanSummary, error) {
 	sc := &eventScan{from: from, to: to, fn: fn}
 	var live *liveLedger
@@ -770,7 +780,7 @@ func (s *Spool) ScanAll(from, to time.Time, fn func(*usage.Event) error) error {
 	}
 	archiveMu.Lock() // no segment moves from the ledger to the archive meanwhile
 	defer archiveMu.Unlock()
-	idx, err := readArchiveIndex(s.opts.ArchiveDir)
+	idx, err := cachedArchiveIndex(s.opts.ArchiveDir)
 	if err != nil {
 		return err
 	}
@@ -821,7 +831,7 @@ func (sc *eventScan) archived(dir string, e ArchiveEntry) error {
 		return err
 	}
 	if sc.next != e.Last+1 {
-		return fmt.Errorf("%s ends at seq %d, %s says %d", e.File(), sc.next-1, ArchiveIndexFile, e.Last)
+		return fmt.Errorf("%s ends at seq %d, %s says %d", e.File(), sc.next-1, e.source(), e.Last)
 	}
 	return nil
 }

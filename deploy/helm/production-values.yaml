@@ -54,20 +54,28 @@ persistence:
   storageClass: REPLACE_WITH_REPLICATED_STORAGE_CLASS
   archive:
     enabled: true
-    # The archive volume is the only place usage records are kept outside the
-    # data volume, so it must not fail together with it. It holds the archive
+    # The archive volume keeps usage records outside the data volume, so it
+    # must not fail together with it. It holds the archive
     # for disputes and the ledger mirror, a live copy of the data volume from
     # which vBilling restores itself when that volume is lost. Provision this
     # PVC separately, on a disk or file share of a storage class in another
     # failure domain: not the data volume's class, and never node-local. Size
     # it for the dispute retention plus a copy of the data volume.
     # A bucket through a CSI driver holds the archive too, but no mirror
-    # (mirror: auto keeps none on a FUSE mount).
+    # (mirror: auto keeps none on a FUSE mount): give the mirror a volume of
+    # its own then, with persistence.mirror below.
     existingClaim: vbilling-archive
     # Or let the chart create it: remove existingClaim and name a class that
     # differs from the data volume's.
     # storageClass: REPLACE_WITH_ARCHIVE_STORAGE_CLASS
     # size: 200Gi
+  # With the archive in a bucket: the ledger mirror on a volume of its own,
+  # in another failure domain than the data volume (a regional disk, or a file
+  # share such as Filestore, EFS or Azure Files), sized for a copy of it.
+  # mirror:
+  #   enabled: true
+  #   storageClass: REPLACE_WITH_MIRROR_STORAGE_CLASS
+  #   size: 120Gi
 
 resources:
   requests:

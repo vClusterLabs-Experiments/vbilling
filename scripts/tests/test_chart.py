@@ -49,7 +49,7 @@ lago:
   priceCard: {vcluster_gpu_hours: {amount: "0"}}
 metronome: {apiToken: metronome-inline}
 webhook: {url: "https://sink.example.com/usage", secret: webhook-inline}
-persistence: {archive: {enabled: true}}
+persistence: {archive: {enabled: true}, mirror: {enabled: true}}
 """
 
 
@@ -172,10 +172,12 @@ class ConfigCheckHookTests(unittest.TestCase):
         self.assertNotIn("serviceAccountName", spec)
         self.assertNotIn("serviceAccount", spec)
         names = {v["name"] for v in spec["volumes"]}
-        self.assertFalse(names & {"data", "archive"}, names)
+        self.assertFalse(names & {"data", "archive", "mirror"}, names)
         self.assertFalse([v for v in spec["volumes"] if "persistentVolumeClaim" in v])
         paths = {m["mountPath"] for m in container(self.job)["volumeMounts"]}
-        self.assertFalse(paths & {"/var/lib/vbilling", "/var/lib/vbilling-archive"}, paths)
+        self.assertFalse(paths & {"/var/lib/vbilling", "/var/lib/vbilling-archive", "/var/lib/vbilling-mirror"}, paths)
+        # It checks the settings that name them, as the pod reads them.
+        self.assertEqual(env(self.job)["LEDGER_MIRROR_DIR"], env(self.sts)["LEDGER_MIRROR_DIR"])
         # Its scratch directory, on a read-only root filesystem.
         self.assertIn({"name": "tmp", "emptyDir": {}}, spec["volumes"])
         self.assertIn({"name": "tmp", "mountPath": "/tmp"}, container(self.job)["volumeMounts"])
@@ -471,6 +473,65 @@ persistence: {storageClass: replicated-ssd, archive: {enabled: true, storageClas
         with self.assertRaises(HelmError) as refused:
             render(*TOKENS, *archive, "--set", "persistence.archive.mirror=sometimes")
         self.assertIn("mirror", str(refused.exception))
+
+    def test_the_mirror_gets_a_volume_of_its_own(self):
+        """An archive kept in a bucket has no mirror: persistence.mirror gives
+        the mirror a claim of its own (LEDGER_MIRROR_DIR), in another failure
+        domain than the data volume."""
+        def claims(sts):
+            return {t["metadata"]["name"]: t["spec"] for t in sts["spec"]["volumeClaimTemplates"]}
+
+        sts = one(render(*TOKENS), "StatefulSet")
+        self.assertNotIn("mirror", claims(sts))
+        self.assertNotIn("LEDGER_MIRROR_DIR", env(sts))
+
+        bucket = ["--set", "persistence.archive.enabled=true", "--set", "persistence.archive.existingClaim=archive-bucket"]
+        mirror = ["--set", "persistence.mirror.enabled=true", "--set", "persistence.mirror.storageClass=regional-pd"]
+        docs = render(*TOKENS, *bucket, *mirror)
+        sts = one(docs, "StatefulSet")
+        self.assertEqual(claims(sts)["mirror"], {"accessModes": ["ReadWriteOnce"], "storageClassName": "regional-pd",
+                                                 "resources": {"requests": {"storage": "10Gi"}}})
+        self.assertIn({"name": "mirror", "mountPath": "/var/lib/vbilling-mirror"}, container(sts)["volumeMounts"])
+        variables = env(sts)
+        self.assertEqual(variables["LEDGER_MIRROR_DIR"]["value"], "/var/lib/vbilling-mirror/$(POD_NAME)")
+        self.assertEqual(variables["ARCHIVE_DIR"]["value"], "/var/lib/vbilling-archive/$(POD_NAME)")
+        self.assertEqual(variables["LEDGER_MIRROR"]["value"], "auto")
+        names = [e["name"] for e in container(sts)["env"]]
+        self.assertLess(names.index("POD_NAME"), names.index("LEDGER_MIRROR_DIR"), "$(POD_NAME) expands only once it is defined")
+        self.assertEqual(env(one(docs, "Job"))["LEDGER_MIRROR_DIR"]["value"], "/var/lib/vbilling-mirror/$(POD_NAME)")
+
+        # Without an archive, and on a file share that offers ReadWriteMany only.
+        sts = one(render(*TOKENS, *mirror, "--set", "persistence.mirror.accessModes={ReadWriteMany}", "--set", "persistence.mirror.size=50Gi"), "StatefulSet")
+        self.assertEqual(claims(sts)["mirror"]["accessModes"], ["ReadWriteMany"])
+        self.assertEqual(claims(sts)["mirror"]["resources"], {"requests": {"storage": "50Gi"}})
+        self.assertNotIn("ARCHIVE_DIR", env(sts))
+        self.assertEqual(env(sts)["LEDGER_MIRROR"]["value"], "auto")
+        self.assertIn("POD_NAME", env(sts))
+
+        # Values saved by a release without persistence.mirror still render.
+        self.assertNotIn("LEDGER_MIRROR_DIR", env(one(render(*TOKENS, *bucket, "--set", "persistence.mirror=null"), "StatefulSet")))
+        for wrong in (["--set", "persistence.mirror.accessModes=ReadWriteOnce"], ["--set", "persistence.mirror.accessModes={ReadOnlyMany}"],
+                      ["--set-string", "persistence.mirror.enabled=true"]):
+            with self.assertRaises(HelmError, msg=wrong) as refused:
+                render(*TOKENS, *wrong)
+            self.assertIn("schema", str(refused.exception), wrong)
+
+    def test_the_notes_warn_about_a_fragile_mirror_volume(self):
+        sound = ["--set", "nodeSelector.pool=infra", "--set", "persistence.storageClass=replicated",
+                 "--set", "persistence.archive.enabled=true", "--set", "persistence.archive.existingClaim=archive-bucket",
+                 "--set", "persistence.mirror.enabled=true", "--set", "persistence.mirror.storageClass=regional-pd"]
+        self.assertNotIn("WARNING", notes(*TOKENS, *sound))
+        same = notes(*TOKENS, *sound, "--set", "persistence.mirror.storageClass=replicated")
+        self.assertIn("the data volume and the mirror volume use the same storage class (replicated)", same)
+        default = notes(*TOKENS, "--set", "persistence.mirror.enabled=true")
+        self.assertIn("the data volume and the mirror volume use the same storage class (the cluster's default)", default)
+        # A mirror, but no archive: the newest records have a second copy, disputes none.
+        self.assertIn("The ledger mirror keeps a\nsecond copy of the newest records", default)
+        self.assertNotIn("only copy of the usage ledger", default)
+        off = notes(*TOKENS, "--set", "persistence.mirror.enabled=true", "--set", "persistence.archive.mirror=off")
+        self.assertIn("the ledger mirror is off", off)
+        # Without a mirror volume the hint for a bucket names it.
+        self.assertIn("the mirror then needs a volume of its own (persistence.mirror)", notes(*TOKENS))
 
     def test_values_with_a_placeholder_left_in_are_refused(self):
         # A region or cluster name left as REPLACE_WITH_... would be written
