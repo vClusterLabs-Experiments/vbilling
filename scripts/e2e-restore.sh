@@ -22,6 +22,9 @@
 # Usage is measured from the Kubernetes API (pod requests, lifetimes), plus
 # one metric pushed to the ingest API. No Prometheus, gateway or GPU is used.
 #
+# MIRROR_VOLUME=1 runs the same checks with the mirror on a volume of its own
+# (persistence.mirror, LEDGER_MIRROR_DIR) instead of the archive volume.
+#
 # Usage: scripts/e2e-restore.sh [--keep]   (--keep leaves everything running)
 # Requires: docker, kind, kubectl, helm, vcluster (0.30+), jq, python3, curl.
 set -euo pipefail
@@ -33,7 +36,12 @@ KEEP=${1:-}
 API=127.0.0.1:28201
 TOKEN=e2e-admin-token # the API always needs a token
 INGEST=e2e-ingest-token
-MIRROR=/var/lib/vbilling-archive/vbilling-0/mirror
+MIRROR_VOLUME=${MIRROR_VOLUME:-}
+if [ -n "$MIRROR_VOLUME" ]; then
+  MIRROR=/var/lib/vbilling-mirror/vbilling-0
+else
+  MIRROR=/var/lib/vbilling-archive/vbilling-0/mirror
+fi
 export KUBECONFIG=$WORK/kubeconfig # never touches ~/.kube/config
 
 pass=0; fail=0
@@ -132,6 +140,7 @@ persistence:
   enabled: true
   size: 1Gi
   archive: {enabled: true, size: 1Gi}
+$( [ -n "$MIRROR_VOLUME" ] && echo "  mirror: {enabled: true, size: 1Gi}" )
 api: {token: $TOKEN, ingestToken: $INGEST}
 EOF
 helm install vbilling "$ROOT/deploy/helm/vbilling" -n vbilling --create-namespace -f "$WORK/values.yaml" --wait --timeout 240s >/dev/null
