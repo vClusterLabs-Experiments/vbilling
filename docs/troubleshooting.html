@@ -412,12 +412,55 @@ skuLabel: model_name</code></div>
           <p>Set it on the tenant's cluster or its namespace in the control plane cluster; several identities are comma-separated. vBilling reads it at the next discovery, within 30 seconds. A custom format can map identities with <code>tenantMap</code> instead. A gateway that serves one tenant can use a token bound to it in <code>INGEST_TOKENS</code>, which wins over the payload.</p>
 
           <h4><span class="fix-label">Fix</span> Refuse instead of accept</h4>
-          <p>With <code>RECORDS_UNKNOWN_TENANTS=reject</code> (Helm <code>records.unknownTenants=reject</code>), such records are refused and listed in the response's <code>rejected</code>, and <code>vbilling_records_rejected_total</code> counts them. An emitter that does not read the response loses them, so map identities first.</p>
+          <p>With <code>RECORDS_UNKNOWN_TENANTS=reject</code> (Helm <code>records.unknownTenants=reject</code>), such records are refused and listed in the response's <code>rejected</code> with the reason <code>tenant</code>, and <code>vbilling_records_rejected_total{client,reason}</code> counts them (a client that never had a push accepted counts under <code>client="_unaccepted"</code>). The same setting refuses window totals sent to <code>POST /api/v1/events</code> for a tenant vBilling does not know. An emitter that does not read the response loses them, so map identities first.</p>
           <p>Records already accepted keep the tenant they were stored with: the ledger is append-only. Settle that usage in the billing platform.</p>
         </div>
       </div>
 
       <!-- Issue 5: Lago Connection Failed -->
+      <h2 id="pushed-usage-refused">Pushed Usage Is Refused</h2>
+      <div class="issue">
+        <div class="issue-header">
+          <h3>"is measured by vBilling itself", "is not a cluster vBilling knows for tenant", "older than ... the oldest usage destination metronome accepts"</h3>
+        </div>
+        <div class="issue-body">
+          <h4>Symptoms</h4>
+          <p><code>POST /api/v1/events</code> or <code>POST /api/v1/records</code> lists items under <code>rejected</code> with a <code>reason</code>, or answers 400 when nothing in the request was stored. <code>vbilling_ingest_events_rejected_total{client,reason}</code> and <code>vbilling_records_rejected_total{client,reason}</code> count them.</p>
+
+          <h4>Cause and fix, by reason</h4>
+          <ul>
+            <li><code>reserved_metric</code>: the metric is one vBilling measures itself (GPU, CPU, memory, node, control plane, storage, load balancer or egress usage, or a metric read from Prometheus), or one that only records may write. Push under a metric code of your own, declared in <code>metering.customMetrics</code>. An operator's correction to measured usage goes to <code>POST /api/v1/events?operator_adjustment=true</code> with the API token.</li>
+            <li><code>cluster</code>: <code>tenant_cluster</code> names a cluster that is not this tenant's, that vBilling never saw, or that did not exist during the usage's window (a cluster is known while it runs and for 7 days after its last metered window). Name the cluster by its ID, as in the <code>tenant_cluster</code> of its metered usage, or leave it out to bill the tenant without a cluster.</li>
+            <li><code>tenant</code>: with <code>RECORDS_UNKNOWN_TENANTS=reject</code>, the tenant is not one vBilling knows. See <a href="#unknown-tenant-records">Records billed to an unknown tenant</a>.</li>
+            <li><code>too_old</code>: the window is older than the oldest usage a configured destination accepts (33 days 23 hours with Metronome). Such usage would be acknowledged and then dead-lettered, so it is refused here; bill it in the billing platform.</li>
+          </ul>
+          <p>A 503 with <code>Retry-After</code> is not a refusal: vBilling is starting and has not discovered tenants or read its ledger yet. Retry.</p>
+        </div>
+      </div>
+
+      <h2 id="ledger-mirror-behind">The Ledger Mirror Is Failing, Behind or Not Kept</h2>
+      <div class="issue">
+        <div class="issue-header">
+          <h3>"the mirror is 42s behind the ledger", "the mirror leaves 10% of the volume to the archive and has stopped copying", "no live second copy of the ledger is kept"</h3>
+        </div>
+        <div class="issue-body">
+          <h4>Symptoms</h4>
+          <p>The source <code>ledger-mirror</code> in <code>GET /api/v1/sources</code> is <code>failing</code> or <code>paused</code>, <code>vbilling_ledger_mirror_lag_seconds</code> grows, or the alert <code>VBillingLedgerMirrorLagging</code> fires. Metering and delivery go on in every case: what is at stake is the second copy of the newest records.</p>
+
+          <h4>Cause and fix</h4>
+          <ul>
+            <li><strong>The volume has no room.</strong> The mirror leaves a tenth of the archive volume to the archive and stops copying before it would take that. The message says how much it still has to copy and how much is free. Grow the archive volume; the mirror continues by itself.</li>
+            <li><strong>The volume is not mounted, read-only or not writable</strong> by vBilling's user (65532 in the chart). The hint names which. The source <code>archive-volume</code> fails for the same reason.</li>
+            <li><strong>A pass hangs.</strong> "A pass has been running for ... without writing anything" means the volume does not answer; look at the storage behind it.</li>
+            <li><strong>Paused: the archive is a bucket.</strong> With <code>LEDGER_MIRROR=auto</code> no mirror is kept on a FUSE mount. Give the archive a disk or a file share to have one, or set <code>persistence.archive.mirror=on</code> for a FUSE filesystem that appends and renames in place.</li>
+            <li><strong>Paused: switched off.</strong> <code>LEDGER_MIRROR=off</code>, or <code>persistence.archive.mirror: off</code>.</li>
+            <li><strong>On the same filesystem as the ledger.</strong> The source is <code>ok</code> but says so: such a mirror protects against a damaged file, not a lost node or disk. Put the archive volume on other storage.</li>
+            <li><strong><code>ledger-mirror-set-aside</code>.</strong> vBilling found a mirror of another ledger, kept it unchanged under <code>mirror-set-aside-&lt;time&gt;</code> and started a new one. Restore it with <code>vbilling ledger restore</code> if it is the ledger to keep, otherwise delete the directory.</li>
+          </ul>
+          <p>See <a href="configuration.html#ledger-mirror">The ledger mirror</a> for what a restore brings back.</p>
+        </div>
+      </div>
+
       <h2 id="lago-connection-failed">Lago Connection Failed</h2>
       <div class="issue">
         <div class="issue-header">

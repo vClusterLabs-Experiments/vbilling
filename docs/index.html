@@ -1525,7 +1525,7 @@
               <div class="code-block">
                 <button class="copy-btn" onclick="copyCode(this)">Copy</button>
                 <pre><code><span class="comment"># Clone vBilling and start Lago</span>
-git clone --branch v0.3.2 https://github.com/vClusterLabs-Experiments/vbilling.git
+git clone --branch v0.3.3 https://github.com/vClusterLabs-Experiments/vbilling.git
 cd vbilling/deploy/lago
 openssl genrsa 2048 > lago_rsa.key
 echo <span class="string">"LAGO_RSA_PRIVATE_KEY=$(base64 -i lago_rsa.key | tr -d '\n')"</span> > .env

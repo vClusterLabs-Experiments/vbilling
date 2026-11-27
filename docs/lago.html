@@ -86,7 +86,7 @@
 
       <h2 id="run-lago">Run Lago locally</h2>
       <p>The repository ships a Docker Compose file for Lago 1.17, with the UI on <code>:8081</code> and the API on <code>:3000</code> (vBilling's own dashboard uses <code>:8080</code>). Lago signs its tokens with an RSA key: generate one, and never commit it. From the repository root:</p>
-      <div class="code-block"><code><span class="cmd">git</span> clone --branch v0.3.2 https://github.com/vClusterLabs-Experiments/vbilling.git &amp;&amp; <span class="cmd">cd</span> vbilling
+      <div class="code-block"><code><span class="cmd">git</span> clone --branch v0.3.3 https://github.com/vClusterLabs-Experiments/vbilling.git &amp;&amp; <span class="cmd">cd</span> vbilling
 <span class="cmd">openssl</span> genrsa 2048 &gt; deploy/lago/lago_rsa.key
 <span class="cmd">echo</span> <span class="string">"LAGO_RSA_PRIVATE_KEY=$(base64 -i deploy/lago/lago_rsa.key | tr -d '\n')"</span> &gt; deploy/lago/.env
 <span class="cmd">docker</span> compose <span class="flag">-f</span> deploy/lago/docker-compose.yml <span class="flag">--env-file</span> deploy/lago/.env up <span class="flag">-d</span></code></div>

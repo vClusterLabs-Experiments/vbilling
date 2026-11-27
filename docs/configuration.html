@@ -154,6 +154,11 @@
               <td>Long-term archive. Before compaction deletes a segment, vBilling gzips it into this directory and records it in <code>archive.jsonl</code>. See <a href="#retention-and-disputes">Retention and disputes</a>.</td>
               <td class="td-default">(none)</td>
             </tr>
+            <tr>
+              <td><code>LEDGER_MIRROR</code></td>
+              <td>The live copy of the data directory in <code>ARCHIVE_DIR/mirror</code>, from which vBilling restores itself after losing the data volume. <code>auto</code>: kept, except where the archive directory is a bucket mounted through FUSE. <code>on</code>: kept on any filesystem (needs <code>ARCHIVE_DIR</code>). <code>off</code>: not kept. See <a href="#ledger-mirror">The ledger mirror</a>.</td>
+              <td class="td-default">auto</td>
+            </tr>
           </tbody>
         </table>
       </div>
@@ -280,7 +285,7 @@
           <tbody>
             <tr><td><code>RECORDS_MAPPINGS_FILE</code></td><td>Path of a YAML map of payload formats besides <code>vbilling</code> and <code>litellm</code>: field paths for the request ID, time, tenant and quantities of each gateway.</td><td class="td-default">(none)</td></tr>
             <tr><td><code>RECORDS_LITELLM</code></td><td>Enable the built-in <code>litellm</code> format for LiteLLM's generic API logger. It declares <code>inference_input_tokens</code> and <code>inference_output_tokens</code>, which every billing adapter then creates.</td><td class="td-default">false</td></tr>
-            <tr><td><code>RECORDS_UNKNOWN_TENANTS</code></td><td><code>accept</code>: bill records for a tenant vBilling does not know to that tenant ID, and report it in the response and in source health. <code>reject</code>: refuse them.</td><td class="td-default">accept</td></tr>
+            <tr><td><code>RECORDS_UNKNOWN_TENANTS</code></td><td><code>accept</code>: bill pushed usage (records and <code>POST /api/v1/events</code>) for a tenant vBilling does not know to that tenant ID, and report it in the response and in source health. <code>reject</code>: refuse it, so an ingest token can never create usage, or a customer at the billing platform, for a tenant that does not exist. <code>production-values.yaml</code> sets <code>reject</code>.</td><td class="td-default">accept</td></tr>
             <tr><td><code>RECORDS_PULL_FILE</code></td><td>YAML list of gateway request logs to read back as records, for any gateway with a logs API: URL with a time range, headers (<code>${RECORDS_PULL_...}</code> variables only), rows path and paging. Pushed and pulled copies count once. Helm: <code>records.pull</code> and <code>records.pullEnv</code>. See <a href="usage-sources.html#gateway-pull">Pulling any gateway's request log</a>.</td><td class="td-default">(none)</td></tr>
             <tr><td><code>LITELLM_URL</code></td><td>Base URL of a LiteLLM proxy (v1.103.0 or later, with a database) whose spend logs vBilling reads back as records, to fill what the generic API logger's push lost. Pushed and pulled copies of a request count once. Enables the <code>litellm</code> format. See <a href="usage-sources.html#litellm-pull">Pulling LiteLLM's spend logs</a>.</td><td class="td-default">(none)</td></tr>
             <tr><td><code>LITELLM_API_KEY</code></td><td>A LiteLLM key that can read every team's spend logs: the master key or a proxy admin key. Required with <code>LITELLM_URL</code>.</td><td class="td-default">(none)</td></tr>
@@ -824,14 +829,39 @@
               <td class="td-default">false / &quot;&quot; / 20Gi / &quot;&quot; / /var/lib/vbilling-archive</td>
             </tr>
             <tr>
+              <td><code>persistence.archive.mirror</code></td>
+              <td>LEDGER_MIRROR: the live copy of the data volume on the archive volume (<code>auto</code>, <code>on</code>, <code>off</code>). See <a href="#ledger-mirror">The ledger mirror</a>.</td>
+              <td class="td-default">auto</td>
+            </tr>
+            <tr>
               <td><code>serviceMonitor.enabled / interval</code></td>
               <td>Prometheus Operator ServiceMonitor</td>
               <td class="td-default">false / 30s</td>
             </tr>
             <tr>
+              <td><code>configCheck.enabled / activeDeadlineSeconds / resources</code></td>
+              <td>The Job that checks a new configuration before an install or upgrade touches the pod (see <a href="#config-check">Check a configuration before it rolls out</a>). Empty <code>resources</code> means the main pod's.</td>
+              <td class="td-default">true / 180 / {}</td>
+            </tr>
+            <tr>
+              <td><code>nodeSelector / tolerations / affinity / topologySpreadConstraints / priorityClassName</code></td>
+              <td>Where the vBilling pod (and the check Job) runs. Keep it off the GPU nodes it meters; see <a href="#placement">Placement</a>.</td>
+              <td class="td-default">unset</td>
+            </tr>
+            <tr>
+              <td><code>imagePullSecrets</code></td>
+              <td>Pull secrets for the main pod and the check Job</td>
+              <td class="td-default">[]</td>
+            </tr>
+            <tr>
+              <td><code>serviceAccount.create / name</code>, <code>nameOverride</code>, <code>fullnameOverride</code></td>
+              <td>The ServiceAccount (with <code>create: false</code> the chart renders none and uses <code>name</code>) and the names of the release's objects</td>
+              <td class="td-default">true / &quot;&quot;</td>
+            </tr>
+            <tr>
               <td><code>image.repository / tag / pullPolicy</code></td>
               <td>Container image</td>
-              <td class="td-default">ghcr.io/vclusterlabs-experiments/vbilling / v0.3.2</td>
+              <td class="td-default">ghcr.io/vclusterlabs-experiments/vbilling / v0.3.3</td>
             </tr>
           </tbody>
         </table>
@@ -847,11 +877,143 @@
   <span class="flag">--set</span> webhook.url=https://data.example.com/usage \
   <span class="flag">--set</span> region=ap-southeast-2 <span class="flag">--set</span> api.existingSecret=vbilling-api</code></div>
 
+      <h2 id="operations">Operations</h2>
+      <h3 id="config-check">Check a configuration before it rolls out</h3>
+      <p>vBilling is one pod. A configuration it refuses at start-up (an invalid metric definition, an enforcement rule it cannot parse, a price card with a typo) used to stop all metering until someone reverted it, because the old pod was already gone. Two things prevent that now.</p>
+      <p><code>vbilling check-config</code> loads and checks the configuration exactly as start-up does: the environment and every file start-up parses (Prometheus metric definitions, custom metrics, records formats and pull definitions, price cards, the list of external clusters, enforcement rules, cross-checks, ingest tokens). It contacts nothing, takes no Lease, opens no ledger and writes nothing, so it also runs in the live pod. It exits 0 with the list of what it checked, or 1 with the same error text start-up would stop with:</p>
+      <div class="code-block"><code><span class="cmd">kubectl</span> <span class="flag">-n</span> vbilling-system exec vbilling-0 -- /vbilling check-config
+<span class="output">vBilling 0.3.3: checking the configuration as start-up reads it
+ok       settings: adapters metronome, region ap-southeast-2, tenant source platform, enforcement enforce, price check hold
+ok       PROMETHEUS_METRICS_FILE: /etc/vbilling/prometheus/metrics.yaml, 3 metric(s)
+ok       ENFORCEMENT_RULES: 2 rule(s)
+The configuration is valid: 6 check(s) passed, 0 warning(s).</span></code></div>
+      <p>The chart runs it for you. With <code>configCheck.enabled</code> (the default), every <code>helm install</code> and <code>helm upgrade</code> first runs a Job with the new configuration, as a pre-install and pre-upgrade hook. If the check fails, the upgrade fails with the error, and the running pod, its StatefulSet and its configuration are untouched: metering goes on with the configuration it had. Read the reason with <code>kubectl -n vbilling-system logs job/vbilling-config-check</code>, fix the values, and upgrade again.</p>
+      <ul>
+        <li>The Job gets the same image, security context, resources and placement as the vBilling pod, needs no RBAC and mounts neither the ledger nor the archive volume.</li>
+        <li>Credentials from a Secret you manage (<code>existingSecret</code>) are checked when the Secret exists. Credentials the chart itself puts in its Secret are not: on an install that Secret does not exist yet, and on an upgrade it still holds the previous values. A credential the check cannot see is a warning, not an error.</li>
+        <li>Argo CD runs Helm hooks as PreSync hooks, so a failed check fails the sync before anything is applied.</li>
+        <li><code>helm rollback</code> runs no hooks, and <code>--no-hooks</code> or <code>configCheck.enabled=false</code> skips the check. Tools that apply <code>helm template</code> output without hook support should render with <code>--no-hooks</code>.</li>
+      </ul>
+      <p>Start-up itself now checks everything before it takes the Lease, and gives the Lease up if it still has to stop afterwards, so a pod that cannot start never holds the Lease that a working one waits for.</p>
+
+      <h3 id="placement">Placement</h3>
+      <p>vBilling meters the compute plane, so it should not live or die with it. Run its pod on nodes that are not the GPU nodes it meters, and put its two volumes in different failure domains:</p>
+      <ul>
+        <li><strong>The ledger volume</strong> (<code>persistence.storageClass</code>) on replicated or network-attached storage, so the pod can move to another node with its ledger. A node-local volume ties the ledger to one node.</li>
+        <li><strong>The archive volume</strong> (<code>persistence.archive</code>) on a different storage class, in another failure domain. It holds the second copy of the ledger: the <a href="#ledger-mirror">ledger mirror</a>, a live copy of the data volume from which vBilling restores itself, and the <a href="#retention-and-disputes">archive</a> for disputes. A bucket holds the archive, but no mirror.</li>
+        <li><strong>The pod</strong> with <code>affinity</code> or <code>nodeSelector</code> (and <code>tolerations</code> where your management nodes are tainted). <a href="https://github.com/vClusterLabs-Experiments/vbilling/blob/main/deploy/helm/production-values.yaml">production-values.yaml</a> keeps it off nodes labelled <code>nvidia.com/gpu.present=true</code> and names placeholders for both storage classes; the pod stays Pending until you replace them, on purpose.</li>
+      </ul>
+      <p>After an install the chart's notes say what is fragile: the archive is off, the mirror is off, both volumes share a storage class, no placement is set, or the configuration check is off. The chart refuses values that still hold a <code>REPLACE_WITH_</code> placeholder, so a region or cluster name is never billed as written in the example file.</p>
+
+      <h3 id="alerts">Alert rules</h3>
+      <p><a href="https://github.com/vClusterLabs-Experiments/vbilling/blob/main/deploy/monitoring/vbilling-alerts.yaml">deploy/monitoring/vbilling-alerts.yaml</a> is a PrometheusRule with the rules below; adjust its namespace and rule-selector labels to your Prometheus Operator. Every rule's description says what to do.</p>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead><tr><th>Alert</th><th>Fires when</th><th>Severity</th></tr></thead>
+          <tbody>
+            <tr><td><code>VBillingNotReporting</code></td><td>vBilling exports no metrics for 5 minutes (the pod is down or cannot start)</td><td>critical</td></tr>
+            <tr><td><code>VBillingLastWindowStale</code></td><td>the last committed window is older than 5 minutes</td><td>critical</td></tr>
+            <tr><td><code>VBillingPrometheusWindowStale</code></td><td>the last committed Prometheus window is older than 5 minutes</td><td>warning</td></tr>
+            <tr><td><code>VBillingPrometheusSamplesLate</code></td><td>counter samples keep arriving too late for their own window: a cluster's metrics pipeline lags</td><td>warning</td></tr>
+            <tr><td><code>VBillingDeliveryLag</code></td><td>a destination is more than 5 minutes behind for 10 minutes</td><td>warning</td></tr>
+            <tr><td><code>VBillingDestinationAwaitingStart</code></td><td>a destination that was removed and added again waits for an operator's start decision</td><td>critical</td></tr>
+            <tr><td><code>VBillingDestinationPaused</code></td><td>a destination has been paused for 6 hours</td><td>warning</td></tr>
+            <tr><td><code>VBillingDeadLetters</code></td><td>a destination permanently rejected events (the first ones after a start included)</td><td>critical</td></tr>
+            <tr><td><code>VBillingEventsHeld</code></td><td>events have been held at the pricing gate for an hour</td><td>warning</td></tr>
+            <tr><td><code>VBillingMissingPrices</code></td><td>a series has no price at a billing platform</td><td>warning</td></tr>
+            <tr><td><code>VBillingTenantsBlocked</code></td><td>a tenant could not be set up at a billing platform for 15 minutes; its usage is parked</td><td>warning</td></tr>
+            <tr><td><code>VBillingTenantIDChanged</code></td><td>the billing ID of a Tenant or Project changed</td><td>warning</td></tr>
+            <tr><td><code>VBillingSourceUnhealthy</code></td><td>a source is <code>failing</code> or <code>diverged</code>: a usage source, a volume or the ledger mirror, a destination's delivery, a tenant a billing platform could not set up, a cluster whose API refuses vBilling, a payment that did not unlock its tenant, or a paused cluster whose stop is not verified</td><td>warning</td></tr>
+            <tr><td><code>VBillingSourceEmpty</code></td><td>a source has returned nothing for an hour (a selector that matches no series)</td><td>warning</td></tr>
+            <tr><td><code>VBillingVolumeNearlyFull</code></td><td>the ledger or archive volume has less than 15% free</td><td>critical</td></tr>
+            <tr><td><code>VBillingLedgerMirrorLagging</code></td><td>the second copy of the ledger is more than 5 minutes behind</td><td>warning</td></tr>
+            <tr><td><code>VBillingGatewayBlockErrors</code></td><td>blocking or unblocking a tenant at the gateway keeps failing</td><td>critical</td></tr>
+            <tr><td><code>VBillingWebhooksRefused</code></td><td>a payment webhook did not unlock its tenant</td><td>warning</td></tr>
+            <tr><td><code>VBillingEnforcementRepaired</code></td><td>a suspension policy or binding inside a cluster was deleted or weakened, and vBilling restored it</td><td>warning</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h2 id="ledger-mirror">The ledger mirror: when the data volume is lost</h2>
+      <p>The data volume holds everything vBilling knows: the usage ledger, the per-request records, each destination's cursor, held events, dead letters, counter baselines, pause spans, billing states, and the metering source identity that event IDs are built from. The archive only receives segments older than seven days, so without more, the newest week exists once. The <strong>ledger mirror</strong> is the second copy of that week: with <code>ARCHIVE_DIR</code> set, vBilling keeps a live copy of the whole data directory in <code>&lt;ARCHIVE_DIR&gt;/mirror</code>, on the archive volume.</p>
+      <ul>
+        <li><strong>A second or two behind.</strong> A pass runs within about a second of every committed window, and every 5 seconds for files that change in between. A pass ends by replacing <code>MIRROR.json</code>, the <em>recovery point</em>: it names exactly the bytes that belong together, so a copy that was interrupted is never restored half.</li>
+        <li><strong>Never in the way.</strong> The mirror runs next to metering. A mirror volume that is slow, read-only, full or gone makes the source <code>ledger-mirror</code> fail and the lag grow. Metering, delivery and the archive go on.</li>
+        <li><strong>Checked.</strong> Every ledger line is checked against its hash and its link to the line before it is copied. <code>vbilling ledger verify --dir &lt;ARCHIVE_DIR&gt;/mirror</code> verifies the copy and its recovery point at any time.</li>
+        <li><strong>Visible.</strong> <code>vbilling_ledger_mirror_lag_seconds</code> is the age of the oldest committed record the mirror does not hold (0 when in step), <code>vbilling_ledger_mirror_errors_total</code> counts failed passes, and the source <code>ledger-mirror</code> in <code>GET /api/v1/sources</code> says where the mirror stands, or why none is kept. The alert rule <code>VBillingLedgerMirrorLagging</code> fires after 5 minutes of a lag above 5 minutes.</li>
+      </ul>
+
+      <h3 id="mirror-setting">Where a mirror is kept</h3>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead>
+            <tr><th><code>LEDGER_MIRROR</code> (Helm <code>persistence.archive.mirror</code>)</th><th>What happens</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>auto</code> (default)</td><td>Kept wherever <code>ARCHIVE_DIR</code> is set, except on a bucket mounted through FUSE (Cloud Storage FUSE, Mountpoint for Amazon S3, BlobFuse). The mirror appends to its newest segment and replaces its recovery point after every window, and a bucket uploads the whole object again for that, or refuses. The archive itself works there: it writes each segment once.</td></tr>
+            <tr><td><code>on</code></td><td>Kept on any filesystem. For a FUSE filesystem that appends and renames in place.</td></tr>
+            <tr><td><code>off</code></td><td>Not kept. Losing the data volume then loses every record that is not archived or delivered yet.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Where none is kept, the source <code>ledger-mirror</code> is <code>paused</code> and says why, and the chart's notes warn when the mirror is switched off. To have the mirror, give the archive a disk or a file share on other storage than the data volume. In a values file, a bare <code>on</code> or <code>off</code> is a YAML boolean; the chart takes both spellings.</p>
+      <p><strong>Space.</strong> The archive volume now holds the archive and a copy of everything on the data volume: size it for both. The mirror leaves a tenth of the volume to the archive and stops copying before it would take that, because a segment that cannot be archived stays on the data volume. The source then says how much it still has to copy and that the volume has to grow; the mirror continues by itself afterwards. A first copy that does not fit is not started. Retention is followed: a segment that compaction removed from the ledger leaves the mirror with the next pass.</p>
+      <p><strong>Access.</strong> The mirror holds what the data volume holds, including the API and ingest tokens vBilling generated. Protect the archive volume like the data volume.</p>
+
+      <h3 id="restore">After the data volume is lost</h3>
+      <p>vBilling restores itself. When it starts on a data directory that holds no ledger and finds its mirror with a recovery point, it copies the recovery point back before it opens anything, verifies the restored ledgers, and continues the same ledger under the same metering source identity. So the procedure is to give the pod a new, empty volume and keep the archive volume:</p>
+      <div class="code-block"><code><span class="comment"># The node or disk under the data volume is gone. Keep the archive claim.</span>
+<span class="cmd">kubectl</span> <span class="flag">-n</span> vbilling-system delete pvc data-vbilling-0 <span class="flag">--wait=false</span>
+<span class="cmd">kubectl</span> <span class="flag">-n</span> vbilling-system delete pod vbilling-0
+<span class="comment"># The StatefulSet creates a new claim and pod. vBilling says what it did:</span>
+<span class="cmd">kubectl</span> <span class="flag">-n</span> vbilling-system logs vbilling-0 | grep '\[mirror\]'
+<span class="output">[mirror] /var/lib/vbilling holds no ledger, but the mirror in /var/lib/vbilling-archive/vbilling-0/mirror does: the data volume was lost or replaced. Restoring it
+[mirror] restored /var/lib/vbilling/ledger: seq 1-48211, 48211 record(s), verified
+[mirror] restored /var/lib/vbilling as it was at 2026-11-26T10:05:00Z, 3m12s ago (the mirror's last complete pass), with 23 state file(s). ...</span></code></div>
+      <p>What happens next:</p>
+      <ul>
+        <li><strong>Metering.</strong> Every window since the restored watermarks is metered again from the lifetimes of the objects vBilling finds, up to 6 hours back, and marked <code>backfilled</code>. Prometheus counters continue from the restored baselines: the increase since the recovery point is billed once.</li>
+        <li><strong>Delivery.</strong> Each destination is sent everything after its restored cursor. What a billing platform already received in the mirror's last seconds is sent again under the same event ID and deduplicated there. A paused destination stays paused, and one that waits for a start decision still waits.</li>
+        <li><strong>State.</strong> Held events, dead letters, pause spans and billing states are as of the recovery point. A paused tenant stays paused and unbilled from its recorded second.</li>
+        <li><strong>Not restored.</strong> Usage pushed to vBilling after the recovery point (the ingest API, per-request records), normally a second or two of it. Senders that retry, and request logs that vBilling pulls, fill it in: a retried push is counted once, whether or not its first copy was restored.</li>
+      </ul>
+      <div class="callout callout-warn">
+        <div class="callout-icon">!</div>
+        <div>Restore soon. The restore log says how old the recovery point is and warns above a day: windows older than 6 hours are not metered again, and a billing platform that deduplicates by event ID for a day (Stripe) no longer recognizes what was being delivered when the copy was made. Compare <code>GET /api/v1/reconcile</code> with the billing platform for those hours. If the restore itself fails, vBilling stops instead of starting as a new install next to the copy of a ledger it lost; the log line names what to fix.</div>
+      </div>
+      <p>vBilling restores only a mirror it keeps. With <code>LEDGER_MIRROR=off</code>, or on a bucket in <code>auto</code>, a copy from earlier is named in the log and left alone, because nothing says how old it is. To start as a new install on purpose, empty the data directory and remove the mirror directory.</p>
+
+      <h3 id="restore-by-hand">Restore by hand</h3>
+      <p><code>vbilling ledger restore</code> does the same from the command line: to another directory, from a copy that was set aside, or over a damaged ledger. It verifies the whole mirror before it changes anything, and refuses a target that holds a ledger unless you pass <code>--force</code>. vBilling must not run on the target: scale the StatefulSet to zero and run the command in a pod of the same image with both volumes mounted.</p>
+      <div class="code-block"><code><span class="cmd">vbilling</span> ledger restore <span class="flag">--from</span> /var/lib/vbilling-archive/vbilling-0/mirror <span class="flag">--to</span> /var/lib/vbilling
+<span class="output">Restored /var/lib/vbilling from /var/lib/vbilling-archive/vbilling-0/mirror
+  recovery point   2026-11-26T10:05:00Z, 3m12s ago (the mirror's last complete pass)
+  metering source  a6ebc8ab6b7a7200bf6be9fcdcb5eb8d
+  ledger           seq 1-15, 15 records in 3 segment(s), verified; last committed seq 15 written 2026-11-26T10:05:00Z
+      cursor metronome               15 (in step)
+      cursor stripe                  12 (3 record(s) to send)
+  ...</span></code></div>
+      <p>The report lists every cursor, what vBilling will do when it starts, and a note when <code>--force</code> replaced a ledger that metered under another identity: the windows that ledger delivered are metered again under other event IDs, so remove them at the billing platform.</p>
+      <p><strong>A mirror of another ledger.</strong> vBilling never overwrites a mirror that holds records its own ledger lacks, for example after a new install was started next to an old archive volume. It renames that copy to <code>mirror-set-aside-&lt;time&gt;</code>, starts a new mirror, and reports the source <code>ledger-mirror-set-aside</code> until you restore the copy or delete it.</p>
+
+      <h3 id="move-the-ledger">Move the ledger to another volume</h3>
+      <p>The same restore moves the ledger to another storage class, for example from a node-local volume to replicated storage. Kubernetes refuses to change the volume claim template of an existing StatefulSet, so the StatefulSet is removed and the upgrade creates it again. Start when the source <code>ledger-mirror</code> is <code>ok</code>:</p>
+      <div class="code-block"><code><span class="comment"># 1. Stop vBilling. A clean stop ends with a last pass: the mirror is in step.</span>
+<span class="cmd">kubectl</span> <span class="flag">-n</span> vbilling-system scale statefulset vbilling <span class="flag">--replicas=0</span>
+<span class="cmd">kubectl</span> <span class="flag">-n</span> vbilling-system wait <span class="flag">--for=delete</span> pod/vbilling-0 <span class="flag">--timeout=120s</span>
+<span class="comment"># 2. Remove the StatefulSet and the old data claim. Keep the archive claim.</span>
+<span class="cmd">kubectl</span> <span class="flag">-n</span> vbilling-system delete statefulset vbilling
+<span class="cmd">kubectl</span> <span class="flag">-n</span> vbilling-system delete pvc data-vbilling-0
+<span class="comment"># 3. Upgrade with the new class. The pod starts on an empty volume and restores itself.</span>
+<span class="cmd">helm</span> upgrade vbilling deploy/helm/vbilling <span class="flag">-n</span> vbilling-system <span class="flag">-f</span> values.yaml <span class="flag">--set</span> persistence.storageClass=replicated-ssd
+<span class="cmd">kubectl</span> <span class="flag">-n</span> vbilling-system logs vbilling-0 | grep '\[mirror\]'</code></div>
+      <p>To keep the old volume until the new one is checked, set the reclaim policy of its PersistentVolume to <code>Retain</code> before step 2. vBilling is down for the minutes this takes, and meters the windows in between afterwards.</p>
+
       <h2 id="retention-and-disputes">Retention and disputes</h2>
       <p>Customers dispute invoices months after the usage happened, so the evidence behind a bill has to outlive the bill. vBilling keeps its hash-chained ledger in two tiers.</p>
       <p><strong>Seven days</strong> is how long raw ledger segments stay on the ledger volume after every destination has consumed them. The period is fixed: <code>RETENTION</code> was removed in v0.3.1, and a value still set only logs a warning. Hourly compaction deletes older ones; a segment a destination has not consumed yet is never deleted. Size <code>persistence.size</code> for this window (see Sizing below).</p>
       <p><strong><code>ARCHIVE_DIR</code></strong> keeps the evidence after that. Before compaction deletes a segment, it writes a gzip of the segment's exact bytes to <code>seg-&lt;first seq&gt;.log.gz</code> (temporary file, fsync, rename), appends a line to <code>archive.jsonl</code> with the segment's sequence range, times, the hash it links to, its last hash and the gzip file's sha256 and size, and only then deletes the segment. If archiving fails, the segment stays and the next compaction retries. vBilling never deletes from the archive. The files are plain gzip and JSON lines: each ledger line is the sha256 of its record, a tab, and the record, which names the hash of the record before it, so <code>sha256sum</code> and <code>zcat</code> are enough to inspect them.</p>
-      <p>With Helm, <code>persistence.archive.enabled=true</code> mounts a volume and sets <code>ARCHIVE_DIR</code> to <code>&lt;mountPath&gt;/&lt;pod name&gt;</code>. For object storage, bind a PersistentVolumeClaim to a bucket through a CSI driver (Cloud Storage FUSE, Mountpoint for Amazon S3) and set <code>persistence.archive.existingClaim</code>. The mount must let the pod user (65532) create, rename and append to files.</p>
+      <p>With Helm, <code>persistence.archive.enabled=true</code> mounts a volume and sets <code>ARCHIVE_DIR</code> to <code>&lt;mountPath&gt;/&lt;pod name&gt;</code>. For object storage, bind a PersistentVolumeClaim to a bucket through a CSI driver (Cloud Storage FUSE, Mountpoint for Amazon S3) and set <code>persistence.archive.existingClaim</code>. The mount must let the pod user (65532) create, rename and append to files. On a bucket vBilling keeps the archive only; the <a href="#ledger-mirror">ledger mirror</a> needs a disk or a file share.</p>
       <div class="callout callout-warn">
         <div class="callout-icon">!</div>
         <div>Without <code>existingClaim</code>, the chart adds a volumeClaimTemplate, which Kubernetes cannot add to an existing StatefulSet. On an existing install, run <code>kubectl -n vbilling-system delete statefulset vbilling --cascade=orphan</code> first: pods, volumes and the ledger stay, and the upgrade recreates the StatefulSet.</div>
@@ -881,9 +1043,9 @@
 
       <h3 id="sizing">Sizing</h3>
       <p>Measured on one full segment (20,025 records) of GPU cluster usage, eight metrics per cluster per minute with the dimensions and properties the collector sets: <strong>821 bytes per event in the ledger, 86 bytes in the archive</strong>, 9.5 times smaller. For 100 clusters (48,000 events an hour) that is about 0.95 GB a day on the ledger volume, so 6.6 GB for the default 7 days, and about 3 GB a month in the archive, 39 GB for 13 months. Verification reads about 165 MB of ledger a second on one core (Apple M1 Max), so those 13 months verify in about 40 minutes. Reproduce with <code>go test -run X -bench ArchiveSegment ./internal/spool/</code>.</p>
-      <p>Those figures describe resource aggregates. Request metering also stores one raw row per nonzero request metric: estimate hot storage as <code>requests/second × metric rows/request × measured bytes/row × retention seconds</code>, then add aggregates, delivery outages, the dedupe index and growth headroom. At 100 requests/second, two rows/request and 1 KiB/row, raw rows alone take about 124 GB for seven days. Measure your own rows and sustained fsync throughput; the chart's 5 GiB and 256 MiB defaults are for small installations.</p>
-      <p><a href="https://github.com/vClusterLabs-Experiments/vbilling/blob/main/deploy/helm/production-values.yaml">production-values.yaml</a> supplies an initial production configuration: a 100 GiB hot volume, a separately provisioned archive PVC, larger CPU and memory allocations, strict tenant validation, price holds and a 75-second collection delay. The example needs sizing for your traffic and a real archive PVC: it names <code>existingClaim: vbilling-archive</code>, and the pod stays Pending until a claim of that name exists in the release namespace. The file is not in the packaged chart or the release assets, so for an install without a clone download it from the tag (<code>https://raw.githubusercontent.com/vClusterLabs-Experiments/vbilling/v0.3.2/deploy/helm/production-values.yaml</code>). Optional <a href="https://github.com/vClusterLabs-Experiments/vbilling/blob/main/deploy/monitoring/vbilling-alerts.yaml">Prometheus rules</a> cover disk headroom, delivery lag, dead letters, source failures and missing prices; adjust their namespace and rule-selector labels to match your Prometheus installation.</p>
-      <p>Usage and reconciliation queries can only include retained ledger and archive data. Without archival, month-to-date totals become incomplete after consumed segments pass retention. Enabling archival later cannot reconstruct segments already deleted. Verify the archive's chain and retain the full data directory, including <code>source.json</code>, destination state, cursors and held usage, together in backups.</p>
+      <p>Those figures describe resource aggregates. Request metering also stores one raw row per nonzero request metric: estimate hot storage as <code>requests/second × metric rows/request × measured bytes/row × retention seconds</code>, then add aggregates, delivery outages, the dedupe index and growth headroom. At 100 requests/second, two rows/request and 1 KiB/row, raw rows alone take about 124 GB for seven days. Measure your own rows and sustained fsync throughput; the chart's 5 GiB and 256 MiB defaults are for small installations. With the <a href="#ledger-mirror">ledger mirror</a>, add the data volume's used space to the archive volume: the mirror is an uncompressed copy of it.</p>
+      <p><a href="https://github.com/vClusterLabs-Experiments/vbilling/blob/main/deploy/helm/production-values.yaml">production-values.yaml</a> supplies an initial production configuration: a 100 GiB hot volume, a separately provisioned archive PVC, larger CPU and memory allocations, strict tenant validation, price holds and a 75-second collection delay. The example needs sizing for your traffic and a real archive PVC: it names <code>existingClaim: vbilling-archive</code>, and the pod stays Pending until a claim of that name exists in the release namespace. The file is not in the packaged chart or the release assets, so for an install without a clone download it from the tag (<code>https://raw.githubusercontent.com/vClusterLabs-Experiments/vbilling/v0.3.3/deploy/helm/production-values.yaml</code>). The shipped <a href="#alerts">alert rules</a> cover a stopped or stale vBilling, delivery, prices, sources, volumes, enforcement and webhooks.</p>
+      <p>Usage and reconciliation queries can only include retained ledger and archive data. Without archival, month-to-date totals become incomplete after consumed segments pass retention. Enabling archival later cannot reconstruct segments already deleted. Verify the archive's chain and retain the full data directory, including <code>source.json</code>, destination state, cursors and held usage, together in backups. The ledger mirror is such a copy, kept current by vBilling itself.</p>
 
       <h2 id="lago-pricing">Lago Pricing Configuration</h2>
       <p>vBilling bootstraps a billable metric for each of its 9 built-in metrics and for every custom metric, among them <code>inference_input_tokens</code> and <code>inference_output_tokens</code>, which v0.3 always declares, and a <code>vcluster-standard</code> plan on startup. All charges default to <strong>$0.00</strong> per unit unless a <a href="lago.html#price-card">price card</a> sets them. You must configure pricing in the Lago UI or API to actually generate non-zero invoices.</p>
