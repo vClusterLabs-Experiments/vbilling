@@ -85,7 +85,7 @@
           <tbody>
             <tr>
               <td><strong>Kubernetes objects</strong><br>Pods, nodes, volumes and load balancers, read from the control plane cluster and from each cluster's own API</td>
-              <td><strong>Exact.</strong> Quantities come from object lifetimes, to the second. Windows missed while vBilling was down are backfilled from those lifetimes, up to <code>MAX_BACKFILL</code>.</td>
+              <td><strong>Exact.</strong> Quantities come from object lifetimes, to the second. Windows missed while vBilling was down are backfilled from those lifetimes, up to 6 hours back (a fixed limit).</td>
               <td>CPU and memory usage from metrics-server (<code>CPU_MEMORY_BASIS=usage</code>) is a sample of the live window and is never backfilled. A cluster that syncs to namespaces of their own (<code>sync.toHost.namespaces</code>) is billed for what it synced there: vCluster labels each of those namespaces with the cluster's name and namespace (<code>vcluster.loft.sh/vcluster-name</code>, <code>vcluster.loft.sh/vcluster-namespace</code>), and those labels say whose the objects are, whoever else has the name. Objects in a namespace where another cluster runs, or ran, are never billed to a cluster that only shares its name, so what a deleted cluster left behind never bills to its namesake. In a namespace without the labels, the cluster's name in <code>vcluster.loft.sh/managed-by</code> decides only when no other cluster on the control plane cluster has it and no cluster ran there; otherwise the objects are billed to neither, and <code>synced-namespaces/&lt;cluster&gt;</code> fails.</td>
             </tr>
             <tr>
@@ -182,12 +182,12 @@
           </tbody>
         </table>
       </div>
-      <p>A record is refused when it has no request ID, no tenant, a metric that is not declared, a negative or non-numeric quantity, more than a billion of one metric (no single request uses that much: such a value is an encoding error, such as a wrapped counter or a timestamp in a token field), a time more than 5 minutes ahead of vBilling's clock, or a time older than <code>RECORDS_RETENTION</code> minus one hour (34 days at most). The <code>vbilling_records_rejected_total{client}</code> counter on <code>/metrics</code> counts them.</p>
+      <p>A record is refused when it has no request ID, no tenant, a metric that is not declared, a negative or non-numeric quantity, more than a billion of one metric (no single request uses that much: such a value is an encoding error, such as a wrapped counter or a timestamp in a token field), a time more than 5 minutes ahead of vBilling's clock, or a time more than 167 hours old (the 7 days records are kept, minus one hour; the limit is fixed). The <code>vbilling_records_rejected_total{client}</code> counter on <code>/metrics</code> counts them.</p>
 
       <h3 id="windows">Windows, retries and late records</h3>
       <ul>
         <li>A record belongs to the window its time falls in, not to the window it arrives in.</li>
-        <li><code>RECORDS_SETTLE</code> (default 30s) after a window ends, vBilling commits one usage event per tenant, metric, SKU and dimensions for that window. <code>properties.records</code> counts the requests in it. A request ID already counted for the window, from a retry or a resent batch, is dropped: the first copy stored is the one billed.</li>
+        <li>30 seconds after a window ends (the settle time, which is fixed), vBilling commits one usage event per tenant, metric, SKU and dimensions for that window. <code>properties.records</code> counts the requests in it. A request ID already counted for the window, from a retry or a resent batch, is dropped: the first copy stored is the one billed.</li>
         <li>Send a time with every record. A record without one is dated when it first arrives (the response warns), and vBilling remembers that time for an hour, also across a restart: a retry within the hour gets the same time, lands in the same window and is dropped there, even when it arrives after the window ended. A retry of a record without a time more than an hour later is billed again.</li>
         <li>A record that arrives later becomes a separate <strong>late adjustment</strong> for the same window: same <code>window_start</code> and <code>window_end</code>, with <code>properties.late: true</code> and <code>properties.arrived_by</code>. Its ID is deterministic. Nothing is ever merged into a window that was already committed.</li>
         <li>The split between on time and late depends only on when each record was stored, never on when vBilling ran. After a crash or an upgrade, vBilling rebuilds the same events with the same IDs: nothing is lost and nothing is counted twice.</li>
@@ -197,7 +197,7 @@
 <span class="output">{"window_start":"2026-11-18T10:03:00Z","quantity":77,"properties":{"arrived_by":"2026-11-18T10:08:00Z","late":true,"records":1}}</span></code></div>
 
       <h3 id="records-retention">Retention and evidence</h3>
-      <p>Raw records stay under <code>DATA_DIR/records</code> for <code>RECORDS_RETENTION</code> (default <code>168h</code>, at least <code>2h</code>). They are the evidence behind each window's event and the input to aggregation; billing adapters receive only the window events. With <code>RECORDS_ARCHIVE=true</code> (Helm <code>records.archive</code>, which needs <code>persistence.archive.enabled</code>), vBilling also archives them to <code>ARCHIVE_DIR/records</code> before retention deletes them: request-level evidence for disputes, at a high volume. See <a href="configuration.html#retention-and-disputes">Retention and disputes</a>.</p>
+      <p>Raw records stay under <code>DATA_DIR/records</code> for 7 days. That is fixed: <code>RECORDS_RETENTION</code> was removed in v0.3.1, and a value still set only logs a warning. They are the evidence behind each window's event and the input to aggregation; billing adapters receive only the window events. Whenever the archive is on (<code>persistence.archive.enabled</code>, which sets <code>ARCHIVE_DIR</code>), vBilling also archives them to <code>ARCHIVE_DIR/records</code> before retention deletes them: request-level evidence for disputes, at a high volume. See <a href="configuration.html#retention-and-disputes">Retention and disputes</a>.</p>
       <p>vBilling stores only the fields a format maps: request ID, time, tenant, quantities, SKU and dimensions. Prompts and responses in a payload are never stored.</p>
 
       <!-- Tenants -->
@@ -358,7 +358,7 @@ callback_settings:
             <tr><td><code>headers</code></td><td>Sent with every request. <code>${RECORDS_PULL_...}</code> is replaced by that environment variable, which <code>pullEnv</code> fills from a Secret. No other variable is ever expanded, so a pull spec cannot send vBilling's own keys anywhere.</td></tr>
             <tr><td><code>rows</code></td><td>Path to the array of rows; empty when the response is the array.</td></tr>
             <tr><td><code>paging</code></td><td><code>mode</code>: <code>none</code> (default), <code>page</code> (from <code>start</code>, default 1), <code>offset</code>, or <code>cursor</code> with <code>next</code>, the path of the next cursor in the response. <code>limit</code> is the page size (default 500); a shorter page is the last one.</td></tr>
-            <tr><td><code>interval</code>, <code>lookback</code>, <code>chunk</code></td><td>How often to pull (default <code>5m</code>), how far back each pull starts (default <code>1h</code>, at most <code>RECORDS_RETENTION</code> minus 2 hours), and the time range read per request sequence (default <code>1h</code>).</td></tr>
+            <tr><td><code>interval</code>, <code>lookback</code>, <code>chunk</code></td><td>How often to pull (default <code>5m</code>), how far back each pull starts (default <code>1h</code>, at most 166 hours: the 7 days records are kept, minus 2 hours), and the time range read per request sequence (default <code>1h</code>).</td></tr>
           </tbody>
         </table>
       </div>
@@ -410,7 +410,7 @@ callback_settings:
       <h3 id="prometheus-outages">Outages</h3>
       <p>Prometheus usage is committed under its own ledger source, with its own watermark, after the Kubernetes windows. Kubernetes metering never waits for Prometheus.</p>
       <ul>
-        <li><strong>vBilling was down:</strong> on restart it reads every window it missed, up to <code>MAX_BACKFILL</code>, and each counter sample lands in its own window. A counter's usage from before that is billed in the first window read.</li>
+        <li><strong>vBilling was down:</strong> on restart it reads every window it missed, up to 6 hours back (a fixed limit), and each counter sample lands in its own window. A counter's usage from before that is billed in the first window read.</li>
         <li><strong>Prometheus is down</strong> (every read fails): nothing is committed and the sources turn <code>failing</code>. The windows wait, and once Prometheus answers they are read one by one, counters and queries alike, so each window gets its own usage.</li>
         <li><strong>Only some reads fail</strong> (one cluster's own Prometheus, one metric): the window is committed without them. Those counters keep their last sample, so the first window that reads them again bills the whole increase since then. The total stays exact; that usage lands in the recovery window. A query that failed has no usage for that window.</li>
       </ul>
@@ -436,7 +436,7 @@ callback_settings:
         <li>vBilling knows that a cluster runs on its own nodes from the cluster's own API, read with the <code>vbilling-kubeconfig</code> Secret (see <a href="private-nodes.html#prometheus">Private Nodes</a>). Clusters in <code>TENANT_CLUSTERS_FILE</code> always do. A cluster vBilling cannot read is scoped by namespace; give it <code>prometheus-matchers</code> instead.</li>
         <li><code>{{namespace}}</code> still works, but it is the cluster's namespace on the control plane cluster: it matches only series scraped there, from clusters on shared or dedicated nodes. Prefer <code>{{selector}}</code>.</li>
         <li>The built-in egress counter and the DCGM utilization queries use the same scoping.</li>
-        <li>A <code>tenant-service://</code> URL needs <code>TENANT_API=true</code>, and the cluster's API credentials need <code>get</code> on <code>services/proxy</code> for that Service. A URL is sent the same <code>PROMETHEUS_HEADERS</code> and bearer token as <code>PROMETHEUS_URL</code>.</li>
+        <li>For a <code>tenant-service://</code> URL, the cluster's API credentials need <code>get</code> on <code>services/proxy</code> for that Service. A URL is sent the same <code>PROMETHEUS_HEADERS</code> and bearer token as <code>PROMETHEUS_URL</code>.</li>
         <li>vBilling reads at most 16 MiB of one answer from a Prometheus a tenant influences: a cluster's <code>prometheus-url</code>, or a <code>tenant-service://</code> Service, whose answers are never trusted to end. A larger answer fails the read, and the metric's source turns <code>failing</code>: narrow the query with <code>{{selector}}</code> or matchers. <code>PROMETHEUS_URL</code> is read in time chunks, at most an hour of raw samples (or 60 evaluations of a query) per request, each halved while its answer passes 64 MiB, so a busy cluster's backfill after an outage is read whole.</li>
       </ul>
       <div class="callout callout-warn">
@@ -543,12 +543,8 @@ crossChecks:
         <table class="config-table">
           <thead><tr><th>Variable</th><th>Helm value</th><th>Default</th></tr></thead>
           <tbody>
-            <tr><td><code>RECORDS_SETTLE</code></td><td><code>records.settle</code></td><td>30s</td></tr>
-            <tr><td><code>RECORDS_RETENTION</code></td><td><code>records.retention</code></td><td>168h</td></tr>
             <tr><td><code>RECORDS_MAPPINGS_FILE</code></td><td><code>records.formats</code></td><td>(none)</td></tr>
-            <tr><td><code>RECORDS_ALLOW_UNKEYED</code></td><td><code>records.allowUnkeyed</code></td><td>false</td></tr>
             <tr><td><code>RECORDS_UNKNOWN_TENANTS</code></td><td><code>records.unknownTenants</code></td><td>accept</td></tr>
-            <tr><td><code>RECORDS_ARCHIVE</code></td><td><code>records.archive</code></td><td>false</td></tr>
             <tr><td><code>RECORDS_PULL_FILE</code></td><td><code>records.pull</code>, with tokens from <code>records.pullEnv</code></td><td>(none)</td></tr>
             <tr><td><code>RECORDS_PULL_LITELLM_URL</code>, <code>RECORDS_PULL_LITELLM_KEY</code></td><td><code>records.pullLiteLLM.url</code>, <code>records.pullLiteLLM.key</code> or <code>existingSecret</code></td><td>(none)</td></tr>
             <tr><td><code>RECORDS_PULL_LITELLM_CLIENT</code>, <code>RECORDS_PULL_LITELLM_TENANT</code></td><td><code>records.pullLiteLLM.client</code>, <code>records.pullLiteLLM.tenant</code></td><td>litellm, (none)</td></tr>
@@ -556,7 +552,6 @@ crossChecks:
             <tr><td><code>INGEST_TOKEN</code>, <code>INGEST_TOKENS</code></td><td><code>api.ingestToken</code>, <code>api.tenantIngestTokens</code></td><td>(none)</td></tr>
             <tr><td><code>PROMETHEUS_METRICS_FILE</code></td><td><code>prometheus.metrics</code></td><td>(none)</td></tr>
             <tr><td><code>PROMETHEUS_SOURCE_LABEL</code></td><td><code>prometheus.sourceLabel</code></td><td>vcluster</td></tr>
-            <tr><td><code>PROMETHEUS_LOOKBACK</code></td><td><code>prometheus.lookback</code></td><td>10m</td></tr>
             <tr><td><code>EGRESS_QUERY</code></td><td><code>prometheus.egressQuery</code></td><td>(none: a counter)</td></tr>
             <tr><td><code>CROSS_CHECKS</code></td><td><code>crossChecks</code></td><td>(none)</td></tr>
           </tbody>
@@ -564,7 +559,7 @@ crossChecks:
       </div>
       <div class="callout callout-warn">
         <div class="callout-icon">!</div>
-        <div><code>RECORDS_SETTLE</code> must be shorter than <code>COLLECTION_INTERVAL</code>. With a window of 30s or less, vBilling uses half the window instead of the 30s default.</div>
+        <div>Several values this page mentions are fixed, not settings: windows are 60 seconds, records settle for 30 seconds and are kept 7 days, a record may be at most 167 hours old, backfill reaches 6 hours back, the Prometheus lookback is 10 minutes, every record needs a request ID, and records are archived whenever the archive is on. The settings that used to change them (<code>COLLECTION_INTERVAL</code>, <code>RECORDS_SETTLE</code>, <code>RECORDS_RETENTION</code>, <code>MAX_BACKFILL</code>, <code>PROMETHEUS_LOOKBACK</code>, <code>RECORDS_ALLOW_UNKEYED</code>, <code>RECORDS_ARCHIVE</code>) were removed in v0.3.1: a value still set logs a warning and changes nothing. See <a href="configuration.html">Configuration</a> for the full list.</div>
       </div>
       <p>Every setting is described in <a href="configuration.html#records">Configuration</a>.</p>
 

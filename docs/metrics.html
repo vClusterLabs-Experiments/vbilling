@@ -114,6 +114,7 @@
           <p><strong>Fractional GPUs:</strong> a MIG slice counts as slices/7 of a GPU (A30: /4), e.g. <code>mig-1g.10gb</code> = 1/7. This works for the MIG mixed strategy (<code>nvidia.com/mig-*</code> resources), the single strategy (slices exposed as <code>nvidia.com/gpu</code>, product label ending in <code>-MIG-&lt;profile&gt;</code>) and GKE GPU partitions (<code>cloud.google.com/gke-gpu-partition-size</code>). On time-sliced nodes (<code>nvidia.com/gpu.replicas</code> &gt; 1, or GKE <code>cloud.google.com/gke-max-shared-clients-per-gpu</code> with time-sharing or MPS) a device counts as 1/replicas. A DRA claim counts the devices allocated to it (a MIG device at its profile's fraction), split across the pods it is reserved for. The SKU becomes <code>&lt;model&gt;-mig-&lt;profile&gt;</code> or <code>&lt;model&gt;-timeslice-&lt;n&gt;</code>, always against the base GPU model (the <code>-SHARED</code> and <code>-MIG-</code> label suffixes are dropped).</p>
           <p><strong>Dedicated and private nodes:</strong> the node's GPU capacity is billed in whole GPUs with <code>billing_mode=dedicated_node</code> (control plane cluster nodes assigned to the tenant) or <code>billing_mode=private_node</code> (vCluster Private Nodes, Auto Nodes and Standalone, metered through the cluster's own API): MIG slices and time-slicing replicas are converted back, so 8 GPUs shared 4 ways bill as 8, not 32. Pods on those nodes are not billed again. See <a href="private-nodes.html">Dedicated and Private Nodes</a>.</p>
           <p><strong>Fair metering:</strong> GPU time on a node that is NotReady or carries an <code>UNHEALTHY_NODE_TAINTS</code> taint is emitted as <code>vcluster_gpu_downtime_hours</code> instead. So is a dedicated or private node's GPU time while its GPUs are installed (GPU Feature Discovery's <code>nvidia.com/gpu.count</code>) but not allocatable, for example while the driver rebuilds after a reboot or a MIG change. A node whose kubelet stopped reporting is down from its last status heartbeat or Lease renewal, whichever is later, not from the Unknown mark that follows 40 to 50 seconds later.</p>
+          <p>Three limits apply. The start of downtime is dated to the second, but the end is not: a node that is Ready again when its window is collected is billed for that whole window, so the last part of an outage, up to a minute, is billed as usage. On a cluster's own nodes (Private Nodes, Auto Nodes, Standalone) only the Ready condition makes a node down; taints are ignored there, including <code>node.kubernetes.io/unreachable</code> and <code>node.kubernetes.io/not-ready</code>, because the cluster's admins write them. And such a node is billed for the most GPUs it ever had: when its device plugin goes away and it advertises fewer GPUs, or none, it keeps billing that count as GPU hours with no downtime, and the <code>private-nodes/&lt;cluster ID&gt;</code> source turns <code>diverged</code> (see <a href="private-nodes.html#private-first-seen">A node bills as vBilling first saw it</a>).</p>
           <h4>Dimensions</h4>
           <table class="props-table">
             <thead><tr><th>Key</th><th>Meaning</th></tr></thead>
@@ -237,8 +238,9 @@
             <dt>Unit</dt>
             <dd>gib-hours</dd>
             <dt>Quantity</dt>
-            <dd>GiB &times; seconds bound in the window / 3600</dd>
+            <dd>GiB &times; seconds in the window / 3600, for a Bound PVC</dd>
           </dl>
+          <p>A PVC bills nothing while it is Pending. Once it is Bound it bills from its creation time, not from the second it bound: the window in which it binds is billed in full when the PVC was created before that window, and windows that closed while it was still Pending are not billed afterwards.</p>
           <p>The cluster's own data volume is excluded unless <code>METER_CONTROL_PLANE=true</code>.</p>
           <h4>Dimensions</h4>
           <table class="props-table">
@@ -295,7 +297,7 @@
             <dt>Quantity</dt>
             <dd>load balancers &times; seconds / 3600</dd>
           </dl>
-          <p>A load balancer that is still pending (no IP) is not billed.</p>
+          <p>A load balancer that is still pending (no IP) is not billed. Once it has an address it bills from the Service's creation time, not from the second the address appeared: the window in which the address is assigned is billed in full when the Service was created before that window, and windows that closed while it was pending are not billed afterwards.</p>
         </div>
       </div>
 
