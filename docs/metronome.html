@@ -482,7 +482,7 @@ enforcement:
         </table>
       </div>
       <p><strong>Found by the validation and fixed in v0.3.3:</strong> a rate of $0 was hidden in the price view behind another combination of the same metric and SKU; a tenant without a customer or an active contract read as <code>unknown</code> instead of <code>unpriced</code>; a destination that was removed and added back resumed from its old cursor with no way to choose where it starts; and one tenant whose customer could not be created held up delivery for every tenant.</p>
-      <p><strong>Not run live:</strong> real GPUs together with <code>METRONOME_PROVISION=true</code>, and the Stripe link. Run your own loop in a sandbox before you invoice from it.</p>
+      <p><strong>Not run live:</strong> real GPUs together with <code>METRONOME_PROVISION=true</code>, the Stripe link, a payment-gated top-up (<code>payment_gate.payment_status</code>) that Metronome delivers itself, and how Metronome retries a delivery vBilling answers with a 500 (<a href="https://github.com/vClusterLabs-Experiments/vbilling/issues/20">#20</a>). Run your own loop in a sandbox before you invoice from it.</p>
 
       <h2 id="troubleshooting">Troubleshooting</h2>
       <h3>The pod exits at startup</h3>
