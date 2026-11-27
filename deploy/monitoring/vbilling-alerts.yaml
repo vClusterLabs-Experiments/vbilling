@@ -211,7 +211,8 @@ spec:
             summary: "vBilling volume {{ $labels.volume }} has less than 15% free space"
             description: >-
               Grow the volume before it fills. A full ledger volume stops every window commit and every record; a
-              full archive volume stops compaction, and the ledger volume fills next. Check destination lag too:
+              full archive volume stops compaction, and the ledger volume fills next; a full mirror volume stops the
+              second copy of the ledger. Check destination lag too:
               undelivered usage keeps segments in the ledger.
         - alert: VBillingLedgerMirrorLagging
           expr: vbilling_ledger_mirror_lag_seconds > 300

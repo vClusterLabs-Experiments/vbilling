@@ -26,6 +26,7 @@ const (
 const (
 	LedgerVolumeName  = "ledger-volume"
 	ArchiveVolumeName = "archive-volume"
+	MirrorVolumeName  = "mirror-volume"
 )
 
 // Volume is a directory vBilling writes to and the volume it is on.
@@ -68,6 +69,22 @@ func ArchiveVolume(archiveDir string, ensure func(path string) error) Volume {
 			"(65532 in the chart) may write to it. Until then compaction archives nothing and keeps every segment on the ledger volume",
 		FullHint: "grow the archive volume: once it is full, compaction cannot archive, segments past retention stay on the ledger volume, " +
 			"and a full ledger volume stops every window commit and every record",
+	}
+}
+
+// MirrorVolume is the ledger mirror's own volume (LEDGER_MIRROR_DIR; ""
+// when the mirror lives on the archive volume or is not kept). ensure
+// creates the mirror's directory, so a new, correctly mounted volume is
+// healthy from the first check.
+func MirrorVolume(mirrorDir string, ensure func(path string) error) Volume {
+	return Volume{
+		Name:   MirrorVolumeName,
+		Path:   mirrorDir,
+		Ensure: ensure,
+		EnsureHint: "vBilling cannot create the mirror's directory: check that the mirror volume is mounted and that vBilling's user " +
+			"(65532 in the chart) may write to it. Until then no second copy of the ledger is kept",
+		FullHint: "grow the mirror volume (LEDGER_MIRROR_DIR): the mirror leaves a tenth of it free and stops copying what does not fit, " +
+			"so the second copy of the ledger falls behind",
 	}
 }
 

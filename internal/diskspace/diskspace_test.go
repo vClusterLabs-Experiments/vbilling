@@ -143,3 +143,32 @@ func TestNoArchiveNoArchiveSource(t *testing.T) {
 		t.Fatalf("without ARCHIVE_DIR only the ledger volume is reported: %v", got)
 	}
 }
+
+// The mirror's own volume (LEDGER_MIRROR_DIR) is watched like the archive
+// volume: its directory is created, it is healthy from the first check, and
+// it has the space gauges the shipped alert on nearly full volumes reads.
+// Without a volume of its own (the mirror on the archive volume, or none)
+// it is not reported.
+func TestMirrorVolumeIsWatchedLikeTheOthers(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "vbilling-0")
+	tel := telemetry.New()
+	h := quietHealth(tel)
+	Check([]Volume{MirrorVolume(dir, func(p string) error { return os.MkdirAll(p, 0o750) })}, h, tel)
+	if s := sources(h)[MirrorVolumeName]; s.Status != health.OK || s.Kind != "storage" {
+		t.Fatalf("mirror volume source: %+v", s)
+	}
+	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+		t.Fatalf("the mirror's directory was not created: %v", err)
+	}
+	labels := map[string]string{"volume": MirrorVolumeName}
+	if size, free := tel.Get("vbilling_volume_size_bytes", labels), tel.Get("vbilling_volume_free_bytes", labels); size <= 0 || free <= 0 || free > size {
+		t.Fatalf("mirror volume gauges: size=%v free=%v", size, free)
+	}
+
+	none := telemetry.New()
+	hn := quietHealth(none)
+	Check([]Volume{MirrorVolume("", nil)}, hn, none)
+	if _, ok := sources(hn)[MirrorVolumeName]; ok {
+		t.Fatal("a mirror without a volume of its own must not be reported")
+	}
+}

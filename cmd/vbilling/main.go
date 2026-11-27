@@ -170,10 +170,16 @@ func main() {
 	// archive directory is created now, not by the first compaction days
 	// later: an archive volume that is not mounted or not writable fails at
 	// once, and an empty, healthy one is ok from the first check.
-	go diskspace.Watch(ctx, []diskspace.Volume{
+	volumes := []diskspace.Volume{
 		diskspace.LedgerVolume(cfg.DataDir),
 		diskspace.ArchiveVolume(cfg.ArchiveDir, spool.EnsureArchiveDir),
-	}, sources, tel)
+	}
+	if cfg.LedgerMirrorDir != "" && mirrorDir != "" {
+		// The mirror's own volume is watched like the others, so the shipped
+		// alert on nearly full volumes covers it too.
+		volumes = append(volumes, diskspace.MirrorVolume(mirrorDir, func(p string) error { return os.MkdirAll(p, 0o750) }))
+	}
+	go diskspace.Watch(ctx, volumes, sources, tel)
 	// The second copy: a live mirror of both ledgers and of every other file
 	// of DATA_DIR, a few seconds behind, in LEDGER_MIRROR_DIR or on the
 	// archive volume. It runs next to metering and never in its way (nil
