@@ -108,6 +108,12 @@ type Controller struct {
 	ambiguous   map[string]bool
 	aliasWarned map[string]string
 	owners      Owners // optional: past owners of clusters (TENANT_SOURCE=platform)
+	// ownerLog dates owner changes of clusters billed by their own settings
+	// (ownerlog.go).
+	ownerLog *ownerLog
+	// reconcileSoon asks Run to reconcile before its next tick, and before
+	// it commits another window (ReconcileSoon).
+	reconcileSoon chan struct{}
 
 	pauses *pause.Store // pause spans; nil = pauses are not tracked
 	// exclusions are the times clusters were excluded from metering;
@@ -345,6 +351,14 @@ func New(cfg *config.Config, disc Discoverer, coll Collector, sp *spool.Spool, t
 			gaps = s
 		}
 	}
+	history := kv.Memory()
+	if cfg.DataDir != "" {
+		if s, err := kv.Open(filepath.Join(cfg.DataDir, "owner-history.json")); err != nil {
+			log.Printf("[controller] owner history kept in memory only: %v", err)
+		} else {
+			history = s
+		}
+	}
 	bound := map[string]bool{}
 	for _, t := range cfg.IngestTokens {
 		if t != "" {
@@ -353,7 +367,8 @@ func New(cfg *config.Config, disc Discoverer, coll Collector, sp *spool.Spool, t
 	}
 	return &Controller{cfg: cfg, disc: disc, coll: coll, spool: sp, tenants: tenants, dests: dests, tel: tel,
 		now: time.Now, lastSeen: map[string]time.Time{}, offboarded: map[string]map[string]bool{}, gaps: gaps, bound: bound,
-		batch: backfillBatch}
+		batch:    backfillBatch,
+		ownerLog: newOwnerLog(history, discovery.TenantSource(cfg.TenantSource)), reconcileSoon: make(chan struct{}, 1)}
 }
 
 // backfillBatch is the most windows one metering run reads. After a long
@@ -369,6 +384,26 @@ func (c *Controller) firstBatch(windows []metrics.Window) (batch []metrics.Windo
 		return windows[:c.batch], true
 	}
 	return windows, false
+}
+
+// ReconcileSoon asks Run to reconcile now rather than at its next tick, and
+// in any case before it commits another window: vCluster Platform saw a
+// cluster change owner, and the tenant records must follow before usage is
+// billed to the new owner.
+func (c *Controller) ReconcileSoon() {
+	select {
+	case c.reconcileSoon <- struct{}{}:
+	default:
+	}
+}
+
+// reconcileIfAsked reconciles when ReconcileSoon asked for it.
+func (c *Controller) reconcileIfAsked(ctx context.Context) {
+	select {
+	case <-c.reconcileSoon:
+		c.Reconcile(ctx)
+	default:
+	}
 }
 
 // Run reconciles tenants every ReconcileInterval and closes a metering
@@ -394,7 +429,10 @@ func (c *Controller) Run(ctx context.Context) error {
 			return ctx.Err()
 		case <-reconcile.C:
 			c.Reconcile(ctx)
+		case <-c.reconcileSoon:
+			c.Reconcile(ctx)
 		case <-collect.C:
+			c.reconcileIfAsked(ctx)
 			c.CollectDue(ctx)
 			c.CollectPrometheusDue(ctx)
 			c.checkSafeguard()
@@ -531,6 +569,7 @@ func (c *Controller) Reconcile(ctx context.Context) {
 	shared := sharedIDs(clusters)
 	c.warnSharedIDs(shared)
 	c.observePauses(clusters, shared, now)
+	c.observeOwners(clusters, excluded, shared, now)
 	var head uint64
 	if c.spool != nil {
 		head = c.spool.Committed()

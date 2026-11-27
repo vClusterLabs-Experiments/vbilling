@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -227,7 +228,9 @@ func (p *PromSource) bareNamespace(t Target) bool {
 func (p *PromSource) namespaceSharers(targets []Target) map[string][]string {
 	out := map[string][]string{}
 	for _, t := range targets {
-		if p.namespaceScoped(t) {
+		// A cluster with several owners in these windows (owners.go) shares
+		// its namespace with no one.
+		if p.namespaceScoped(t) && !slices.Contains(out[t.Cluster.Namespace], t.Cluster.Name) {
 			out[t.Cluster.Namespace] = append(out[t.Cluster.Namespace], t.Cluster.Name)
 		}
 	}
@@ -502,6 +505,9 @@ func (p *PromSource) Collect(ctx context.Context, targets []Target, windows []Wi
 		}
 	}
 	attempts, failures := 0, 0
+	// A cluster whose owner changed in these windows is one target per
+	// owner: each reads into a copy, kept only if all of them succeed.
+	reads := newOwnerReads(targets, windows)
 	for _, t := range targets {
 		id := t.Cluster.ExternalID()
 		var away *elsewhere
@@ -527,12 +533,18 @@ func (p *PromSource) Collect(ctx context.Context, targets []Target, windows []Wi
 		if bare {
 			vars.seriesOwner, vars.foreignPods = synced.seriesFilter(t, away.syncedNamespaces())
 		}
-		vars.excluded = t.Excluded
+		vars.excluded, vars.elsewhere = t.Excluded, t.Elsewhere
 		base := p.c.baseFor(t)
 		for _, m := range p.specs() {
 			name := health.Name("prometheus", m.Code, id)
 			attempts++
+			o, a, owned := reads.start(id, m.Code, out, accs)
 			if err != nil {
+				if owned != nil {
+					owned.err = err
+					owned.report = func(int, int, error) { p.health.Fail(name, "prometheus", id, err, "") }
+					continue
+				}
 				failures++
 				p.health.Fail(name, "prometheus", id, err, "")
 				continue
@@ -543,42 +555,52 @@ func (p *PromSource) Collect(ctx context.Context, targets []Target, windows []Wi
 			case vars.foreignPods && m.Counter == "":
 				merr = fmt.Errorf("namespace contains pods synced by another cluster: an aggregated query cannot isolate their usage; use a counter with namespace and pod labels, or trusted per-cluster matchers")
 			case m.builtin == "gpu-util":
-				n, merr = p.gpuUtil(ctx, client, t, vars, windows, accs, base)
+				n, merr = p.gpuUtil(ctx, client, t, vars, windows, a, base)
 			case m.Counter != "":
 				var historic []map[string]string
 				cv := vars
 				if m.builtin == "egress" {
 					cv.seriesKeep = podInterfaces
 				}
-				n, late, historic, merr = p.counter(ctx, client, m.PromMetric, id, cv, !bare, windows, out, accs, base)
+				n, late, historic, merr = p.counter(ctx, client, m.PromMetric, id, cv, !bare, windows, o, a, base)
 				if merr == nil && len(historic) > 0 {
 					p.noteHistory(m.PromMetric, id, historic)
 				}
 			default:
-				n, merr = p.query(ctx, client, m.PromMetric, vars, windows, accs, base)
+				n, merr = p.query(ctx, client, m.PromMetric, vars, windows, a, base)
 			}
-			switch {
-			case merr != nil:
+			report := func(n, late int, merr error) {
+				switch {
+				case merr != nil:
+					p.health.Fail(name, "prometheus", id, merr, how)
+				case away.uncertainCount() > 0:
+					// Read and billed where the cluster's objects are known to be;
+					// not where nothing tells whose they are.
+					p.health.Fail(name, "prometheus", id, fmt.Errorf("read %d series (%s); %s", n, how, away.why(t.Cluster)), syncedHint)
+				case vars.foreignPods:
+					p.health.Fail(name, "prometheus", id, fmt.Errorf("read %d attributable series; excluded other clusters' pods from a shared control-plane namespace", n), "move namespace mappings away from other clusters' control-plane namespaces")
+				case n == 0:
+					p.health.Empty(name, "prometheus", id, "no series for "+id+" ("+how+")", emptyHint(m.PromMetric, vars, p.opts.SourceLabel))
+				case late > 0:
+					// Billed, in a later window than their own: say so.
+					p.health.Note(name, "prometheus", id, n,
+						fmt.Sprintf("%d sample(s) reached Prometheus more than %s after they were taken and are billed in a later window than their own", late, PromMaxWait),
+						"the pipeline that ships this cluster's metrics lags: check its remote write or collector queue")
+				default:
+					p.health.OK(name, "prometheus", id, n)
+				}
+			}
+			if owned != nil {
+				owned.n, owned.late, owned.err, owned.report = n, late, merr, report
+				continue
+			}
+			if merr != nil {
 				failures++
-				p.health.Fail(name, "prometheus", id, merr, how)
-			case away.uncertainCount() > 0:
-				// Read and billed where the cluster's objects are known to be;
-				// not where nothing tells whose they are.
-				p.health.Fail(name, "prometheus", id, fmt.Errorf("read %d series (%s); %s", n, how, away.why(t.Cluster)), syncedHint)
-			case vars.foreignPods:
-				p.health.Fail(name, "prometheus", id, fmt.Errorf("read %d attributable series; excluded other clusters' pods from a shared control-plane namespace", n), "move namespace mappings away from other clusters' control-plane namespaces")
-			case n == 0:
-				p.health.Empty(name, "prometheus", id, "no series for "+id+" ("+how+")", emptyHint(m.PromMetric, vars, p.opts.SourceLabel))
-			case late > 0:
-				// Billed, in a later window than their own: say so.
-				p.health.Note(name, "prometheus", id, n,
-					fmt.Sprintf("%d sample(s) reached Prometheus more than %s after they were taken and are billed in a later window than their own", late, PromMaxWait),
-					"the pipeline that ships this cluster's metrics lags: check its remote write or collector queue")
-			default:
-				p.health.OK(name, "prometheus", id, n)
 			}
+			report(n, late, merr)
 		}
 	}
+	failures += reads.finish(out, accs)
 	now := p.c.opts.Now().UTC()
 	for i, w := range windows {
 		var evs []usage.Event
@@ -791,6 +813,10 @@ func (p *PromSource) counter(ctx context.Context, client *prometheusClient, m Pr
 				// Counted, at least in part, while the cluster was excluded
 				// from metering: not billed, and the count moves on, so
 				// nothing of that time is billed later either.
+				inc = 0
+			}
+			if vars.elsewhereAt(smp.T) {
+				// Another owner's sample: that owner's target bills it.
 				inc = 0
 			}
 			if readThrough && inc > 0 && !smp.T.After(first.Start) {
@@ -1183,10 +1209,11 @@ func (p *PromSource) gpuUtil(ctx context.Context, client *prometheusClient, t Ta
 		for _, r := range counts[w.End] {
 			countBy[promGPUModel(r.Labels)] = r.Value
 		}
+		share := vars.billedShare(w)
 		for _, r := range util[w.End] {
 			n++
-			if vars.billedShare(w) == 0 {
-				continue // excluded from metering for the whole window
+			if share == 0 {
+				continue // excluded from metering, or another owner's, for the whole window
 			}
 			model := promGPUModel(r.Labels)
 			ev := base(usage.MetricGPUUtilization, nil)
@@ -1196,8 +1223,9 @@ func (p *PromSource) gpuUtil(ctx context.Context, client *prometheusClient, t Ta
 				props["gpu_devices"] = c
 			}
 			// Idle GPUs are a reading too: 0% is recorded, not skipped, so
-			// an idle fleet does not look like a source that stopped.
-			accs[w.End].observe(ev, r.Value*w.End.Sub(w.Start).Hours(), props)
+			// an idle fleet does not look like a source that stopped. The
+			// hours are this target's part of the window.
+			accs[w.End].observe(ev, r.Value*w.End.Sub(w.Start).Hours()*share, props)
 		}
 	}
 	return n, nil

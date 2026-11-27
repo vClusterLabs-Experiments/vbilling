@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -66,6 +67,17 @@ type Resolver struct {
 	lastTry time.Time
 	lastErr error
 	entries map[string]*entry // namespace/name of the workload -> binding
+
+	// Watching (watch.go). pending maps the UID of a Project, Tenant or
+	// instance to when the watch first reported a change to it that no read
+	// has covered yet; a change a read then shows is dated there.
+	pending  map[string]time.Time
+	wake     chan struct{} // a watch event asks for a read
+	watchCtx context.Context
+	watches  map[string]*watchState // by resource
+	settle   time.Duration          // how long a burst of events gets before the read
+	readGap  time.Duration          // the least time between reads the watch asks for
+	onChange func()                 // called after a read recorded an owner change
 }
 
 // entry is one cluster's binding and its earlier owners.
@@ -110,7 +122,8 @@ func New(opts Options) (*Resolver, error) {
 		return nil, fmt.Errorf("open %s: %w", opts.StatePath, err)
 	}
 	sum := sha256.Sum256([]byte(opts.Client.AccessKey))
-	r := &Resolver{client: c, opts: opts, store: store, keyTag: hex.EncodeToString(sum[:4]), entries: map[string]*entry{}}
+	r := &Resolver{client: c, opts: opts, store: store, keyTag: hex.EncodeToString(sum[:4]), entries: map[string]*entry{},
+		pending: map[string]time.Time{}, wake: make(chan struct{}, 1), watches: map[string]*watchState{}, settle: watchSettle, readGap: forceGap}
 	for k, v := range store.WithPrefix("binding/") {
 		var e entry
 		if json.Unmarshal([]byte(v), &e) == nil {
@@ -137,12 +150,27 @@ func (r *Resolver) refresh(ctx context.Context, force bool) {
 		r.lastTry = now
 	}
 	r.mu.Unlock()
-	if !due {
-		return
+	if due {
+		r.read(ctx, now)
 	}
+}
+
+// read reads the Platform, keeps what it read, and records the owner
+// changes it shows for the clusters vBilling knows (observeLocked).
+func (r *Resolver) read(ctx context.Context, now time.Time) {
 	snap, err := r.client.Snapshot(ctx, now.UTC())
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	changed := false
+	defer func() {
+		notify := r.onChange
+		r.mu.Unlock()
+		if err == nil {
+			r.startWatches(snap)
+		}
+		if changed && notify != nil {
+			notify()
+		}
+	}()
 	if err != nil {
 		r.lastErr = err
 		if r.opts.Health != nil {
@@ -162,6 +190,9 @@ func (r *Resolver) refresh(ctx context.Context, force bool) {
 		}
 		return
 	}
+	if r.snap != nil && snap.At.Before(r.snap.At) {
+		return // a read that started later is in already
+	}
 	if r.snap == nil {
 		tenants := "no Tenant resource (Platform before 4.12): projects are the billing accounts"
 		if snap.HasTenants() {
@@ -174,6 +205,36 @@ func (r *Resolver) refresh(ctx context.Context, force bool) {
 	if r.opts.Health != nil {
 		r.opts.Health.OK("platform", "platform", r.client.Host(), len(snap.Instances))
 	}
+	changed = r.observeLocked(snap)
+}
+
+// observeLocked records the owner changes a new read shows for the clusters
+// vBilling knows, right away: the window a change falls in is split there
+// before it is committed. It reports whether any owner changed.
+func (r *Resolver) observeLocked(snap *Snapshot) bool {
+	idx := snap.index(r.opts.Cluster)
+	changed := false
+	keys := make([]string, 0, len(r.entries))
+	for key := range r.entries {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		e := r.entries[key]
+		b, _, ok := snap.resolve(idx[key], e.Binding.InstanceUID)
+		if !ok || e.Binding.Same(&b) {
+			continue // ambiguous or gone: Bind reports it; or no owner change
+		}
+		r.persist(key, r.record(key, e.WorkloadUID, b, snap.At))
+		changed = true
+	}
+	// What the watch reported before this read began is in it.
+	for uid, at := range r.pending {
+		if !at.After(snap.At) {
+			delete(r.pending, uid)
+		}
+	}
+	return changed
 }
 
 // forceGap limits reads forced by new clusters.
@@ -299,11 +360,14 @@ func (r *Resolver) Bind(ctx context.Context, clusters []discovery.TenantCluster)
 	return out, nil
 }
 
-// record makes b the cluster's binding. When the owner changed, the old one
-// becomes history: the move is dated to the creation of the instance that
-// now points at the cluster (the Platform creates a new instance when it
-// moves a cluster to another project), else to now, and never before the
-// last window already in the ledger.
+// record makes b the cluster's binding, seen at now. When the owner
+// changed, the old one becomes history, and the move is dated as early as
+// vBilling can tell: at the creation of the instance that now points at
+// the cluster (the Platform creates a new instance when it moves a cluster
+// to another project), or when the watch reported a change to that
+// instance, the old one, or their Project or Tenant (watch.go), whichever
+// is earlier; else at now, the read that shows it. Never before the last
+// window already in the ledger.
 func (r *Resolver) record(key, workloadUID string, b discovery.PlatformBinding, now time.Time) *entry {
 	e := r.entries[key]
 	if e == nil {
@@ -326,13 +390,21 @@ func (r *Resolver) record(key, workloadUID string, b discovery.PlatformBinding, 
 		e.Binding = b
 		return e
 	}
-	at := now
-	if b.InstanceUID != e.Binding.InstanceUID && b.InstanceCreated.After(e.Since) && b.InstanceCreated.Before(now) {
-		at = b.InstanceCreated
+	at, how := now, "seen at a read of the Platform"
+	if b.InstanceUID != e.Binding.InstanceUID && b.InstanceCreated.After(e.Since) && b.InstanceCreated.Before(at) {
+		at, how = b.InstanceCreated, "the creation of instance "+b.Instance
+	}
+	if t, ok := r.reportedAt(&e.Binding, &b); ok && !t.After(at) {
+		at, how = t, "reported by the Platform watch"
+	}
+	// To the second, so the split, the logs and the customer record agree.
+	at = at.UTC().Truncate(time.Second)
+	if at.Before(e.Since) {
+		at = e.Since // never before the current owner took effect
 	}
 	if r.opts.Committed != nil {
 		if wm, ok := r.opts.Committed(); ok && at.Before(wm) {
-			at = wm // windows up to wm are in the ledger under the old owner
+			at, how = wm, how+"; usage up to the last window already billed stays with the old owner"
 		}
 	}
 	if was := e.Binding.TenantID(); e.Binding.SameAccount(&b) && was != b.TenantID() {
@@ -342,8 +414,8 @@ func (r *Resolver) record(key, workloadUID string, b discovery.PlatformBinding, 
 		b.PreviousTenantID, b.TenantIDChanged = was, at
 		r.billingIDChanged(key, was, &b, at)
 	} else {
-		log.Printf("[platform] %s moved from %s (tenant %s) to %s (tenant %s) at %s; windows before stay billed to the old owner",
-			key, e.Binding.Owner(), was, b.Owner(), b.TenantID(), at.Format(time.RFC3339))
+		log.Printf("[platform] %s moved from %s (tenant %s) to %s (tenant %s) at %s (%s): usage up to then is billed to %s, from then on to %s",
+			key, e.Binding.Owner(), was, b.Owner(), b.TenantID(), at.Format(time.RFC3339), how, was, b.TenantID())
 	}
 	e.History = append(e.History, epoch{Binding: e.Binding, Since: e.Since, Until: at})
 	if len(e.History) > maxHistory {
@@ -422,9 +494,12 @@ func (r *Resolver) forget(key string) {
 	_ = r.store.Delete("binding/" + key)
 }
 
-// OwnerAt returns cl as it was bound during the window ending at end, for
-// windows metered after the fact (backfill after a restart, fills after a
-// tenant API outage). ok is false when the current binding applies.
+// OwnerAt returns cl as it was bound during the window, or the part of a
+// window, ending at end: for windows metered as they close, after the fact
+// (backfill after a restart, fills after a tenant API outage), and the
+// parts of a window an owner change splits (ChangesIn). ok is false when
+// cl's binding applies. A move the watch reported after the last discovery
+// applies already, although cl does not carry it yet.
 func (r *Resolver) OwnerAt(cl discovery.TenantCluster, end time.Time) (discovery.TenantCluster, bool) {
 	if cl.Platform == nil || cl.External {
 		return cl, false
@@ -432,14 +507,17 @@ func (r *Resolver) OwnerAt(cl discovery.TenantCluster, end time.Time) (discovery
 	last := end.Add(-time.Nanosecond) // the window's last instant
 	r.mu.Lock()
 	e := r.entries[cl.Namespace+"/"+cl.Name]
-	if e == nil || len(e.History) == 0 || !last.Before(e.Since) {
+	if e == nil || e.WorkloadUID != "" && cl.UID != "" && e.WorkloadUID != cl.UID {
 		r.mu.Unlock()
-		return cl, false
+		return cl, false // unknown, or a new cluster under an old name
 	}
-	b := e.History[0].Binding // before anything known: the oldest owner
-	for _, h := range e.History {
-		if !last.Before(h.Since) && last.Before(h.Until) {
-			b = h.Binding
+	b := e.Binding
+	if len(e.History) > 0 && last.Before(e.Since) {
+		b = e.History[0].Binding // before anything known: the oldest owner
+		for _, h := range e.History {
+			if !last.Before(h.Since) && last.Before(h.Until) {
+				b = h.Binding
+			}
 		}
 	}
 	r.mu.Unlock()
@@ -451,6 +529,36 @@ func (r *Resolver) OwnerAt(cl discovery.TenantCluster, end time.Time) (discovery
 	out.Annotations = copyMap(cl.Annotations)
 	out.ApplyPlatform(b)
 	return out, true
+}
+
+// ChangesIn returns the moments in (start, end) at which cl's owner
+// changed, in order: the window is billed to each owner for its part.
+func (r *Resolver) ChangesIn(cl discovery.TenantCluster, start, end time.Time) []time.Time {
+	if cl.Platform == nil || cl.External {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e := r.entries[cl.Namespace+"/"+cl.Name]
+	if e == nil || e.WorkloadUID != "" && cl.UID != "" && e.WorkloadUID != cl.UID {
+		return nil
+	}
+	var out []time.Time
+	for _, h := range e.History {
+		if h.Until.After(start) && h.Until.Before(end) {
+			out = append(out, h.Until)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Before(out[j]) })
+	return out
+}
+
+// OnOwnerChange calls f after a read recorded a cluster's move or a
+// billing ID change, so tenant records follow before more usage is billed.
+func (r *Resolver) OnOwnerChange(f func()) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onChange = f
 }
 
 // ProxyConfig reaches a bound cluster's API through the Platform proxy. A

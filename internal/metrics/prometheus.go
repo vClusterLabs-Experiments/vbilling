@@ -528,20 +528,37 @@ type queryVars struct {
 	// excluded are the times nothing of the cluster is billed
 	// (Target.Excluded).
 	excluded []pause.Span
+	// elsewhere are the times the cluster was billed to another owner
+	// (Target.Elsewhere).
+	elsewhere []pause.Span
 }
 
-// billedShare is the part of a window that is not excluded from metering,
-// from 0 to 1.
+// billedShare is the part of a window that is neither excluded from
+// metering nor billed to another owner, from 0 to 1.
 func (v queryVars) billedShare(w Window) float64 {
-	if len(v.excluded) == 0 {
+	if len(v.excluded) == 0 && len(v.elsewhere) == 0 {
 		return 1
 	}
 	size := w.End.Sub(w.Start)
 	if size <= 0 {
 		return 0
 	}
-	out := pause.Overlap(v.excluded, time.Time{}, time.Time{}, w.Start, w.End)
+	out := pause.Overlap(pause.Union(v.excluded, v.elsewhere), time.Time{}, time.Time{}, w.Start, w.End)
 	return max(0, 1-float64(out)/float64(size))
+}
+
+// elsewhereAt reports whether a counter sample taken at t belongs to
+// another owner of the cluster. A sample counts what happened since the
+// one before it, up to its own time, so it belongs to the owner of the part
+// that ends at or after it: an owner's part [from, to) takes the samples
+// in (from, to].
+func (v queryVars) elsewhereAt(t time.Time) bool {
+	for _, sp := range v.elsewhere {
+		if t.After(sp.From) && (sp.To.IsZero() || !t.After(sp.To)) {
+			return true
+		}
+	}
+	return false
 }
 
 // excludedBetween reports whether any time after from, up to to, was

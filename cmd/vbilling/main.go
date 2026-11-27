@@ -334,6 +334,10 @@ func main() {
 	}
 	if owners != nil {
 		ctrl.UseOwners(owners)
+		// Owner changes the Platform reports are dated when they arrive; the
+		// tenant records follow before the next window is committed.
+		owners.OnOwnerChange(ctrl.ReconcileSoon)
+		go owners.Watch(ctx)
 	}
 	enf := newEnforcer(cfg, kube, ctrl, dests, tel, tenantMgr, pauses, coll, newGateway(cfg, ctrl, formats, tel))
 	// A cluster whose API refuses vBilling and a payment that did not lift a

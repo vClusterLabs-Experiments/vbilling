@@ -3,6 +3,7 @@ package platform
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -19,21 +20,27 @@ type Snapshot struct {
 	Tenants   map[string]*Object // by name; nil when this Platform has no Tenant resource
 	Instances []Object
 	nsProject map[string]string // project namespace -> project
+	// Watchable are the resources API discovery lists the watch verb for,
+	// and Versions the resource version each was listed at.
+	Watchable map[string]bool
+	Versions  map[string]string
 }
 
 // Snapshot reads Self, Projects, Tenants (when the Platform has them) and
 // VirtualClusterInstances. Any failure fails the whole read.
 func (c *Client) Snapshot(ctx context.Context, now time.Time) (*Snapshot, error) {
-	s := &Snapshot{At: now, Projects: map[string]*Object{}, nsProject: map[string]string{}}
+	s := &Snapshot{At: now, Projects: map[string]*Object{}, nsProject: map[string]string{},
+		Watchable: map[string]bool{}, Versions: map[string]string{}}
 	self, err := c.Self(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("read self: %w", err)
 	}
 	s.Self = self
-	projects, err := c.list(ctx, projectsGVR)
+	projects, rv, err := c.listAt(ctx, projectsGVR)
 	if err != nil {
 		return nil, fmt.Errorf("list projects: %w", err)
 	}
+	s.Versions[projectsGVR.Resource] = rv
 	for i := range projects {
 		p := &projects[i]
 		s.Projects[p.Name] = p
@@ -49,24 +56,70 @@ func (c *Client) Snapshot(ctx context.Context, now time.Time) (*Snapshot, error)
 			s.nsProject[pre+p.Name] = p.Name
 		}
 	}
-	hasTenants, err := c.servesTenants()
+	verbs, err := c.resources()
 	if err != nil {
 		return nil, fmt.Errorf("discover management API: %w", err)
 	}
-	if hasTenants {
-		tenants, err := c.list(ctx, tenantsGVR)
+	for res, vs := range verbs {
+		s.Watchable[res] = slices.Contains(vs, "watch")
+	}
+	if _, hasTenants := verbs[tenantsGVR.Resource]; hasTenants {
+		tenants, rv, err := c.listAt(ctx, tenantsGVR)
 		if err != nil {
 			return nil, fmt.Errorf("list tenants: %w", err)
 		}
+		s.Versions[tenantsGVR.Resource] = rv
 		s.Tenants = map[string]*Object{}
 		for i := range tenants {
 			s.Tenants[tenants[i].Name] = &tenants[i]
 		}
 	}
-	if s.Instances, err = c.list(ctx, instancesGVR); err != nil {
+	if s.Instances, rv, err = c.listAt(ctx, instancesGVR); err != nil {
 		return nil, fmt.Errorf("list virtual cluster instances: %w", err)
 	}
+	s.Versions[instancesGVR.Resource] = rv
 	return s, nil
+}
+
+// object returns the snapshot's version of a watched object: a Project or
+// Tenant by name, an instance by UID. Nil when the snapshot does not have
+// it.
+func (s *Snapshot) object(resource string, o *Object) *Object {
+	switch resource {
+	case projectsGVR.Resource:
+		return s.Projects[o.Name]
+	case tenantsGVR.Resource:
+		return s.Tenants[o.Name]
+	}
+	for i := range s.Instances {
+		if s.Instances[i].UID == o.UID {
+			return &s.Instances[i]
+		}
+	}
+	return nil
+}
+
+// ownership is what of a Project, Tenant or instance decides who pays and
+// under which name; nothing else (status, phase, other annotations) moves
+// a cluster to another owner.
+func ownership(o *Object) string {
+	var b strings.Builder
+	b.WriteString(string(o.UID) + "\x00" + o.Namespace + "/" + o.Name + "\x00" + o.Spec.DisplayName)
+	ref := o.Spec.ClusterRef
+	fmt.Fprintf(&b, "\x00%s/%s/%s/%t/%t", ref.Cluster, ref.Namespace, ref.VirtualCluster, o.Spec.Standalone, o.Status.IgnoreReconciliation)
+	var keys []string
+	for _, m := range []map[string]string{o.Labels, o.Annotations} {
+		for k, v := range m {
+			switch {
+			case k == TenantOwnerLabel, k == TenantExclusiveLabel, k == TenantLegacyLabel, k == ProjectNamespaceAnnotation,
+				strings.HasPrefix(k, discovery.AnnotationPrefix):
+				keys = append(keys, k+"="+v)
+			}
+		}
+	}
+	sort.Strings(keys)
+	b.WriteString("\x00" + strings.Join(keys, "\x00"))
+	return b.String()
 }
 
 // HasTenants reports whether this Platform version has the Tenant resource.

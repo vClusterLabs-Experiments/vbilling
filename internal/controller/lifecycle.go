@@ -279,32 +279,32 @@ func (c *Controller) lifecycleTargets() []metrics.Target {
 	return out
 }
 
-// meteredIn drops the targets that are excluded from metering for the whole
-// window. skipped names them, so runs of windows split where the set of
-// targets changes.
+// meteredIn drops the targets that are excluded from metering, or billed to
+// another owner, for the whole window. skipped names them, so runs of
+// windows split where the set of targets changes.
 func meteredIn(targets []metrics.Target, w metrics.Window) (kept []metrics.Target, skipped string) {
 	size := w.End.Sub(w.Start)
+	unbilled := func(t *metrics.Target) bool {
+		nb := t.NotBilled()
+		return len(nb) > 0 && pause.Overlap(nb, time.Time{}, time.Time{}, w.Start, w.End) >= size
+	}
 	for i := range targets {
-		if len(targets[i].Excluded) == 0 {
-			continue
-		}
-		if pause.Overlap(targets[i].Excluded, time.Time{}, time.Time{}, w.Start, w.End) < size {
+		if !unbilled(&targets[i]) {
 			continue
 		}
 		if kept == nil {
 			kept = append(make([]metrics.Target, 0, len(targets)), targets[:i]...)
 		}
-		skipped += targets[i].Cluster.ExternalID() + "\x00"
+		skipped += targets[i].Cluster.ExternalID() + "\x00" + targets[i].Tenant + "\x00"
 	}
 	if kept == nil {
 		return targets, ""
 	}
 	kept = kept[:0]
 	for i := range targets {
-		if len(targets[i].Excluded) > 0 && pause.Overlap(targets[i].Excluded, time.Time{}, time.Time{}, w.Start, w.End) >= size {
-			continue
+		if !unbilled(&targets[i]) {
+			kept = append(kept, targets[i])
 		}
-		kept = append(kept, targets[i])
 	}
 	return kept, skipped
 }

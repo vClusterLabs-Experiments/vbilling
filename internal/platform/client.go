@@ -26,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
@@ -94,6 +95,9 @@ type Client struct {
 	base *rest.Config
 	mgmt dynamic.Interface
 	disc discovery.DiscoveryInterface
+	// watch has no overall request timeout: a watch stays open until the
+	// Platform ends it (watchTimeout).
+	watch dynamic.Interface
 }
 
 // NewClient validates opts and returns a client.
@@ -133,23 +137,43 @@ func NewClient(opts ClientOptions) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Client{base: base, mgmt: mgmt, disc: disc}, nil
+	wc := rest.CopyConfig(mc)
+	wc.Timeout = 0
+	whc, err := safehttp.KubeHTTPClient(wc)
+	if err != nil {
+		return nil, err
+	}
+	watch, err := dynamic.NewForConfigAndClient(wc, whc)
+	if err != nil {
+		return nil, err
+	}
+	return &Client{base: base, mgmt: mgmt, disc: disc, watch: watch}, nil
+}
+
+// resources returns the verbs of each management resource, from API
+// discovery: a key that may not read a resource gets 403 whether or not the
+// resource exists, so listing cannot tell.
+func (c *Client) resources() (map[string][]string, error) {
+	l, err := c.disc.ServerResourcesForGroupVersion(projectsGVR.GroupVersion().String())
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string][]string, len(l.APIResources))
+	for _, r := range l.APIResources {
+		out[r.Name] = r.Verbs
+	}
+	return out, nil
 }
 
 // servesTenants reports whether this Platform has the Tenant resource
-// (4.12 and later). It asks API discovery rather than listing: a key that
-// may not read a resource gets 403 whether or not the resource exists.
+// (4.12 and later).
 func (c *Client) servesTenants() (bool, error) {
-	l, err := c.disc.ServerResourcesForGroupVersion(projectsGVR.GroupVersion().String())
+	res, err := c.resources()
 	if err != nil {
 		return false, err
 	}
-	for _, r := range l.APIResources {
-		if r.Name == tenantsGVR.Resource {
-			return true, nil
-		}
-	}
-	return false, nil
+	_, ok := res[tenantsGVR.Resource]
+	return ok, nil
 }
 
 // Host is the Platform URL.
@@ -191,23 +215,53 @@ func (c *Client) Self(ctx context.Context) (Self, error) {
 
 // list reads every page of a management resource.
 func (c *Client) list(ctx context.Context, gvr schema.GroupVersionResource) ([]Object, error) {
+	out, _, err := c.listAt(ctx, gvr)
+	return out, err
+}
+
+// listAt reads every page of a management resource, and the resource
+// version of the list: a watch started from it misses nothing after it.
+func (c *Client) listAt(ctx context.Context, gvr schema.GroupVersionResource) ([]Object, string, error) {
 	var out []Object
+	rv := ""
 	opts := metav1.ListOptions{Limit: 500}
 	for {
 		l, err := c.mgmt.Resource(gvr).List(ctx, opts)
 		if err != nil {
-			return nil, err
+			return nil, "", err
+		}
+		if rv == "" {
+			rv = l.GetResourceVersion() // the pages of one list share it
 		}
 		for _, it := range l.Items {
-			var o Object
-			if err := runtime.DefaultUnstructuredConverter.FromUnstructured(it.Object, &o); err != nil {
-				return nil, fmt.Errorf("decode %s %s: %w", gvr.Resource, it.GetName(), err)
+			o, err := decode(gvr, &it)
+			if err != nil {
+				return nil, "", err
 			}
 			out = append(out, o)
 		}
 		if l.GetContinue() == "" {
-			return out, nil
+			return out, rv, nil
 		}
 		opts.Continue = l.GetContinue()
 	}
+}
+
+func decode(gvr schema.GroupVersionResource, it *unstructured.Unstructured) (Object, error) {
+	var o Object
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(it.Object, &o); err != nil {
+		return o, fmt.Errorf("decode %s %s: %w", gvr.Resource, it.GetName(), err)
+	}
+	return o, nil
+}
+
+// watchTimeout is how long the Platform keeps one watch open before it
+// ends it and vBilling starts the next one.
+const watchTimeout = 5 * time.Minute
+
+// watchFrom watches a management resource from resource version rv (all
+// of it, as a new watch reports, when rv is empty).
+func (c *Client) watchFrom(ctx context.Context, gvr schema.GroupVersionResource, rv string) (watch.Interface, error) {
+	secs := int64(watchTimeout / time.Second)
+	return c.watch.Resource(gvr).Watch(ctx, metav1.ListOptions{ResourceVersion: rv, AllowWatchBookmarks: true, TimeoutSeconds: &secs})
 }

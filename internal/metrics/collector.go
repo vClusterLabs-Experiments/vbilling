@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -221,6 +222,10 @@ type Target struct {
 	// deleted (an open span from its deletion, on a cluster that is metered
 	// one last time for the window it was deleted in).
 	Excluded []pause.Span
+	// Elsewhere are the times the cluster was billed to another owner: its
+	// owner changed inside the window, and each owner is a target of its
+	// own (see owners.go).
+	Elsewhere []pause.Span
 }
 
 // pausesFor returns the pauses that stop billing capacity of the given
@@ -232,8 +237,8 @@ type Target struct {
 // stops the control plane's hours alone: nothing confirms the workloads on
 // the cluster's nodes stopped, so they and their nodes keep billing.
 //
-// The times a cluster was excluded from metering stop billing everything,
-// whatever keeps billing while paused.
+// The times a cluster was excluded from metering, or billed to another
+// owner, stop billing everything, whatever keeps billing while paused.
 func (c *Collector) pausesFor(t Target, kind string) []pause.Span {
 	var out []pause.Span
 	switch {
@@ -247,7 +252,7 @@ func (c *Collector) pausesFor(t Target, kind string) []pause.Span {
 			}
 		}
 	}
-	return pause.Union(out, t.Excluded)
+	return pause.Union(out, t.NotBilled())
 }
 
 // pausedFor returns the part of [start, end) inside [ws, we) during which
@@ -439,18 +444,63 @@ func (c *Collector) collect(ctx context.Context, targets []Target, windows []Win
 			return nil, st, err
 		}
 	}
+	// A cluster whose owner changed in these windows is one target per
+	// owner (owners.go). It counts once in the stats, and its own API, read
+	// for each owner, is kept only when every read succeeded: its windows
+	// are then committed for every owner or filled later for every owner,
+	// never both.
+	several := severalOwners(targets)
+	counted := map[string]bool{}
+	own := map[string]*ownAPIReads{}
+	var ownOrder []string
 	for _, t := range targets {
+		id := t.Cluster.ExternalID()
+		stT := &st
+		if counted[id] {
+			stT = &Stats{}
+		}
+		counted[id] = true
 		// External tenant clusters have nothing on this control plane cluster.
 		var syncedOn map[string]bool
 		if !onlyTenantAPI && !t.Cluster.External {
-			on, err := c.collectTarget(ctx, t, nodes, dra, synced.awayOf(t.Cluster), windows, accs, &st)
+			on, err := c.collectTarget(ctx, t, nodes, dra, synced.awayOf(t.Cluster), windows, accs, stT)
 			if err != nil {
-				return nil, st, fmt.Errorf("meter %s: %w", t.Cluster.ExternalID(), err)
+				return nil, st, fmt.Errorf("meter %s: %w", id, err)
 			}
 			syncedOn = on
 		}
-		if c.tenants != nil {
+		if c.tenants == nil {
+			continue
+		}
+		if !several[id] {
 			c.collectTenant(ctx, t, nodes, syncedOn, windows, accs, &st)
+			continue
+		}
+		r := own[id]
+		if r == nil {
+			r = &ownAPIReads{}
+			own[id] = r
+			ownOrder = append(ownOrder, id)
+		}
+		tmp := newAccumulators(windows)
+		before := len(stT.TenantAPIFailed)
+		c.collectTenant(ctx, t, nodes, syncedOn, windows, tmp, stT)
+		r.failed = r.failed || len(stT.TenantAPIFailed) > before
+		if stT.PendingHeartbeat != nil {
+			st.PendingHeartbeat = stT.PendingHeartbeat
+		}
+		r.accs = append(r.accs, tmp)
+	}
+	for _, id := range ownOrder {
+		r := own[id]
+		if !r.failed {
+			for _, a := range r.accs {
+				mergeAccs(a, accs)
+			}
+			continue
+		}
+		if !slices.Contains(st.TenantAPIFailed, id) {
+			st.TenantAPIFailed = append(st.TenantAPIFailed, id)
 		}
 	}
 	c.saveNodeHistory()
@@ -605,7 +655,7 @@ func (c *Collector) collectTarget(ctx context.Context, t Target, nodes map[strin
 				// paused time too, although no replica is ready then.
 				spans = pause.Union(spans, t.Paused)
 			}
-			accs[w.End].add(base(usage.MetricInstanceHours, nil), outside(spans, t.Excluded, w.Start, w.End).Hours(), nil)
+			accs[w.End].add(base(usage.MetricInstanceHours, nil), outside(spans, t.NotBilled(), w.Start, w.End).Hours(), nil)
 			continue
 		}
 		if !bill {
