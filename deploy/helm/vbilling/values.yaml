@@ -66,6 +66,27 @@ billing:
   # before usage starts: late usage can miss a finalized invoice.
   priceCheck:
     mode: warn # warn | hold | off
+  # Storage included in a price, such as 32 GiB with every node
+  # (ALLOWANCES_FILE). A billing platform's free tier applies to a customer's
+  # total, never per node, cluster or volume: vBilling applies the allowance
+  # where it is defined, at every second of a window, and bills what is above
+  # it as vcluster_storage_overage_gb_hours. With any allowance, every storage
+  # class is billed through that metric (a class without an allowance is all
+  # overage), and vcluster_storage_gb_hours stays in the ledger, exports and
+  # webhooks as an informational record of the whole capacity. Price the
+  # overage metric in your billing platform. See docs/pricing-models.html.
+  allowances: []
+  # - metric: vcluster_storage_gb_hours  # the only metric that takes one
+  #   included: 32                       # GiB
+  #   # node: each of the cluster's own nodes (dedicated or private) while it
+  #   # is billed; a cluster without its own nodes includes nothing.
+  #   # cluster: the cluster. volume: each volume.
+  #   per: node
+  #   # Optional. The listed classes share one allowance, the first listed
+  #   # taking from it first, and other classes have none. Without it, every
+  #   # class no other entry lists has an allowance of its own. A claim
+  #   # without a storage class is metered under the class "default".
+  #   storageClasses: [fast-ssd, standard]
 
 metering:
   # requests (exact): requests times lifetime. usage or max: a metrics-server

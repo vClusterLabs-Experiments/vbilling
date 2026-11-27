@@ -46,6 +46,7 @@ type startupConfig struct {
 	cfg         *config.Config
 	formats     records.Formats
 	promMetrics []metrics.PromMetric
+	allowances  []metrics.Allowance // ALLOWANCES_FILE
 
 	// checked lists what was read and checked, in order.
 	checked []string
@@ -164,6 +165,9 @@ func (st *startupConfig) load(opts startupOptions) error {
 	}
 	if cfg.PrometheusMetrics != "" {
 		st.ok("PROMETHEUS_METRICS_FILE %s: %d metric(s)", cfg.PrometheusMetrics, len(st.promMetrics))
+	}
+	if err := st.loadAllowances(); err != nil {
+		return err
 	}
 
 	// vCluster Platform (TENANT_SOURCE=platform): the URL, the access key
@@ -291,6 +295,36 @@ func (st *startupConfig) load(opts startupOptions) error {
 	return nil
 }
 
+// loadAllowances reads ALLOWANCES_FILE. With an allowance, storage is
+// billed as vcluster_storage_overage_gb_hours, and vcluster_storage_gb_hours
+// stays in the ledger as information.
+func (st *startupConfig) loadAllowances() error {
+	cfg := st.cfg
+	allowances, err := metrics.LoadAllowances(cfg.AllowancesFile)
+	if err != nil {
+		return fmt.Errorf("ALLOWANCES_FILE: %w", err)
+	}
+	st.allowances = allowances
+	usage.UseStorageAllowances(len(allowances) > 0)
+	if cfg.AllowancesFile == "" {
+		return nil
+	}
+	if len(allowances) == 0 {
+		st.ok("ALLOWANCES_FILE %s: no allowances: %s is billed", cfg.AllowancesFile, usage.MetricStorageGBHours)
+		return nil
+	}
+	st.ok("ALLOWANCES_FILE %s: %d allowance(s): storage is billed as %s, the storage above them; %s is informational",
+		cfg.AllowancesFile, len(allowances), usage.MetricStorageOverageGBHours, usage.MetricStorageGBHours)
+	for _, a := range allowances {
+		if a.Per == metrics.PerNode && cfg.PrivateNodeBilling == "usage" {
+			st.warn("ALLOWANCES_FILE: an allowance per node counts the nodes billed whole, and PRIVATE_NODE_BILLING=usage bills the pods on a cluster's own nodes instead: " +
+				"only dedicated nodes include storage then, and the storage of clusters with their own nodes is all above the allowance")
+			break
+		}
+	}
+	return nil
+}
+
 // credential is a secret setting that part of the configuration requires.
 type credential struct {
 	env    string
@@ -379,9 +413,9 @@ const checkConfigUsage = `Usage: vbilling check-config [--allow-missing-secrets]
 
 Reads and checks the configuration exactly as start-up does: the settings in
 the environment and every file they name (custom metrics, Prometheus metric
-definitions, records formats and pulls, price cards, the tenant clusters file,
-the vCluster Platform CA). Exits 0 and lists what it checked, or exits 1 with
-the error vBilling would stop with at start-up.
+definitions, storage allowances, records formats and pulls, price cards, the
+tenant clusters file, the vCluster Platform CA). Exits 0 and lists what it
+checked, or exits 1 with the error vBilling would stop with at start-up.
 
 It contacts nothing (no Kubernetes API, billing platform, Prometheus or
 gateway), takes no Lease, and never opens the data or archive volume. Run it

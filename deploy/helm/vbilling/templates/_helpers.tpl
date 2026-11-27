@@ -179,12 +179,12 @@ Args: dict "root" $ "name" NAME "check" BOOL
 
 {{/*
 "true" when the chart renders the files ConfigMap: custom metrics given as a
-list, records formats and pulls, the Stripe price card.
+list, storage allowances, records formats and pulls, the Stripe price card.
 */}}
 {{- define "vbilling.hasFiles" -}}
 {{- $custom := and .Values.metering.customMetrics (not (kindIs "string" .Values.metering.customMetrics)) -}}
 {{- $stripeCard := and (has "stripe" (include "vbilling.adapters" . | splitList ",")) .Values.stripe.priceCard -}}
-{{- if or .Values.records.formats $custom .Values.records.pull $stripeCard }}true{{ end -}}
+{{- if or .Values.records.formats $custom .Values.records.pull $stripeCard .Values.billing.allowances }}true{{ end -}}
 {{- end }}
 
 {{/*
@@ -196,6 +196,10 @@ Data of the files ConfigMap, for the release's ConfigMap and the check's copy.
 {{- if $custom }}
 custom-metrics.yaml: |
   {{- toYaml .Values.metering.customMetrics | nindent 2 }}
+{{- end }}
+{{- if .Values.billing.allowances }}
+allowances.yaml: |
+  {{- toYaml .Values.billing.allowances | nindent 2 }}
 {{- end }}
 {{- if .Values.records.formats }}
 records-formats.yaml: |
@@ -448,6 +452,10 @@ bare on or off as a boolean, so both spellings are taken.
 {{- else if .Values.metering.customMetrics }}
 - name: CUSTOM_METRICS_FILE
   value: /etc/vbilling/files/custom-metrics.yaml
+{{- end }}
+{{- if .Values.billing.allowances }}
+- name: ALLOWANCES_FILE
+  value: /etc/vbilling/files/allowances.yaml
 {{- end }}
 {{- if .Values.billing.planByClass }}
 - name: PLAN_BY_CLASS

@@ -82,6 +82,7 @@
           <tr><td><code>vcluster_cpu_core_hours</code>, <code>vcluster_memory_gb_hours</code></td><td>Exact with <code>CPU_MEMORY_BASIS=requests</code>; an estimate with <code>usage</code> or <code>max</code></td><td>Pod lifetimes and requests, or node capacity. With <code>usage</code> or <code>max</code>, usage is one metrics-server reading taken when the window is collected, times the window's length: its events carry <code>estimate: true</code>. metrics-server has no history, so a window collected late (after a restart or outage) bills no usage at all with <code>usage</code> (requests with <code>max</code>); vBilling logs those pod-windows and counts them in <code>vbilling_cpu_memory_unmeasured_total</code>. <code>requests</code> is the default.</td></tr>
           <tr><td><code>vcluster_private_node_hours</code></td><td>Exact</td><td>Node lifetimes and health</td></tr>
           <tr><td><code>vcluster_storage_gb_hours</code></td><td>Exact</td><td>Bound PVC lifetimes</td></tr>
+          <tr><td><code>vcluster_storage_overage_gb_hours</code> (with storage allowances)</td><td>Exact</td><td>Bound PVC lifetimes, and the lifetimes of the nodes billed whole</td></tr>
           <tr><td><code>vcluster_instance_hours</code></td><td>Exact</td><td>Control plane readiness</td></tr>
           <tr><td><code>vcluster_lb_hours</code></td><td>Exact</td><td>LoadBalancer Service lifetimes</td></tr>
           <tr><td><code>vcluster_network_egress_gb</code></td><td>Exact by default; an estimate with <code>EGRESS_QUERY</code></td><td>A Prometheus counter, read sample by sample</td></tr>
@@ -243,6 +244,36 @@
           <p>A PVC bills nothing while it is Pending. It bills from the second it was bound, where vBilling's watch saw it bind; a PVC that was bound before vBilling could see it bills from its creation, in the window it first counts in, and windows that closed while it was still Pending are not billed afterwards.</p>
           <p>A resized PVC bills each capacity for the time it had it: 1 GiB for the first 32 seconds of a window and 3 GiB for the rest is 116 GiB-seconds, not 180. A deleted PVC bills until the second it was deleted, so the window it was deleted in still has its storage event.</p>
           <p>The cluster's own data volume is excluded unless <code>METER_CONTROL_PLANE=true</code>.</p>
+          <p>With storage allowances (<code>billing.allowances</code>) this metric is informational: it stays in the ledger, the exports and the webhook feed as the whole capacity, and billing platforms get <code>vcluster_storage_overage_gb_hours</code> instead. Its events then carry <code>overage_gib_hours</code>, and <code>included_gib</code> and <code>allowance_per</code> when an allowance applies to their storage class.</p>
+          <h4>Dimensions</h4>
+          <table class="props-table">
+            <thead><tr><th>Key</th><th>Meaning</th></tr></thead>
+            <tbody>
+              <tr><td><code>sku</code></td><td>Storage class</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div class="metric-card" id="storage-overage-gb-hours">
+        <div class="metric-card-header">
+          <h3><code>vcluster_storage_overage_gb_hours</code></h3>
+          <div class="metric-card-badges">
+            <span class="metric-badge shared">Shared nodes</span> <span class="metric-badge private">Dedicated nodes</span>
+          </div>
+        </div>
+        <div class="metric-card-body">
+          <dl class="metric-detail">
+            <dt>Name</dt>
+            <dd>Storage GiB Hours above allowance</dd>
+            <dt>Source</dt>
+            <dd>The volumes of <code>vcluster_storage_gb_hours</code>, and the cluster's own nodes while they are billed whole</dd>
+            <dt>Unit</dt>
+            <dd>gib-hours</dd>
+            <dt>Quantity</dt>
+            <dd>GiB above the allowance &times; seconds in the window / 3600, at each instant of the window</dd>
+          </dl>
+          <p>In the catalog only when <code>billing.allowances</code> (<code>ALLOWANCES_FILE</code>) sets an allowance; storage is then billed through it, every storage class included (a class without an allowance is all overage). The allowance is included per node (each of the cluster's own nodes while it bills node-hours), per cluster, or per volume, and applies at every second of the window: when a volume is bound, resized or deleted, when a node joins, leaves or goes down, and when the cluster is paused. A cluster without nodes of its own includes nothing per node. See <a href="pricing-models.html#allowances">Included storage</a>.</p>
+          <p>Each event carries the identity of the storage event of the same cluster, class and window, and the allowance applied: <code>included_gib</code>, <code>allowance_per</code>, <code>allowance_storage_classes</code> for classes that share an allowance, and <code>gross_gib_hours</code>, the quantity of that storage event. A window with nothing above the allowance has no event; its storage event says <code>overage_gib_hours: 0</code>.</p>
           <h4>Dimensions</h4>
           <table class="props-table">
             <thead><tr><th>Key</th><th>Meaning</th></tr></thead>

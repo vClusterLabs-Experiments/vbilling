@@ -249,7 +249,12 @@ func main() {
 		TenantExcludeNamespaces: cfg.TenantExcludeNamespaces,
 		DRAGPUDrivers:           cfg.DRAGPUDrivers,
 		PauseKeep:               pauseKeep,
+		Allowances:              startup.allowances,
 	})
+	if len(startup.allowances) > 0 {
+		log.Printf("Storage allowances: %d (ALLOWANCES_FILE): storage is billed as %s; %s is informational",
+			len(startup.allowances), usage.MetricStorageOverageGBHours, usage.MetricStorageGBHours)
+	}
 	coll.UseDynamic(dynamicClient)
 	coll.UsePauses(pauses)
 	coll.UseHealth(sources)

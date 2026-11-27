@@ -26,6 +26,11 @@ const (
 	MetricGPUDowntimeHours = "vcluster_gpu_downtime_hours"
 )
 
+// MetricStorageOverageGBHours is the storage above the allowances of
+// ALLOWANCES_FILE. It is in the catalog only while an allowance is
+// configured, and storage is billed through it then (UseStorageAllowances).
+const MetricStorageOverageGBHours = "vcluster_storage_overage_gb_hours"
+
 // MetricDef describes a metric so adapters can create the matching meter,
 // billable metric or plan charge.
 type MetricDef struct {
@@ -80,6 +85,9 @@ var builtin = []MetricDef{
 	{Code: MetricStorageGBHours, Name: "Storage GiB Hours", Unit: "gib-hours", Billable: true,
 		Description: "Requested capacity of bound persistent volume claims, per storage class.",
 		GroupKeys:   []string{"region", "sku"}, Accuracy: AccuracyExact, Source: SourceKubernetes},
+	{Code: MetricStorageOverageGBHours, Name: "Storage GiB Hours above allowance", Unit: "gib-hours", Billable: true,
+		Description: "Bound persistent volume claim capacity above the storage included with a cluster's nodes, the cluster or each volume (ALLOWANCES_FILE), per storage class.",
+		GroupKeys:   []string{"region", "sku"}, Accuracy: AccuracyExact, Source: SourceKubernetes},
 	{Code: MetricInstanceHours, Name: "Tenant Cluster Hours", Unit: "hours", Billable: true,
 		Description: "Hours a tenant cluster control plane was running and ready.",
 		GroupKeys:   []string{"region", DimTenantClass}, Accuracy: AccuracyExact, Source: SourceKubernetes},
@@ -104,7 +112,8 @@ var (
 	catMu  sync.RWMutex
 	custom = map[string]MetricDef{}
 	// off are built-in metrics the configuration switched off (SetEnabled).
-	off = map[string]bool{}
+	// The storage overage is off until an allowance is configured.
+	off = map[string]bool{MetricStorageOverageGBHours: true}
 )
 
 // Catalog returns builtin metrics followed by operator-declared custom ones.
@@ -181,15 +190,38 @@ func (e *Event) Estimate() bool {
 
 // Lookup finds a metric definition by code.
 func Lookup(code string) (MetricDef, bool) {
+	catMu.RLock()
+	defer catMu.RUnlock()
 	for _, d := range builtin {
 		if d.Code == code {
 			return d, true
 		}
 	}
-	catMu.RLock()
-	defer catMu.RUnlock()
 	d, ok := custom[code]
 	return d, ok
+}
+
+// SetBillable makes a built-in metric billable or informational. Billing
+// platforms skip informational metrics when they read the ledger; the
+// ledger, exports and webhooks keep them.
+func SetBillable(code string, billable bool) {
+	catMu.Lock()
+	defer catMu.Unlock()
+	for i := range builtin {
+		if builtin[i].Code == code {
+			builtin[i].Billable = billable
+		}
+	}
+}
+
+// UseStorageAllowances switches storage billing to the allowances of
+// ALLOWANCES_FILE, or back. With them, vcluster_storage_overage_gb_hours is
+// in the catalog and bills storage, and vcluster_storage_gb_hours stays in
+// the ledger as an informational record of the whole capacity. Without them
+// the overage metric is out of the catalog and the gross metric is billed.
+func UseStorageAllowances(on bool) {
+	SetEnabled(MetricStorageOverageGBHours, on)
+	SetBillable(MetricStorageGBHours, !on)
 }
 
 // RegisterCustom declares an operator metric, e.g. inference tokens pushed

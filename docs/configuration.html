@@ -225,6 +225,11 @@
               <td class="td-default">(none)</td>
             </tr>
             <tr>
+              <td><code>ALLOWANCES_FILE</code></td>
+              <td>Path of a YAML list of storage allowances: <code>metric</code> (<code>vcluster_storage_gb_hours</code>, the only metric that takes one), <code>included</code> (GiB, above 0), <code>per</code> (<code>node</code>, <code>cluster</code> or <code>volume</code>) and, optionally, <code>storageClasses</code> (the listed classes share the allowance, the first listed taking from it first). With any allowance, storage above it is billed as <code>vcluster_storage_overage_gb_hours</code>, every storage class included, and <code>vcluster_storage_gb_hours</code> becomes informational. Helm renders <code>billing.allowances</code> into it; <code>vbilling check-config</code> checks it. See <a href="pricing-models.html#allowances">Included storage</a>.</td>
+              <td class="td-default">(none)</td>
+            </tr>
+            <tr>
               <td><code>PROMETHEUS_URL</code></td>
               <td>Any Prometheus HTTP API (Prometheus, Thanos, Mimir, VictoriaMetrics). Enables egress and GPU utilization metrics.</td>
               <td class="td-default">(none)</td>
@@ -709,6 +714,11 @@
               <td class="td-default">warn</td>
             </tr>
             <tr>
+              <td><code>billing.allowances</code></td>
+              <td>A list of <code>{metric, included, per, storageClasses}</code>: ALLOWANCES_FILE (ConfigMap)</td>
+              <td class="td-default">[]</td>
+            </tr>
+            <tr>
               <td><code>metering.*</code></td>
               <td>CPU_MEMORY_BASIS, METER_*, GPU_RESOURCES, SKU_LABEL, CAPACITY_TYPE_LABEL, UNHEALTHY_NODE_TAINTS, VCLUSTER_NODE_LABEL</td>
               <td class="td-default">see above</td>
@@ -1058,7 +1068,7 @@ The configuration is valid: 6 check(s) passed, 0 warning(s).</span></code></div>
       <p>Usage and reconciliation queries can only include retained ledger and archive data. Without archival, month-to-date totals become incomplete after consumed segments pass retention. Enabling archival later cannot reconstruct segments already deleted. Verify the archive's chain and retain the full data directory, including <code>source.json</code>, destination state, cursors and held usage, together in backups. The ledger mirror is such a copy, kept current by vBilling itself.</p>
 
       <h2 id="lago-pricing">Lago Pricing Configuration</h2>
-      <p>vBilling bootstraps a billable metric for each of its 9 built-in metrics and for every custom metric, among them <code>inference_input_tokens</code> and <code>inference_output_tokens</code>, which v0.3 always declares, and a <code>vcluster-standard</code> plan on startup. All charges default to <strong>$0.00</strong> per unit unless a <a href="lago.html#price-card">price card</a> sets them. You must configure pricing in the Lago UI or API to actually generate non-zero invoices.</p>
+      <p>vBilling bootstraps a billable metric for each of its 9 built-in metrics and for every custom metric, among them <code>inference_input_tokens</code> and <code>inference_output_tokens</code>, which v0.3 always declares, and a <code>vcluster-standard</code> plan on startup. With storage allowances it also creates <code>vcluster_storage_overage_gb_hours</code> (field name: the code), which then carries storage: price that charge, not <code>vcluster_storage_gb_hours</code>. All charges default to <strong>$0.00</strong> per unit unless a <a href="lago.html#price-card">price card</a> sets them. You must configure pricing in the Lago UI or API to actually generate non-zero invoices.</p>
 
       <h3>Charges to configure</h3>
       <p>In the Lago UI, go to <strong>Plans &gt; vCluster Standard &gt; Edit</strong> and set the per-unit price for each charge:</p>

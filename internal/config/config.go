@@ -77,6 +77,10 @@ type Config struct {
 	OffboardGrace           time.Duration
 	CustomMetrics           string
 	CustomMetricsFile       string // YAML list form of CUSTOM_METRICS (Helm metering.customMetrics)
+	// AllowancesFile (ALLOWANCES_FILE) lists storage included with a
+	// cluster's nodes, the cluster or each volume (Helm billing.allowances).
+	// With it, storage above the allowance is billed as its own metric.
+	AllowancesFile string
 	// PlanByClass picks a plan (Lago plan code, Stripe plan tag, Metronome
 	// rate card) for tenants without a vbilling.vcluster.com/plan setting.
 	PlanByClass map[string]string
@@ -343,6 +347,7 @@ func Load() *Config {
 		OffboardGrace:           offboardGrace,
 		CustomMetrics:           os.Getenv("CUSTOM_METRICS"), // v0.2 string form, still accepted
 		CustomMetricsFile:       os.Getenv("CUSTOM_METRICS_FILE"),
+		AllowancesFile:          os.Getenv("ALLOWANCES_FILE"),
 		PlanByClass:             envMap("PLAN_BY_CLASS"),
 		CollectionDelay:         envDuration("COLLECTION_DELAY", 5*time.Second),
 		RecordsSettle:           recordsSettle,

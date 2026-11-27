@@ -244,7 +244,8 @@
             <tr><td><code>vcluster_gpu_hours</code></td><td>GPU-hours</td><td><code>region, sku, capacity_type, billing_mode, tenant_cluster</code></td></tr>
             <tr><td><code>vcluster_cpu_core_hours</code></td><td>core-hours</td><td><code>region, capacity_type, billing_mode, tenant_cluster</code></td></tr>
             <tr><td><code>vcluster_memory_gb_hours</code></td><td>GiB-hours</td><td><code>region, capacity_type, billing_mode, tenant_cluster</code></td></tr>
-            <tr><td><code>vcluster_storage_gb_hours</code></td><td>GiB-hours</td><td><code>region, sku, tenant_cluster</code></td></tr>
+            <tr><td><code>vcluster_storage_gb_hours</code> (informational with storage allowances)</td><td>GiB-hours</td><td><code>region, sku, tenant_cluster</code></td></tr>
+            <tr><td><code>vcluster_storage_overage_gb_hours</code> (with storage allowances)</td><td>GiB-hours</td><td><code>region, sku, tenant_cluster</code></td></tr>
             <tr><td><code>vcluster_instance_hours</code> (control plane hours)</td><td>hours</td><td><code>region, tenant_class, tenant_cluster</code></td></tr>
             <tr><td><code>vcluster_private_node_hours</code></td><td>node-hours</td><td><code>region, sku, capacity_type, tenant_cluster</code></td></tr>
             <tr><td><code>vcluster_network_egress_gb</code></td><td>GiB</td><td><code>region, tenant_cluster</code></td></tr>
@@ -280,6 +281,7 @@ presentation_group_key: [tenant_cluster]</code></div>
   ]
 }</code></div>
       <p>Price whole nodes either by node-hours or by their GPU, CPU and memory hours, not both (see <a href="private-nodes.html#billed">what gets billed</a>). Node disks are not metered. vBilling sends quantities only: the rate card sets prices and currency.</p>
+      <p><strong>Included storage.</strong> A tiered rate with free units applies them once to a customer's total for the product, so it cannot include 32 GiB with every node, every cluster or every volume. Set the allowance in vBilling instead (<code>billing.allowances</code>, see <a href="pricing-models.html#allowances">Included storage</a>). Storage then reaches Metronome as <code>vcluster_storage_overage_gb_hours</code>, the GiB-hours above the allowance, for every storage class. Give it a billable metric before you turn allowances on (<code>vbilling metronome billable-metrics</code> prints it; with <code>METRONOME_PROVISION=true</code> vBilling creates it), or its usage is held as uncounted. Add a usage product on it with a flat rate per storage class, <code>pricing_group_key: [region, sku]</code> and <code>presentation_group_key: [tenant_cluster]</code>, and no free tier: the allowance is applied already. <code>vcluster_storage_gb_hours</code> is then informational. It is not sent, needs no billable metric, and price coverage does not check or hold it.</p>
 
       <h2 id="prepaid-loop">The prepaid wallet loop</h2>
       <p>An AI Cloud that sells prepaid capacity keeps the wallet in Metronome: the portal's contract carries prepaid commits, and a top-up adds a commit. vBilling closes the loop around that wallet:</p>

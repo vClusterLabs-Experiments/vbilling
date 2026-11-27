@@ -174,6 +174,9 @@ func mergeAccs(from, into map[time.Time]*accumulator) {
 			ev.Quantity, ev.Properties = 0, nil
 			into[end].add(ev, qty, props)
 		}
+		for k, q := range a.covered {
+			into[end].covered[k] += q
+		}
 	}
 }
 
@@ -398,6 +401,9 @@ func (c *Collector) meterTenant(ctx context.Context, t Target, conn *TenantConn,
 	applyDRANodes(private, dra)
 	c.rememberPrivateNodes(t.Cluster.ExternalID(), private)
 	st.PrivateNodes += len(private)
+	// What storage allowances apply to: the cluster's own volumes, and its
+	// nodes while they are billed whole.
+	uses := &storageUses{}
 	for _, n := range private {
 		if n.down {
 			st.NodesDown++
@@ -435,15 +441,16 @@ func (c *Collector) meterTenant(ctx context.Context, t Target, conn *TenantConn,
 		// operator's to give (LabelBillable counts on the control plane
 		// cluster's dedicated nodes only).
 		for name, n := range private {
-			c.meterWholeNode(name, n, windows, accs, base, "private_node", c.pausesFor(t, pause.KeepNodes))
+			c.meterWholeNode(name, n, windows, accs, base, "private_node", c.pausesFor(t, pause.KeepNodes), uses)
 		}
 	}
 
 	// Volumes and load balancers of such a tenant cluster live in it too.
 	// conn.Graveyard is nil for a stored inventory: what it holds is billed
 	// as it was read.
-	meterVolumes(conn.Graveyard.Volumes(inv.PVCs, ""), func(map[string]string) bool { return true }, windows, accs, base, c.clip(t, pause.KeepStorage))
+	meterVolumes(conn.Graveyard.Volumes(inv.PVCs, ""), func(map[string]string) bool { return true }, windows, accs, base, c.pausesFor(t, pause.KeepStorage), uses)
 	meterLoadBalancers(conn.Graveyard.LoadBalancers(inv.Services, ""), func(*corev1.Service) bool { return true }, windows, accs, base, c.clip(t, pause.KeepLoadBalancers))
+	c.coverStorage(uses, windows, accs, base)
 	return nil
 }
 

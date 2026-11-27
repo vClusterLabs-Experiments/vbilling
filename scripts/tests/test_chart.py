@@ -488,5 +488,48 @@ persistence: {storageClass: replicated-ssd, archive: {enabled: true, storageClas
         self.assertNotIn("HOST_CLUSTER", source)
 
 
+class AllowancesTests(unittest.TestCase):
+    """billing.allowances becomes ALLOWANCES_FILE as metering.customMetrics
+    becomes CUSTOM_METRICS_FILE: a file in the files ConfigMap that the pod
+    and the configuration check both read."""
+
+    ALLOWANCES = [
+        {"metric": "vcluster_storage_gb_hours", "included": 32, "per": "node"},
+        {"metric": "vcluster_storage_gb_hours", "included": 10.5, "per": "volume", "storageClasses": ["hdd", "archive"]},
+    ]
+
+    def test_the_pod_and_the_check_read_the_same_file(self):
+        values = values_file(self, json.dumps({"billing": {"allowances": self.ALLOWANCES}}))
+        docs = render(*TOKENS, values=[values])
+        sts, job = one(docs, "StatefulSet"), one(docs, "Job")
+        for obj in (sts, job):
+            self.assertEqual(env(obj)["ALLOWANCES_FILE"], {"name": "ALLOWANCES_FILE", "value": "/etc/vbilling/files/allowances.yaml"})
+            self.assertIn("/etc/vbilling/files", [m["mountPath"] for m in container(obj)["volumeMounts"]])
+        files, copy = one(docs, "ConfigMap", "vbilling-files"), one(docs, "ConfigMap", "vbilling-files-config-check")
+        self.assertEqual(sorted(files["data"]), ["allowances.yaml"])
+        self.assertEqual(copy["data"], files["data"])
+        # A YAML list: parsed under a key, since the helper reads mappings.
+        text = files["data"]["allowances.yaml"]
+        parsed = chartlib.yaml_documents("allowances:\n" + "".join("  " + line + "\n" for line in text.splitlines()))[0]
+        self.assertEqual(parsed["allowances"], self.ALLOWANCES)
+
+    def test_without_allowances_nothing_is_set(self):
+        docs = render(*TOKENS)
+        self.assertNotIn("ALLOWANCES_FILE", env(one(docs, "StatefulSet")))
+        self.assertEqual(find(docs, "ConfigMap", "vbilling-files"), [])
+        self.assertEqual(chartlib.yaml_file(chartlib.CHART / "values.yaml")["billing"]["allowances"], [])
+
+    def test_the_schema_refuses_allowances_of_the_wrong_type(self):
+        entry = ["--set", "billing.allowances[0].metric=vcluster_storage_gb_hours", "--set", "billing.allowances[0].per=node"]
+        render(*TOKENS, *entry, "--set", "billing.allowances[0].included=32")
+        for wrong in (["--set", "billing.allowances=32"],
+                      [*entry, "--set-string", "billing.allowances[0].included=32"],
+                      [*entry],  # nothing included
+                      [*entry, "--set", "billing.allowances[0].included=32", "--set", "billing.allowances[0].storageClasses=fast"]):
+            with self.assertRaises(HelmError, msg=wrong) as refused:
+                render(*TOKENS, *wrong)
+            self.assertIn("schema", str(refused.exception), wrong)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -61,7 +61,10 @@ type Options struct {
 	// PauseKeep is the capacity that keeps billing while a cluster is
 	// paused (PAUSE_KEEP_BILLING). Nil means pause.DefaultKeep.
 	PauseKeep pause.Keep
-	Now       func() time.Time
+	// Allowances are the storage allowances of ALLOWANCES_FILE: with any,
+	// storage above them is billed as vcluster_storage_overage_gb_hours.
+	Allowances []Allowance
+	Now        func() time.Time
 }
 
 // Collector gathers billable state from the Kubernetes API.
@@ -75,6 +78,7 @@ type Collector struct {
 	tenants     TenantAPI               // tenant clusters' own APIs; nil = control plane cluster only
 	dyn         dynamic.Interface       // DRA ResourceClaims and ResourceSlices; nil = none
 	opts        Options
+	allowances  *allowanceRules // storage allowances by class; nil = none
 
 	excludedTenantNS map[string]bool
 	health           *health.Registry // nil: not reported
@@ -186,7 +190,7 @@ func NewCollector(kube kubernetes.Interface, mc metricsclient.Interface, opts Op
 	}
 	c := &Collector{kube: kube, metrics: mc, opts: opts, excludedTenantNS: map[string]bool{}, lastInv: map[string]*tenantInventory{},
 		ownNodes: map[string]bool{}, nodeHistory: newPrivateNodeHistory(), syncedReported: map[string]bool{},
-		hostSeen: map[string]remembered{}, hostRan: map[string]time.Time{}}
+		hostSeen: map[string]remembered{}, hostRan: map[string]time.Time{}, allowances: newAllowanceRules(opts.Allowances)}
 	for _, ns := range opts.TenantExcludeNamespaces {
 		c.excludedTenantNS[ns] = true
 	}
@@ -300,10 +304,13 @@ type accumulator struct {
 	window Window
 	events map[string]*usage.Event
 	order  []string
+	// covered is the GiB-hours storage allowances cover of each storage
+	// event, by the event's identity (cover, settleAllowances).
+	covered map[string]float64
 }
 
 func newAccumulator(w Window) *accumulator {
-	return &accumulator{window: w, events: map[string]*usage.Event{}}
+	return &accumulator{window: w, events: map[string]*usage.Event{}, covered: map[string]float64{}}
 }
 
 func (a *accumulator) add(tmpl usage.Event, qty float64, props map[string]any) {
@@ -451,6 +458,7 @@ func (c *Collector) collect(ctx context.Context, targets []Target, windows []Win
 		return nil, st, st.PendingHeartbeat
 	}
 	for _, w := range windows {
+		accs[w.End].settleAllowances(c.allowances)
 		var evs []usage.Event
 		for _, ev := range accs[w.End].list() {
 			if c.opts.MeteringSource != "" {
@@ -532,12 +540,16 @@ func (c *Collector) collectTarget(ctx context.Context, t Target, nodes map[strin
 	c.meterPods(pods, include, virtualNS,
 		nodes, dedicated, dra, windows, accs, st, base, usageByPod, "shared", c.workloadPauses(t))
 
+	// What storage allowances apply to: the volumes and dedicated nodes
+	// billed here. The control plane's own volumes are not the tenant's.
+	uses := &storageUses{coverable: func(l map[string]string) bool { return !controlPlaneObject(l, cl.Name) }}
+
 	// Dedicated nodes: full capacity, per node.
 	for name, n := range dedicated {
 		if n.labels[LabelBillable] == "false" {
 			continue // the tenant's own hardware: neither the node nor its pods are billed
 		}
-		c.meterWholeNode(name, n, windows, accs, base, "dedicated_node", c.pausesFor(t, pause.KeepNodes))
+		c.meterWholeNode(name, n, windows, accs, base, "dedicated_node", c.pausesFor(t, pause.KeepNodes), uses)
 	}
 
 	// Storage: bound PVCs synced from the tenant cluster, per storage class.
@@ -545,8 +557,9 @@ func (c *Collector) collectTarget(ctx context.Context, t Target, nodes map[strin
 	if err != nil {
 		return nil, fmt.Errorf("list pvcs: %w", err)
 	}
-	meterVolumes(c.graveyard.Volumes(pvcs.Items, ns), ownedFilter(pvcLabels(pvcs.Items), cl.Name, c.opts.MeterControlPlane), windows, accs, base, c.clip(t, pause.KeepStorage))
-	meterVolumes(c.graveyard.KnownVolumes(away.pvcs), func(map[string]string) bool { return true }, windows, accs, base, c.clip(t, pause.KeepStorage))
+	meterVolumes(c.graveyard.Volumes(pvcs.Items, ns), ownedFilter(pvcLabels(pvcs.Items), cl.Name, c.opts.MeterControlPlane), windows, accs, base, c.pausesFor(t, pause.KeepStorage), uses)
+	meterVolumes(c.graveyard.KnownVolumes(away.pvcs), func(map[string]string) bool { return true }, windows, accs, base, c.pausesFor(t, pause.KeepStorage), uses)
+	c.coverStorage(uses, windows, accs, base)
 
 	// Load balancers with an assigned address.
 	svcs, err := c.kube.CoreV1().Services(ns).List(ctx, metav1.ListOptions{})
@@ -824,7 +837,10 @@ func (c *Collector) meterPods(pods []podEntry, include func(*corev1.Pod) bool, n
 // meterWholeNode bills a node's full capacity (node-hours, whole GPUs, CPU
 // and memory) to one tenant cluster: dedicated nodes of the control plane
 // cluster and private nodes of the tenant cluster itself.
-func (c *Collector) meterWholeNode(name string, n *nodeInfo, windows []Window, accs map[time.Time]*accumulator, base baseFn, mode string, paused []pause.Span) {
+//
+// uses records the times the node was billed, for storage allowances per
+// node.
+func (c *Collector) meterWholeNode(name string, n *nodeInfo, windows []Window, accs map[time.Time]*accumulator, base baseFn, mode string, paused []pause.Span, uses *storageUses) {
 	life := []pause.Span{{From: n.created, To: n.deletedAt}}
 	// The node's downtime within its life.
 	var downs []pause.Span
@@ -839,6 +855,8 @@ func (c *Collector) meterWholeNode(name string, n *nodeInfo, windows []Window, a
 			downs = append(downs, sp)
 		}
 	}
+	// Billed: its life, but neither paused nor down (the node-hours below).
+	uses.node(pause.Outside(pause.Union(paused, downs), n.created, n.deletedAt))
 	for _, w := range windows {
 		acc := accs[w.End]
 		// A paused cluster's nodes are idle and unusable: their paused time
@@ -915,8 +933,11 @@ func (c *Collector) meterWholeNode(name string, n *nodeInfo, windows []Window, a
 
 // meterVolumes bills bound volumes per storage class: from when each was
 // bound (its creation, where the watch did not see it bind) to when it was
-// deleted, at the capacity it had at each moment.
-func meterVolumes(volumes []volumeEntry, include func(map[string]string) bool, windows []Window, accs map[time.Time]*accumulator, base baseFn, paused pausedFn) {
+// deleted, at the capacity it had at each moment, outside the paused spans
+// that stop storage billing. uses records the same times and capacities,
+// for storage allowances.
+func meterVolumes(volumes []volumeEntry, include func(map[string]string) bool, windows []Window, accs map[time.Time]*accumulator, base baseFn,
+	paused []pause.Span, uses *storageUses) {
 	for _, v := range volumes {
 		pvc := v.pvc
 		// A deleted claim is kept only if it was bound when it was deleted.
@@ -933,23 +954,40 @@ func meterVolumes(volumes []volumeEntry, include func(map[string]string) bool, w
 		if len(sizes) == 0 {
 			sizes = []sizeAt{{Bytes: claimBytes(pvc)}}
 		}
+		// The time it had each size: from when it was bound, or resized, to
+		// its next resize, or its deletion.
+		sizeSpan := func(i int) (from, to time.Time) {
+			from, to = v.from, v.deletedAt
+			if sizes[i].At.After(from) {
+				from = sizes[i].At
+			}
+			if i+1 < len(sizes) && (to.IsZero() || sizes[i+1].At.Before(to)) {
+				to = sizes[i+1].At
+			}
+			return from, to
+		}
+		if uses.keeps(pvc.Labels) {
+			var parts []volumePart
+			for i, sz := range sizes {
+				from, to := sizeSpan(i)
+				if !to.IsZero() && !to.After(from) {
+					continue
+				}
+				for _, part := range pause.Outside(paused, from, to) {
+					parts = append(parts, volumePart{from: part[0], to: part[1], gib: float64(sz.Bytes) / gib})
+				}
+			}
+			uses.volume(class, parts)
+		}
 		for _, w := range windows {
 			var gibHours float64
 			for i, sz := range sizes {
-				from, to := v.from, v.deletedAt
-				if sz.At.After(from) {
-					from = sz.At
-				}
-				if i+1 < len(sizes) && (to.IsZero() || sizes[i+1].At.Before(to)) {
-					to = sizes[i+1].At
-				}
+				from, to := sizeSpan(i)
 				if !to.IsZero() && !to.After(from) {
 					continue
 				}
 				ov := usage.Overlap(from, to, w.Start, w.End)
-				if paused != nil {
-					ov = max(ov-paused(from, to, w.Start, w.End), 0)
-				}
+				ov = max(ov-pause.Overlap(paused, from, to, w.Start, w.End), 0)
 				gibHours += float64(sz.Bytes) / gib * ov.Hours()
 			}
 			ev := base(usage.MetricStorageGBHours, nil)

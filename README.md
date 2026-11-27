@@ -92,7 +92,8 @@ See [Usage sources](https://vclusterlabs-experiments.github.io/vbilling/usage-so
 | `vcluster_cpu_core_hours` | core-hours | metrics-server usage, requests, or the larger of both (`CPU_MEMORY_BASIS`) | `capacity_type`, `billing_mode` |
 | `vcluster_memory_gb_hours` | gib-hours | As CPU | `capacity_type`, `billing_mode` |
 | `vcluster_private_node_hours` | node-hours | Whole nodes dedicated to a cluster, per node | `sku` (SKU label or instance type), `capacity_type` |
-| `vcluster_storage_gb_hours` | gib-hours | Bound PVCs synced from the cluster | `sku` = storage class |
+| `vcluster_storage_gb_hours` | gib-hours | Bound PVCs synced from the cluster. Informational when storage allowances are set | `sku` = storage class |
+| `vcluster_storage_overage_gb_hours` | gib-hours | With `billing.allowances` only: the capacity above the storage included per node, cluster or volume, at every second of the window. Storage is billed through it then | `sku` = storage class |
 | `vcluster_instance_hours` | hours | Control plane hours while ready (not while provisioning or asleep) | `tenant_class` |
 | `vcluster_lb_hours` | hours | LoadBalancer services with an assigned address | |
 | `vcluster_network_egress_gb` | gib | Prometheus counter `container_network_transmit_bytes_total`, read sample by sample: the exact byte increase per window. `EGRESS_QUERY` replaces it with PromQL, an estimate | |
@@ -484,6 +485,7 @@ Most installs set about ten settings: `ADAPTERS`, that billing platform's creden
 | `PROMETHEUS_URL`, `PROMETHEUS_HEADERS`, `PROMETHEUS_BEARER_TOKEN_FILE`, `PROMETHEUS_PRESET`, `PROMETHEUS_SOURCE_LABEL`, `PROMETHEUS_METRICS_FILE` (`prometheus.*`) | | Any Prometheus HTTP API. `counter:` metrics are exact, `query:` metrics are estimates |
 | `EGRESS_QUERY`, `GPU_UTIL_QUERY`, `GPU_COUNT_QUERY` (`prometheus.*`) | | Replace the built-in egress counter (an estimate then) or the DCGM utilization queries; `none` turns one off |
 | `CUSTOM_METRICS_FILE` (`metering.customMetrics`) | | Metrics you push: `code`, `name`, `unit`, `description`, `groupKeys`, `billable` |
+| `ALLOWANCES_FILE` (`billing.allowances`) | | Storage included per node, cluster or volume: `metric`, `included` (GiB), `per`, `storageClasses`. Storage above it is billed as `vcluster_storage_overage_gb_hours` ([Included storage](https://vclusterlabs-experiments.github.io/vbilling/pricing-models.html#allowances)) |
 | `RECORDS_LITELLM`, `RECORDS_MAPPINGS_FILE`, `RECORDS_PULL_FILE`, `RECORDS_UNKNOWN_TENANTS` (`records.*`) | `false`, , , `accept` | Per-request usage from AI gateways: the built-in LiteLLM format, other formats, gateway logs to read back |
 | `LITELLM_URL`, `LITELLM_API_KEY`, `LITELLM_TENANT`, `LITELLM_CLIENT` (`records.pullLiteLLM.*`) | , , , `litellm` | Read LiteLLM's spend logs back, and block teams with `ENFORCEMENT_LITELLM`. When the push uses a token bound to one tenant, or its own client name, pin the pull the same way so pulled copies count once |
 | `CROSS_CHECKS` (`crossChecks`) | | `primary=secondary[:tolerance%],...` |
@@ -523,6 +525,7 @@ v0.3.3 makes usage read from Prometheus exact at its edges, shows prices per ser
 - **Egress.** The built-in metric counts the interfaces of pods only. The node's own interfaces, which every host-network pod repeats, are no longer summed: expect lower egress for clusters with their own nodes. `EGRESS_QUERY=none` and `GPU_UTIL_QUERY=none` take the metric out of the catalog.
 - **Control plane hours.** They follow the time a replica was ready, to about a second. For a paused cluster they stop when its last replica is gone, a few seconds before the verified stop that ends node and workload billing.
 - **Deleted and changed objects.** A deleted cluster, volume or load balancer is billed up to the second it was deleted, a resized volume at each size for its time, and volumes and load balancers from the second they were bound or got an address.
+- **Included storage.** `billing.allowances` (`ALLOWANCES_FILE`) includes storage per node, per cluster or per volume, which a billing platform's free tier cannot: it applies to a customer's total. Storage above the allowance is billed as `vcluster_storage_overage_gb_hours`, and `vcluster_storage_gb_hours` becomes informational. Without it nothing changes. See [Included storage](https://vclusterlabs-experiments.github.io/vbilling/pricing-models.html#allowances).
 - **Excluded clusters.** A cluster or tenant taken out of metering is billed up to the moment vBilling sees the exclusion and again from the moment it sees it end. Excluded time is never backfilled, counters skip what was counted meanwhile, and the tenant's record lists the cluster under `excluded_clusters`.
 - **Node downtime.** A node that fails and recovers within one window is not billed for the time between, and after a resume a kubelet that has not reported yet is not taken for a dead node.
 - **Node-hour events carry `disk_gib`.** Their IDs differ from v0.3.2's for windows metered after the upgrade. Committed windows are never sent again, so nothing is billed twice.
