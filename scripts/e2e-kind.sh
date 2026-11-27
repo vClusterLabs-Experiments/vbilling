@@ -8,9 +8,10 @@
 #   - stripe-mock (Stripe's official mock, validating every request against
 #     Stripe's OpenAPI spec)
 #   - a local receiver verifying vBilling's signed CloudEvents webhooks
-# It then asserts metered quantities, delivery, ledger integrity, and the
-# billing-state enforcement loop (signed Stripe webhook -> admission policy
-# blocks new pods -> payment lifts the block).
+# It then asserts metered quantities (among them a 2 GiB volume billed above
+# an allowance of 1 GiB per cluster, ALLOWANCES_FILE), delivery, ledger
+# integrity, and the billing-state enforcement loop (signed Stripe webhook ->
+# admission policy blocks new pods -> payment lifts the block).
 #
 # Usage: scripts/e2e-kind.sh [--keep]   (--keep leaves everything running)
 # Requires: docker, kind, kubectl, helm, vcluster (0.30+), go, jq, python3.
@@ -97,7 +98,28 @@ spec:
           resources: {requests: {cpu: 100m, memory: 64Mi}, limits: {nvidia.com/gpu: $4}}
 EOF
 }
-{ echo "apiVersion: v1"; echo "kind: Namespace"; echo "metadata: {name: training}"; echo "---"; gpu_deploy trainer training 2 2 "nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3, topology.kubernetes.io/zone: syd-1a"; } > "$WORK/team-a.yaml"
+{ echo "apiVersion: v1"; echo "kind: Namespace"; echo "metadata: {name: training}"; echo "---"; gpu_deploy trainer training 2 2 "nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3, topology.kubernetes.io/zone: syd-1a"
+  # A 2 GiB checkpoint volume: 1 GiB of it is included (ALLOWANCES_FILE below).
+  cat <<'YAML'
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: ckpt, namespace: training}
+spec: {accessModes: [ReadWriteOnce], resources: {requests: {storage: 2Gi}}}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: ckpt-writer, namespace: training}
+spec:
+  containers:
+    - name: main
+      image: busybox:1.36
+      command: ["sh", "-c", "while true; do sleep 3600; done"]
+      resources: {requests: {cpu: 10m, memory: 16Mi}}
+      volumeMounts: [{name: data, mountPath: /data}]
+  volumes: [{name: data, persistentVolumeClaim: {claimName: ckpt}}]
+YAML
+} > "$WORK/team-a.yaml"
 { echo "apiVersion: v1"; echo "kind: Namespace"; echo "metadata: {name: inference}"; echo "---"; gpu_deploy llm inference 1 1 "nvidia.com/gpu.product: NVIDIA-L40S"; } > "$WORK/team-c.yaml"
 gpu_deploy pretrain default 1 8 "vcluster.loft.sh/managed-by: team-b" "{key: dedicated, operator: Equal, value: team-b, effect: NoSchedule}" > "$WORK/team-b.yaml"
 for t in team-a team-b team-c; do vcluster connect "$t" -n "$t" --driver helm -- kubectl apply -f "$WORK/$t.yaml" >/dev/null 2>&1; done
@@ -122,7 +144,8 @@ HTTPServer(("127.0.0.1", 19999), H).serve_forever()
 EOF
 python3 "$WORK/receiver.py" & PIDS+=($!)
 (cd "$ROOT" && CGO_ENABLED=0 go build -o "$WORK/vbilling" ./cmd/vbilling)
-ADAPTERS=stripe,webhook STRIPE_API_KEY=sk_test_123 STRIPE_API_BASE=http://localhost:12111 STRIPE_WEBHOOK_SECRET=$STRIPE_WHSEC \
+printf -- '- {metric: vcluster_storage_gb_hours, included: 1, per: cluster}\n' > "$WORK/allowances.yaml"
+ALLOWANCES_FILE=$WORK/allowances.yaml ADAPTERS=stripe,webhook STRIPE_API_KEY=sk_test_123 STRIPE_API_BASE=http://localhost:12111 STRIPE_WEBHOOK_SECRET=$STRIPE_WHSEC \
 WEBHOOK_URL=http://127.0.0.1:19999/events WEBHOOK_SECRET=$WEBHOOK_SECRET \
 REGION=ap-southeast-2 CLUSTER_NAME=syd-cp-1 \
 DATA_DIR=$WORK/data LISTEN_ADDR=$API API_TOKEN=$TOKEN CPU_MEMORY_BASIS=requests ENFORCEMENT_MODE=enforce \
@@ -141,6 +164,12 @@ check "acme H100: 2 pods x 2 GPUs x 60s = 0.066666667 GPU-hours" '[ "$(q '"'"'.t
 check "acme L40S (spot): 1 GPU x 60s = 0.016666667" '[ "$(q '"'"'.tenant=="acme" and .sku=="NVIDIA-L40S"'"'"')" = "0.016666667" ]'
 check "Globex dedicated node: 8 GPUs x 60s = 0.133333333, billing_mode=dedicated_node" '[ "$(q '"'"'.tenant=="vcluster-team-b-team-b" and .billing_mode=="dedicated_node"'"'"')" = "0.133333333" ]'
 check "Globex pod on its own dedicated node is not billed again as shared" '[ "$(q '"'"'.tenant=="vcluster-team-b-team-b" and .billing_mode=="shared"'"'"')" = "0" ]'
+sq() { api "/api/v1/usage?from=$WIN&to=$WEND&group_by=tenant&metric=$1" | jq -r '[.rows[] | select(.tenant=="acme") | .quantity] | add // 0'; }
+ev1() { api "/api/v1/events?from=$WIN&to=$WEND&metric=$1" | jq -s -r "[.[] | select(.tenant==\"acme\") | $2] | .[0]"; }
+check "acme storage: 2 GiB x 60s = 0.033333333 GiB-hours, kept as the full record" '[ "$(sq vcluster_storage_gb_hours)" = "0.033333333" ]'
+check "acme storage above its 1 GiB per cluster: 1 GiB x 60s = 0.016666667 GiB-hours" '[ "$(sq vcluster_storage_overage_gb_hours)" = "0.016666667" ]'
+check "the storage event says what was above the allowance, the overage event what was included" \
+  '[ "$(ev1 vcluster_storage_gb_hours .properties.overage_gib_hours)" = "0.016666667" ] && [ "$(ev1 vcluster_storage_overage_gb_hours .properties.included_gib)" = "1" ]'
 check "two tenant clusters roll up into one customer" '[ "$(api /api/v1/tenants | jq "[.tenants[] | select(.id==\"acme\") | .clusters | length] | .[0]")" = "2" ]'
 
 step "delivery and integrity"
