@@ -3,13 +3,16 @@ package records
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/vclusterlabs-experiments/vbilling/internal/health"
+	"github.com/vclusterlabs-experiments/vbilling/internal/safeguard"
 	"github.com/vclusterlabs-experiments/vbilling/internal/spool"
 	"github.com/vclusterlabs-experiments/vbilling/internal/telemetry"
 	"github.com/vclusterlabs-experiments/vbilling/internal/usage"
@@ -145,6 +148,14 @@ type Ingester struct {
 	pulls map[string]pullIdentity // format -> what its pull stores rows under
 
 	pins map[string][]string // tenant -> IDs of its tokens in Options.BoundTokens, sorted
+
+	// clusters knows the clusters a record may name (UseClusters). Nil knows
+	// none: a record that names a cluster is refused.
+	clusters *safeguard.Clusters
+	// oldest is the oldest usage the destinations accept, and oldestBy the
+	// destination that sets it (LimitAge). Zero: none sets a limit.
+	oldest   time.Duration
+	oldestBy string
 }
 
 // SKUGate bounds the new SKUs usage brings in, per source (SKUSource...)
@@ -179,6 +190,38 @@ func SKUSourcePull(client string) string { return "pull:" + client }
 // UseSKUGate applies g to every usage row stored, pushed or pulled. Set it
 // before records are ingested.
 func (in *Ingester) UseSKUGate(g SKUGate) { in.skuGate = g }
+
+// UseClusters makes c decide which cluster a record may name (its
+// tenant_cluster): one of the record's tenant, for a window in which it
+// existed. A pushed record that names another is refused; a pulled row
+// keeps its usage and loses the cluster. Set it before records are
+// ingested.
+func (in *Ingester) UseClusters(c *safeguard.Clusters) { in.clusters = c }
+
+// LimitAge refuses records older than limit, the oldest usage the named
+// destination accepts (destinations.AgeLimiter): it would dead-letter their
+// usage. Options.MaxAge still applies. Set it before records are ingested.
+func (in *Ingester) LimitAge(limit time.Duration, destination string) {
+	in.oldest, in.oldestBy = limit, destination
+}
+
+// maxAge is the oldest record accepted: Options.MaxAge, or the destinations'
+// limit when that is tighter.
+func (in *Ingester) maxAge() time.Duration {
+	if in.oldest > 0 && in.oldest < in.opts.MaxAge {
+		return in.oldest
+	}
+	return in.opts.MaxAge
+}
+
+// ResolveTenant maps a tenant value an emitter sends to a billing tenant,
+// as records do: the ingest API resolves the tenant of pushed events with
+// it, so both push paths know the same tenants.
+func (in *Ingester) ResolveTenant(v string) (tenant string, known bool) { return in.resolve(v) }
+
+// RejectsUnknownTenants reports whether records for a tenant vBilling does
+// not know are refused (Options.RejectUnknownTenants).
+func (in *Ingester) RejectsUnknownTenants() bool { return in.opts.RejectUnknownTenants }
 
 // HasFormat reports whether records can be sent in format.
 func (in *Ingester) HasFormat(format string) bool {
@@ -490,11 +533,13 @@ func (in *Ingester) checkPull(format, client, bound, token string) {
 	}
 }
 
-// Rejection explains why one record was refused.
+// Rejection explains why one record (or one ingested event) was refused:
+// Error says it in full, Reason names the kind of problem.
 type Rejection struct {
-	Index int    `json:"index"`
-	ID    string `json:"id,omitempty"`
-	Error string `json:"error"`
+	Index  int    `json:"index"`
+	ID     string `json:"id,omitempty"`
+	Reason Reason `json:"reason,omitempty"`
+	Error  string `json:"error"`
 }
 
 // Result reports what happened to a payload.
@@ -515,11 +560,17 @@ type Result struct {
 	// already, every usage row of each, so none was stored again: rows a
 	// puller read again, or a push retried across an upgrade.
 	AlreadyStored int `json:"already_stored,omitempty"`
+
+	rejectedBy map[Reason]int // RejectedCount by reason, for the counters
 }
 
 // reject records a refused record.
 func (r *Result) reject(rej Rejection) {
 	r.RejectedCount++
+	if r.rejectedBy == nil {
+		r.rejectedBy = map[Reason]int{}
+	}
+	r.rejectedBy[rej.Reason]++
 	if len(r.Rejected) < MaxRejections {
 		r.Rejected = append(r.Rejected, rej)
 	}
@@ -644,27 +695,29 @@ func (in *Ingester) ingest(c ingestCall, objs []map[string]any) (Result, error) 
 		}
 		sentID := rec.ID
 		rec.ID = RequestID(rec.ID)
-		reject := func(msg string) { res.reject(Rejection{Index: i, ID: rec.ID, Error: msg}) }
+		reject := func(reason Reason, msg string) {
+			res.reject(Rejection{Index: i, ID: rec.ID, Reason: reason, Error: msg})
+		}
 		if err != nil {
-			reject(err.Error())
+			reject(ReasonInvalid, err.Error())
 			continue
 		}
 		if rec.ID == "" {
 			if !in.opts.AllowUnkeyed {
-				reject("no request ID: every record needs a unique, stable ID so retries are not billed twice")
+				reject(ReasonInvalid, "no request ID: every record needs a unique, stable ID so retries are not billed twice")
 				continue
 			}
 			rec.ID = ContentID(obj)
 			sentID = rec.ID
 		}
 		if len(rec.Usage) > MaxUsagePerRecord {
-			reject(fmt.Sprintf("%d usage keys, more than %d", len(rec.Usage), MaxUsagePerRecord))
+			reject(ReasonInvalid, fmt.Sprintf("%d usage keys, more than %d", len(rec.Usage), MaxUsagePerRecord))
 			continue
 		}
 		if pulled {
 			makeSafe(&rec)
 		} else if msg := recordValues(&rec); msg != "" {
-			reject(msg)
+			reject(ReasonInvalid, msg)
 			continue
 		}
 		switch {
@@ -672,13 +725,13 @@ func (in *Ingester) ingest(c ingestCall, objs []map[string]any) (Result, error) 
 			// The token identifies the source, and the source is the tenant.
 			rec.Tenant, rec.TenantKey = boundTenant, boundTenant
 		case rec.Tenant == "":
-			reject("no tenant: the record has no tenant field (or use an ingest token bound to a tenant, see INGEST_TOKENS)")
+			reject(ReasonTenant, "no tenant: the record has no tenant field (or use an ingest token bound to a tenant, see INGEST_TOKENS)")
 			continue
 		default:
 			t, known := in.resolve(rec.Tenant)
 			if !known {
 				if in.opts.RejectUnknownTenants {
-					reject(fmt.Sprintf("unknown tenant %q: map it with the vbilling.vcluster.com/aliases annotation or the format's tenantMap", rec.Tenant))
+					reject(ReasonTenant, fmt.Sprintf("unknown tenant %q: map it with the vbilling.vcluster.com/aliases annotation or the format's tenantMap", rec.Tenant))
 					continue
 				}
 				unknown[t] = true
@@ -698,16 +751,41 @@ func (in *Ingester) ingest(c ingestCall, objs []map[string]any) (Result, error) 
 			noTime++
 		}
 		if rec.Time.After(now.Add(in.opts.MaxFuture)) {
-			reject(fmt.Sprintf("time %s is in the future", rec.Time.Format(time.RFC3339)))
+			reject(ReasonInFuture, fmt.Sprintf("time %s is in the future", rec.Time.Format(time.RFC3339)))
 			continue
 		}
 		if rec.Time.Before(now.Add(-in.opts.MaxAge)) {
-			reject(fmt.Sprintf("time %s is older than %s, the oldest usage vBilling accepts", rec.Time.Format(time.RFC3339), in.opts.MaxAge))
+			reject(ReasonTooOld, fmt.Sprintf("time %s is older than %s, the oldest usage vBilling accepts", rec.Time.Format(time.RFC3339), in.opts.MaxAge))
 			continue
 		}
 		ws, we := usage.Window(rec.Time, in.opts.Window)
+		// A destination compares the start of the usage's window with its own
+		// limit and dead-letters what is older: refuse that here, where the
+		// emitter still gets the answer.
+		if in.oldest > 0 && ws.Before(now.Add(-in.oldest)) {
+			reject(ReasonTooOld, fmt.Sprintf("time %s is in a window that started more than %s ago, the oldest usage destination %s accepts",
+				rec.Time.Format(time.RFC3339), safeguard.Age(in.oldest), in.oldestBy))
+			continue
+		}
+		// A record names a cluster of its tenant, for a window in which that
+		// cluster existed, or none. A pulled row was served, so it keeps its
+		// usage and loses the cluster instead.
+		unknownCluster := ""
+		if cluster := rec.cluster(); cluster != "" {
+			switch err := in.clusters.Check(rec.Tenant, cluster, ws, we); {
+			case err == nil:
+			case errors.Is(err, safeguard.ErrNotReady):
+				return Result{Format: c.format, Received: res.Received}, fmt.Errorf("%w (tenant_cluster %q): retry in a few seconds", err, cluster)
+			case pulled:
+				unknownCluster = cluster
+				rec.dropCluster()
+			default:
+				reject(ReasonCluster, err.Error())
+				continue
+			}
+		}
 		var recRows []usage.Event
-		var problems []string
+		var problems Problems
 		duplicates := 0
 		metrics := make([]string, 0, len(rec.Usage))
 		for m := range rec.Usage {
@@ -718,7 +796,13 @@ func (in *Ingester) ingest(c ingestCall, objs []map[string]any) (Result, error) 
 			q := rec.Usage[metric]
 			def, ok := usage.Lookup(metric)
 			if !ok {
-				problems = append(problems, fmt.Sprintf("unknown metric %q (declare it in CUSTOM_METRICS or the format's metrics)", metric))
+				problems.Add(ReasonUnknownMetric, fmt.Sprintf("unknown metric %q (declare it in CUSTOM_METRICS or the format's metrics)", metric))
+				continue
+			}
+			// A metric vBilling measures itself takes no records, pushed or
+			// pulled: its usage would be billed like measured usage.
+			if err := safeguard.PushedMetric(def, safeguard.PathRecords); err != nil {
+				problems.Add(ReasonReservedMetric, err.Error())
 				continue
 			}
 			if q == 0 {
@@ -740,6 +824,9 @@ func (in *Ingester) ingest(c ingestCall, objs []map[string]any) (Result, error) 
 			if pulled {
 				ev.Properties["via"] = "pull"
 			}
+			if unknownCluster != "" {
+				ev.Properties[propUnknownCluster] = unknownCluster
+			}
 			if dated {
 				ev.Properties["arrival_time"] = true // "at" is when it first arrived
 				datedAt[id] = rec.Time
@@ -755,7 +842,7 @@ func (in *Ingester) ingest(c ingestCall, objs []map[string]any) (Result, error) 
 			}
 			ev.Finalize()
 			if err := ev.Validate(); err != nil {
-				problems = append(problems, err.Error())
+				problems.Add(ReasonInvalid, err.Error())
 				continue
 			}
 			if boundTenant != "" || sentID != rec.ID {
@@ -763,8 +850,8 @@ func (in *Ingester) ingest(c ingestCall, objs []map[string]any) (Result, error) 
 			}
 			recRows = append(recRows, ev)
 		}
-		if len(problems) > 0 {
-			reject(strings.Join(problems, "; "))
+		if problems.Any() {
+			reject(problems.Reason(), problems.String())
 			continue
 		}
 		for i := range recRows {
@@ -840,6 +927,11 @@ func (in *Ingester) ingest(c ingestCall, objs []map[string]any) (Result, error) 
 		}
 	}
 	res.UsageRows = len(rows)
+	if n := withoutCluster(recs); n > 0 {
+		res.Warnings = append(res.Warnings, fmt.Sprintf("%d pulled record(s) named a cluster vBilling does not know for their tenant: their usage is stored without a cluster "+
+			"(the %s property of their rows keeps the name)", n, propUnknownCluster))
+		log.Printf("[records] %s: %d pulled record(s) named a cluster vBilling does not know for their tenant; their usage is stored without a cluster", client, n)
+	}
 	for t := range unknown {
 		res.UnknownTenants = append(res.UnknownTenants, t)
 	}
@@ -854,17 +946,44 @@ func (in *Ingester) ingest(c ingestCall, objs []map[string]any) (Result, error) 
 	if noTime > 0 {
 		res.Warnings = append(res.Warnings, fmt.Sprintf("%d record(s) had no time; the time each first arrived was used (a retry within an hour keeps it; send a time to be safe from later retries)", noTime))
 	}
-	if pulled || !report {
+	if pulled {
 		return res, nil // the puller reports its own health and counters
 	}
-	if res.Accepted > 0 || res.AlreadyStored > 0 {
-		in.health.OK(health.Name("records", client), "records", client, res.Accepted)
-		in.checkPull(c.format, client, boundTenant, token)
+	// Every pushed record is counted, whoever sent it. The counters name the
+	// client only once a push of it was accepted (UnacceptedClient).
+	labelled := UnacceptedClient
+	if report {
+		labelled = client
+		if res.Accepted > 0 || res.AlreadyStored > 0 {
+			in.health.OK(health.Name("records", client), "records", client, res.Accepted)
+			in.checkPull(c.format, client, boundTenant, token)
+		}
+		in.tel.Add("vbilling_records_accepted_total", "Per-request usage records durably stored.", map[string]string{"client": client}, float64(res.Accepted))
 	}
-	in.tel.Add("vbilling_records_received_total", "Per-request usage records received.", map[string]string{"client": client}, float64(res.Received))
-	in.tel.Add("vbilling_records_accepted_total", "Per-request usage records durably stored.", map[string]string{"client": client}, float64(res.Accepted))
-	in.tel.Add("vbilling_records_rejected_total", "Per-request usage records refused.", map[string]string{"client": client}, float64(res.RejectedCount))
+	in.tel.Add("vbilling_records_received_total", "Per-request usage records received.", map[string]string{"client": labelled}, float64(res.Received))
+	for _, reason := range Reasons {
+		if n := res.rejectedBy[reason]; n > 0 {
+			in.tel.Add("vbilling_records_rejected_total", "Per-request usage records refused, by reason.",
+				map[string]string{"client": labelled, "reason": string(reason)}, float64(n))
+		}
+	}
 	return res, nil
+}
+
+// propUnknownCluster is the property of a pulled row that named a cluster
+// vBilling does not know for its tenant: the row is stored without the
+// cluster, and the property keeps the name the gateway logged.
+const propUnknownCluster = "unknown_tenant_cluster"
+
+// withoutCluster counts the records whose rows carry propUnknownCluster.
+func withoutCluster(recs [][]usage.Event) int {
+	n := 0
+	for _, r := range recs {
+		if len(r) > 0 && r[0].Properties[propUnknownCluster] != nil {
+			n++
+		}
+	}
+	return n
 }
 
 // rowSize estimates the bytes a usage row takes in the records ledger: its

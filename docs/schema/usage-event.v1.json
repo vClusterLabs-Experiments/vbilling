@@ -40,6 +40,7 @@
         "memory_gib": {"type": "string", "description": "Node-hour events: the node's memory capacity in GiB."},
         "gpu_count": {"type": "string", "description": "Node-hour events: the node's physical GPUs."},
         "public_ip": {"enum": ["true", "false"], "description": "Node-hour events: whether the node has an ExternalIP address."},
+        "disk_gib": {"type": "string", "description": "Node-hour events: the node's own disk in GiB (its ephemeral-storage capacity), when the node reports one."},
         "node": {"type": "string"},
         "instance_type": {"type": "string"}
       }

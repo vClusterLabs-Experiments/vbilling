@@ -159,7 +159,7 @@ func (c *Controller) delivered(tenant, dest string) (bool, string) {
 			return false, "reading held events: " + err.Error()
 		}
 		if held {
-			return false, "some of its usage is held at the pricing gate (no price yet, or not counted by the billing platform yet)"
+			return false, "some of its usage is still waiting in vBilling: held at the pricing gate (no price yet, or not counted by the billing platform yet), or parked because the tenant could not be set up at the billing platform"
 		}
 	}
 	return true, ""

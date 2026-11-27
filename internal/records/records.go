@@ -206,7 +206,7 @@ func LoadFormats(path string, litellm bool) (Formats, error) {
 		}
 		for k := range m.Dimensions {
 			if usage.ReservedDimension(k) {
-				return nil, fmt.Errorf("%s: format %q: dimension %q is the name of a property of the usage itself (value, unit, sku, region, project, resource_id, source, window_start, window_end, schema_version, accuracy, estimate); rename it", path, name, k)
+				return nil, fmt.Errorf("%s: format %q: dimension %q is the name of a property of the usage itself (value, unit, sku, region, project, resource_id, source, window_start, window_end, schema_version, accuracy, estimate, metering_source); rename it", path, name, k)
 			}
 		}
 		m.TimePrecision = time.Duration(m.TimeRound)
@@ -259,6 +259,22 @@ type Record struct {
 	Project       string
 	TenantCluster string
 	Dimensions    map[string]string
+}
+
+// cluster is the cluster a record names: its tenant_cluster, or else a
+// dimension of that name. Either becomes the tenant_cluster dimension of
+// the record's usage.
+func (r *Record) cluster() string {
+	if r.TenantCluster != "" {
+		return r.TenantCluster
+	}
+	return r.Dimensions[usage.DimTenantCluster]
+}
+
+// dropCluster makes a record name no cluster.
+func (r *Record) dropCluster() {
+	r.TenantCluster = ""
+	delete(r.Dimensions, usage.DimTenantCluster)
 }
 
 // Parse decodes a payload (one JSON object, a JSON array, an object with a

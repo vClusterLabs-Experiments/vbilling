@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/vclusterlabs-experiments/vbilling/internal/config"
-	"github.com/vclusterlabs-experiments/vbilling/internal/usage"
 )
 
 // Separate tenants can legitimately choose the same local request ID.
@@ -18,7 +17,7 @@ func TestReviewTenantBoundEventIDsAreIsolated(t *testing.T) {
 		cfg.IngestTokens = map[string]string{"token-a": "tenant-a", "token-b": "tenant-b"}
 	})
 	body := fmt.Sprintf(`[{"id":"request-1","metric":%q,"quantity":10,"window_start":%q,"window_end":%q}]`,
-		usage.MetricGPUHours, now.Add(-2*time.Minute).Format(time.RFC3339), now.Add(-time.Minute).Format(time.RFC3339))
+		pushedMetric, now.Add(-2*time.Minute).Format(time.RFC3339), now.Add(-time.Minute).Format(time.RFC3339))
 	for _, token := range []string{"token-a", "token-b"} {
 		code, out := postJSON(t, e.srv.URL+"/api/v1/events", token, body)
 		if code != http.StatusOK || out["accepted"] != float64(1) {
@@ -35,7 +34,7 @@ func TestTenantBoundEventIDRetryDeduplicates(t *testing.T) {
 		cfg.IngestTokens = map[string]string{"token-a": "tenant-a"}
 	})
 	body := fmt.Sprintf(`[{"id":"request-1","metric":%q,"quantity":10,"window_start":%q,"window_end":%q}]`,
-		usage.MetricGPUHours, now.Add(-2*time.Minute).Format(time.RFC3339), now.Add(-time.Minute).Format(time.RFC3339))
+		pushedMetric, now.Add(-2*time.Minute).Format(time.RFC3339), now.Add(-time.Minute).Format(time.RFC3339))
 	code, out := postJSON(t, e.srv.URL+"/api/v1/events", "token-a", body)
 	if code != http.StatusOK || out["accepted"] != float64(1) {
 		t.Fatalf("first send: %d %v", code, out)

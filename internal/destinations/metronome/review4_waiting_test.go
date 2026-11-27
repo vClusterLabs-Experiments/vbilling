@@ -368,14 +368,23 @@ func TestReview4UsageAPropertyFilterLeavesOutDoesNotWait(t *testing.T) {
 // Finding 15. A SQL billable metric may count any event type, and vBilling
 // cannot tell which: while one is active, usage no other billable metric
 // counts is reported unknown and never held, in any mode, so it is never
-// stalled into invoice periods Metronome finalized.
+// stalled into invoice periods Metronome finalized. Unknown is loud: the
+// series' source says so (status unchecked). (The tenants have a customer and a contract: without
+// them nothing rates the usage whatever counts it, see
+// TestASQLBillableMetricNeverHidesAMissingCustomer.)
 func TestReview4UsageASQLBillableMetricBillsWaits(t *testing.T) {
 	f := newRigFake(t)
 	f.AddBillableMetric([]byte(`{"name":"GPU hours (SQL)","sql":"SELECT customer_id, SUM(CAST(properties.value AS DECIMAL)) AS value FROM events WHERE event_type = 'vcluster_gpu_hours' GROUP BY customer_id"}`))
+	card := f.AddRateCard("List")
 	at := rigNow()
 	ev := gpu("tenant-acme", "c1", at.Add(-2*time.Minute), 1)
 
 	for _, mode := range []string{pricing.ModeWarn, pricing.ModeHold} {
+		cus, err := f.CreateCustomer("Customer "+mode, "tenant-"+mode)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.AddContract(metronometest.Contract{CustomerID: cus, RateCardID: card, StartingAt: at.AddDate(0, -1, 0)})
 		r := newHoldRig(t, t.TempDir(), rigOptions{base: f.URL, mode: mode})
 		e := ev
 		e.Tenant, e.ID = "tenant-"+mode, ""
@@ -385,14 +394,46 @@ func TestReview4UsageASQLBillableMetricBillsWaits(t *testing.T) {
 		if !sentIDs(f)[e.ID] || r.held.Count(rigDest) != 0 {
 			t.Errorf("PRICE_CHECK=%s: GPU usage held (%d) although an active SQL billable metric may bill it", mode, r.held.Count(rigDest))
 		}
+		r.check()
+		rows := 0
 		for _, d := range r.svc.Report().Destinations {
 			for _, row := range d.Series {
-				if row.Metric == usage.MetricGPUHours && !row.NoUsageYet && (row.Status != destinations.PriceUnknown || !strings.Contains(row.Detail, "SQL billable metric")) {
+				if row.Metric != usage.MetricGPUHours || row.NoUsageYet {
+					continue
+				}
+				rows++
+				if row.Status != destinations.PriceUnknown || !strings.Contains(row.Detail, "SQL billable metric") {
 					t.Errorf("PRICE_CHECK=%s: GPU row %+v, want unknown, naming the SQL billable metric", mode, row)
 				}
 			}
 		}
+		if rows != 1 {
+			t.Errorf("PRICE_CHECK=%s: %d GPU rows with usage, want 1", mode, rows)
+		}
+		// Listed as a problem under its own status: someone chose this
+		// setup, so it is not an outage, and it is never silent.
+		reported := false
+		for _, src := range r.h.Problems() {
+			reported = reported || (src.Kind == "pricing" && src.Status == health.Unchecked && strings.Contains(src.Name, usage.MetricGPUHours) &&
+				strings.Contains(src.Message, "SQL billable metric") && strings.Contains(src.Hint, "check in Metronome that SQL billable metric"))
+		}
+		if !reported {
+			t.Errorf("PRICE_CHECK=%s: usage vBilling cannot check is delivered without a source that says so: %+v", mode, r.h.Problems())
+		}
 		r.stop()
+	}
+}
+
+// A tenant no customer gets is unrated whatever counts its usage: an active
+// SQL billable metric, which makes the catalog impossible to check, does not
+// turn that into "unknown" and let the usage through PRICE_CHECK=hold.
+func TestASQLBillableMetricNeverHidesAMissingCustomer(t *testing.T) {
+	f := newFake(t)
+	f.AddBillableMetric([]byte(`{"name":"GPU hours (SQL)","sql":"SELECT customer_id, SUM(CAST(properties.value AS DECIMAL)) AS value FROM events WHERE event_type = 'vcluster_gpu_hours' GROUP BY customer_id"}`))
+	a := newReadOnly(t, f)
+	c := coverageOf(t, a, gpuSeriesOf(a, "tenant-nobody", "NVIDIA-H100"))[0]
+	if c.Status != destinations.PriceMissing || !strings.Contains(c.Detail, "no customer for this alias yet") {
+		t.Fatalf("coverage %+v, want unpriced for want of a customer", c)
 	}
 }
 

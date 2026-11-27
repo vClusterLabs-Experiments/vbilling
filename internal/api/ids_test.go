@@ -17,12 +17,12 @@ func TestIngestRefusesReservedIDs(t *testing.T) {
 	e := setup(t)
 	ws, we := now.Add(-5*time.Minute).Format(time.RFC3339), now.Add(-4*time.Minute).Format(time.RFC3339)
 	for _, id := range []string{"vb1_72ee4bf14f34feed3f56dd67b3481196", "te1_0", "ie1_0"} {
-		body := fmt.Sprintf(`[{"id":%q,"tenant":"acme","metric":%q,"quantity":1,"window_start":%q,"window_end":%q}]`, id, usage.MetricGPUHours, ws, we)
+		body := fmt.Sprintf(`[{"id":%q,"tenant":"acme","metric":%q,"quantity":1,"window_start":%q,"window_end":%q}]`, id, pushedMetric, ws, we)
 		if code, out := postJSON(t, e.srv.URL+"/api/v1/events", "ingest-secret", body); code != http.StatusBadRequest {
 			t.Errorf("id %s: %d %v, want 400", id, code, out)
 		}
 	}
-	body := fmt.Sprintf(`[{"id":"gw-123","tenant":"acme","metric":%q,"quantity":1,"window_start":%q,"window_end":%q}]`, usage.MetricGPUHours, ws, we)
+	body := fmt.Sprintf(`[{"id":"gw-123","tenant":"acme","metric":%q,"quantity":1,"window_start":%q,"window_end":%q}]`, pushedMetric, ws, we)
 	if code, out := postJSON(t, e.srv.URL+"/api/v1/events", "ingest-secret", body); code != 200 || out["ids"].([]any)[0] != "gw-123" {
 		t.Fatalf("an ordinary id is kept as is: %d %v", code, out)
 	}
@@ -34,12 +34,12 @@ func TestIngestRefusesReservedIDs(t *testing.T) {
 func TestIngestIDsWithoutAnIDAreNamespaced(t *testing.T) {
 	e := setup(t, func(c *config.Config) { c.IngestTokens = map[string]string{"tok-acme": "acme"} })
 	ws := now.Add(-5 * time.Minute)
-	ev := usage.Event{Tenant: "acme", Metric: usage.MetricGPUHours, SKU: "NVIDIA-H100", Region: "ap-southeast-2",
+	ev := usage.Event{Tenant: "acme", Metric: pushedMetric, SKU: "NVIDIA-H100", Region: "ap-southeast-2",
 		WindowStart: ws, WindowEnd: ws.Add(time.Minute)}
 	ev.Finalize()
 	collectorID := ev.ID
 	body := fmt.Sprintf(`[{"tenant":"acme","metric":%q,"quantity":1,"sku":"NVIDIA-H100","window_start":%q,"window_end":%q}]`,
-		usage.MetricGPUHours, ws.Format(time.RFC3339), ws.Add(time.Minute).Format(time.RFC3339))
+		pushedMetric, ws.Format(time.RFC3339), ws.Add(time.Minute).Format(time.RFC3339))
 
 	ids := map[string]string{}
 	for _, tok := range []string{"ingest-secret", "tok-acme"} {
@@ -65,7 +65,7 @@ func TestIngestIDsWithoutAnIDAreNamespaced(t *testing.T) {
 
 	// v0.3.0 stored an id-less event under its derived ID; its retry after
 	// the upgrade is a duplicate, not new usage.
-	old := usage.Event{Tenant: "acme", Metric: usage.MetricGPUHours, Quantity: 1, SKU: "NVIDIA-L40S", Region: "ap-southeast-2",
+	old := usage.Event{Tenant: "acme", Metric: pushedMetric, Quantity: 1, SKU: "NVIDIA-L40S", Region: "ap-southeast-2",
 		WindowStart: ws, WindowEnd: ws.Add(time.Minute), Source: "ingest:api", RecordedAt: now}
 	old.Finalize()
 	if _, _, err := e.sp.AppendIngest(old.Source, []usage.Event{old}); err != nil {

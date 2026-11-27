@@ -1,5 +1,23 @@
 # Optional Prometheus Operator rules. Set metadata.namespace and labels to
-# match your Prometheus installation's rule selector before applying.
+# match your Prometheus installation's rule selector before applying. The
+# rules need vBilling's /metrics in that Prometheus (serviceMonitor.enabled in
+# the chart, or a scrape job of your own with the API token).
+#
+# Two things to know when you change them:
+#
+# - vBilling is one pod. When it is down, every series below is gone, and a
+#   rule on a missing series never fires. VBillingNotReporting is the rule
+#   for that case. With several vBilling instances in one Prometheus, give
+#   its absent() a selector per instance (for example {namespace="..."}).
+# - Counters of rare events (dead letters, refused webhooks, repairs) appear
+#   with their first event, and increase() cannot see the first sample of a
+#   series. Rules on them therefore also fire while the series is new:
+#   "x > 0 unless x offset 15m" is true for the first 15 minutes of a series.
+#   The "for" of those rules keeps a short scrape failure, after which a
+#   series also looks new, from firing them.
+#
+# scripts/tests/test_alerts.py checks that every metric used here is one
+# vBilling exports.
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
@@ -9,14 +27,64 @@ spec:
   groups:
     - name: vbilling
       rules:
-        - alert: VBillingVolumeNearlyFull
-          expr: vbilling_volume_free_bytes / vbilling_volume_size_bytes < 0.15
+        # --- Metering: is usage being recorded? ---
+        - alert: VBillingNotReporting
+          expr: absent(vbilling_last_window_end_timestamp_seconds)
           for: 5m
           labels:
             severity: critical
           annotations:
-            summary: "vBilling volume {{ $labels.volume }} has less than 15% free space"
-            description: "Grow the volume before a full ledger prevents metering. Check archive health and destination lag."
+            summary: "vBilling reports no committed metering window"
+            description: >-
+              Prometheus has had no vbilling_last_window_end_timestamp_seconds for 5 minutes: vBilling is not running,
+              is waiting for its Lease, has not committed a window since it started, or cannot be scraped (/metrics
+              needs the API token). A configuration vBilling refuses at start-up shows up here. Check the pod and its
+              log. Windows up to 6 hours old are metered once vBilling runs again; usage that gateways push in the
+              meantime is only kept if they retry.
+        - alert: VBillingLastWindowStale
+          expr: time() - vbilling_last_window_end_timestamp_seconds > 300
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "vBilling has not committed a metering window for {{ $value | humanizeDuration }}"
+            description: >-
+              vBilling runs but the last committed window ended more than 5 minutes ago (it is normally under 3
+              minutes old). Check vbilling_collection_held (a window waiting for node heartbeats),
+              vbilling_collection_failures_total and vbilling_discovery_failures_total, the pod log for
+              "[controller]" lines, and GET /api/v1/status. Windows up to 6 hours old are metered once collection
+              works again; older ones are lost.
+        # Only with Prometheus configured: without it the gauge is not there
+        # (or zero), and the rule stays silent.
+        - alert: VBillingPrometheusWindowStale
+          expr: |
+            time() - vbilling_prometheus_last_window_end_timestamp_seconds > 300
+            and
+            vbilling_prometheus_last_window_end_timestamp_seconds > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "vBilling has not committed usage read from Prometheus for {{ $value | humanizeDuration }}"
+            description: >-
+              The last window of usage read from Prometheus ended more than 5 minutes ago, while the windows vBilling
+              meters from Kubernetes may be current. Check that Prometheus (prometheus.url) is reachable and answers,
+              GET /api/v1/sources for the failing prometheus sources, and vbilling_prometheus_unavailable_total.
+              Usage read from counters waits for Prometheus and is billed once it answers again.
+        # Sustained: late samples in every 5 minute range for 15 minutes.
+        - alert: VBillingPrometheusSamplesLate
+          expr: increase(vbilling_prometheus_late_samples_total[5m]) > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Samples reach Prometheus after vBilling has read their window"
+            description: >-
+              For 15 minutes, samples have arrived in Prometheus later than vBilling reads their window: the metrics
+              pipeline of a cluster lags (a remote write queue, a slow or overloaded agent). Check that cluster's
+              Prometheus agent and its remote write, and GET /api/v1/sources for the cluster and metric.
+
+        # --- Delivery: does usage reach the billing platforms? ---
         - alert: VBillingDeliveryLag
           expr: vbilling_destination_lag_seconds > 300
           for: 10m
@@ -24,22 +92,36 @@ spec:
             severity: warning
           annotations:
             summary: "vBilling delivery to {{ $labels.destination }} is delayed"
-            description: "Inspect /api/v1/status and destination errors; late delivery can miss an invoice's finalization."
+            description: >-
+              The oldest undelivered event for {{ $labels.destination }} is {{ $value | humanizeDuration }} old.
+              Inspect /api/v1/status for the destination's last error. Nothing is lost while it waits in the ledger,
+              but late delivery can miss an invoice's finalization.
         - alert: VBillingDeadLetters
-          expr: increase(vbilling_events_dead_lettered_total[10m]) > 0
+          expr: |
+            increase(vbilling_events_dead_lettered_total[15m]) > 0
+            or
+            (vbilling_events_dead_lettered_total > 0 unless vbilling_events_dead_lettered_total offset 15m)
+          for: 5m
           labels:
             severity: critical
           annotations:
-            summary: "vBilling parked usage for {{ $labels.destination }}"
-            description: "Inspect the dead letters, fix the cause and reconcile any ambiguous Stripe delivery before replay."
-        - alert: VBillingSourceUnhealthy
-          expr: vbilling_sources{status=~"failing|diverged"} > 0
-          for: 5m
+            summary: "vBilling parked usage that {{ $labels.destination }} rejected"
+            description: >-
+              {{ $labels.destination }} permanently rejected usage events, and vBilling set them aside as dead
+              letters: they are not billed. Inspect GET /api/v1/destinations/{{ $labels.destination }}/dead-letters,
+              fix the cause, reconcile any ambiguous Stripe delivery, then replay them.
+        - alert: VBillingEventsHeld
+          expr: vbilling_held_events > 0
+          for: 1h
           labels:
             severity: warning
           annotations:
-            summary: "vBilling has unhealthy {{ $labels.kind }} sources"
-            description: "Inspect /api/v1/sources for the affected customer, last successful read and recovery hint."
+            summary: "vBilling has held usage back from {{ $labels.destination }} for an hour"
+            description: >-
+              {{ $value }} usage events wait because {{ $labels.destination }} has no price or no billable metric for
+              them (GET /api/v1/pricing lists the series). Add it now: held usage is released without a price 23
+              hours after its window, so that it still reaches its invoice period, and the billing platform then
+              bills it at zero until the price exists and the usage is rated again.
         - alert: VBillingMissingPrices
           expr: vbilling_unpriced_series > 0
           for: 5m
@@ -48,3 +130,142 @@ spec:
           annotations:
             summary: "vBilling usage has no price in {{ $labels.destination }}"
             description: "Inspect /api/v1/pricing and add prices before the invoice is finalized."
+        - alert: VBillingDestinationAwaitingStart
+          expr: vbilling_destination_state{state="awaiting_start"} == 1
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "vBilling delivers nothing to {{ $labels.destination }} until an operator decides where it starts"
+            description: >-
+              {{ $labels.destination }} was removed from the adapters and is configured again, with usage recorded
+              in between. vBilling neither replays that backlog nor skips it by itself. Inspect GET
+              /api/v1/destinations for the backlog, then POST /api/v1/destinations/{{ $labels.destination }}/start
+              with from set to cursor (deliver it), head (skip it) or a time.
+        - alert: VBillingDestinationPaused
+          expr: vbilling_destination_state{state="paused"} == 1
+          for: 6h
+          labels:
+            severity: warning
+          annotations:
+            summary: "Delivery to {{ $labels.destination }} has been paused for 6 hours"
+            description: >-
+              An operator paused delivery to {{ $labels.destination }} and it is still paused. Check whether the
+              pause is still wanted: its usage waits in the ledger and is delivered in order on POST
+              /api/v1/destinations/{{ $labels.destination }}/resume, and usage that waits too long can miss its
+              invoice period.
+        - alert: VBillingTenantsBlocked
+          expr: vbilling_tenants_blocked > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "vBilling cannot deliver the usage of {{ $value }} tenant(s) to {{ $labels.destination }}"
+            description: >-
+              Setting up these tenants in {{ $labels.destination }} keeps failing, so their usage waits in the
+              ledger while other tenants are delivered. Inspect /api/v1/status and the pod log for the tenant and the
+              error, and fix it in the billing platform. Usage that waits too long can miss its invoice.
+        - alert: VBillingTenantIDChanged
+          expr: |
+            increase(vbilling_tenant_id_changes_total[30m]) > 0
+            or
+            (vbilling_tenant_id_changes_total > 0 unless vbilling_tenant_id_changes_total offset 30m)
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "The billing ID of a tenant changed"
+            description: >-
+              vBilling now bills a tenant's clusters under another ID than before, for example because the vCluster
+              Platform Tenant or Project that owns them changed. From now on their usage goes to the customer with
+              the new ID in the billing platform. Check GET /api/v1/tenants and the pod log for the old and the new
+              ID, and that the billing platform has the customer you expect under the new one.
+
+        # --- Sources and volumes ---
+        - alert: VBillingSourceUnhealthy
+          expr: vbilling_sources{status=~"failing|diverged"} > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "vBilling has {{ $value }} {{ $labels.status }} {{ $labels.kind }} source(s)"
+            description: "Inspect /api/v1/sources for the affected cluster or tenant, last successful read and recovery hint."
+        - alert: VBillingSourceEmpty
+          expr: vbilling_sources{status="empty"} > 0
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: "vBilling has read nothing from {{ $value }} {{ $labels.kind }} source(s) for an hour"
+            description: >-
+              A source answers but returns no data. Most often a metric's selector matches no series for a cluster,
+              and that usage is not billed. GET /api/v1/sources names each source with a hint. Correct the selector
+              (prometheus.metrics), or remove a metric no cluster reports. A cluster that rightly has no such usage
+              keeps its source empty.
+        - alert: VBillingVolumeNearlyFull
+          expr: vbilling_volume_free_bytes / vbilling_volume_size_bytes < 0.15
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "vBilling volume {{ $labels.volume }} has less than 15% free space"
+            description: >-
+              Grow the volume before it fills. A full ledger volume stops every window commit and every record; a
+              full archive volume stops compaction, and the ledger volume fills next. Check destination lag too:
+              undelivered usage keeps segments in the ledger.
+        - alert: VBillingLedgerMirrorLagging
+          expr: vbilling_ledger_mirror_lag_seconds > 300
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "vBilling's copy of the ledger outside the data volume is {{ $value | humanizeDuration }} behind"
+            description: >-
+              Records newer than the copy exist on the data volume alone: losing that volume or its node now loses
+              them. Check the source ledger-mirror in GET /api/v1/sources, which says why the mirror is behind and
+              what to do: the archive volume is not mounted or not writable, or it has less than a tenth free, which
+              the mirror leaves to the archive (grow the volume).
+
+        # --- Enforcement: do billing states reach tenants? ---
+        # vBilling retries a failed block or unblock every 2 minutes, so a call
+        # that keeps failing adds to the counter in every 5 minute range.
+        - alert: VBillingGatewayBlockErrors
+          expr: increase(vbilling_gateway_block_errors_total[5m]) > 0
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "vBilling cannot block or unblock tenants at the {{ $labels.gateway }} gateway"
+            description: >-
+              Calls to {{ $labels.gateway }} have kept failing for 10 minutes. A suspended or paused tenant may still
+              be served, and a tenant that has paid may still be blocked. Check that the gateway is reachable and
+              that its admin key is valid (records.pullLiteLLM), and the pod log for "[gateway]" lines.
+        - alert: VBillingWebhooksRefused
+          expr: |
+            increase(vbilling_webhooks_total{result=~"refused|unsettled"}[30m]) > 0
+            or
+            (vbilling_webhooks_total{result=~"refused|unsettled"} > 0 unless vbilling_webhooks_total{result=~"refused|unsettled"} offset 30m)
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "vBilling could not apply {{ $labels.source }} webhooks ({{ $labels.result }})"
+            description: >-
+              Webhooks from {{ $labels.source }} were refused or could not be settled, so a payment, a failed payment
+              or a balance alert may not have changed the tenant's billing state. Check the webhook secret against
+              the one the billing platform signs with, and the pod log. The billing platform sends a refused webhook
+              again; GET /api/v1/billing-states shows what vBilling applied.
+        - alert: VBillingEnforcementRepaired
+          expr: |
+            increase(vbilling_enforcement_repairs_total[30m]) > 0
+            or
+            (vbilling_enforcement_repairs_total > 0 unless vbilling_enforcement_repairs_total offset 30m)
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "vBilling restored a suspension or pause that was removed ({{ $labels.kind }})"
+            description: >-
+              Something other than vBilling undid the enforcement of a billing state, and vBilling put it back. Find
+              who can change the tenant's namespace, cluster or admission policy: repeated repairs mean a tenant is
+              working around a suspension. The pod log names the tenant and the object.

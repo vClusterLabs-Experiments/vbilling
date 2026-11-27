@@ -22,7 +22,11 @@ import (
 type fakeDisc struct {
 	clusters []discovery.TenantCluster
 	err      error
+	// excluded are the clusters left out as excluded from metering.
+	excluded []discovery.TenantCluster
 }
+
+func (f *fakeDisc) Excluded() []discovery.TenantCluster { return f.excluded }
 
 func (f *fakeDisc) Discover(context.Context) ([]discovery.TenantCluster, error) {
 	return f.clusters, f.err

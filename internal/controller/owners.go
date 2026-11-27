@@ -78,7 +78,10 @@ func (c *Controller) ownerRuns(targets []metrics.Target, windows []metrics.Windo
 	var runs []ownerRun
 	for _, w := range windows {
 		ts, sig := c.targetsFor(targets, w.End)
-		sig += "\x02" + w.End.Sub(w.Start).String()
+		// A cluster excluded from metering or deleted for the whole window
+		// is not read at all.
+		ts, skipped := meteredIn(ts, w)
+		sig += "\x02" + w.End.Sub(w.Start).String() + "\x02" + skipped
 		if n := len(runs); n > 0 && runs[n-1].sig == sig {
 			runs[n-1].windows = append(runs[n-1].windows, w)
 			continue
@@ -110,7 +113,7 @@ func (c *Controller) targetsFor(targets []metrics.Target, end time.Time) ([]metr
 			// The owner changes who pays, never what ran: keep the cluster's
 			// pause state and spans.
 			cl.Paused = t.Cluster.Paused
-			t = metrics.Target{Cluster: cl, Tenant: tenant.ID, Project: cl.Project, TenantClass: class, Paused: t.Paused}
+			t = metrics.Target{Cluster: cl, Tenant: tenant.ID, Project: cl.Project, TenantClass: class, Paused: t.Paused, Excluded: t.Excluded}
 		}
 		out[i] = t
 		sig.WriteString(t.Tenant + "\x00" + t.Project + "\x00" + t.TenantClass + "\x01")

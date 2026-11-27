@@ -45,6 +45,7 @@ import (
 	"github.com/vclusterlabs-experiments/vbilling/internal/telemetry"
 	"github.com/vclusterlabs-experiments/vbilling/internal/tenantapi"
 	"github.com/vclusterlabs-experiments/vbilling/internal/usage"
+	vbversion "github.com/vclusterlabs-experiments/vbilling/internal/version"
 
 	// Register the remaining built-in adapters.
 	_ "github.com/vclusterlabs-experiments/vbilling/internal/destinations/lago"
@@ -52,7 +53,9 @@ import (
 	_ "github.com/vclusterlabs-experiments/vbilling/internal/destinations/webhook"
 )
 
-var version = "0.3.2"
+// version is written once, in internal/version: the log, the API and the
+// User-Agent of every outgoing client report the same one.
+var version = vbversion.Version
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "ledger" {
@@ -61,57 +64,24 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "metronome" {
 		os.Exit(runMetronomeCmd(os.Args[2:]))
 	}
+	if len(os.Args) > 1 && os.Args[1] == "check-config" {
+		os.Exit(runCheckConfigCmd(os.Args[2:]))
+	}
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	log.Printf("vBilling %s: usage metering for tenant clusters", version)
 
-	cfg := config.Load()
-	if err := cfg.Validate(); err != nil {
-		log.Fatalf("invalid configuration: %v", err)
+	// Every check of the configuration is in loadStartupConfig (check.go),
+	// which "vbilling check-config" runs too: add new ones there, so the
+	// chart's Job refuses a bad configuration before the pod is replaced.
+	// The parsers further down see settings that already passed.
+	startup, err := loadStartupConfig(startupOptions{})
+	for _, w := range startup.warnings {
+		log.Printf("WARNING: %s", w)
 	}
-	for _, w := range cfg.Warnings {
-		log.Printf("WARNING: setting %s", w)
-	}
-	customs, err := usage.ParseCustomMetrics(cfg.CustomMetrics)
 	if err != nil {
-		log.Fatalf("CUSTOM_METRICS: %v", err)
+		log.Fatalf("%v", err)
 	}
-	if cfg.CustomMetricsFile != "" {
-		b, err := os.ReadFile(cfg.CustomMetricsFile)
-		if err != nil {
-			log.Fatalf("CUSTOM_METRICS_FILE: %v", err)
-		}
-		more, err := usage.ParseCustomMetricsYAML(b)
-		if err != nil {
-			log.Fatalf("CUSTOM_METRICS_FILE %s: %v", cfg.CustomMetricsFile, err)
-		}
-		customs = append(customs, more...)
-	}
-	for _, d := range customs {
-		if err := usage.RegisterCustom(d); err != nil {
-			log.Fatalf("CUSTOM_METRICS: %v", err)
-		}
-	}
-	formats, err := records.LoadFormats(cfg.RecordsMappingsFile, cfg.RecordsLiteLLM)
-	if err != nil {
-		log.Fatalf("RECORDS_MAPPINGS_FILE: %v", err)
-	}
-	if err := formats.Declare(); err != nil {
-		log.Fatalf("records formats: %v", err)
-	}
-	// Egress is a counter (exact) unless EGRESS_QUERY replaces it.
-	if cfg.EgressQuery != "" && cfg.EgressQuery != "none" {
-		usage.SetAccuracy(usage.MetricNetworkEgressGB, usage.AccuracyEstimate)
-	}
-	if cfg.CPUMemoryBasis != "requests" {
-		// Usage is a metrics-server sample of the live window, not a
-		// measurement over it: requests is the exact basis.
-		usage.SetAccuracy(usage.MetricCPUCoreHours, usage.AccuracyEstimate)
-		usage.SetAccuracy(usage.MetricMemoryGBHours, usage.AccuracyEstimate)
-	}
-	promMetrics, err := metrics.LoadPromMetrics(cfg.PrometheusMetrics)
-	if err != nil {
-		log.Fatalf("PROMETHEUS_METRICS_FILE: %v", err)
-	}
+	cfg, formats, promMetrics := startup.cfg, startup.formats, startup.promMetrics
 	log.Printf("Adapters: %v | Region: %s | Window: %s | CPU/memory basis: %s | Data: %s",
 		cfg.Adapters, cfg.Region, cfg.CollectionInterval, cfg.CPUMemoryBasis, cfg.DataDir)
 
@@ -129,6 +99,28 @@ func main() {
 	// delivered before this process holds the Lease.
 	guard := holdLease(ctx, kube, namespace, cfg.ListenAddr)
 	defer guard.Release()
+	// A start-up error from here on ends the process with log.Fatal, which
+	// skips the deferred release: give the Lease up first (see fatal.go).
+	startupOver := releaseOnFatal(guard.Release)
+	// The live second copy of the data directory, on the archive volume
+	// (LEDGER_MIRROR). Where none is kept, an earlier copy is never restored
+	// by itself: nothing says how old it is.
+	mirrorPlan := spool.PlanMirror(cfg.LedgerMirror, cfg.ArchiveDir)
+	mirrorDir := mirrorPlan.Dir
+	if mirrorPlan.Reason != "" {
+		log.Printf("[mirror] %s. %s", mirrorPlan.Reason, mirrorPlan.Hint)
+		if mirrorPlan.Unused != "" {
+			log.Printf("[mirror] WARNING: %s holds a copy from when the mirror was kept. It is not updated any more and vBilling never restores it by itself: delete it, or restore it by hand with vbilling ledger restore", mirrorPlan.Unused)
+		}
+	}
+	// A data volume that was lost: DATA_DIR holds no ledger, but this pod's
+	// mirror on the archive volume does. It comes back before anything is
+	// opened, metering source identity included, so vBilling continues the
+	// ledger instead of starting a new one next to its copy.
+	if _, err := spool.RestoreIfLost(mirrorDir, cfg.DataDir, log.Printf); err != nil {
+		log.Fatalf("restore the ledger: %s holds none and its mirror in %s could not be restored: %v. vBilling does not start as a new install next to the copy of a ledger it lost: "+
+			"fix what the error names and restart, or run vbilling ledger restore. To give that ledger up and start as a new install, move %s away", cfg.DataDir, mirrorDir, err, mirrorDir)
+	}
 	cfg.MeteringSource, err = sourceid.Load(cfg.DataDir)
 	if err != nil {
 		log.Fatalf("metering source identity: %v", err)
@@ -170,12 +162,27 @@ func main() {
 
 	tel := telemetry.Default
 	sources := health.New(tel)
-	// A full ledger volume stops every commit: report it long before.
-	go diskspace.Watch(ctx, map[string]string{"ledger-volume": cfg.DataDir, "archive-volume": cfg.ArchiveDir}, sources, tel)
+	// A full ledger volume stops every commit: report it long before. The
+	// archive directory is created now, not by the first compaction days
+	// later: an archive volume that is not mounted or not writable fails at
+	// once, and an empty, healthy one is ok from the first check.
+	go diskspace.Watch(ctx, []diskspace.Volume{
+		diskspace.LedgerVolume(cfg.DataDir),
+		diskspace.ArchiveVolume(cfg.ArchiveDir, spool.EnsureArchiveDir),
+	}, sources, tel)
+	// The second copy: the archive volume also holds a live mirror of both
+	// ledgers and of every other file of DATA_DIR, a few seconds behind. It
+	// runs next to metering and never in its way (nil when none is kept;
+	// source health then says why).
+	mirrorPlan.Report(sources, cfg.ArchiveDir)
+	mirror := spool.NewMirror(spool.MirrorOptions{DataDir: cfg.DataDir, Dir: mirrorDir, Ledgers: []*spool.Spool{sp, recSpool},
+		Identity: cfg.MeteringSource, Exclude: []string{cfg.ArchiveDir}, Health: sources, Tel: tel})
+	go mirror.Run(ctx)
 	tenants := pipeline.NewTenantRegistry()
 	// Events held until their billing platform counts them (Metronome: a
 	// billable metric, unless PRICE_CHECK=off) or prices them
-	// (PRICE_CHECK=hold). Always opened, so whatever an earlier run held is
+	// (PRICE_CHECK=hold), and events parked until their tenant is set up at a
+	// destination. Always opened, so whatever an earlier run held is
 	// released.
 	held, err := pipeline.OpenHeld(filepath.Join(cfg.DataDir, "held"), false)
 	if err != nil {
@@ -189,6 +196,8 @@ func main() {
 		prices = pricing.New(sp, dests, tenants, held, sources, tel, pricing.Options{
 			Mode: cfg.PriceCheck, Interval: cfg.PriceCheckInterval, Lookback: cfg.PriceCheckLookback, MaxHold: maxHold,
 		})
+	} else {
+		log.Printf("[pricing] %s", pricing.OffNote)
 	}
 	var gate pipeline.Gate
 	if prices != nil {
@@ -200,6 +209,7 @@ func main() {
 		Held:      held,
 		Gate:      gate,
 		MaxHold:   maxHold,
+		Health:    sources, // paused and returning destinations, tenants a destination cannot set up
 	}, tel)
 	disc := discovery.NewDiscoverer(kube, dynamicClient, cfg.WatchNamespaces, cfg.PlatformCluster)
 	owners := newPlatformResolver(cfg, sources, sp)
@@ -263,7 +273,16 @@ func main() {
 	if cfg.WatchDeletions {
 		g := metrics.NewGraveyard(retention, time.Now)
 		go g.Watch(ctx, kube, metrics.LabelManagedBy, true, true)
+		go g.WatchCapacity(ctx, kube, metrics.LabelManagedBy)
 		coll.UseGraveyard(g)
+		// When each control plane had a ready replica, and when it was
+		// deleted: control plane hours follow that, to about a second.
+		planes, err := metrics.NewControlPlanes(filepath.Join(cfg.DataDir, "control-planes.json"), retention+time.Hour, time.Now)
+		if err != nil {
+			log.Fatalf("control plane timeline: %v", err)
+		}
+		go planes.Watch(ctx, kube, cfg.WatchNamespaces)
+		coll.UseControlPlanes(planes)
 	}
 	var tenantMgr *tenantapi.Manager
 	if cfg.TenantAPI {
@@ -296,6 +315,12 @@ func main() {
 	ctrl := controller.New(cfg, disc, coll, sp, tenants, dests, tel)
 	ctrl.UsePrometheus(prom)
 	ctrl.UsePauses(pauses)
+	// Since when each excluded cluster is excluded from metering.
+	exclusions, err := pause.OpenSpans(filepath.Join(cfg.DataDir, "exclusion-spans.json"))
+	if err != nil {
+		log.Fatalf("open exclusion spans: %v", err)
+	}
+	ctrl.UseExclusions(exclusions)
 	ctrl.UseHeld(held) // offboarding waits for usage held until priced
 	ctrl.UseHealth(sources)
 	ctrl.UseSafeguard(safeguard.New(sp, sources, tel))
@@ -306,6 +331,11 @@ func main() {
 		ctrl.UseOwners(owners)
 	}
 	enf := newEnforcer(cfg, kube, ctrl, dests, tel, tenantMgr, pauses, coll, newGateway(cfg, ctrl, formats, tel))
+	// A cluster whose API refuses vBilling and a payment that did not lift a
+	// hold show as sources, and a cluster that was deleted loses its pause
+	// entry.
+	enf.UseHealth(sources)
+	enf.UseClusters(func() ([]discovery.TenantCluster, bool) { return ctrl.Clusters(), ctrl.Ready() })
 
 	recOpts := records.Options{
 		Window:               cfg.CollectionInterval,
@@ -366,6 +396,9 @@ func main() {
 	// state. No cluster's alias can capture them.
 	recordsTenants := recordsConfigTenants(cfg, formats, pullSpecs)
 	ctrl.UseKnownTenants(func(id string) bool { return recordsTenants[id] || enf.HasState(id) })
+	// vbilling_tenant_billing_state has a series for every tenant vBilling
+	// knows, active when it has no hold.
+	enf.UseTenants(func() []string { return knownTenantIDs(cfg, tenants, recordsTenants) })
 
 	// The API is never open: without API_TOKEN, a token is generated in
 	// DATA_DIR (log its path, never the token). Ingest has a token of its
@@ -385,6 +418,8 @@ func main() {
 	// Read, write and idle timeouts; the raw export streams past them.
 	srv := apiServer.HTTPServer(cfg.ListenAddr)
 
+	// Start-up is over: what the Lease guards runs from here on.
+	startupOver()
 	var wg sync.WaitGroup
 	wg.Add(6)
 	go func() {
@@ -405,6 +440,7 @@ func main() {
 			case <-ctx.Done():
 				return
 			case <-t.C:
+				mirrorPlan.Report(sources, cfg.ArchiveDir) // stated once, so stated again
 				sources.Prune(time.Now().Add(-6 * time.Hour))
 			}
 		}
@@ -469,6 +505,7 @@ func main() {
 	defer done()
 	srv.Shutdown(shutdownCtx)
 	wg.Wait()
+	mirror.Stop() // one last pass: a clean stop leaves the mirror in step
 	if err := sp.Close(); err != nil {
 		log.Printf("close ledger: %v", err)
 	}
@@ -631,6 +668,30 @@ func recordsConfigTenants(cfg *config.Config, formats records.Formats, pulls []r
 	return out
 }
 
+// knownTenantIDs lists the tenants vBilling knows without asking for one by
+// name: those with a cluster (until they are offboarded), those an ingest
+// token is bound to, and those the records configuration bills to.
+func knownTenantIDs(cfg *config.Config, tenants *pipeline.TenantRegistry, recordsTenants map[string]bool) []string {
+	seen := map[string]bool{}
+	var ids []string
+	add := func(id string) {
+		if id != "" && !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	for _, t := range tenants.All() {
+		add(t.ID)
+	}
+	for _, id := range cfg.IngestTokens {
+		add(id)
+	}
+	for id := range recordsTenants {
+		add(id)
+	}
+	return ids
+}
+
 // every runs f every interval until ctx ends.
 func every(ctx context.Context, interval time.Duration, f func(context.Context)) {
 	t := time.NewTicker(interval)
@@ -652,19 +713,17 @@ func newPlatformResolver(cfg *config.Config, sources *health.Registry, sp *spool
 		return nil
 	}
 	r, err := platform.New(platform.Options{
-		Client: platform.ClientOptions{
-			URL:       cfg.PlatformURL,
-			AccessKey: cfg.PlatformAccessKey,
-			CAFile:    cfg.PlatformCAFile,
-			Insecure:  cfg.PlatformInsecure,
-			UserAgent: "vbilling/" + version,
-		},
+		Client:      platformClientOptions(cfg),
 		Cluster:     cfg.PlatformCluster,
 		Refresh:     cfg.PlatformRefresh,
 		OrphanGrace: cfg.PlatformOrphanGrace,
 		StatePath:   filepath.Join(cfg.DataDir, "platform-bindings.json"),
 		Committed:   func() (time.Time, bool) { return sp.Watermark(spool.SourceCollector) },
 		Health:      sources,
+		OnBillingIDChange: func(string, string) {
+			telemetry.Default.Add("vbilling_tenant_id_changes_total",
+				"Times the billing ID of a Tenant or Project changed: the billing platform sees another customer from then on.", nil, 1)
+		},
 	})
 	if err != nil {
 		log.Fatalf("vCluster Platform: %v", err)

@@ -144,6 +144,55 @@ func Open(dir string) (*Store, error) {
 // Memory returns an in-memory store.
 func Memory() *Store { return &Store{kv: kv.Memory()} }
 
+// OpenSpans loads a store of spans only (no inventories) from one file. The
+// controller keeps the times a cluster was excluded from metering in one:
+// spans of another kind than pauses, recorded and clipped the same way. An
+// empty path keeps them in memory.
+func OpenSpans(path string) (*Store, error) {
+	if path == "" {
+		return Memory(), nil
+	}
+	s, err := kv.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	return &Store{kv: s}, nil
+}
+
+// ByExcluded marks a span during which a cluster was excluded from
+// metering (vbilling.vcluster.com/exclude) or no longer existed. Nothing of
+// the cluster is billed for it, whatever PAUSE_KEEP_BILLING keeps.
+const ByExcluded = "excluded"
+
+// Union merges two lists of spans into one whose spans do not overlap, in
+// order, so time covered by both is counted once (Overlap and Outside add
+// up what each span covers).
+func Union(a, b []Span) []Span {
+	if len(a) == 0 {
+		return b
+	}
+	if len(b) == 0 {
+		return a
+	}
+	all := append(append([]Span(nil), a...), b...)
+	sort.Slice(all, func(i, j int) bool { return all[i].From.Before(all[j].From) })
+	out := all[:1]
+	for _, sp := range all[1:] {
+		last := &out[len(out)-1]
+		if last.To.IsZero() {
+			break // open: it covers everything after it
+		}
+		if sp.From.After(last.To) {
+			out = append(out, sp)
+			continue
+		}
+		if sp.To.IsZero() || sp.To.After(last.To) {
+			last.To = sp.To
+		}
+	}
+	return out
+}
+
 func (s *Store) load(id string) []Span {
 	raw, ok := s.kv.Get(id)
 	if !ok {

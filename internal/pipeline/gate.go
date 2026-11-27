@@ -36,9 +36,34 @@ type Decision struct {
 	Reason string
 }
 
-// shippedLog remembers, per destination and series, the newest ledger
-// sequence a release delivered, so the same events read again from the ledger
-// (a batch retried after its held part was released) are not sent twice.
+// item is one event on its way to a destination: where it sits in the ledger
+// and the pricing series the gate gave it ("" when no gate decides for it).
+type item struct {
+	seq    uint64
+	series string
+	ev     usage.Event
+}
+
+func eventsOf(items []item) []usage.Event {
+	out := make([]usage.Event, len(items))
+	for i := range items {
+		out[i] = items[i].ev
+	}
+	return out
+}
+
+func itemsOf(entries []HeldEntry) []item {
+	out := make([]item, len(entries))
+	for i := range entries {
+		out[i] = item{seq: entries[i].Seq, series: entries[i].Series, ev: entries[i].Event}
+	}
+	return out
+}
+
+// shippedLog remembers, per destination and key (a pricing series or a
+// ParkKey), the newest ledger sequence a release delivered, so the same
+// events read again (a batch retried after part of it was released) are not
+// sent twice.
 type shippedLog struct {
 	mu sync.Mutex
 	m  map[string]map[string]uint64
@@ -72,30 +97,34 @@ func (s *shippedLog) reset(dest string) {
 	delete(s.m, dest)
 }
 
-// park splits a batch into the events to deliver now and the events to hold,
-// and writes the held ones durably before the cursor can move past them. An
-// event is held when the gate says so, or when its series already has held
-// events, so a series always ships in ledger order.
-func (d *Dispatcher) park(ctx context.Context, dest destinations.Destination, events []usage.Event, seqs []uint64) ([]usage.Event, error) {
+// park splits a batch into the events that may go on to the destination and
+// the events the pricing gate holds, and writes the held ones durably before
+// the cursor can move past them. An event is held when the gate says so, or
+// when its series already has held events, so a series always ships in
+// ledger order. Whether the events that go on are sent or parked for their
+// tenant is decided next (dispatch).
+func (d *Dispatcher) park(ctx context.Context, dest destinations.Destination, items []item) ([]item, error) {
 	name := dest.Name()
 	var decisions []Decision
 	if d.opts.Gate != nil {
-		decisions = d.opts.Gate.Decide(ctx, name, events)
+		decisions = d.opts.Gate.Decide(ctx, name, eventsOf(items))
 	}
 	now := time.Now().UTC()
-	ship := events[:0:0]
+	ship := items[:0:0]
 	var hold []HeldEntry
 	var already uint64
-	for i := range events {
+	for i := range items {
 		var dec Decision
 		if i < len(decisions) {
 			dec = decisions[i]
 		}
+		it := items[i]
+		it.series = dec.Series
 		if dec.Series == "" {
-			ship = append(ship, events[i])
+			ship = append(ship, it)
 			continue
 		}
-		if seqs[i] <= d.shipped.get(name, dec.Series) {
+		if it.seq <= d.shipped.get(name, dec.Series) {
 			already++ // delivered by a release
 			continue
 		}
@@ -104,20 +133,19 @@ func (d *Dispatcher) park(ctx context.Context, dest destinations.Destination, ev
 			if !dec.Hold {
 				reason = "queued behind held events of the same series"
 			}
-			hold = append(hold, HeldEntry{Seq: seqs[i], At: now, Series: dec.Series, Reason: reason, Event: events[i]})
+			hold = append(hold, HeldEntry{Seq: it.seq, At: now, Series: dec.Series, Reason: reason, Event: it.ev})
 			continue
 		}
-		ship = append(ship, events[i])
+		ship = append(ship, it)
 	}
 	if len(hold) > 0 {
 		// The tenant exists whatever its prices: create it now (a Lago
 		// subscription only counts usage from its start, a Metronome contract
-		// from its start date), so released usage lands in its period.
-		evs := make([]usage.Event, len(hold))
-		for i := range hold {
-			evs[i] = hold[i].Event
-		}
-		if err := d.ensureTenants(ctx, dest, evs); err != nil {
+		// from its start date), so released usage lands in its period. A
+		// tenant that cannot be set up does not keep anything from being
+		// held: it is retried on its own, and its events are parked when the
+		// gate releases them (dispatch).
+		if err := d.setUpHeldTenants(ctx, dest, hold); err != nil {
 			return nil, err
 		}
 		added, err := d.opts.Held.Add(name, hold)
@@ -180,11 +208,9 @@ func (d *Dispatcher) release(ctx context.Context, dest destinations.Destination)
 			if len(entries) == 0 {
 				break
 			}
-			events := make([]usage.Event, len(entries))
-			for i := range entries {
-				events[i] = entries[i].Event
-			}
-			dead, err := d.deliver(ctx, dest, events)
+			// Sent, or parked for a tenant that is not set up: either way the
+			// events are safe before they leave the series' file.
+			out, err := d.dispatch(ctx, dest, itemsOf(entries))
 			if err != nil {
 				return fmt.Errorf("release held events: %w", err)
 			}
@@ -193,19 +219,19 @@ func (d *Dispatcher) release(ctx context.Context, dest destinations.Destination)
 				return fmt.Errorf("release held events: %w", err)
 			}
 			d.shipped.set(name, h.Series, last)
-			d.checkpointDelivery(dest, events)
-			delivered := uint64(len(entries) - dead)
-			total += len(entries)
+			d.checkpointDelivery(dest, out.sent)
+			released := len(entries) - out.parked - out.already
+			total += released
 			labels := map[string]string{"destination": name}
-			d.tel.Add("vbilling_events_delivered_total", "Events accepted by a destination.", labels, float64(delivered))
-			d.tel.Add("vbilling_events_released_total", "Held events delivered once their series was priced.", labels, float64(len(entries)))
-			if dead > 0 {
-				d.tel.Add("vbilling_events_dead_lettered_total", "Events a destination permanently rejected.", labels, float64(dead))
+			d.tel.Add("vbilling_events_delivered_total", "Events accepted by a destination.", labels, float64(out.delivered))
+			d.tel.Add("vbilling_events_released_total", "Held events delivered once their series was priced.", labels, float64(released))
+			if out.dead > 0 {
+				d.tel.Add("vbilling_events_dead_lettered_total", "Events a destination permanently rejected.", labels, float64(out.dead))
 			}
 			d.update(name, func(s *Status) {
-				s.Delivered += delivered
-				s.DeadLettered += uint64(dead)
-				s.Released += uint64(len(entries))
+				s.Delivered += uint64(out.delivered)
+				s.DeadLettered += uint64(out.dead)
+				s.Released += uint64(released)
 				s.LastSuccess = time.Now().UTC()
 				s.ConsecutiveFailures = 0
 			})
@@ -249,11 +275,7 @@ func (d *Dispatcher) releaseExpired(ctx context.Context, dest destinations.Desti
 			break
 		}
 		take := entries[:n]
-		events := make([]usage.Event, n)
-		for i := range take {
-			events[i] = take[i].Event
-		}
-		dead, err := d.deliver(ctx, dest, events)
+		out, err := d.dispatch(ctx, dest, itemsOf(take))
 		if err != nil {
 			return fmt.Errorf("release expired held events: %w", err)
 		}
@@ -262,18 +284,19 @@ func (d *Dispatcher) releaseExpired(ctx context.Context, dest destinations.Desti
 			return fmt.Errorf("release expired held events: %w", err)
 		}
 		d.shipped.set(name, h.Series, last.Seq)
-		d.checkpointDelivery(dest, events)
-		total += n
+		d.checkpointDelivery(dest, out.sent)
+		released := n - out.parked - out.already
+		total += released
 		labels := map[string]string{"destination": name}
-		d.tel.Add("vbilling_events_delivered_total", "Events accepted by a destination.", labels, float64(n-dead))
-		d.tel.Add("vbilling_events_released_unpriced_total", "Held events released without a price, before their invoice period is final.", labels, float64(n))
-		if dead > 0 {
-			d.tel.Add("vbilling_events_dead_lettered_total", "Events a destination permanently rejected.", labels, float64(dead))
+		d.tel.Add("vbilling_events_delivered_total", "Events accepted by a destination.", labels, float64(out.delivered))
+		d.tel.Add("vbilling_events_released_unpriced_total", "Held events released without a price, before their invoice period is final.", labels, float64(released))
+		if out.dead > 0 {
+			d.tel.Add("vbilling_events_dead_lettered_total", "Events a destination permanently rejected.", labels, float64(out.dead))
 		}
 		d.update(name, func(s *Status) {
-			s.Delivered += uint64(n - dead)
-			s.DeadLettered += uint64(dead)
-			s.ReleasedUnpriced += uint64(n)
+			s.Delivered += uint64(out.delivered)
+			s.DeadLettered += uint64(out.dead)
+			s.ReleasedUnpriced += uint64(released)
 			s.LastSuccess = time.Now().UTC()
 		})
 		d.publishHeld(name)
@@ -292,10 +315,14 @@ func (d *Dispatcher) releaseExpired(ctx context.Context, dest destinations.Desti
 	return ctx.Err()
 }
 
+// publishHeld exports how many events wait for a destination: held at the
+// pricing gate, and parked for tenants that are not set up.
 func (d *Dispatcher) publishHeld(name string) {
-	n := d.opts.Held.Count(name)
-	d.update(name, func(s *Status) { s.Held = uint64(n) })
-	d.tel.Set("vbilling_held_events", "Events held back from a destination until their series is priced (PRICE_CHECK=hold) or counted by the billing platform.", map[string]string{"destination": name}, float64(n))
+	held, parked := d.opts.Held.Count(name), d.opts.Held.ParkedCount(name)
+	d.update(name, func(s *Status) { s.Held, s.Parked = uint64(held), uint64(parked) })
+	labels := map[string]string{"destination": name}
+	d.tel.Set("vbilling_held_events", "Events held back from a destination until their series is priced (PRICE_CHECK=hold) or counted by the billing platform.", labels, float64(held))
+	d.tel.Set("vbilling_parked_events", "Events parked because their tenant is not set up at the destination; they ship, in order, once it is.", labels, float64(parked))
 }
 
 // gateChanged returns the gate's change channel while a destination has

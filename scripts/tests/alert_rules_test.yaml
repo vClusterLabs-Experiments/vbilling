@@ -1,0 +1,258 @@
+# When each alert in deploy/monitoring/vbilling-alerts.yaml fires, as promtool
+# rule tests. test_alerts.py runs them when promtool is installed, against a
+# copy of the rules without annotations (rules.yaml next to this file), so
+# the expected alerts below list labels only.
+#
+#   promtool test rules alert_rules_test.yaml
+rule_files:
+  - rules.yaml
+evaluation_interval: 1m
+
+tests:
+  - name: a last window older than 5 minutes fires after 2 more minutes
+    interval: 1m
+    input_series:
+      # A window is committed every minute for 10 minutes, then none.
+      - series: vbilling_last_window_end_timestamp_seconds{job="vbilling"}
+        values: 0+60x10 600x20
+    alert_rule_test:
+      - {eval_time: 15m, alertname: VBillingLastWindowStale, exp_alerts: []} # exactly 300s old
+      - {eval_time: 17m, alertname: VBillingLastWindowStale, exp_alerts: []} # older, but not for 2m yet
+      - eval_time: 18m
+        alertname: VBillingLastWindowStale
+        exp_alerts:
+          - exp_labels: {severity: critical, job: vbilling}
+      - {eval_time: 18m, alertname: VBillingNotReporting, exp_alerts: []} # the series is there
+
+  - name: a vBilling that is down fires the rule for a missing series, not the stale one
+    interval: 1m
+    input_series:
+      # The pod stops at 5m: its series go stale, and nothing can compare them.
+      - series: vbilling_last_window_end_timestamp_seconds{job="vbilling"}
+        values: 0+60x5 stale
+      - series: up{job="something-else"}
+        values: 1x30
+    alert_rule_test:
+      - {eval_time: 10m, alertname: VBillingNotReporting, exp_alerts: []}
+      - eval_time: 11m
+        alertname: VBillingNotReporting
+        exp_alerts:
+          - exp_labels: {severity: critical}
+      - {eval_time: 30m, alertname: VBillingLastWindowStale, exp_alerts: []}
+
+  - name: usage read from Prometheus, a last window older than 5 minutes warns after 5 more
+    interval: 1m
+    input_series:
+      # Prometheus windows are committed for 10 minutes, then none, while
+      # the windows metered from Kubernetes go on.
+      - series: vbilling_prometheus_last_window_end_timestamp_seconds
+        values: 0+60x10 600x30
+      - series: vbilling_last_window_end_timestamp_seconds
+        values: 0+60x40
+    alert_rule_test:
+      - {eval_time: 20m, alertname: VBillingPrometheusWindowStale, exp_alerts: []}
+      - eval_time: 21m
+        alertname: VBillingPrometheusWindowStale
+        exp_alerts:
+          - exp_labels: {severity: warning}
+      - {eval_time: 30m, alertname: VBillingLastWindowStale, exp_alerts: []}
+
+  - name: without Prometheus the gauge is absent or zero, and nothing warns
+    interval: 1m
+    input_series:
+      - series: vbilling_prometheus_last_window_end_timestamp_seconds
+        values: 0x40
+    alert_rule_test:
+      - {eval_time: 30m, alertname: VBillingPrometheusWindowStale, exp_alerts: []}
+
+  - name: samples that keep arriving late warn after 15 minutes, one late batch does not
+    interval: 1m
+    input_series:
+      - series: vbilling_prometheus_late_samples_total
+        values: 0x5 7x14 7+2x30 # one batch at 6m; late samples every minute from 22m
+    alert_rule_test:
+      - {eval_time: 20m, alertname: VBillingPrometheusSamplesLate, exp_alerts: []}
+      - {eval_time: 36m, alertname: VBillingPrometheusSamplesLate, exp_alerts: []}
+      - eval_time: 37m
+        alertname: VBillingPrometheusSamplesLate
+        exp_alerts:
+          - exp_labels: {severity: warning}
+
+  - name: a change of a tenant's billing ID warns, the first one included
+    interval: 1m
+    input_series:
+      - series: vbilling_tenant_id_changes_total
+        values: _x10 1x50
+    alert_rule_test:
+      - {eval_time: 14m, alertname: VBillingTenantIDChanged, exp_alerts: []}
+      - eval_time: 15m
+        alertname: VBillingTenantIDChanged
+        exp_alerts:
+          - exp_labels: {severity: warning}
+      - {eval_time: 45m, alertname: VBillingTenantIDChanged, exp_alerts: []}
+
+  - name: the first dead letter after a start fires, although increase() cannot see it
+    interval: 1m
+    input_series:
+      # No dead letters for 10 minutes, so no series; then 3 at once.
+      - series: vbilling_events_dead_lettered_total{destination="stripe"}
+        values: _x10 3x50
+    alert_rule_test:
+      - {eval_time: 14m, alertname: VBillingDeadLetters, exp_alerts: []}
+      - eval_time: 15m
+        alertname: VBillingDeadLetters
+        exp_alerts:
+          - exp_labels: {severity: critical, destination: stripe}
+      # The counter stays at 3: the series is no longer new, and nothing was added.
+      - {eval_time: 26m, alertname: VBillingDeadLetters, exp_alerts: []}
+      - {eval_time: 60m, alertname: VBillingDeadLetters, exp_alerts: []}
+
+  - name: more dead letters on a counter that exists fire as well
+    interval: 1m
+    input_series:
+      - series: vbilling_events_dead_lettered_total{destination="metronome"}
+        values: 3x30 5x40
+    alert_rule_test:
+      - {eval_time: 30m, alertname: VBillingDeadLetters, exp_alerts: []}
+      - eval_time: 36m
+        alertname: VBillingDeadLetters
+        exp_alerts:
+          - exp_labels: {severity: critical, destination: metronome}
+      - {eval_time: 50m, alertname: VBillingDeadLetters, exp_alerts: []}
+
+  - name: usage that waits 5 minutes for a billing platform, or has no price there
+    interval: 1m
+    input_series:
+      - series: vbilling_destination_lag_seconds{destination="webhook"}
+        values: 0x5 360+60x30 # the destination fails from 6m
+      - series: vbilling_destination_lag_seconds{destination="stripe"}
+        values: 0x40
+      - series: vbilling_unpriced_series{destination="metronome"}
+        values: 0x5 2x35
+    alert_rule_test:
+      - {eval_time: 15m, alertname: VBillingDeliveryLag, exp_alerts: []}
+      - eval_time: 16m
+        alertname: VBillingDeliveryLag
+        exp_alerts:
+          - exp_labels: {severity: warning, destination: webhook}
+      - {eval_time: 10m, alertname: VBillingMissingPrices, exp_alerts: []}
+      - eval_time: 11m
+        alertname: VBillingMissingPrices
+        exp_alerts:
+          - exp_labels: {severity: warning, destination: metronome}
+
+  - name: gateway calls that keep failing fire, one failed call does not
+    interval: 1m
+    input_series:
+      - series: vbilling_gateway_block_errors_total{gateway="litellm"}
+        values: 0x10 1x10 1+1x30 # one failure at 11m; failing every minute from 23m
+    alert_rule_test:
+      - {eval_time: 20m, alertname: VBillingGatewayBlockErrors, exp_alerts: []}
+      - {eval_time: 32m, alertname: VBillingGatewayBlockErrors, exp_alerts: []}
+      - eval_time: 33m
+        alertname: VBillingGatewayBlockErrors
+        exp_alerts:
+          - exp_labels: {severity: critical, gateway: litellm}
+
+  - name: sources that return nothing warn after an hour, failing ones after 5 minutes
+    interval: 1m
+    input_series:
+      - series: vbilling_sources{kind="prometheus", status="empty"}
+        values: 4x90
+      - series: vbilling_sources{kind="prometheus", status="failing"}
+        values: 0x90
+      - series: vbilling_sources{kind="storage", status="failing"}
+        values: 0x30 1x60
+      - series: vbilling_sources{kind="storage", status="ok"}
+        values: 2x90
+    alert_rule_test:
+      - {eval_time: 59m, alertname: VBillingSourceEmpty, exp_alerts: []}
+      - eval_time: 60m
+        alertname: VBillingSourceEmpty
+        exp_alerts:
+          - exp_labels: {severity: warning, kind: prometheus, status: empty}
+      - {eval_time: 30m, alertname: VBillingSourceUnhealthy, exp_alerts: []}
+      - eval_time: 36m
+        alertname: VBillingSourceUnhealthy
+        exp_alerts:
+          - exp_labels: {severity: warning, kind: storage, status: failing}
+
+  - name: held events warn after an hour
+    interval: 1m
+    input_series:
+      - series: vbilling_held_events{destination="metronome"}
+        values: 0x10 12x80
+      - series: vbilling_held_events{destination="webhook"}
+        values: 0x90
+    alert_rule_test:
+      - {eval_time: 70m, alertname: VBillingEventsHeld, exp_alerts: []}
+      - eval_time: 71m
+        alertname: VBillingEventsHeld
+        exp_alerts:
+          - exp_labels: {severity: warning, destination: metronome}
+
+  - name: either volume below 15 percent free fires
+    interval: 1m
+    input_series:
+      - series: vbilling_volume_size_bytes{volume="ledger-volume"}
+        values: 1000x20
+      - series: vbilling_volume_free_bytes{volume="ledger-volume"}
+        values: 600x20
+      - series: vbilling_volume_size_bytes{volume="archive-volume"}
+        values: 1000x20
+      - series: vbilling_volume_free_bytes{volume="archive-volume"}
+        values: 100x20
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: VBillingVolumeNearlyFull
+        exp_alerts:
+          - exp_labels: {severity: critical, volume: archive-volume}
+
+  - name: the rules for the metrics v0.3.3 adds
+    interval: 1m
+    input_series:
+      - series: vbilling_ledger_mirror_lag_seconds
+        values: 30x10 400x20
+      - series: vbilling_tenants_blocked{destination="stripe"}
+        values: 0x5 1x40
+      - series: vbilling_destination_state{destination="metronome", state="awaiting_start"}
+        values: 0x5 1x40
+      - series: vbilling_destination_state{destination="metronome", state="delivering"}
+        values: 1x5 0x40
+      - series: vbilling_destination_state{destination="stripe", state="paused"}
+        values: 1x400
+      - series: vbilling_webhooks_total{source="stripe", result="applied"}
+        values: 0+1x45
+      - series: vbilling_webhooks_total{source="stripe", result="refused"}
+        values: _x10 1x35
+      - series: vbilling_enforcement_repairs_total{kind="binding_deleted"}
+        values: _x20 1x25
+    alert_rule_test:
+      - {eval_time: 15m, alertname: VBillingLedgerMirrorLagging, exp_alerts: []}
+      - eval_time: 16m
+        alertname: VBillingLedgerMirrorLagging
+        exp_alerts:
+          - exp_labels: {severity: warning}
+      - {eval_time: 10m, alertname: VBillingDestinationAwaitingStart, exp_alerts: []}
+      - eval_time: 11m
+        alertname: VBillingDestinationAwaitingStart
+        exp_alerts:
+          - exp_labels: {severity: critical, destination: metronome, state: awaiting_start}
+      - {eval_time: 5h59m, alertname: VBillingDestinationPaused, exp_alerts: []}
+      - eval_time: 6h1m
+        alertname: VBillingDestinationPaused
+        exp_alerts:
+          - exp_labels: {severity: warning, destination: stripe, state: paused}
+      - {eval_time: 20m, alertname: VBillingTenantsBlocked, exp_alerts: []}
+      - eval_time: 21m
+        alertname: VBillingTenantsBlocked
+        exp_alerts:
+          - exp_labels: {severity: warning, destination: stripe}
+      - eval_time: 15m
+        alertname: VBillingWebhooksRefused
+        exp_alerts:
+          - exp_labels: {severity: warning, source: stripe, result: refused}
+      - eval_time: 25m
+        alertname: VBillingEnforcementRepaired
+        exp_alerts:
+          - exp_labels: {severity: warning, kind: binding_deleted}

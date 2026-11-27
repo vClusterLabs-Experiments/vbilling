@@ -63,9 +63,16 @@ func storedRequestIDs(t *testing.T, r *rig) map[string]bool {
 func TestPushedRecordsTooLargeToStoreAreRefused(t *testing.T) {
 	r := newRig(t, Options{})
 	defer r.close()
+	// Fifteen metrics an emitter may push under (the ones vBilling measures
+	// itself take no records).
 	var metrics []string
-	for _, def := range usage.Catalog() {
-		metrics = append(metrics, def.Code)
+	for i := 0; i < 15; i++ {
+		code := fmt.Sprintf("bulk_metric_%02d", i)
+		if err := usage.RegisterCustom(usage.MetricDef{Code: code, Unit: "units"}); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { usage.RemoveCustom(code) })
+		metrics = append(metrics, code)
 	}
 	at := t0.Add(-30 * time.Second).Format(time.RFC3339Nano)
 	dims := map[string]any{}

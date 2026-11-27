@@ -1,9 +1,10 @@
-# Starting point for an AI-cloud installation. Override region, adapters,
-# provider credentials, and the API Secret for your environment.
+# Starting point for an AI Cloud installation. Replace every REPLACE_WITH_
+# value, and set the adapters, the billing platform credentials and the API
+# Secret for your environment.
 # Storage and memory must be sized from measured request volume; these are
 # initial allocations, not a throughput guarantee. See configuration.html#sizing.
 region: REPLACE_WITH_REGION
-clusterName: REPLACE_WITH_HOST_CLUSTER
+clusterName: REPLACE_WITH_CONTROL_PLANE_CLUSTER
 
 billing:
   collectionDelay: 75s
@@ -13,12 +14,60 @@ billing:
 records:
   unknownTenants: reject
 
+# Placement: off the GPU nodes.
+# vBilling is one pod with one ledger, and it meters the GPU nodes: it must
+# not live on them. They are the nodes tenants fill to the last GPU, that
+# operators drain for maintenance and that providers reclaim. Billing has to
+# keep running through all of that, next to the control plane cluster's own
+# services.
+#
+# The rule below keeps vBilling off every node that NVIDIA GPU feature
+# discovery labels nvidia.com/gpu.present=true, without any label of your own
+# (it needs at least one node without GPUs). Where you have an infrastructure
+# node pool, name it as well: its label in nodeSelector and, if the pool is
+# tainted, the toleration.
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: nvidia.com/gpu.present
+              operator: NotIn
+              values: ["true"]
+# nodeSelector:
+#   REPLACE_WITH_INFRA_NODE_LABEL_KEY: REPLACE_WITH_INFRA_NODE_LABEL_VALUE
+# tolerations:
+#   - key: REPLACE_WITH_INFRA_NODE_TAINT_KEY
+#     operator: Exists
+#     effect: NoSchedule
+# A PriorityClass above tenant workloads, so node pressure never evicts billing first.
+# priorityClassName: REPLACE_WITH_PRIORITY_CLASS
+
 persistence:
   size: 100Gi
+  # The data volume holds the ledger: every usage record that has not reached
+  # the billing platform yet, and seven days of those that have. Put it on
+  # replicated or network-attached storage, so that it survives its node and
+  # follows the pod to another one. Never a node-local class (local-path,
+  # hostPath, a local PersistentVolume, an instance-store disk): that pins
+  # the ledger to one node and loses it with the node or its disk.
+  storageClass: REPLACE_WITH_REPLICATED_STORAGE_CLASS
   archive:
     enabled: true
-    # Provision this PVC separately, with sufficient dispute retention.
+    # The archive volume is the only place usage records are kept outside the
+    # data volume, so it must not fail together with it. It holds the archive
+    # for disputes and the ledger mirror, a live copy of the data volume from
+    # which vBilling restores itself when that volume is lost. Provision this
+    # PVC separately, on a disk or file share of a storage class in another
+    # failure domain: not the data volume's class, and never node-local. Size
+    # it for the dispute retention plus a copy of the data volume.
+    # A bucket through a CSI driver holds the archive too, but no mirror
+    # (mirror: auto keeps none on a FUSE mount).
     existingClaim: vbilling-archive
+    # Or let the chart create it: remove existingClaim and name a class that
+    # differs from the data volume's.
+    # storageClass: REPLACE_WITH_ARCHIVE_STORAGE_CLASS
+    # size: 200Gi
 
 resources:
   requests:
@@ -28,6 +77,7 @@ resources:
     cpu: "2"
     memory: 2Gi
 
-# Enable only when Prometheus Operator's ServiceMonitor CRD is installed.
+# Enable only when Prometheus Operator's ServiceMonitor CRD is installed. The
+# alert rules in deploy/monitoring/vbilling-alerts.yaml need its metrics.
 serviceMonitor:
   enabled: false

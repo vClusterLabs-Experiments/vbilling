@@ -10,6 +10,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
+	"github.com/vclusterlabs-experiments/vbilling/internal/pause"
 	"github.com/vclusterlabs-experiments/vbilling/internal/usage"
 )
 
@@ -32,6 +33,7 @@ type nodeInfo struct {
 	gpuCapacity     int64  // devices of GPU_RESOURCES (nvidia.com/gpu, amd.com/gpu)
 	cpuCapacity     float64
 	memCapacity     float64 // bytes
+	diskCapacity    float64 // bytes of the node's own disk (ephemeral-storage capacity); 0 = not reported
 	gpuReplicas     int     // time-slicing replicas per physical GPU (1 = not shared)
 	labels          map[string]string
 	deletedAt       time.Time // set for nodes seen deleted (Auto Nodes scale-down); zero = present
@@ -56,6 +58,9 @@ type nodeInfo struct {
 	// whole window counts as down: the tenant gets the benefit of the doubt).
 	down      bool
 	downSince time.Time
+	// downs are the times the node was not ready that the watch saw end: a
+	// node that is ready again shows nothing of them itself.
+	downs []pause.Span
 }
 
 var gpuProductLabels = []string{
@@ -141,6 +146,9 @@ func (c *Collector) parseNodeAs(n *corev1.Node, renewed time.Time, private bool)
 	}
 	if q, ok := n.Status.Capacity[corev1.ResourceMemory]; ok {
 		ni.memCapacity = float64(q.Value())
+	}
+	if q, ok := n.Status.Capacity[corev1.ResourceEphemeralStorage]; ok {
+		ni.diskCapacity = float64(q.Value())
 	}
 	for _, addr := range n.Status.Addresses {
 		if addr.Type == corev1.NodeExternalIP && addr.Address != "" {
@@ -275,12 +283,17 @@ func (n *nodeInfo) advertisedGPUs() float64 {
 // instance-level SKUs are defined: vCPUs and memory from its capacity,
 // physical GPUs, and whether it has a public address.
 func (n *nodeInfo) instanceAttributes() map[string]string {
-	return map[string]string{
+	out := map[string]string{
 		usage.DimVCPUs:     strconv.FormatFloat(n.cpuCapacity, 'f', -1, 64),
 		usage.DimMemoryGiB: strings.TrimSuffix(strconv.FormatFloat(n.memCapacity/gib, 'f', 1, 64), ".0"),
 		usage.DimGPUCount:  strconv.FormatFloat(n.instanceGPUs(), 'f', -1, 64),
 		usage.DimPublicIP:  strconv.FormatBool(n.externalIP),
 	}
+	// The node's own disk, where its kubelet reports one.
+	if n.diskCapacity > 0 {
+		out[usage.DimDiskGiB] = strings.TrimSuffix(strconv.FormatFloat(n.diskCapacity/gib, 'f', 1, 64), ".0")
+	}
+	return out
 }
 
 // applyDRANodes adds the GPUs nodes offer through DRA, which no extended
@@ -311,30 +324,30 @@ func (n *nodeInfo) markDown(since time.Time) {
 	}
 }
 
-// downFrom is when the node's downtime began within [start, end): end when
-// it is not down.
-func (n *nodeInfo) downFrom(start, end time.Time) time.Time {
-	if n == nil || !n.down {
-		return end
+// downSpans are the times the node was not ready: those the watch saw end
+// (downs), and the one it is in now, from when it began (unknown: always).
+func (n *nodeInfo) downSpans() []pause.Span {
+	if n == nil {
+		return nil
 	}
-	if !n.downSince.IsZero() && n.downSince.After(start) {
-		return n.downSince
+	if !n.down {
+		return n.downs
 	}
-	return start
+	return pause.Union(n.downs, []pause.Span{{From: n.downSince}})
 }
 
 // split divides the part of [start, end) inside [ws, we) into billable and
 // downtime durations for this node.
 func (n *nodeInfo) split(start, end, ws, we time.Time) (billable, down time.Duration) {
 	total := usage.Overlap(start, end, ws, we)
-	if total == 0 || n == nil || !n.down {
+	if total == 0 || n == nil {
 		return total, 0
 	}
-	from := start
-	if !n.downSince.IsZero() && n.downSince.After(from) {
-		from = n.downSince
+	spans := n.downSpans()
+	if len(spans) == 0 {
+		return total, 0
 	}
-	down = usage.Overlap(from, end, ws, we)
+	down = min(pause.Overlap(spans, start, end, ws, we), total)
 	return total - down, down
 }
 

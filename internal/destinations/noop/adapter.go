@@ -1,5 +1,5 @@
 // Package noop is a destination adapter that logs events without sending them anywhere.
-// Useful for dry-run validation and integration testing without a billing backend.
+// Useful for dry-run validation and integration testing without a billing platform.
 package noop
 
 import (

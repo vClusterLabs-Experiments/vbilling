@@ -8,6 +8,7 @@ import (
 	"log"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -68,6 +69,10 @@ type TenantCluster struct {
 	// set when discovery could not list them all. See HostNamespaces.Whose.
 	Namesakes        []string
 	NamesakesUnknown bool
+	// DeletedAt is set on a cluster that no longer exists and is metered
+	// one last time, for the window it was deleted in: nothing is read
+	// from it (it has no API any more), and nothing is billed past it.
+	DeletedAt time.Time
 }
 
 // NameShared reports whether objects carrying this cluster's name in
@@ -160,6 +165,20 @@ type Discoverer struct {
 	platformCluster string
 	external        []TenantCluster
 	binder          Binder
+
+	mu       sync.Mutex
+	excluded []TenantCluster // the clusters the last Discover left out as excluded
+}
+
+// Excluded returns the clusters the last successful Discover found but left
+// out because they carry vbilling.vcluster.com/exclude=true (on a cluster
+// the Platform owns: on its Tenant or Project). They are not metered; the
+// controller records since when, so the window a cluster is excluded in is
+// billed up to that moment and the exclusion shows in the API.
+func (d *Discoverer) Excluded() []TenantCluster {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]TenantCluster(nil), d.excluded...)
 }
 
 // WithExternal adds tenant clusters configured outside this control plane
@@ -207,6 +226,7 @@ func (d *Discoverer) Discover(ctx context.Context) ([]TenantCluster, error) {
 	}
 	clusters = append(clusters, d.external...)
 	out := clusters[:0]
+	var excluded []TenantCluster
 	for _, c := range clusters {
 		if c.Instance == "" {
 			c.Instance = c.Name
@@ -220,11 +240,16 @@ func (d *Discoverer) Discover(ctx context.Context) ([]TenantCluster, error) {
 			}
 		}
 		if c.Meta("exclude") == "true" {
+			excluded = append(excluded, c)
 			continue
 		}
 		out = append(out, c)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ExternalID() < out[j].ExternalID() })
+	sort.Slice(excluded, func(i, j int) bool { return excluded[i].ExternalID() < excluded[j].ExternalID() })
+	d.mu.Lock()
+	d.excluded = excluded
+	d.mu.Unlock()
 	return out, nil
 }
 

@@ -1,24 +1,76 @@
-// Package safeguard checks that vBilling never bills more than exists.
+// Package safeguard keeps vBilling from billing what does not exist. Usage
+// vBilling measures itself and usage emitters push to it can be wrong in
+// different ways, so they are guarded differently: measured usage is
+// checked after it is committed, pushed usage is refused before it is
+// stored.
 //
-// After every collection, the windows that received events vBilling
-// measured itself since the last pass (the collector, Prometheus, fills of
-// a cluster's own API) are checked whole, on those events:
+// # Measured usage: checked after every collection
 //
-//   - no node is billed more node-hours than the window lasts;
-//   - no node is billed more GPU-hours than its physical GPUs times the
-//     window;
-//   - no resource is billed to two tenants in the same window.
+// Measured usage is every ledger event whose source is not ingest:<client>,
+// records or records-late: what the collector, Prometheus and the fills of
+// a cluster's own API wrote. After every collection, the Checker takes the
+// windows that received such events since its last pass, leaves out those
+// that ended more than 24 hours before the newest of them, and checks each
+// window whole, on its measured events only:
 //
-// Usage that emitters report (ingested events and per-request records) is
-// left out. Its windows are the emitter's (up to 34 days, any alignment),
-// so one event could make every pass read a month of ledger, and its node
-// and resource names are whatever the emitter says, so they prove nothing
-// about vBilling's own bills and would raise findings against other
-// tenants.
+//   - node_hours: the vcluster_private_node_hours billed for a node (its
+//     node dimension, or else its resource ID) are at most the window's
+//     length;
+//   - gpu_hours: the vcluster_gpu_hours billed for a node are at most its
+//     physical GPUs (the physical_gpus property) times the window's length.
+//     Events that name no node (a pod's GPUs on a shared node), and nodes
+//     whose events carry no physical_gpus, are not checked;
+//   - resource_tenants: no resource ID is billed to two tenants.
 //
 // A violation turns the subject's source health "diverged" and counts in
-// vbilling_safeguard_violations_total. It never holds delivery: the check
-// says where to look, and a held invoice would hide the cause.
+// vbilling_safeguard_violations_total; a later window within bounds clears
+// it. The Checker never changes, caps, holds or drops usage: it says where
+// to look, and a held invoice would hide the cause.
+//
+// # Pushed usage: refused at ingest
+//
+// Pushed usage is what emitters report: events sent to POST /api/v1/events,
+// records sent to POST /api/v1/records, and rows vBilling reads back from a
+// gateway's log. The Checker leaves it out. Its windows are the emitter's
+// (up to 34 days, any alignment), so one event could make every pass read a
+// month of ledger, and its node and resource names are whatever the emitter
+// says, so they prove nothing about vBilling's own bills and would raise
+// findings against other tenants. Instead the ingest API applies the rules
+// of this package and its own to every event and record, and refuses what
+// breaks them with the reason, before anything is stored. They guarantee:
+//
+//   - No pushed usage under a measured metric (PushedMetric). A metric the
+//     catalog says vBilling measures itself (any source but ingest and
+//     records: today every built-in metric, and those read from Prometheus)
+//     takes no pushed usage from any ingest token, on either path, so a
+//     ghost node's node-hours or GPU-hours cannot be pushed next to the
+//     measured ones. A metric built from records takes records only.
+//     Emitters write the metrics an operator declared for pushed usage.
+//   - No usage for a tenant vBilling does not know, with
+//     RECORDS_UNKNOWN_TENANTS=reject: both push paths resolve the tenant the
+//     same way (a tenant vBilling knows, or an alias of one) and refuse any
+//     other value, so no tenant of that name reaches a destination. With
+//     accept, the default, both paths store such usage under the value as
+//     sent and report it.
+//   - No usage for a cluster that does not exist (Clusters). Pushed usage
+//     that names a cluster (tenant_cluster) names one of its tenant, for a
+//     window in which the cluster existed: it runs now and was created
+//     before the window ended, or vBilling metered it for that tenant and
+//     the ledger still holds that usage. Usage that names no cluster is the
+//     tenant's as a whole. A row read back from a gateway's log is kept
+//     without its cluster rather than refused.
+//   - No usage a destination is certain to dead-letter: usage older than
+//     the oldest a configured destination accepts is refused.
+//
+// They do not bound quantities: vBilling has no measurement to hold an
+// emitter's own metric against, so what a gateway reports under it is
+// billed as reported (the new SKUs it may bring in are capped by the API).
+//
+// The operator can correct any metric, a measured one included, by pushing
+// events with the API token (an operator adjustment). The rules on tenants,
+// clusters and age apply to it too. It is pushed usage: its events keep an
+// ingest:<client> source, carry the property operator_adjustment, which no
+// emitter can set, and are not part of the Checker's checks.
 package safeguard
 
 import (

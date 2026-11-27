@@ -108,6 +108,11 @@ func (a *Adapter) Name() string { return "stripe" }
 // Accepts skips informational metrics; Stripe would bill anything it meters.
 func (a *Adapter) Accepts(metric string) bool { return destinations.BillableOnly(metric) }
 
+// OldestUsage is the oldest usage SendEvents sends to Stripe: it
+// dead-letters anything older (destinations.AgeLimiter), so ingest refuses
+// it first.
+func (a *Adapter) OldestUsage() time.Duration { return maxEventAge }
+
 // --- meters ---
 
 func (a *Adapter) loadMetersLocked(ctx context.Context) error {

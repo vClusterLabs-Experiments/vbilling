@@ -9,12 +9,21 @@ replicaCount: 1
 
 image:
   repository: ghcr.io/vclusterlabs-experiments/vbilling
-  tag: v0.3.2
+  tag: v0.3.3
   # Explicit immutable image override. Published charts pin their default
   # repository and tag through Chart.yaml annotations, including upgrades
   # with --reuse-values. Custom repositories and tags remain usable.
   digest: ""
   pullPolicy: IfNotPresent
+# Secrets with credentials for a private registry or mirror, for the vBilling
+# pod and the configuration check Job.
+imagePullSecrets: []
+# - name: registry-credentials
+
+# Replace the chart name in object names, or the whole name (the default is
+# the release name, with "-vbilling" unless it contains "vbilling").
+nameOverride: ""
+fullnameOverride: ""
 
 # Destinations usage fans out to. Built-in: stripe, metronome, lago, webhook, noop.
 # Each destination has its own cursor into the ledger, so one billing platform
@@ -203,6 +212,10 @@ metronome:
   # metrics and customers, a contract on rateCard when set, and with
   # stripe.apiKey a linked Stripe customer. See docs/metronome.html.
   provision: false
+  # Deprecated, from v0.3.0, where linking a Stripe customer implied creating
+  # customers: true is read as provision: true, so values written for v0.3.0
+  # keep working. Set provision; the Stripe link follows from stripe.apiKey.
+  stripeLink: false
   rateCard: "" # provision only: rate card alias or ID for each tenant's contract
   webhookSecret: "" # enables /webhooks/metronome (spend and credit alerts)
 
@@ -233,7 +246,11 @@ api:
 # post one record per request; vBilling stores it durably and bills one event
 # per tenant, metric and window. See docs/usage-sources.html.
 records:
-  unknownTenants: accept # accept (and report) or reject records for tenants vBilling does not know
+  # accept (and report) or reject pushed usage for tenants vBilling does not
+  # know. It decides for both push paths: records and POST /api/v1/events.
+  # With reject, an ingest token can never create usage, or a customer at the
+  # billing platform, for a tenant that does not exist.
+  unknownTenants: accept
   # The built-in format for LiteLLM's generic API logger (?format=litellm). It
   # declares inference_input_tokens and inference_output_tokens.
   litellm: false
@@ -331,10 +348,25 @@ enforcement:
     # nvidia-network-operator. "none" stops every DaemonSet.
     keepNamespaces: ""
 
+# Where the usage ledger lives. vBilling is one pod with one ledger: what
+# these volumes are made of decides what a lost node or disk costs.
+#   - Data volume: replicated or network-attached storage. On a node-local
+#     class (local-path, hostPath, a local PersistentVolume) the ledger is
+#     pinned to one node and is gone with that node or its disk.
+#   - Archive volume: on, and on storage that does not fail together with the
+#     data volume: another storage class or failure domain. It is the only
+#     place usage records are kept outside the data volume: the archive of
+#     segments older than 7 days, and the ledger mirror, a live copy of the
+#     data volume from which vBilling restores itself. Object storage through
+#     a CSI driver (existingClaim) holds the archive only: no mirror is kept
+#     on a bucket.
+# The install notes warn when the values show a fragile setup (no archive, the
+# mirror off, or both volumes on one storage class). deploy/helm/production-values.yaml is a
+# starting point with placeholders for both classes.
 persistence:
   enabled: true # the ledger is the durable outbox: keep it on a volume
   size: 5Gi
-  storageClass: ""
+  storageClass: "" # empty: the cluster's default class. Never a node-local one in production
   # Long-term archive for invoice disputes (ARCHIVE_DIR). Before compaction
   # deletes a ledger segment older than 7 days, vBilling gzips it and records
   # it in archive.jsonl (about 86 bytes per usage event). Without this
@@ -354,12 +386,55 @@ persistence:
   # does not allow adding one to an existing StatefulSet: run
   # `kubectl delete statefulset <name> --cascade=orphan` (pods, volumes and
   # data stay) before the upgrade that enables it.
+  #
+  # The ledger mirror (LEDGER_MIRROR) lives on the same volume, in
+  # <mountPath>/<pod name>/mirror: a live copy of everything on the data
+  # volume (both ledgers, cursors, held events, counter baselines, billing
+  # states), a second or two behind. When the data volume is lost, vBilling
+  # restores itself from it at the next start and continues the same ledger;
+  # `vbilling ledger restore` does the same by hand.
+  #   auto  kept, except where the archive is a bucket mounted through FUSE:
+  #         the mirror appends to its files after every window, and a bucket
+  #         uploads the whole object again for that
+  #   on    kept on any filesystem
+  #   off   not kept: losing the data volume then loses every record that is
+  #         not archived or delivered yet
+  # Size the volume for the archive plus a copy of the data volume. The mirror
+  # leaves a tenth of the volume to the archive and stops copying before that.
+  # It holds the API and ingest tokens: protect this volume like the data volume.
   archive:
     enabled: false
     existingClaim: "" # PVC to mount, e.g. one bound to a bucket by a CSI driver
     size: 20Gi # volumeClaimTemplate size when existingClaim is empty
-    storageClass: ""
+    storageClass: "" # volumeClaimTemplate class: not the data volume's class, see above
     mountPath: /var/lib/vbilling-archive
+    mirror: auto # auto | on | off, see above
+
+# Configuration check. Before every install and upgrade, a Job runs
+# `vbilling check-config` with the new values: the same settings and files the
+# new pod would get, read and checked exactly as vBilling does at start-up
+# (metric definitions, records formats and pulls, price cards, enforcement
+# rules). If vBilling would refuse them, the Job fails, the release is not
+# changed and the running pod keeps metering. Without it, a mistake in the
+# values is found by the new pod, and nothing meters until it is reverted.
+# Why a check failed:
+#   kubectl -n <namespace> logs job/<release name>-config-check
+# (a Helm that knows helm.sh/hook-output-log-policy prints it with the
+# failure). The failed Job stays until the next install or upgrade.
+#
+# The Job contacts nothing, has no Kubernetes API access and mounts neither
+# the data nor the archive volume. It runs as a Helm pre-install and
+# pre-upgrade hook, which Argo CD runs as a PreSync hook. It reads Secrets
+# you keep yourself (existingSecret) when they exist; the Secret the chart
+# renders does not exist yet at that point, so credentials given in the
+# values are not checked. Tools that apply the output of `helm template`
+# without hook support should render with --no-hooks or disable the check.
+configCheck:
+  enabled: true
+  activeDeadlineSeconds: 180 # give up when the Job cannot be scheduled or pull the image in time
+  # Requests and limits of the check. Empty: those of the vBilling pod
+  # (resources), so the node needs room for one more such pod for a few seconds.
+  resources: {}
 
 serviceMonitor:
   enabled: false
@@ -386,6 +461,15 @@ podSecurityContext:
   seccompProfile:
     type: RuntimeDefault
 
+# Placement. Keep vBilling off the GPU nodes it meters: they are the nodes
+# tenants fill, drain and replace, and billing has to outlive them. Run it on
+# the nodes that hold the control plane cluster's own services, with storage
+# that can follow the pod to another node (persistence above). The
+# configuration check Job is scheduled the same way.
 nodeSelector: {}
 tolerations: []
 affinity: {}
+topologySpreadConstraints: []
+# A PriorityClass above tenant workloads, so node pressure never evicts
+# billing first.
+priorityClassName: ""

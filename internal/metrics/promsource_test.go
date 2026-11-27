@@ -35,7 +35,18 @@ type fakeProm struct {
 	series  []fakeSeries
 	down    bool
 	queries []string
+	// lag is how long after it was taken a sample reaches this Prometheus,
+	// judged at now (both zero: every sample is there at once).
+	lag time.Duration
+	now time.Time
 }
+
+// visible reports whether a sample has reached the fake Prometheus.
+func (f *fakeProm) visible(smp promSample) bool {
+	return f.now.IsZero() || !smp.T.Add(f.lag).After(f.now)
+}
+
+var newestRe = regexp.MustCompile(`^max\(timestamp\((.*)\)\)$`)
 
 var matcherRe = regexp.MustCompile(`([a-zA-Z_][a-zA-Z0-9_]*)(=|!=)"((?:[^"\\]|\\.)*)"`)
 
@@ -51,6 +62,31 @@ func (f *fakeProm) handler(t *testing.T) http.HandlerFunc {
 			return
 		}
 		at, _ := strconv.ParseInt(r.URL.Query().Get("time"), 10, 64)
+		// max(timestamp(selector)): when the newest sample was taken, among
+		// those that are not stale (5 minutes).
+		if m := newestRe.FindStringSubmatch(q); m != nil {
+			sel, name := m[1], m[1]
+			if i := strings.Index(sel, "{"); i >= 0 {
+				name = sel[:i]
+			}
+			newest := int64(0)
+			for _, s := range f.series {
+				if s.name != name || !matches(sel, s.labels) {
+					continue
+				}
+				for _, smp := range s.samples {
+					if f.visible(smp) && smp.T.Unix() <= at && smp.T.Unix() > at-300 && smp.T.Unix() > newest {
+						newest = smp.T.Unix()
+					}
+				}
+			}
+			result := []map[string]any{}
+			if newest > 0 {
+				result = append(result, map[string]any{"metric": map[string]string{}, "value": []any{float64(at), strconv.FormatInt(newest, 10)}})
+			}
+			json.NewEncoder(w).Encode(map[string]any{"status": "success", "data": map[string]any{"resultType": "vector", "result": result}})
+			return
+		}
 		open := strings.LastIndex(q, "[")
 		secs, _ := strconv.Atoi(strings.TrimSuffix(q[open+1:], "s]"))
 		sel := q[:open]
@@ -65,7 +101,7 @@ func (f *fakeProm) handler(t *testing.T) http.HandlerFunc {
 			}
 			var values [][]any
 			for _, smp := range s.samples {
-				if smp.T.Unix() > at-int64(secs) && smp.T.Unix() <= at {
+				if f.visible(smp) && smp.T.Unix() > at-int64(secs) && smp.T.Unix() <= at {
 					values = append(values, []any{float64(smp.T.UnixMilli()) / 1000, strconv.FormatFloat(smp.V, 'f', -1, 64)})
 				}
 			}

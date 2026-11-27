@@ -18,7 +18,7 @@ func TestIngestRefusesUnsafeFieldsAndReservedDimensions(t *testing.T) {
 	e := setup(t)
 	ws, we := now.Add(-5*time.Minute), now.Add(-4*time.Minute)
 	event := func(id string, extra map[string]any) map[string]any {
-		ev := map[string]any{"id": id, "tenant": "acme", "metric": usage.MetricGPUHours, "quantity": 1, "window_start": ws, "window_end": we}
+		ev := map[string]any{"id": id, "tenant": "acme", "metric": pushedMetric, "quantity": 1, "window_start": ws, "window_end": we}
 		for k, v := range extra {
 			ev[k] = v
 		}
@@ -55,7 +55,7 @@ func TestIngestRefusesUnsafeFieldsAndReservedDimensions(t *testing.T) {
 func TestCSVExportsEscapeFormulas(t *testing.T) {
 	e := setup(t)
 	ws := now.Add(-5 * time.Minute)
-	b, _ := json.Marshal([]map[string]any{{"id": "-1", "tenant": "=HYPERLINK(1)", "metric": usage.MetricGPUHours, "quantity": 1, "sku": "@SUM(A1)",
+	b, _ := json.Marshal([]map[string]any{{"id": "-1", "tenant": "=HYPERLINK(1)", "metric": pushedMetric, "quantity": 1, "sku": "@SUM(A1)",
 		"window_start": ws, "window_end": ws.Add(time.Minute), "dimensions": map[string]string{"model": "+x"}}})
 	if code, out := postJSON(t, e.srv.URL+"/api/v1/events", "ingest-secret", string(b)); code != http.StatusOK {
 		t.Fatalf("ingest: %d %v", code, out)

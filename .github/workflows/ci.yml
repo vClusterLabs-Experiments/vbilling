@@ -36,7 +36,9 @@ jobs:
       - name: Test release image pinning and upgrade overrides
         run: python3 -m unittest discover -s scripts/tests -v
       - run: helm lint deploy/helm/vbilling
-      - run: helm lint deploy/helm/vbilling -f deploy/helm/production-values.yaml
+      # An install refuses production-values.yaml until its placeholders are
+      # replaced: lint it with them replaced, the way it is installed.
+      - run: helm lint deploy/helm/vbilling -f deploy/helm/production-values.yaml --set region=eu-west-1 --set clusterName=prod-1 --set persistence.storageClass=replicated
       - run: helm template vbilling deploy/helm/vbilling --set adapters='{stripe}' --set stripe.existingSecret=vbilling-stripe > /dev/null
 
   gke-stripe:

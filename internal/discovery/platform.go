@@ -28,6 +28,24 @@ type PlatformBinding struct {
 	// Settings are the vbilling.vcluster.com/ settings (prefix trimmed) of
 	// the billing account object: the Tenant, else the Project.
 	Settings map[string]string `json:"settings,omitempty"`
+	// PreviousTenantID is the billing ID this cluster's account had before
+	// its tenant setting was changed (at TenantIDChanged). The account is
+	// the same Tenant or Project; the billing platform sees another
+	// customer.
+	PreviousTenantID string    `json:"previousTenantID,omitempty"`
+	TenantIDChanged  time.Time `json:"tenantIDChanged,omitempty"`
+}
+
+// SameAccount reports whether two bindings have the same billing account
+// object: the same Tenant, or (without Tenants) the same Project.
+func (b *PlatformBinding) SameAccount(o *PlatformBinding) bool {
+	if b == nil || o == nil {
+		return false
+	}
+	if b.Tenant != "" || o.Tenant != "" {
+		return b.TenantUID != "" && b.TenantUID == o.TenantUID
+	}
+	return b.ProjectUID != "" && b.ProjectUID == o.ProjectUID
 }
 
 // TenantID is the billing customer: an explicit vbilling.vcluster.com/tenant
@@ -124,10 +142,17 @@ func (c *TenantCluster) PlatformMetadata() map[string]string {
 	if b == nil {
 		return nil
 	}
+	meta := map[string]string{"platform_account": "project", "platform_project": b.Project, "platform_project_uid": b.ProjectUID}
 	if b.Tenant != "" {
-		return map[string]string{"platform_account": "tenant", "platform_tenant": b.Tenant, "platform_tenant_uid": b.TenantUID}
+		meta = map[string]string{"platform_account": "tenant", "platform_tenant": b.Tenant, "platform_tenant_uid": b.TenantUID}
 	}
-	return map[string]string{"platform_account": "project", "platform_project": b.Project, "platform_project_uid": b.ProjectUID}
+	if b.PreviousTenantID != "" {
+		// The same account billed under another ID before: whoever reads the
+		// customer record can find its earlier usage and its wallet.
+		meta["previous_tenant_id"] = b.PreviousTenantID
+		meta["tenant_id_changed_at"] = b.TenantIDChanged.UTC().Format(time.RFC3339)
+	}
+	return meta
 }
 
 // PlatformProperties are stamped on the cluster's usage events: the

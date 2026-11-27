@@ -269,13 +269,15 @@ type admissionTampering struct {
 	}
 }
 
-// A pause policy the cluster's API refuses to install is a failed drain:
-// the control plane stays up and the pause is retried.
+// A pause policy that cannot be installed for a reason that can pass (the
+// cluster's API answers 503) is a failed drain: the control plane stays up
+// and the pause is retried. An API that refuses vBilling the policy
+// (Forbidden) is not waited for: see
+// TestClusterWhoseAPIRefusesVBillingIsStoppedAtOnce.
 func TestPausePolicyThatCannotBeInstalledKeepsTheControlPlaneUp(t *testing.T) {
 	cl, host, inside := privateCluster(podOn("inference", "default", "gpu-1"))
 	inside.PrependReactor("create", "validatingadmissionpolicies", func(a ktesting.Action) (bool, runtime.Object, error) {
-		return true, nil, apierrors.NewForbidden(schema.GroupResource{Group: "admissionregistration.k8s.io", Resource: "validatingadmissionpolicies"},
-			PausedPolicyName, errors.New("RBAC: access denied"))
+		return true, nil, apierrors.NewServiceUnavailable("etcdserver: leader changed")
 	})
 	spans := pause.Memory()
 	e := New(host, Options{Mode: "enforce", DrainTimeout: time.Minute, Pauses: spans, Now: newClock().Now,

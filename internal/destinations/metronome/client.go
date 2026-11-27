@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/vclusterlabs-experiments/vbilling/internal/destinations"
+	"github.com/vclusterlabs-experiments/vbilling/internal/version"
 )
 
 // Client is a minimal Metronome REST client.
@@ -87,7 +88,7 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
-	req.Header.Set("User-Agent", "vbilling/0.3.1")
+	req.Header.Set("User-Agent", version.UserAgent())
 	if in != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}

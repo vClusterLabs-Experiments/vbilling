@@ -72,6 +72,15 @@ type Controller struct {
 	discovered      bool
 	lastWindow      time.Time
 	collectionRetry time.Time // heartbeat uncertainty is retried before the next boundary
+	// promRetry is when the newest Prometheus window is looked at again:
+	// its samples had not all reached Prometheus (CollectPrometheusDue).
+	promRetry time.Time
+	// promWaiting is when a waiting Prometheus window was last logged.
+	promWaiting time.Time
+	// liveSince is when this controller started metering (Run). A window
+	// that ended before it was not watched as it happened: it is metered
+	// from what the API still shows, like any backfilled window.
+	liveSince time.Time
 	// lastUnrequested is the last logged count of pods without requests.
 	lastUnrequested int
 
@@ -98,6 +107,15 @@ type Controller struct {
 	owners      Owners // optional: past owners of clusters (TENANT_SOURCE=platform)
 
 	pauses *pause.Store // pause spans; nil = pauses are not tracked
+	// exclusions are the times clusters were excluded from metering;
+	// excluded the clusters that are now; departed those that were metered
+	// and are gone (lifecycle.go).
+	exclusions *pause.Store
+	excluded   []discovery.TenantCluster
+	departed   map[string]departed
+	// missing are clusters discovery stopped listing whose deletion the
+	// watch has not confirmed yet (at: when they were first missed).
+	missing map[string]departed
 
 	// bound are the tenants INGEST_TOKENS are bound to; known reports
 	// tenants vBilling knows from elsewhere (UseKnownTenants).
@@ -339,6 +357,9 @@ func New(cfg *config.Config, disc Discoverer, coll Collector, sp *spool.Spool, t
 func (c *Controller) Run(ctx context.Context) error {
 	log.Printf("[controller] starting (adapters=%v, window=%s, reconcile=%s, region=%s)",
 		c.cfg.Adapters, c.cfg.CollectionInterval, c.cfg.ReconcileInterval, c.cfg.Region)
+	c.mu.Lock()
+	c.liveSince = c.now()
+	c.mu.Unlock()
 	c.Reconcile(ctx)
 	c.CollectDue(ctx)
 	c.CollectPrometheusDue(ctx)
@@ -398,11 +419,23 @@ func (c *Controller) untilNextWindow() time.Duration {
 	next := c.latestDue().Add(c.cfg.CollectionInterval).Add(c.settle())
 	c.mu.Lock()
 	retry := c.collectionRetry
+	if !c.promRetry.IsZero() && (retry.IsZero() || c.promRetry.Before(retry)) {
+		retry = c.promRetry
+	}
 	c.mu.Unlock()
 	if !retry.IsZero() && retry.Before(next) {
 		return max(time.Second, retry.Sub(now))
 	}
 	return next.Sub(now)
+}
+
+// live reports whether a window ending at end is metered as it happened:
+// it ended after this controller started. One that ended before is metered
+// after the fact and marked backfilled, the newest one too.
+func (c *Controller) live(end time.Time) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return !end.Before(c.liveSince)
 }
 
 // Ready reports whether discovery has succeeded at least once.
@@ -448,10 +481,17 @@ func (c *Controller) Reconcile(ctx context.Context) {
 		return
 	}
 	now := c.now()
+	var excluded []discovery.TenantCluster
+	if l, ok := c.disc.(excludedLister); ok {
+		excluded = l.Excluded()
+	}
+	c.observeExclusions(clusters, excluded, now)
+	c.observeDepartures(clusters, excluded, now)
 	tenants := c.tenantsFrom(clusters)
 	for _, t := range tenants {
 		c.tenants.Upsert(t)
 	}
+	c.noteClusterless(tenants, excluded)
 
 	aliases := map[string]string{}
 	ambiguous := map[string]bool{}
@@ -482,6 +522,7 @@ func (c *Controller) Reconcile(ctx context.Context) {
 	c.ambiguous = ambiguous
 	c.shared = shared
 	c.clusters = clusters
+	c.excluded = excluded
 	c.discovered = true
 	for _, t := range tenants {
 		c.lastSeen[t.ID] = now
@@ -659,6 +700,11 @@ func (c *Controller) CollectDue(ctx context.Context) {
 		}
 	}
 	windows := windowsBetween(start, latestEnd, size, latestEnd)
+	if n := len(windows); n > 0 && !c.live(latestEnd) {
+		// The newest window closed before this controller started: nothing
+		// watched it, so it is metered like the windows before it.
+		windows[n-1].Latest = false
+	}
 
 	targets := c.targets()
 
@@ -707,9 +753,16 @@ func (c *Controller) CollectDue(ctx context.Context) {
 		c.mu.Unlock()
 	}
 	c.fillTenantGaps(ctx, failed, windows, targets)
-	if len(windows) > 1 {
-		log.Printf("[controller] backfilled %d window(s) after a gap", len(windows)-1)
-		c.tel.Add("vbilling_backfilled_windows_total", "Windows metered after a gap (restart or outage).", nil, float64(len(windows)-1))
+	c.forgetDeparted()
+	backfilled := 0
+	for _, w := range windows {
+		if !w.Latest {
+			backfilled++
+		}
+	}
+	if backfilled > 0 {
+		log.Printf("[controller] backfilled %d window(s) after a gap", backfilled)
+		c.tel.Add("vbilling_backfilled_windows_total", "Windows metered after a gap (restart or outage).", nil, float64(backfilled))
 	}
 	log.Printf("[controller] window %s: %d events for %d tenant cluster(s) (%d pods, %d GPU pods, %d nodes down)",
 		latestEnd.Format("15:04:05"), total, len(targets), st.Pods, st.GPUPods, st.NodesDown)
@@ -1055,6 +1108,7 @@ func (c *Controller) targets() []metrics.Target {
 	c.mu.Lock()
 	shared := c.shared
 	c.mu.Unlock()
+	exclusions := c.exclusionStore()
 	var targets []metrics.Target
 	for _, cl := range c.Clusters() {
 		t, _ := c.tenants.Get(cl.TenantID(src))
@@ -1063,9 +1117,14 @@ func (c *Controller) targets() []metrics.Target {
 			// A shared ID's spans could be either cluster's: neither is clipped.
 			target.Paused = c.pauses.Spans(cl.ExternalID())
 		}
+		if !shared[cl.ExternalID()] {
+			// It was excluded from metering earlier: not billed for that time.
+			target.Excluded = exclusions.Spans(cl.ExternalID())
+		}
 		targets = append(targets, target)
 	}
-	return targets
+	// Clusters excluded or deleted since: their last window is still closed.
+	return append(targets, c.lifecycleTargets()...)
 }
 
 // CollectPrometheusDue reads Prometheus usage for every window since the
@@ -1094,12 +1153,51 @@ func (c *Controller) CollectPrometheusDue(ctx context.Context) {
 		}
 	}
 	windows := windowsBetween(start, latestEnd, size, latestEnd)
+	targets := c.targets()
+	now := c.now().UTC()
+	// The newest window is read once its samples have reached Prometheus
+	// (see metrics.PromMaxWait): until then it waits, and is looked at again
+	// in a few seconds. Older windows are past that wait and are read now.
+	c.mu.Lock()
+	c.promRetry = time.Time{}
+	c.mu.Unlock()
+	if s, ok := c.prom.(promSettler); ok && now.Before(latestEnd.Add(metrics.PromMaxWait)) {
+		// Only the clusters this window is read for are waited for.
+		read, _ := meteredIn(targets, windows[len(windows)-1])
+		if settled, waiting := s.Settled(ctx, read, latestEnd); !settled {
+			retry := now.Add(promPoll)
+			if cap := latestEnd.Add(metrics.PromMaxWait); retry.After(cap) {
+				retry = cap
+			}
+			c.mu.Lock()
+			c.promRetry = retry
+			// Waiting a few seconds is the normal case: say it now and then,
+			// not for every window.
+			if now.Sub(c.promWaiting) >= 10*time.Minute {
+				c.promWaiting = now
+				log.Printf("[controller] Prometheus window %s waits for its samples (%s is still behind), at most %s; windows wait like this whenever samples are still on their way",
+					latestEnd.Format("15:04:05"), waiting, metrics.PromMaxWait)
+			}
+			c.mu.Unlock()
+			windows = windows[:len(windows)-1]
+			if len(windows) == 0 {
+				return
+			}
+		}
+	}
+	// The newest window read is the live one when it is read on time (its
+	// wait, and one more look); any other (read after an outage, or closed
+	// before this controller started) is marked backfilled.
+	for i := range windows {
+		w := &windows[i]
+		w.Latest = i == len(windows)-1 && c.live(w.End) && now.Before(w.End.Add(metrics.PromMaxWait+promPoll))
+	}
 	// Windows read after the fact bill each cluster's owner during them,
 	// as Kubernetes backfill does. Each run of windows with the same owners
 	// is read and committed before the next one is read: counters bill
 	// from the baselines the previous run committed.
-	total := 0
-	for _, r := range c.ownerRuns(c.targets(), windows) {
+	total, late := 0, 0
+	for _, r := range c.ownerRuns(targets, windows) {
 		results, err := c.prom.Collect(ctx, r.targets, r.windows)
 		if err != nil {
 			log.Printf("[controller] Prometheus: %v; %d window(s) wait until it answers", err, len(r.windows))
@@ -1107,6 +1205,9 @@ func (c *Controller) CollectPrometheusDue(ctx context.Context) {
 			return
 		}
 		props := platformProps(r.targets)
+		for _, res := range results {
+			late += res.Late
+		}
 		err = c.prom.Commit(results, func(w metrics.Window, evs []usage.Event) error {
 			stampPlatform(evs, props)
 			total += len(evs)
@@ -1121,7 +1222,21 @@ func (c *Controller) CollectPrometheusDue(ctx context.Context) {
 		log.Printf("[controller] Prometheus: %d event(s) over %d window(s)", total, len(windows))
 	}
 	c.tel.Add("vbilling_prometheus_events_total", "Usage events read from Prometheus.", nil, float64(total))
+	c.tel.Add("vbilling_prometheus_late_samples_total",
+		"Counter samples that reached Prometheus too late for their own window and were billed in a later one.", nil, float64(late))
+	c.tel.Set("vbilling_prometheus_last_window_end_timestamp_seconds", "End of the last committed Prometheus window.", nil,
+		float64(windows[len(windows)-1].End.Unix()))
+	c.forgetDeparted()
 }
+
+// promSettler is implemented by a PromCollector that can tell whether a
+// window's samples have reached Prometheus.
+type promSettler interface {
+	Settled(ctx context.Context, targets []metrics.Target, end time.Time) (settled bool, waiting string)
+}
+
+// promPoll is how often a waiting Prometheus window is looked at again.
+const promPoll = 5 * time.Second
 
 // prometheusConfigured is true when PROMETHEUS_URL is set or a cluster
 // names its own Prometheus.

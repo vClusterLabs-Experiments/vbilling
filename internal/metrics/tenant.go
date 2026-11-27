@@ -94,6 +94,23 @@ func (c *Collector) collectTenant(ctx context.Context, t Target, hostNodes map[s
 	for _, w := range windows {
 		tmp[w.End] = newAccumulator(w)
 	}
+	if !t.Cluster.DeletedAt.IsZero() {
+		// Deleted: it has no API any more, and that is not an outage to
+		// fill later. What it had when it was last read is metered up to
+		// its deletion (Target.Excluded ends everything there).
+		c.invMu.Lock()
+		inv := c.lastInv[id]
+		c.invMu.Unlock()
+		if inv == nil {
+			return
+		}
+		if err := c.meterTenant(ctx, t, &TenantConn{External: t.Cluster.External}, inv, storedViews(inv, hostNodes, t.Cluster.External), windows, tmp, st); err != nil {
+			log.Printf("[metrics] %s: metering its last inventory: %v", id, err)
+			return
+		}
+		mergeAccs(tmp, accs)
+		return
+	}
 	if t.Cluster.Paused {
 		if _, err := c.tenants.Conn(ctx, t.Cluster); errors.Is(err, ErrNoTenantAPI) {
 			c.noteOwnNodes(id, false)
@@ -313,7 +330,7 @@ func (c *Collector) collectTenantAPI(ctx context.Context, t Target, conn *Tenant
 	proofs, heartbeatErr := readNodeHeartbeats(ctx, conn.Kube)
 	if heartbeatErr == nil {
 		inv.Leases = heartbeatRenewals(proofs)
-		if pending := settleHeartbeats(inv.Nodes, proofs, windows, c.opts.Now()); pending != nil {
+		if pending := settleHeartbeats(inv.Nodes, proofs, windows, c.opts.Now(), c.apiUpSince(t)); pending != nil {
 			return pending
 		}
 		if c.health != nil {
@@ -354,6 +371,7 @@ func (c *Collector) meterTenant(ctx context.Context, t Target, conn *TenantConn,
 		}
 		ni := c.parsePrivateNode(n, inv.Leases[n.Name])
 		ni.deletedAt = deletedAt
+		ni.downs = conn.Graveyard.NodeDowns(ni.name)
 		private[ni.name] = ni
 		return nil
 	}
@@ -417,13 +435,15 @@ func (c *Collector) meterTenant(ctx context.Context, t Target, conn *TenantConn,
 		// operator's to give (LabelBillable counts on the control plane
 		// cluster's dedicated nodes only).
 		for name, n := range private {
-			c.meterWholeNode(name, n, windows, accs, base, "private_node", c.clip(t, pause.KeepNodes))
+			c.meterWholeNode(name, n, windows, accs, base, "private_node", c.pausesFor(t, pause.KeepNodes))
 		}
 	}
 
 	// Volumes and load balancers of such a tenant cluster live in it too.
-	meterVolumes(inv.PVCs, func(map[string]string) bool { return true }, windows, accs, base, c.clip(t, pause.KeepStorage))
-	meterLoadBalancers(inv.Services, func(*corev1.Service) bool { return true }, windows, accs, base, c.clip(t, pause.KeepLoadBalancers))
+	// conn.Graveyard is nil for a stored inventory: what it holds is billed
+	// as it was read.
+	meterVolumes(conn.Graveyard.Volumes(inv.PVCs, ""), func(map[string]string) bool { return true }, windows, accs, base, c.clip(t, pause.KeepStorage))
+	meterLoadBalancers(conn.Graveyard.LoadBalancers(inv.Services, ""), func(*corev1.Service) bool { return true }, windows, accs, base, c.clip(t, pause.KeepLoadBalancers))
 	return nil
 }
 
@@ -545,4 +565,20 @@ func (c *Collector) ForgetPaused(id string) {
 			log.Printf("[metrics] %s: drop paused inventory: %v", id, err)
 		}
 	}
+}
+
+// apiUpSince is when a cluster's own API last came up, as far as vBilling
+// knows: the end of its last pause, or when its control plane was last seen
+// becoming ready. Zero when neither is known.
+func (c *Collector) apiUpSince(t Target) time.Time {
+	var since time.Time
+	for _, sp := range t.Paused {
+		if sp.To.After(since) {
+			since = sp.To
+		}
+	}
+	if at, ok := c.planes.ReadySince(t.Cluster); ok && at.After(since) {
+		since = at
+	}
+	return since
 }

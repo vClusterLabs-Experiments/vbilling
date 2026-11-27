@@ -152,8 +152,10 @@ m() { jq -r "$1" "$WORK/paused.json"; }
 check "CPU was billed before the pause" "[ \"\$(m '.before.vcluster_cpu_core_hours // 0')\" != 0 ]"
 check "no CPU hours in fully paused windows" "[ \"\$(m '.paused_windows.vcluster_cpu_core_hours // 0')\" = 0 ]"
 check "no control plane hours in fully paused windows" "[ \"\$(m '.paused_windows.vcluster_instance_hours // 0')\" = 0 ]"
-check "control plane hours stop at the second the stop is verified" \
-  "python3 -I -c 'import sys; a,b=float(sys.argv[1]),float(sys.argv[2]); sys.exit(abs(a-b)>1.5/3600)' \"\$(m '.pause_window.vcluster_instance_hours // 0')\" \"\$(m .expected_cp_hours)\""
+# The control plane bills while a replica is ready: it stops when its last
+# replica is gone, some seconds before vBilling has verified the stop.
+check "control plane hours stop when its last replica is gone, no later than the verified stop" \
+  "python3 -I -c 'import sys; a,b=float(sys.argv[1]),float(sys.argv[2]); sys.exit(not (0 < a <= b+1.5/3600 and b-a <= 60/3600))' \"\$(m '.pause_window.vcluster_instance_hours // 0')\" \"\$(m .expected_cp_hours)\""
 check "the volume keeps billing (1 GiB x 2 windows)" \
   "python3 -I -c 'import sys; sys.exit(abs(float(sys.argv[1])-2/60)>1e-6)' \"\$(m '.paused_windows.vcluster_storage_gb_hours // 0')\""
 

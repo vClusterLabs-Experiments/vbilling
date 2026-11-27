@@ -181,7 +181,7 @@ func (p *LiteLLMPuller) pull(ctx context.Context) (PullResult, error) {
 		}
 	}
 	// Records older than the ingester's limit are refused anyway.
-	if oldest := now.Add(-p.in.opts.MaxAge).Add(time.Minute); res.From.Before(oldest) {
+	if oldest := now.Add(-p.in.maxAge()).Add(time.Minute); res.From.Before(oldest) {
 		res.From = oldest
 	}
 	res.Result.Format = "litellm"

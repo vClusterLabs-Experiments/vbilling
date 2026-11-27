@@ -16,12 +16,13 @@ import (
 // Third review: what a tenant sends with an ingest token bound to it.
 
 // gpuEvents returns n valid GPU-hour events with IDs, in the window that
-// ended five minutes before the test clock.
+// ended five minutes before the test clock. They are pushed usage (a batch
+// scheduler's GPU-hours, say), under the metric an operator declared for it.
 func gpuEvents(n int, sku func(i int) string) []map[string]any {
 	ws := now.Add(-5 * time.Minute)
 	out := make([]map[string]any, n)
 	for i := range out {
-		out[i] = map[string]any{"id": fmt.Sprintf("ev-%d", i), "metric": usage.MetricGPUHours, "quantity": 0.000001,
+		out[i] = map[string]any{"id": fmt.Sprintf("ev-%d", i), "metric": pushedMetric, "quantity": 0.000001,
 			"window_start": ws, "window_end": ws.Add(time.Minute)}
 		if sku != nil {
 			out[i]["sku"] = sku(i)
@@ -125,7 +126,7 @@ func TestReview3BoundTokenFillsTheSKUCapOfTheOperatorsGateway(t *testing.T) {
 	}
 	// The operator's gateway (shared ingest token) reports acme's real usage.
 	ws := now.Add(-3 * time.Minute)
-	real, _ := json.Marshal([]map[string]any{{"id": "gw-req-1", "tenant": "acme", "metric": usage.MetricGPUHours, "quantity": 2,
+	real, _ := json.Marshal([]map[string]any{{"id": "gw-req-1", "tenant": "acme", "metric": pushedMetric, "quantity": 2,
 		"sku": "NVIDIA-H100-80GB-HBM3", "window_start": ws, "window_end": ws.Add(time.Minute)}})
 	if code := postWithClient(t, e.srv.URL+"/api/v1/events", "ingest-secret", "operator-gw", real); code != http.StatusOK {
 		t.Fatalf("gateway usage: %d", code)

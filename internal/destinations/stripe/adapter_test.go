@@ -220,6 +220,28 @@ func TestTooOldEventsAreRejectedNotRetried(t *testing.T) {
 	}
 }
 
+// The oldest usage the adapter declares is exactly what SendEvents
+// enforces, so ingest can refuse what Stripe would never take.
+func TestDeclaredOldestUsageIsWhatSendEventsEnforces(t *testing.T) {
+	f := newFakeStripe(t, func() time.Time { return now })
+	a := newTestAdapter(t, f, "")
+	var limiter destinations.AgeLimiter = a
+	limit := limiter.OldestUsage()
+	if limit != 35*24*time.Hour-time.Hour {
+		t.Fatalf("the adapter declares %s, want Stripe's 35 days less the hour of margin", limit)
+	}
+	kept := gpuEvent("acme", "NVIDIA-H100-80GB-HBM3", now.Add(-limit), 1)
+	lost := gpuEvent("acme", "NVIDIA-H100-80GB-HBM3", now.Add(-limit-time.Second), 1)
+	err := a.SendEvents(context.Background(), []usage.Event{kept, lost})
+	var partial *destinations.PartialError
+	if !errors.As(err, &partial) || len(partial.Rejected) != 1 || partial.Rejected[lost.ID] == "" {
+		t.Fatalf("usage one second past the declared limit: %v, want only it rejected", err)
+	}
+	if len(f.events) != 1 {
+		t.Fatalf("recorded %d events, want the one exactly as old as the declared limit", len(f.events))
+	}
+}
+
 func TestAutoSubscribeUsesPlanTaggedPrices(t *testing.T) {
 	f := newFakeStripe(t, func() time.Time { return now })
 	a := newTestAdapter(t, f, "", func(c *config.Config) { c.StripeAutoSubscribe = true })

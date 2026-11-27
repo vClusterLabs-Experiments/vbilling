@@ -207,11 +207,15 @@ func TestPriceCoverageReadsTheTenantsOwnContract(t *testing.T) {
 	if c := got[1]; c.Status != destinations.PriceMissing || !strings.Contains(c.Hint, `"Enterprise AUD"`) || !strings.Contains(c.Hint, "sku=NVIDIA-B200") {
 		t.Errorf("B200 has a rate on METRONOME_RATE_CARD only, not on the customer's contract: %+v", c)
 	}
-	if c := got[2]; c.Status != destinations.PriceUnknown || !strings.Contains(c.Detail, "no customer for this alias yet") {
-		t.Errorf("a tenant no customer has yet is a warning: %+v", c)
+	// No customer, or no contract in force: nothing rates the usage. That is
+	// unpriced (held with PRICE_CHECK=hold), with what to create.
+	if c := got[2]; c.Status != destinations.PriceMissing || !strings.Contains(c.Detail, "no customer for this alias yet") ||
+		!strings.Contains(c.Hint, `create a Metronome customer with the ingest alias "tenant-newbie"`) || a.Uncounted(c) {
+		t.Errorf("a tenant no customer has yet is unpriced, with the alias to create: %+v", c)
 	}
-	if c := got[3]; c.Status != destinations.PriceUnknown || !strings.Contains(c.Detail, "no active contract") {
-		t.Errorf("a customer without an active contract: %+v", c)
+	if c := got[3]; c.Status != destinations.PriceMissing || !strings.Contains(c.Detail, "customer "+gone) || !strings.Contains(c.Detail, "no active contract") ||
+		!strings.Contains(c.Hint, "add a contract for customer "+gone) || a.Uncounted(c) {
+		t.Errorf("a customer without an active contract is unpriced, with the customer to add one for: %+v", c)
 	}
 	// The tenant's series now share the rate card's plan; the others wait
 	// under their alias until a customer or contract appears.
@@ -269,10 +273,11 @@ func TestPriceCoverageMatchesBillableMetricsByEventType(t *testing.T) {
 	}
 }
 
-// In hold mode a tenant without a customer is never held (Metronome
-// attributes its usage once the portal creates the customer); a SKU missing
-// from the customer's own rate card is.
-func TestHoldModeNeverHoldsUsageWithoutCustomer(t *testing.T) {
+// In hold mode nothing that is known to be unrated ships: usage of a tenant
+// no customer gets yet is held like a SKU missing from the customer's own
+// rate card, because nothing rates it. (Until v0.3.2 it was reported unknown
+// and delivered, so a tenant the portal forgot went out unrated.)
+func TestHoldModeHoldsUsageWithoutCustomer(t *testing.T) {
 	f := newFake(t)
 	bm := financeMetric(t, f, usage.MetricGPUHours, "GPU Hours")
 	prod := f.AddProduct("GPU Hours", bm, "sku")
@@ -296,14 +301,24 @@ func TestHoldModeNeverHoldsUsageWithoutCustomer(t *testing.T) {
 	unpriced.Finalize()
 	early := gpu("tenant-newbie", "c9", now.Add(-time.Minute), 1)
 	dec := svc.Gate().Decide(ctx, "metronome", []usage.Event{priced, unpriced, early})
-	if dec[0].Hold || !dec[1].Hold || dec[2].Hold {
+	if dec[0].Hold || !dec[1].Hold || !dec[2].Hold {
 		t.Fatalf("holds: priced %v, unpriced %v, no customer yet %v (%+v)", dec[0].Hold, dec[1].Hold, dec[2].Hold, dec)
+	}
+	if !strings.Contains(dec[2].Reason, `no Metronome customer has the ingest alias "tenant-newbie"`) || !strings.Contains(dec[2].Reason, "hint: create a Metronome customer") {
+		t.Fatalf("the hold says what is missing: %q", dec[2].Reason)
 	}
 	// Once the tenant's plan is its rate card, the same events decide the same way.
 	svc.CheckNow(ctx)
 	dec = svc.Gate().Decide(ctx, "metronome", []usage.Event{priced, unpriced, early})
-	if dec[0].Hold || !dec[1].Hold || dec[2].Hold {
+	if dec[0].Hold || !dec[1].Hold || !dec[2].Hold {
 		t.Fatalf("after the plan moved to the rate card: %+v", dec)
+	}
+	// The portal signs the tenant up: its usage is rated, so it ships.
+	newbie, _ := f.CreateCustomer("Newbie", "org_2", "tenant-newbie")
+	f.AddContract(metronometest.Contract{CustomerID: newbie, RateCardID: card, StartingAt: now.AddDate(0, 0, -1)})
+	svc.CheckNow(ctx)
+	if dec = svc.Gate().Decide(ctx, "metronome", []usage.Event{early}); dec[0].Hold {
+		t.Fatalf("held although the tenant has a customer and a contract that prices the usage: %+v", dec[0])
 	}
 }
 

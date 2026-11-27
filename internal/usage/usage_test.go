@@ -161,3 +161,38 @@ func TestCustomMetrics(t *testing.T) {
 		t.Error("custom metric missing from Billable()")
 	}
 }
+
+// A built-in metric whose source is switched off (EGRESS_QUERY=none) leaves
+// the catalog, so no billing platform is asked to create or price a meter
+// that never gets usage. Events of it that are already in the ledger are
+// still recognized.
+func TestSwitchedOffBuiltinLeavesTheCatalog(t *testing.T) {
+	inCatalog := func(code string) bool {
+		for _, d := range Catalog() {
+			if d.Code == code {
+				return true
+			}
+		}
+		return false
+	}
+	if !inCatalog(MetricNetworkEgressGB) {
+		t.Fatal("egress is in the catalog by default")
+	}
+	SetEnabled(MetricNetworkEgressGB, false)
+	t.Cleanup(func() { SetEnabled(MetricNetworkEgressGB, true) })
+	if inCatalog(MetricNetworkEgressGB) {
+		t.Error("egress is switched off and still advertised in the catalog")
+	}
+	for _, d := range Billable() {
+		if d.Code == MetricNetworkEgressGB {
+			t.Error("egress is switched off and still listed as billable")
+		}
+	}
+	if def, ok := Lookup(MetricNetworkEgressGB); !ok || !def.Billable {
+		t.Error("events of a switched-off metric that are already in the ledger must still be recognized")
+	}
+	SetEnabled(MetricNetworkEgressGB, true)
+	if !inCatalog(MetricNetworkEgressGB) {
+		t.Error("switched on again, egress is back in the catalog")
+	}
+}

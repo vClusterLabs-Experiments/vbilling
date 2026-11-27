@@ -41,6 +41,7 @@ type holdRig struct {
 type rigOptions struct {
 	base      string        // Metronome's URL
 	provision bool          // METRONOME_PROVISION
+	rateCard  string        // METRONOME_RATE_CARD
 	mode      string        // PRICE_CHECK (default warn)
 	maxHold   time.Duration // default pipeline.MaxUnpricedHold
 	batch     int           // ledger records per delivery (default 500)
@@ -76,7 +77,7 @@ func openHoldRig(t *testing.T, dir string, o rigOptions) *holdRig {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := &config.Config{DataDir: dir, MetronomeProvision: o.provision, PriceCheck: o.mode, PriceCheckMaxHold: o.maxHold,
+	cfg := &config.Config{DataDir: dir, MetronomeProvision: o.provision, MetronomeRateCard: o.rateCard, PriceCheck: o.mode, PriceCheckMaxHold: o.maxHold,
 		MetronomeStripeCollect: "charge_automatically"}
 	a := New(NewClient(o.base, metronometest.Token), cfg, kv.Memory(), nil)
 	h := health.New(nil)

@@ -149,6 +149,33 @@ func TestArchiveNeedsItsOwnVolume(t *testing.T) {
 	}
 }
 
+// LEDGER_MIRROR: the live copy of the data directory on the archive volume
+// is decided at start-up (auto), kept wherever the archive is (on) or not
+// kept (off). A typo is refused, and so is "on" with nowhere to keep it.
+func TestLedgerMirrorSetting(t *testing.T) {
+	if c := Load(); c.LedgerMirror != "auto" || c.Validate() != nil {
+		t.Fatalf("default: %q, %v", c.LedgerMirror, c.Validate())
+	}
+	for _, mode := range []string{"auto", "off"} {
+		t.Setenv("LEDGER_MIRROR", mode)
+		if c := Load(); c.LedgerMirror != mode || c.Validate() != nil {
+			t.Fatalf("%s without an archive: %q, %v", mode, c.LedgerMirror, c.Validate())
+		}
+	}
+	t.Setenv("LEDGER_MIRROR", "on")
+	if err := Load().Validate(); err == nil || !strings.Contains(err.Error(), "LEDGER_MIRROR=on needs ARCHIVE_DIR") {
+		t.Fatalf("on without an archive: %v", err)
+	}
+	t.Setenv("ARCHIVE_DIR", "/archive")
+	if err := Load().Validate(); err != nil {
+		t.Fatalf("on with an archive: %v", err)
+	}
+	t.Setenv("LEDGER_MIRROR", "yes")
+	if err := Load().Validate(); err == nil || !strings.Contains(err.Error(), `LEDGER_MIRROR "yes" must be auto, on or off`) {
+		t.Fatalf("a typo: %v", err)
+	}
+}
+
 // LiteLLM's pull can be pinned to a tenant and given the push's client name,
 // so pulled copies of pushed requests get the same IDs.
 func TestLiteLLMPinSettings(t *testing.T) {

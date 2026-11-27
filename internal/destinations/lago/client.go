@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/vclusterlabs-experiments/vbilling/internal/destinations"
+	"github.com/vclusterlabs-experiments/vbilling/internal/version"
 )
 
 // Client is an HTTP client for the Lago billing API.
@@ -376,6 +377,7 @@ func (c *Client) do(ctx context.Context, method, path string, body interface{}, 
 		req.Header.Set("Content-Type", "application/json")
 	}
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	req.Header.Set("User-Agent", version.UserAgent())
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -403,6 +405,7 @@ func (c *Client) delete(ctx context.Context, path string) error {
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	req.Header.Set("User-Agent", version.UserAgent())
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {

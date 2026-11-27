@@ -1,13 +1,279 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "vBilling Helm values",
+  "description": "Types of every value the chart reads (scripts/tests/test_chart.py keeps this file, values.yaml and the templates in step). Unknown keys are accepted on purpose: values saved by an older release must never fail an upgrade. What a setting may contain is checked by vBilling itself, in the configuration check Job, before a rollout.",
   "type": "object",
   "properties": {
-    "image": {"type": "object", "properties": {"digest": {"type": "string", "pattern": "^$|^sha256:[a-f0-9]{64}$"}}},
     "replicaCount": {
       "description": "vBilling runs as one instance: each replica would keep its own ledger, so records would split between replicas and a second replica could not take over. Restarts are safe: the ledger and backfill resume where vBilling stopped.",
       "type": "integer",
       "minimum": 0,
       "maximum": 1
-    }
+    },
+    "image": {
+      "type": "object",
+      "properties": {
+        "repository": {"type": "string"},
+        "tag": {"type": "string"},
+        "digest": {"type": "string", "pattern": "^$|^sha256:[a-f0-9]{64}$"},
+        "pullPolicy": {"type": "string"}
+      }
+    },
+    "imagePullSecrets": {
+      "type": "array",
+      "items": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}
+    },
+    "nameOverride": {"type": "string"},
+    "fullnameOverride": {"type": "string"},
+    "adapters": {"type": "array", "items": {"type": "string"}},
+    "adapter": {"type": "string"},
+    "region": {"type": "string"},
+    "clusterName": {"type": "string"},
+    "tenantSource": {"type": "string"},
+    "billing": {
+      "type": "object",
+      "properties": {
+        "defaultPlanCode": {"type": "string"},
+        "currency": {"type": "string"},
+        "collectionDelay": {"type": "string"},
+        "planByClass": {"type": "object", "additionalProperties": {"type": "string"}},
+        "priceCheck": {"type": "object", "properties": {"mode": {"type": "string"}}}
+      }
+    },
+    "metering": {
+      "type": "object",
+      "properties": {
+        "cpuMemoryBasis": {"type": "string"},
+        "meterControlPlane": {"type": "boolean"},
+        "meterByNamespace": {"type": "boolean"},
+        "gpuResources": {"type": "array", "items": {"type": "string"}},
+        "skuLabel": {"type": "string"},
+        "capacityTypeLabel": {"type": "string"},
+        "unhealthyNodeTaints": {"type": "array", "items": {"type": "string"}},
+        "dedicatedNodeLabel": {"type": "string"},
+        "customMetrics": {
+          "description": "A list of metrics, or the v0.2 string \"code:unit[:key|key],...\".",
+          "type": ["array", "string"],
+          "items": {"type": "object"}
+        }
+      }
+    },
+    "tenantAPI": {
+      "type": "object",
+      "properties": {
+        "privateNodeBilling": {"type": "string"},
+        "externalClustersSecret": {"type": "string"}
+      }
+    },
+    "prometheus": {
+      "type": "object",
+      "properties": {
+        "url": {"type": "string"},
+        "egressQuery": {"type": "string"},
+        "gpuUtilQuery": {"type": "string"},
+        "gpuCountQuery": {"type": "string"},
+        "headers": {"type": "object", "additionalProperties": {"type": "string"}},
+        "existingSecret": {"type": "string"},
+        "bearerTokenFile": {"type": "string"},
+        "preset": {"type": "string"},
+        "sourceLabel": {"type": "string"},
+        "metrics": {"type": "array", "items": {"type": "object"}}
+      }
+    },
+    "platform": {
+      "type": "object",
+      "properties": {
+        "cluster": {"type": "string"},
+        "url": {"type": "string"},
+        "accessKey": {"type": "string"},
+        "existingSecret": {"type": "string"},
+        "caSecret": {"type": "string"},
+        "insecure": {"type": "boolean"}
+      }
+    },
+    "watchNamespaces": {"type": "array", "items": {"type": "string"}},
+    "lago": {
+      "type": "object",
+      "properties": {
+        "apiURL": {"type": "string"},
+        "apiKey": {"type": "string"},
+        "existingSecret": {"type": "string"},
+        "priceCard": {"type": "object"},
+        "priceCardConfigMap": {"type": "string"},
+        "managedPlans": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "stripe": {
+      "type": "object",
+      "properties": {
+        "apiKey": {"type": "string"},
+        "existingSecret": {"type": "string"},
+        "apiBase": {"type": "string"},
+        "splitMetersBy": {"type": "array", "items": {"type": "string"}},
+        "autoSubscribe": {"type": "boolean"},
+        "webhookSecret": {"type": "string"},
+        "priceCard": {"type": "object"}
+      }
+    },
+    "metronome": {
+      "type": "object",
+      "properties": {
+        "apiToken": {"type": "string"},
+        "existingSecret": {"type": "string"},
+        "apiBase": {"type": "string"},
+        "provision": {"type": "boolean"},
+        "stripeLink": {
+          "description": "Deprecated (v0.3.0): true is read as provision: true.",
+          "type": "boolean"
+        },
+        "rateCard": {"type": "string"},
+        "webhookSecret": {"type": "string"}
+      }
+    },
+    "webhook": {
+      "type": "object",
+      "properties": {
+        "url": {"type": "string"},
+        "secret": {"type": "string"},
+        "existingSecret": {"type": "string"},
+        "headers": {"type": "object", "additionalProperties": {"type": "string"}}
+      }
+    },
+    "api": {
+      "type": "object",
+      "properties": {
+        "port": {"type": ["integer", "string"]},
+        "token": {"type": "string"},
+        "ingestToken": {"type": "string"},
+        "tenantIngestTokens": {"type": "object", "additionalProperties": {"type": "string"}},
+        "existingSecret": {"type": "string"},
+        "service": {
+          "type": "object",
+          "properties": {
+            "type": {"type": "string"},
+            "port": {"type": ["integer", "string"]}
+          }
+        }
+      }
+    },
+    "records": {
+      "type": "object",
+      "properties": {
+        "unknownTenants": {"type": "string"},
+        "litellm": {"type": "boolean"},
+        "pullLiteLLM": {
+          "type": "object",
+          "properties": {
+            "url": {"type": "string"},
+            "key": {"type": "string"},
+            "existingSecret": {"type": "string"},
+            "tenant": {"type": "string"},
+            "client": {"type": "string"}
+          }
+        },
+        "pull": {"type": "array", "items": {"type": "object"}},
+        "pullEnv": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {"type": "string"},
+              "secret": {"type": "string"},
+              "key": {"type": "string"}
+            },
+            "required": ["name", "secret", "key"]
+          }
+        },
+        "formats": {"type": "object"}
+      }
+    },
+    "crossChecks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "primary": {"type": "string"},
+          "secondary": {"type": "string"},
+          "tolerancePercent": {"type": "number"}
+        },
+        "required": ["primary", "secondary"]
+      }
+    },
+    "enforcement": {
+      "type": "object",
+      "properties": {
+        "mode": {"type": "string"},
+        "rules": {"type": "string"},
+        "gateway": {"type": "object", "properties": {"litellm": {"type": "boolean"}}},
+        "admissionPolicy": {"type": "object", "properties": {"enabled": {"type": "boolean"}}},
+        "inCluster": {"type": "boolean"},
+        "pause": {
+          "type": "object",
+          "properties": {
+            "keepBilling": {"type": "string"},
+            "keepNamespaces": {"type": "string"}
+          }
+        }
+      }
+    },
+    "persistence": {
+      "type": "object",
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "size": {"type": ["string", "integer"]},
+        "storageClass": {
+          "description": "Storage class of the data volume (the ledger). Replicated or network-attached storage; never a node-local class in production.",
+          "type": "string"
+        },
+        "archive": {
+          "type": "object",
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "existingClaim": {"type": "string"},
+            "size": {"type": ["string", "integer"]},
+            "storageClass": {
+              "description": "Storage class of the archive volume when the chart creates it: one that does not fail together with the data volume's.",
+              "type": "string"
+            },
+            "mountPath": {"type": "string"},
+            "mirror": {
+              "description": "LEDGER_MIRROR: the live copy of the data volume kept on the archive volume. auto keeps it except on a bucket mounted through FUSE. A bare on or off in YAML is a boolean and means the same.",
+              "enum": ["auto", "on", "off", true, false]
+            }
+          }
+        }
+      }
+    },
+    "configCheck": {
+      "description": "The pre-install and pre-upgrade Job that runs `vbilling check-config` with the new configuration.",
+      "type": "object",
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "activeDeadlineSeconds": {"type": "integer", "minimum": 1},
+        "resources": {"type": "object"}
+      }
+    },
+    "serviceMonitor": {
+      "type": "object",
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "interval": {"type": "string"}
+      }
+    },
+    "serviceAccount": {
+      "type": "object",
+      "properties": {
+        "create": {"type": "boolean"},
+        "name": {"type": "string"},
+        "annotations": {"type": "object", "additionalProperties": {"type": "string"}}
+      }
+    },
+    "resources": {"type": "object"},
+    "podSecurityContext": {"type": "object"},
+    "nodeSelector": {"type": "object", "additionalProperties": {"type": "string"}},
+    "tolerations": {"type": "array", "items": {"type": "object"}},
+    "affinity": {"type": "object"},
+    "topologySpreadConstraints": {"type": "array", "items": {"type": "object"}},
+    "priorityClassName": {"type": "string"}
   }
 }

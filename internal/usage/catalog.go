@@ -33,7 +33,7 @@ type MetricDef struct {
 	Name        string `json:"name"`
 	Unit        string `json:"unit"`
 	Description string `json:"description"`
-	// Billable metrics are created in billing backends. Informational ones
+	// Billable metrics are created in billing platforms. Informational ones
 	// only reach the ledger, webhooks and exports.
 	Billable bool `json:"billable"`
 	// GroupKeys are the dimensions a rating engine should be able to price
@@ -87,7 +87,7 @@ var builtin = []MetricDef{
 		Description: "Whole nodes allocated to one tenant, billed for full capacity.",
 		GroupKeys:   []string{"region", "sku", DimCapacityType}, Accuracy: AccuracyExact, Source: SourceKubernetes},
 	{Code: MetricNetworkEgressGB, Name: "Network Egress GiB", Unit: "gib", Billable: true,
-		Description: "Transmitted bytes from tenant workloads (requires Prometheus).",
+		Description: "Bytes the cluster's pods transmit on their own network interfaces, to any destination (requires Prometheus).",
 		GroupKeys:   []string{"region"}, Accuracy: AccuracyExact, Source: SourcePrometheus},
 	{Code: MetricLBHours, Name: "Load Balancer Hours", Unit: "hours", Billable: true,
 		Description: "Hours of Service type=LoadBalancer.",
@@ -103,14 +103,23 @@ var builtin = []MetricDef{
 var (
 	catMu  sync.RWMutex
 	custom = map[string]MetricDef{}
+	// off are built-in metrics the configuration switched off (SetEnabled).
+	off = map[string]bool{}
 )
 
 // Catalog returns builtin metrics followed by operator-declared custom ones.
+// A built-in metric the configuration switched off is left out, so no
+// billing platform is asked to create or price a meter that never gets
+// usage.
 func Catalog() []MetricDef {
 	catMu.RLock()
 	defer catMu.RUnlock()
 	out := make([]MetricDef, 0, len(builtin)+len(custom))
-	out = append(out, builtin...)
+	for _, d := range builtin {
+		if !off[d.Code] {
+			out = append(out, d)
+		}
+	}
 	codes := make([]string, 0, len(custom))
 	for c := range custom {
 		codes = append(codes, c)
@@ -122,7 +131,7 @@ func Catalog() []MetricDef {
 	return out
 }
 
-// Billable returns the subset of the catalog that billing backends create.
+// Billable returns the subset of the catalog that billing platforms create.
 func Billable() []MetricDef {
 	var out []MetricDef
 	for _, d := range Catalog() {
@@ -131,6 +140,20 @@ func Billable() []MetricDef {
 		}
 	}
 	return out
+}
+
+// SetEnabled takes a built-in metric out of the catalog, or puts it back,
+// when configuration switches its source off (EGRESS_QUERY=none,
+// GPU_UTIL_QUERY=none). Lookup still knows the metric, so events of it that
+// are already in the ledger are delivered.
+func SetEnabled(code string, enabled bool) {
+	catMu.Lock()
+	defer catMu.Unlock()
+	if enabled {
+		delete(off, code)
+	} else {
+		off[code] = true
+	}
 }
 
 // SetAccuracy changes a built-in metric's accuracy when configuration makes

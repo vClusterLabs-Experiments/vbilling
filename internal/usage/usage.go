@@ -41,7 +41,8 @@ const (
 )
 
 // Instance attributes on dedicated and private node-hour events: what an
-// instance-level SKU is made of (vCores, RAM, GPU quantity, a public IP).
+// instance-level SKU is made of (vCores, RAM, GPU quantity, a public IP, the
+// node's disk).
 // They describe the node; they are not group keys, so pricing never splits
 // on them unless a billing platform is configured to.
 const (
@@ -49,6 +50,7 @@ const (
 	DimMemoryGiB = "memory_gib" // memory capacity of the node, in GiB (one decimal)
 	DimGPUCount  = "gpu_count"  // physical GPUs (MIG and time-slicing converted back)
 	DimPublicIP  = "public_ip"  // "true" when the node has an ExternalIP address
+	DimDiskGiB   = "disk_gib"   // the node's own disk in GiB (its ephemeral-storage capacity, one decimal), when reported
 )
 
 // Capacity types.
@@ -91,16 +93,20 @@ type Event struct {
 
 // Tenant is a billing customer. One tenant can own several tenant clusters.
 type Tenant struct {
-	ID          string            `json:"id"`
-	DisplayName string            `json:"display_name"`
-	Email       string            `json:"email,omitempty"`
-	Currency    string            `json:"currency,omitempty"`
-	Region      string            `json:"region,omitempty"`
-	Project     string            `json:"project,omitempty"`
-	Class       string            `json:"class,omitempty"`
-	Plan        string            `json:"plan,omitempty"`
-	Clusters    []string          `json:"clusters,omitempty"`
-	Metadata    map[string]string `json:"metadata,omitempty"`
+	ID          string   `json:"id"`
+	DisplayName string   `json:"display_name"`
+	Email       string   `json:"email,omitempty"`
+	Currency    string   `json:"currency,omitempty"`
+	Region      string   `json:"region,omitempty"`
+	Project     string   `json:"project,omitempty"`
+	Class       string   `json:"class,omitempty"`
+	Plan        string   `json:"plan,omitempty"`
+	Clusters    []string `json:"clusters,omitempty"`
+	// ExcludedClusters are the tenant's clusters that are excluded from
+	// metering (vbilling.vcluster.com/exclude): they exist, and nothing of
+	// them is billed.
+	ExcludedClusters []string          `json:"excluded_clusters,omitempty"`
+	Metadata         map[string]string `json:"metadata,omitempty"`
 	// ProviderIDs carries IDs the operator pinned for a provider, e.g.
 	// {"stripe": "cus_123"} from a tenant-cluster annotation.
 	ProviderIDs map[string]string `json:"provider_ids,omitempty"`

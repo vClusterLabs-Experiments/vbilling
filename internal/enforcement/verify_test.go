@@ -152,13 +152,16 @@ func TestPodThatNeverGoesLeavesThePauseUnverified(t *testing.T) {
 	}
 }
 
-// A drain the cluster's API keeps refusing is retried with the control
-// plane up; once it has failed for the drain timeout, the control plane is
-// stopped anyway, unverified.
+// A drain that keeps failing for a reason that can pass (here a webhook
+// inside the cluster that denies pod deletions, which the API answers with
+// a 400) is retried with the control plane up; once it has failed for the
+// drain timeout, the control plane is stopped anyway, unverified. A drain
+// the API refuses vBilling itself (Forbidden, Unauthorized) is not waited
+// for: see TestClusterWhoseAPIRefusesVBillingIsStoppedAtOnce.
 func TestDrainThatKeepsFailingStopsTheControlPlaneUnverified(t *testing.T) {
 	cl, host, inside := privateCluster(podOn("inference", "default", "gpu-1"))
 	inside.PrependReactor("delete", "pods", func(a ktesting.Action) (bool, runtime.Object, error) {
-		return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "pods"}, "inference", errBlocked)
+		return true, nil, apierrors.NewBadRequest(errBlocked.Error())
 	})
 	clock := newClock()
 	spans := pause.Memory()

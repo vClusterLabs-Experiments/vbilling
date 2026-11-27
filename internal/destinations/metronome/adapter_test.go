@@ -37,6 +37,8 @@ type fakeMetronome struct {
 	events    map[string]IngestEvent // transaction_id -> first accepted
 	ingests   int
 	contracts map[string]CreateContractRequest // uniqueness key -> request
+	cards     map[string]string                // uniqueness key -> the rate card ID the contract was created on
+	aliases   map[string]string                // rate card alias -> the rate card ID it points to now (default: cardFor)
 	ended     map[string]string                // uniqueness key -> ending_before
 	archived  map[string]bool                  // uniqueness key -> archived
 	billing   map[string][]BillingProviderConfig
@@ -48,11 +50,33 @@ type fakeMetronome struct {
 
 func newFakeMetronome(t *testing.T) *fakeMetronome {
 	f := &fakeMetronome{t: t, customers: map[string]*Customer{}, events: map[string]IngestEvent{},
-		contracts: map[string]CreateContractRequest{}, ended: map[string]string{}, archived: map[string]bool{},
+		contracts: map[string]CreateContractRequest{}, cards: map[string]string{}, aliases: map[string]string{},
+		ended: map[string]string{}, archived: map[string]bool{},
 		billing: map[string][]BillingProviderConfig{}, failNext: map[string]int{}}
 	f.srv = httptest.NewServer(http.HandlerFunc(f.handle))
 	t.Cleanup(f.srv.Close)
 	return f
+}
+
+// cardFor is the rate card an alias points to unless a test moved it.
+func cardFor(alias string) string { return uuidFor("rate-card-" + alias) }
+
+// cardOf is the rate card a contract is on: Metronome resolves an alias
+// once, when the contract is created.
+func (f *fakeMetronome) cardOf(key string) string {
+	if id := f.cards[key]; id != "" {
+		return id
+	}
+	c := f.contracts[key]
+	switch {
+	case c.RateCardID != "":
+		return c.RateCardID
+	case c.RateCardAlias == "":
+		return ""
+	case f.aliases[c.RateCardAlias] != "":
+		return f.aliases[c.RateCardAlias]
+	}
+	return cardFor(c.RateCardAlias)
 }
 
 func uuidFor(s string) string {
@@ -153,6 +177,7 @@ func (f *fakeMetronome) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		f.contracts[req.UniquenessKey] = req
+		f.cards[req.UniquenessKey] = f.cardOf(req.UniquenessKey)
 		f.reply(w, 200, map[string]any{"data": map[string]string{"id": uuidFor(req.UniquenessKey)}})
 
 	case "POST /v2/contracts/list":
@@ -177,6 +202,9 @@ func (f *fakeMetronome) handle(w http.ResponseWriter, r *http.Request) {
 		var data []map[string]any
 		for _, k := range keys[from:to] {
 			c := map[string]any{"id": uuidFor(k), "uniqueness_key": k, "starting_at": f.contracts[k].StartingAt, "customer_id": req.CustomerID}
+			if rc := f.cardOf(k); rc != "" {
+				c["rate_card_id"] = rc
+			}
 			if e := f.ended[k]; e != "" {
 				c["ending_before"] = e
 			}
@@ -509,6 +537,29 @@ func TestOldEventsRejectedWithReason(t *testing.T) {
 	var partial *destinations.PartialError
 	if !errors.As(err, &partial) || !strings.Contains(partial.Rejected[old.ID], "34-day") {
 		t.Fatalf("expected age rejection, got %v", err)
+	}
+}
+
+// The oldest usage the adapter declares is exactly what SendEvents
+// enforces: ingest refuses pushed usage older than it, so nothing ingest
+// acknowledged is certain to be dead-lettered here.
+func TestDeclaredOldestUsageIsWhatSendEventsEnforces(t *testing.T) {
+	f := newFakeMetronome(t)
+	a := newAdapter(t, f, nil)
+	var limiter destinations.AgeLimiter = a
+	limit := limiter.OldestUsage()
+	if limit != 34*24*time.Hour-time.Hour {
+		t.Fatalf("the adapter declares %s, want Metronome's 34 days less the hour of margin", limit)
+	}
+	kept := gpu("acme", "c", now.Add(-limit), 1)
+	lost := gpu("acme", "c", now.Add(-limit-time.Second), 1)
+	err := a.SendEvents(context.Background(), []usage.Event{kept, lost})
+	var partial *destinations.PartialError
+	if !errors.As(err, &partial) || len(partial.Rejected) != 1 || partial.Rejected[lost.ID] == "" {
+		t.Fatalf("usage one second past the declared limit: %v, want only it rejected", err)
+	}
+	if _, sent := f.events[kept.ID]; !sent {
+		t.Fatal("usage exactly as old as the declared limit was not sent")
 	}
 }
 

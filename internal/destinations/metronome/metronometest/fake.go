@@ -10,7 +10,10 @@
 //   - billable metrics, products, rate cards and rates (Finance's catalog);
 //     a billable metric counts only the usage ingested after it was
 //     created, as Metronome's are not retroactive;
-//   - contracts listed per customer (the portal's, with prepaid commits);
+//   - contracts listed per customer (the portal's, with prepaid commits), and
+//     the ones vBilling creates, ends and archives with METRONOME_PROVISION:
+//     a rate card alias is resolved once, when a contract is created, so a
+//     contract stays on its rate card when the alias moves;
 //   - usage aggregation (POST /v1/usage) per billable metric;
 //   - threshold notifications in alarm for a customer, as
 //     POST /v1/customer-alerts/get and POST /v1/customer-alerts/list
@@ -636,6 +639,10 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.reply(w, http.StatusOK, map[string]any{"data": map[string]string{"id": m.ID}})
 	case "POST /v2/contracts/list":
 		s.listContracts(w, body)
+	case "POST /v1/contracts/create":
+		s.createContract(w, key, body)
+	case "POST /v1/contracts/updateEndDate", "POST /v1/contracts/archive":
+		s.endContract(w, key, body)
 	case "POST /v1/contract-pricing/products/list":
 		s.listProducts(w, r, body)
 	case "POST /v1/contract-pricing/rate-cards/list":
@@ -814,6 +821,144 @@ func (s *Server) listContracts(w http.ResponseWriter, body []byte) {
 		data = append(data, s.contractJSON(c))
 	}
 	s.reply(w, http.StatusOK, map[string]any{"data": data, "cursor": cursor})
+}
+
+// createContract answers POST /v1/contracts/create, as vBilling calls it with
+// METRONOME_PROVISION. A rate card alias is resolved here, once: the contract
+// keeps the rate card the alias points to now, wherever the alias moves
+// later. A uniqueness key can be used once (409 afterwards).
+func (s *Server) createContract(w http.ResponseWriter, key string, body []byte) {
+	if !s.checkRequest(w, "create_contract", body) {
+		return
+	}
+	var req struct {
+		CustomerID    string `json:"customer_id"`
+		StartingAt    string `json:"starting_at"`
+		RateCardID    string `json:"rate_card_id"`
+		RateCardAlias string `json:"rate_card_alias"`
+		UniquenessKey string `json:"uniqueness_key"`
+	}
+	json.Unmarshal(body, &req)
+	if s.customerLocked(req.CustomerID) == nil {
+		s.errorf(w, http.StatusNotFound, "customer %s not found", req.CustomerID)
+		return
+	}
+	start, err := time.Parse(time.RFC3339, req.StartingAt)
+	if err != nil {
+		s.errorf(w, http.StatusBadRequest, "starting_at %q is not RFC 3339", req.StartingAt)
+		return
+	}
+	card := req.RateCardID
+	if req.RateCardAlias != "" {
+		card = ""
+		for _, rc := range s.cards {
+			if contains(rc.Aliases, req.RateCardAlias) {
+				card = rc.ID
+			}
+		}
+		if card == "" {
+			s.errorf(w, http.StatusBadRequest, "no rate card has the alias %q", req.RateCardAlias)
+			return
+		}
+	}
+	if req.UniquenessKey != "" {
+		for _, c := range s.contracts {
+			if c.UniquenessKey == req.UniquenessKey {
+				s.errorf(w, http.StatusConflict, "This uniqueness key has already been used.")
+				return
+			}
+		}
+	}
+	c := &Contract{ID: s.newID("contract"), CustomerID: req.CustomerID, RateCardID: card, StartingAt: start, UniquenessKey: req.UniquenessKey}
+	s.contracts = append(s.contracts, c)
+	s.writes = append(s.writes, key)
+	s.reply(w, http.StatusOK, map[string]any{"data": map[string]string{"id": c.ID}})
+}
+
+// endContract answers POST /v1/contracts/updateEndDate and
+// POST /v1/contracts/archive.
+func (s *Server) endContract(w http.ResponseWriter, key string, body []byte) {
+	archive := strings.HasSuffix(key, "/archive")
+	name := "update_contract_end_date"
+	if archive {
+		name = "archive_contract"
+	}
+	if !s.checkRequest(w, name, body) {
+		return
+	}
+	var req struct {
+		CustomerID   string `json:"customer_id"`
+		ContractID   string `json:"contract_id"`
+		EndingBefore string `json:"ending_before"`
+	}
+	json.Unmarshal(body, &req)
+	var c *Contract
+	for _, x := range s.contracts {
+		if x.ID == req.ContractID && x.CustomerID == req.CustomerID {
+			c = x
+		}
+	}
+	if c == nil {
+		s.errorf(w, http.StatusNotFound, "contract not found")
+		return
+	}
+	if archive {
+		c.Archived = true
+	} else {
+		end, err := time.Parse(time.RFC3339, req.EndingBefore)
+		if err != nil || !end.After(c.StartingAt) {
+			s.errorf(w, http.StatusBadRequest, "ending_before must be after starting_at")
+			return
+		}
+		c.EndingBefore = end
+	}
+	s.writes = append(s.writes, key)
+	s.reply(w, http.StatusOK, map[string]any{"data": map[string]string{"id": c.ID}})
+}
+
+// MoveRateCardAlias points a rate card alias at another rate card, as
+// Finance does when a new price list goes live: the alias leaves the rate
+// card that had it. Contracts created on the alias stay where they are.
+func (s *Server) MoveRateCardAlias(alias, rateCardID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, rc := range s.cards {
+		kept := rc.Aliases[:0:0]
+		for _, a := range rc.Aliases {
+			if a != alias {
+				kept = append(kept, a)
+			}
+		}
+		if rc.ID == rateCardID {
+			kept = append(kept, alias)
+		}
+		rc.Aliases = kept
+	}
+}
+
+// Contracts returns copies of a customer's contracts, in creation order.
+func (s *Server) Contracts(customerID string) []Contract {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []Contract
+	for _, c := range s.contracts {
+		if c.CustomerID == customerID {
+			out = append(out, *c)
+		}
+	}
+	return out
+}
+
+// EndContract ends a contract the way the account's owner does in Metronome
+// (not counted as a write by vBilling).
+func (s *Server) EndContract(id string, endingBefore time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, c := range s.contracts {
+		if c.ID == id {
+			c.EndingBefore = endingBefore
+		}
+	}
 }
 
 func (s *Server) contractJSON(c *Contract) map[string]any {

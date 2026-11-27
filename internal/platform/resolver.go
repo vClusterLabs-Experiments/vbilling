@@ -39,6 +39,9 @@ type Options struct {
 	Committed func() (time.Time, bool)
 	Health    *health.Registry
 	Now       func() time.Time
+	// OnBillingIDChange is called when the billing ID of an account changed
+	// (the tenant setting of a Tenant or Project was edited).
+	OnBillingIDChange func(was, now string)
 }
 
 // forgetAfter drops bindings of workloads not seen for this long.
@@ -115,7 +118,7 @@ func New(opts Options) (*Resolver, error) {
 		}
 	}
 	if n := len(r.entries); n > 0 {
-		log.Printf("[platform] loaded %d persisted cluster binding(s); they stand until the Platform answers", n)
+		log.Printf("[platform] loaded %d persisted cluster binding(s), clusters deleted in the last week included; they stand until the Platform answers", n)
 	}
 	return r, nil
 }
@@ -145,7 +148,15 @@ func (r *Resolver) refresh(ctx context.Context, force bool) {
 		if r.opts.Health != nil {
 			hint := "no owner is known yet, so clusters are not attributed until it answers"
 			if r.snap != nil || len(r.entries) > 0 {
-				hint = fmt.Sprintf("keeping the last known owners of %d cluster(s); usage is never moved to another tenant while the Platform is unreachable", len(r.entries))
+				// Clusters seen lately: owners are remembered for a week after
+				// a cluster is deleted, for windows metered after the fact.
+				live := 0
+				for _, e := range r.entries {
+					if now.Sub(e.LastSeen) < 2*time.Hour {
+						live++
+					}
+				}
+				hint = fmt.Sprintf("keeping the last known owners of %d cluster(s); usage is never moved to another tenant while the Platform is unreachable", live)
 			}
 			r.opts.Health.Fail("platform", "platform", r.client.Host(), err, hint)
 		}
@@ -309,7 +320,10 @@ func (r *Resolver) record(key, workloadUID string, b discovery.PlatformBinding, 
 		e.WorkloadUID = workloadUID
 	}
 	if e.Binding.Same(&b) {
-		e.Binding = b // names, settings and phase may change
+		// Names, settings and phase may change; what the account was billed
+		// as before stays on record.
+		b.PreviousTenantID, b.TenantIDChanged = e.Binding.PreviousTenantID, e.Binding.TenantIDChanged
+		e.Binding = b
 		return e
 	}
 	at := now
@@ -321,14 +335,43 @@ func (r *Resolver) record(key, workloadUID string, b discovery.PlatformBinding, 
 			at = wm // windows up to wm are in the ledger under the old owner
 		}
 	}
-	log.Printf("[platform] %s moved from %s (tenant %s) to %s (tenant %s) at %s; windows before stay billed to the old owner",
-		key, e.Binding.Owner(), e.Binding.TenantID(), b.Owner(), b.TenantID(), at.Format(time.RFC3339))
+	if was := e.Binding.TenantID(); e.Binding.SameAccount(&b) && was != b.TenantID() {
+		// Not a move: the same Tenant (or Project) is billed under another
+		// ID. The billing platform keys customers on that ID, so this is
+		// another customer there: say so, loudly and where it can be found.
+		b.PreviousTenantID, b.TenantIDChanged = was, at
+		r.billingIDChanged(key, was, &b, at)
+	} else {
+		log.Printf("[platform] %s moved from %s (tenant %s) to %s (tenant %s) at %s; windows before stay billed to the old owner",
+			key, e.Binding.Owner(), was, b.Owner(), b.TenantID(), at.Format(time.RFC3339))
+	}
 	e.History = append(e.History, epoch{Binding: e.Binding, Since: e.Since, Until: at})
 	if len(e.History) > maxHistory {
 		e.History = e.History[len(e.History)-maxHistory:]
 	}
 	e.Binding, e.Since = b, at
 	return e
+}
+
+// billingIDChanged reports that an account's billing ID changed. Nothing
+// stops it (the operator who can edit a Tenant decides who pays), but a
+// billing platform that keys customers on the ID now sees a different
+// customer, without the wallet, commits and credits of the old one: that
+// must never happen unnoticed.
+func (r *Resolver) billingIDChanged(key, was string, b *discovery.PlatformBinding, at time.Time) {
+	now := b.TenantID()
+	log.Printf("[platform] WARNING: the billing ID of %s changed from %q to %q at %s (%stenant on its Tenant or Project; cluster %s). "+
+		"Usage from then on is sent as %q: to a billing platform that is another customer, without the balance, commits and credits of %q. "+
+		"To keep one customer, give the existing customer the new ID as well (in Metronome: add %q to its ingest aliases)",
+		b.Owner(), was, now, at.Format(time.RFC3339), discovery.AnnotationPrefix, key, now, was, now)
+	if r.opts.Health != nil {
+		r.opts.Health.Note(health.Name("billing-id", now), "platform", now, 1,
+			fmt.Sprintf("billed as %q until %s, as %q since: a different customer at the billing platform", was, at.Format(time.RFC3339), now),
+			fmt.Sprintf("if that was not intended, set %stenant back to %q; to keep one customer, add %q to the existing customer's ingest aliases", discovery.AnnotationPrefix, was, now))
+	}
+	if r.opts.OnBillingIDChange != nil {
+		r.opts.OnBillingIDChange(was, now)
+	}
 }
 
 // statusOf is OK for a binding without problems, else Failing.

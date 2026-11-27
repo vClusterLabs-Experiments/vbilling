@@ -46,6 +46,23 @@ var ErrNoArchive = errors.New("no archive directory configured (ARCHIVE_DIR)")
 // live ledger and the archive.
 var archiveMu sync.Mutex
 
+// EnsureArchiveDir creates the archive directory, parents included, and does
+// nothing when it exists.
+//
+// vBilling calls it at start-up and with every volume check, not only when
+// the first compaction has a segment to archive (seven days after an
+// install): the directory is one of its own under the mount (the chart sets
+// ARCHIVE_DIR to <mount path>/<pod name>), so until it exists a healthy,
+// empty archive volume cannot be told from one that is not mounted. A
+// failure here is that signal: the volume is not mounted, or vBilling's user
+// cannot write to it.
+func EnsureArchiveDir(dir string) error {
+	if dir == "" {
+		return ErrNoArchive
+	}
+	return os.MkdirAll(dir, 0o750)
+}
+
 // ArchiveEntry is one line of archive.jsonl: one archived segment.
 type ArchiveEntry struct {
 	Name       string    `json:"name"`        // segment file name, seg-<first>.log
@@ -233,7 +250,7 @@ func (s *Spool) archiveSegments(segs []segment) (int, error) {
 		return 0, nil
 	}
 	dir := s.opts.ArchiveDir
-	if err := os.MkdirAll(dir, 0o750); err != nil {
+	if err := EnsureArchiveDir(dir); err != nil {
 		return 0, fmt.Errorf("archive: %w", err)
 	}
 	idx, err := readArchiveIndex(dir)

@@ -208,7 +208,7 @@ func TestUsageLineItemsAndCSV(t *testing.T) {
 
 func TestIngestValidatesDedupesAndAuthenticates(t *testing.T) {
 	defer func() { recover() }()
-	usage.RegisterCustom(usage.MetricDef{Code: "inference_output_tokens", Unit: "tokens", GroupKeys: []string{"model"}})
+	usage.RegisterCustom(usage.MetricDef{Code: "gateway_output_tokens", Unit: "tokens", GroupKeys: []string{"model"}})
 	e := setup(t)
 	post := func(token, body string) (int, map[string]any) {
 		req, _ := http.NewRequest("POST", e.srv.URL+"/api/v1/events", strings.NewReader(body))
@@ -225,9 +225,9 @@ func TestIngestValidatesDedupesAndAuthenticates(t *testing.T) {
 	}
 	ws := now.Add(-5 * time.Minute).Format(time.RFC3339)
 	we := now.Add(-4 * time.Minute).Format(time.RFC3339)
-	good := fmt.Sprintf(`{"tenant":"acme","metric":"inference_output_tokens","quantity":125000,"window_start":%q,"window_end":%q,"dimensions":{"model":"llama-3-70b"}}`, ws, we)
+	good := fmt.Sprintf(`{"tenant":"acme","metric":"gateway_output_tokens","quantity":125000,"window_start":%q,"window_end":%q,"dimensions":{"model":"llama-3-70b"}}`, ws, we)
 	bad := fmt.Sprintf(`{"tenant":"acme","metric":"made_up","quantity":1,"window_start":%q,"window_end":%q}`, ws, we)
-	future := fmt.Sprintf(`{"tenant":"acme","metric":"inference_output_tokens","quantity":1,"window_start":%q,"window_end":%q}`, we, now.Add(time.Hour).Format(time.RFC3339))
+	future := fmt.Sprintf(`{"tenant":"acme","metric":"gateway_output_tokens","quantity":1,"window_start":%q,"window_end":%q}`, we, now.Add(time.Hour).Format(time.RFC3339))
 
 	if code, _ := post("wrong", `{"events":[]}`); code != 401 {
 		t.Fatalf("bad token: %d", code)
@@ -378,6 +378,7 @@ func TestAPIIsNeverOpen(t *testing.T) {
 		{"GET", "/api/v1/pricing"}, {"POST", "/api/v1/pricing/check"}, {"GET", "/api/v1/reconcile"}, {"GET", "/api/v1/ledger/verify"},
 		{"GET", "/api/v1/destinations"}, {"GET", "/api/v1/destinations/fakebill/dead-letters"},
 		{"POST", "/api/v1/destinations/fakebill/dead-letters/replay"}, {"POST", "/api/v1/destinations/fakebill/cursor"},
+		{"POST", "/api/v1/destinations/fakebill/pause"}, {"POST", "/api/v1/destinations/fakebill/resume"}, {"POST", "/api/v1/destinations/fakebill/start"},
 		{"GET", "/api/v1/billing-states"}, {"PUT", "/api/v1/billing-states/acme"},
 	}
 	for _, apiToken := range []string{adminToken, ""} {

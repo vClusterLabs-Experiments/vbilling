@@ -62,7 +62,7 @@ func TestSKUCapPerTenantPerDay(t *testing.T) {
 	ws := now.Add(-5 * time.Minute)
 	var evs []map[string]any
 	for i := 0; i <= maxSKUsPerTenantPerDay; i++ {
-		evs = append(evs, map[string]any{"id": fmt.Sprintf("e-%d", i), "metric": usage.MetricGPUHours, "quantity": 1,
+		evs = append(evs, map[string]any{"id": fmt.Sprintf("e-%d", i), "metric": pushedMetric, "quantity": 1,
 			"sku": fmt.Sprintf("SKU-%d", i), "window_start": ws, "window_end": ws.Add(time.Minute)})
 	}
 	b, _ := json.Marshal(evs)

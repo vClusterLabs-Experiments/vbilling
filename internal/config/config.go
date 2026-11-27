@@ -30,6 +30,10 @@ type Config struct {
 	DataDir    string
 	Retention  time.Duration
 	ArchiveDir string // ARCHIVE_DIR: gzipped copies of compacted segments, kept for disputes
+	// LedgerMirror (LEDGER_MIRROR) is whether ARCHIVE_DIR also holds a live
+	// copy of the data directory: auto (yes, except on a bucket mounted
+	// through FUSE), on or off.
+	LedgerMirror string
 
 	// Collection. CollectionInterval is the metering window size.
 	CollectionInterval time.Duration
@@ -290,9 +294,10 @@ func Load() *Config {
 		Region:      envOr("REGION", "default"),
 		ClusterName: envOr("CLUSTER_NAME", "control-plane"),
 
-		DataDir:    envOr("DATA_DIR", "/var/lib/vbilling"),
-		Retention:  ledgerRetention,
-		ArchiveDir: os.Getenv("ARCHIVE_DIR"),
+		DataDir:      envOr("DATA_DIR", "/var/lib/vbilling"),
+		Retention:    ledgerRetention,
+		ArchiveDir:   os.Getenv("ARCHIVE_DIR"),
+		LedgerMirror: envOr("LEDGER_MIRROR", "auto"),
 
 		CollectionInterval: windowSize,
 		ReconcileInterval:  reconcileInterval,
@@ -505,6 +510,15 @@ func (c *Config) Validate() error {
 	}
 	if c.RecordsArchive && c.ArchiveDir == "" {
 		return fmt.Errorf("RECORDS_ARCHIVE needs ARCHIVE_DIR")
+	}
+	switch c.LedgerMirror {
+	case "auto", "off":
+	case "on":
+		if c.ArchiveDir == "" {
+			return fmt.Errorf("LEDGER_MIRROR=on needs ARCHIVE_DIR: the mirror is kept on the archive volume")
+		}
+	default:
+		return fmt.Errorf("LEDGER_MIRROR %q must be auto, on or off", c.LedgerMirror)
 	}
 	if c.RecordsRetention < 2*time.Hour {
 		return fmt.Errorf("RECORDS_RETENTION %s must be at least 2h", c.RecordsRetention)

@@ -52,7 +52,7 @@ func TestIngestedEventPropertiesAndRejectionCount(t *testing.T) {
 	e := setup(t, func(c *config.Config) { c.IngestTokens = map[string]string{"tok-acme": "acme"} })
 	ws := now.Add(-5 * time.Minute)
 	ev := func(id string, props map[string]any) map[string]any {
-		return map[string]any{"id": id, "metric": usage.MetricGPUHours, "quantity": 1, "unit": "GPU-hours", "properties": props,
+		return map[string]any{"id": id, "metric": pushedMetric, "quantity": 1, "unit": "GPU-hours", "properties": props,
 			"window_start": ws, "window_end": ws.Add(time.Minute)}
 	}
 	good, _ := json.Marshal([]any{ev("ok", map[string]any{"gpu_devices": 6, "pods": 3, "backfilled": true, "note": "nightly run"})})
@@ -97,7 +97,7 @@ func TestEventsOfEachBoundTokenGetIDsOfTheirOwn(t *testing.T) {
 		for _, tok := range []string{"tok-acme-own", "tok-acme-gw"} {
 			q := map[string]string{"tok-acme-own": "0.000001", "tok-acme-gw": "8"}[tok]
 			body := fmt.Sprintf(`[{%s"metric":%q,"quantity":%s,"sku":"NVIDIA-H100","window_start":%q,"window_end":%q}]`,
-				id, usage.MetricGPUHours, q, ws.Format(time.RFC3339), ws.Add(time.Minute).Format(time.RFC3339))
+				id, pushedMetric, q, ws.Format(time.RFC3339), ws.Add(time.Minute).Format(time.RFC3339))
 			code, out := postClientJSON(t, e.srv.URL+"/api/v1/events", tok, "gateway", body)
 			if code != http.StatusOK || out["accepted"] != float64(1) {
 				t.Fatalf("%s %s: %d %v: the copy sent with another token bound to the tenant took this event's ID", tok, id, code, out)
@@ -112,13 +112,13 @@ func TestEventsOfEachBoundTokenGetIDsOfTheirOwn(t *testing.T) {
 func TestBoundEventRetriedAcrossTheUpgradeCountsOnce(t *testing.T) {
 	e := setup(t, func(c *config.Config) { c.IngestTokens = map[string]string{"tok-acme": "acme"} })
 	ws := now.Add(-5 * time.Minute)
-	old := usage.Event{ID: v030TenantEventID("acme", "api", "evt-1"), Tenant: "acme", Metric: usage.MetricGPUHours, Quantity: 1,
+	old := usage.Event{ID: v030TenantEventID("acme", "api", "evt-1"), Tenant: "acme", Metric: pushedMetric, Quantity: 1,
 		SKU: "NVIDIA-H100", Region: "ap-southeast-2", WindowStart: ws, WindowEnd: ws.Add(time.Minute), Source: "ingest:api", RecordedAt: now}
 	if _, _, err := e.sp.AppendIngest(old.Source, []usage.Event{old}); err != nil {
 		t.Fatal(err)
 	}
 	body := fmt.Sprintf(`[{"id":"evt-1","metric":%q,"quantity":1,"sku":"NVIDIA-H100","window_start":%q,"window_end":%q}]`,
-		usage.MetricGPUHours, ws.Format(time.RFC3339), ws.Add(time.Minute).Format(time.RFC3339))
+		pushedMetric, ws.Format(time.RFC3339), ws.Add(time.Minute).Format(time.RFC3339))
 	if code, out := postJSON(t, e.srv.URL+"/api/v1/events", "tok-acme", body); code != http.StatusOK || out["accepted"] != float64(0) || out["duplicates"] != float64(1) {
 		t.Fatalf("retry across the upgrade: %d %v, want a duplicate", code, out)
 	}

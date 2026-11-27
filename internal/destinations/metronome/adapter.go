@@ -82,7 +82,9 @@ type Adapter struct {
 	mu      sync.Mutex
 	metrics map[string]string      // metric code -> billable metric ID vBilling created or adopted (provisioning)
 	aliases map[string]aliasEntry  // customer ID -> its ingest aliases, cached
-	plans   map[string]*tenantPlan // tenant -> rate cards of its customer's contracts (price coverage)
+	plans   map[string]*tenantPlan // tenant -> where its usage is rated, as the last price check read it
+	cards   map[string]string      // provisioning: rate card setting -> the rate card ID it pointed to at the last price check
+	failed  map[string]string      // provisioning: tenant -> why its customer or contract could not be created (a permanent error)
 	known   map[string]bool        // tenants recorded as vBilling ingest aliases
 	warned  map[string]bool        // tenants told that their pinned customer is not used
 
@@ -97,8 +99,8 @@ type aliasEntry struct {
 // New builds the adapter (exported for tests). link may be nil.
 func New(c *Client, cfg *config.Config, state *kv.Store, link *stripe.Adapter) *Adapter {
 	return &Adapter{c: c, cfg: cfg, state: state, stripe: link, now: time.Now, metrics: map[string]string{},
-		aliases: map[string]aliasEntry{}, plans: map[string]*tenantPlan{}, known: map[string]bool{}, warned: map[string]bool{},
-		reservedSeen: map[string]bool{}}
+		aliases: map[string]aliasEntry{}, plans: map[string]*tenantPlan{}, cards: map[string]string{}, failed: map[string]string{},
+		known: map[string]bool{}, warned: map[string]bool{}, reservedSeen: map[string]bool{}}
 }
 
 func (a *Adapter) Name() string { return "metronome" }
@@ -112,6 +114,11 @@ func (a *Adapter) provision() bool { return a.cfg.MetronomeProvision }
 func (a *Adapter) StripeLink() *stripe.Adapter { return a.stripe }
 
 func (a *Adapter) Accepts(metric string) bool { return destinations.BillableOnly(metric) }
+
+// OldestUsage is the oldest usage SendEvents sends to Metronome: it
+// dead-letters anything older (destinations.AgeLimiter), so ingest refuses
+// it first.
+func (a *Adapter) OldestUsage() time.Duration { return maxEventAge }
 
 // GroupKeys is the single compound group key of a metric's billable metric:
 // the metric's pricing dimensions plus tenant_cluster for presentation.
@@ -260,6 +267,39 @@ func (a *Adapter) EnsureTenant(ctx context.Context, t usage.Tenant) error {
 		a.noteTenant(t)
 		return nil
 	}
+	err := a.ensureTenant(ctx, t)
+	a.noteEnsured(t.ID, err)
+	return err
+}
+
+// noteEnsured remembers, for the price check, a tenant whose customer or
+// contract vBilling could not create for good. The dispatcher delivers such
+// a tenant's usage anyway, and nothing rates it: price coverage reports it
+// unpriced until EnsureTenant succeeds. An error that is retried holds up
+// delivery instead, so there is nothing to report.
+func (a *Adapter) noteEnsured(tenant string, err error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	p := a.plans[tenant]
+	switch {
+	case err == nil:
+		delete(a.failed, tenant)
+		// The next price check reads the contract Metronome holds now.
+		if p != nil && p.pending {
+			p.checked = time.Time{}
+		}
+	case destinations.IsPermanent(err):
+		a.failed[tenant] = err.Error()
+		// The check assumed a contract that was not created: the tenant's
+		// next usage is checked again before it is delivered.
+		if p != nil && p.pending {
+			*p = tenantPlan{plan: aliasPlan + tenant, setting: p.setting, pinned: p.pinned, used: p.used, sig: p.sig, state: p.state, movedLog: p.movedLog}
+		}
+	}
+}
+
+// ensureTenant creates what a tenant needs in Metronome (METRONOME_PROVISION).
+func (a *Adapter) ensureTenant(ctx context.Context, t usage.Tenant) error {
 	cusID, err := a.ensureCustomer(ctx, t)
 	if err != nil {
 		return err
@@ -514,11 +554,35 @@ func (a *Adapter) ensureContract(ctx context.Context, t usage.Tenant, cusID, rat
 		if keep, err = a.createContract(ctx, t, cusID, rateCard, contractStart(ctx, today, ours), keys); err != nil {
 			return err
 		}
+	} else {
+		// A contract vBilling created earlier: its state was lost, another
+		// replica created it, or the tenant is back on a rate card whose
+		// contract is still open.
+		log.Printf("[metronome] tenant %s (customer %s) keeps contract %s on rate card %s, which started at %s",
+			t.ID, cusID, keep.ID, rateCardRef(rateCard, keep.RateCardID), keep.StartingAt)
 	}
 	if err := a.endOtherContracts(ctx, t, cusID, ours, *keep, today); err != nil {
 		return err
 	}
 	return a.state.Set("contract-current/"+t.ID, rateCard)
+}
+
+// rateCardRef names, in a log line, the rate card a contract is on: the ID
+// Metronome holds for the contract and, when the rate card was configured as
+// an alias, that alias. Metronome resolves an alias once, when the contract
+// is created, and the contract keeps that rate card wherever the alias
+// points later. id is "" when Metronome's answer did not name the rate card.
+func rateCardRef(setting, id string) string {
+	switch {
+	case id == setting || (id == "" && uuidRe.MatchString(setting)):
+		return setting
+	case id == "":
+		return fmt.Sprintf("alias %q (Metronome did not say which rate card it resolved to)", setting)
+	case uuidRe.MatchString(setting):
+		return fmt.Sprintf("%s (configured as %s)", id, setting)
+	default:
+		return fmt.Sprintf("%s (alias %q)", id, setting)
+	}
 }
 
 // contractStart is when a new contract starts: at UTC midnight of the day the
@@ -581,6 +645,8 @@ func (a *Adapter) createContract(ctx context.Context, t usage.Tenant, cusID, rat
 			}
 			for _, c := range all {
 				if c.UniquenessKey == key && openAt(c, start) {
+					log.Printf("[metronome] tenant %s (customer %s) keeps contract %s on rate card %s, which another attempt created from %s",
+						t.ID, cusID, c.ID, rateCardRef(rateCard, c.RateCardID), start.Format("2006-01-02"))
 					return &c, nil
 				}
 			}
@@ -589,8 +655,23 @@ func (a *Adapter) createContract(ctx context.Context, t usage.Tenant, cusID, rat
 		if err != nil {
 			return nil, fmt.Errorf("create contract for %s on %s: %w", t.ID, rateCard, err)
 		}
-		log.Printf("[metronome] contract %s for tenant %s on rate card %s from %s", id, t.ID, rateCard, start.Format("2006-01-02"))
-		return &Contract{ID: id, UniquenessKey: key, StartingAt: rfc3339(start)}, nil
+		c := &Contract{ID: id, UniquenessKey: key, StartingAt: rfc3339(start), RateCardID: req.RateCardID}
+		if c.RateCardID == "" {
+			// Metronome answers with the contract's ID only. Read the contract
+			// back for the rate card the alias resolved to, so the log says
+			// which rate card the tenant is on. A failed read changes nothing:
+			// the price check reads the contract again.
+			if all, lerr := a.c.ListContracts(ctx, cusID); lerr == nil {
+				for _, x := range all {
+					if x.ID == id {
+						c.RateCardID = x.RateCardID
+					}
+				}
+			}
+		}
+		log.Printf("[metronome] contract %s for tenant %s (customer %s) on rate card %s from %s",
+			id, t.ID, cusID, rateCardRef(rateCard, c.RateCardID), start.Format("2006-01-02"))
+		return c, nil
 	}
 	return nil, destinations.Permanent(fmt.Errorf("no free contract key for %s on %s today", t.ID, rateCard))
 }
@@ -609,15 +690,24 @@ func (a *Adapter) endOtherContracts(ctx context.Context, t usage.Tenant, cusID s
 			continue
 		}
 		start := parseTime(c.StartingAt)
+		archive := !start.Before(at)
 		var err error
-		if start.Before(at) {
-			err = a.c.EndContract(ctx, cusID, c.ID, at)
-		} else {
+		if archive {
 			err = a.c.ArchiveContract(ctx, cusID, c.ID)
+		} else {
+			err = a.c.EndContract(ctx, cusID, c.ID, at)
+		}
+		on := ""
+		if c.RateCardID != "" {
+			on = ", on rate card " + c.RateCardID
 		}
 		switch {
+		case err == nil && archive:
+			// Archived, not ended: the log says what Metronome holds.
+			log.Printf("[metronome] contract %s of tenant %s (customer %s%s) archived: it started at %s, and contract %s takes over from %s, so it rates no usage",
+				c.ID, t.ID, cusID, on, rfc3339(start), keep.ID, rfc3339(at))
 		case err == nil:
-			log.Printf("[metronome] contract %s of tenant %s ended at %s, where contract %s takes over", c.ID, t.ID, rfc3339(at), keep.ID)
+			log.Printf("[metronome] contract %s of tenant %s (customer %s%s) ended at %s, where contract %s takes over", c.ID, t.ID, cusID, on, rfc3339(at), keep.ID)
 			if from := laterOf(start, parseTime(keep.StartingAt)); from.Before(at) {
 				log.Printf("[metronome] WARNING: contracts %s and %s of tenant %s both ran from %s to %s: check their invoices for that period",
 					c.ID, keep.ID, t.ID, rfc3339(from), rfc3339(at))

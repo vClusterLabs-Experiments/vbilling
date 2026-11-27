@@ -18,8 +18,10 @@ import (
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/yaml"
 
+	"github.com/vclusterlabs-experiments/vbilling/internal/pause"
 	"github.com/vclusterlabs-experiments/vbilling/internal/safehttp"
 	"github.com/vclusterlabs-experiments/vbilling/internal/usage"
+	"github.com/vclusterlabs-experiments/vbilling/internal/version"
 )
 
 // promTransport sends one Prometheus HTTP API request and returns the body.
@@ -51,6 +53,7 @@ func (h *httpTransport) get(ctx context.Context, path string, params url.Values)
 	if err != nil {
 		return nil, 0, err
 	}
+	req.Header.Set("User-Agent", version.UserAgent()) // PROMETHEUS_HEADERS may replace it
 	for k, v := range h.headers {
 		req.Header.Set(k, v)
 	}
@@ -519,6 +522,37 @@ type queryVars struct {
 	// attribution before counter samples can become usage.
 	seriesOwner func(map[string]string) (bool, error)
 	foreignPods bool
+	// seriesKeep narrows the series of a counter read to those that are
+	// usage (podInterfaces for the built-in egress counter).
+	seriesKeep func([]promSeries) []promSeries
+	// excluded are the times nothing of the cluster is billed
+	// (Target.Excluded).
+	excluded []pause.Span
+}
+
+// billedShare is the part of a window that is not excluded from metering,
+// from 0 to 1.
+func (v queryVars) billedShare(w Window) float64 {
+	if len(v.excluded) == 0 {
+		return 1
+	}
+	size := w.End.Sub(w.Start)
+	if size <= 0 {
+		return 0
+	}
+	out := pause.Overlap(v.excluded, time.Time{}, time.Time{}, w.Start, w.End)
+	return max(0, 1-float64(out)/float64(size))
+}
+
+// excludedBetween reports whether any time after from, up to to, was
+// excluded from metering.
+func (v queryVars) excludedBetween(from, to time.Time) bool {
+	for _, sp := range v.excluded {
+		if sp.From.Before(to) && (sp.To.IsZero() || sp.To.After(from)) {
+			return true
+		}
+	}
+	return false
 }
 
 func varsFor(t Target, window time.Duration) queryVars {
@@ -555,11 +589,101 @@ func expand(tmpl string, v queryVars) string {
 	).Replace(tmpl)
 }
 
-// Egress counts transmitted bytes of the cluster's pods. By default it is a
-// counter, so each window bills the exact byte delta between samples. Set
-// EGRESS_QUERY to count only internet-bound traffic (for example from
-// Cilium/Hubble or your fabric's flow metrics); a query is an estimate.
+// Egress counts the bytes the cluster's pods transmit on their own network
+// interfaces, to any destination (traffic to other pods included). By
+// default it is a counter, so each window bills the exact byte delta
+// between samples. Set EGRESS_QUERY to count only internet-bound traffic
+// (for example from Cilium/Hubble or your fabric's flow metrics); a query
+// is an estimate.
 const defaultEgressCounter = `container_network_transmit_bytes_total{{selector}}`
+
+// seriesPodLabels are the labels that name a series' pod, as cAdvisor, older
+// kubelets and OpenTelemetry collectors write them.
+var seriesPodLabels = []string{"pod", "pod_name", "k8s_pod_name", "kubernetes_pod_name"}
+
+// podInterfaces keeps the series of the egress counter that are a pod's
+// own interface. cAdvisor also reports the node's interfaces: once for the
+// node itself (no pod label) and once more for every pod on the host
+// network (kube-proxy, a CNI agent, a load balancer speaker), which share
+// them. Those count every pod's traffic that leaves the node a second
+// time, and the node's own traffic, once per such pod: on an idle
+// single-node cluster with three host-network pods they were 90% of what
+// was billed. So a series is dropped when
+//
+//   - it names no pod (the node's own counters), or
+//   - it is the node's interface seen through a pod on the host network:
+//     its samples equal those of the node's series for that interface, or,
+//     where the node's own series are not stored, its pod reports several
+//     interfaces and another pod reports one of them with the same samples.
+//
+// A pod's own interface is never seen by anything else, so pods that
+// happen to send the same bytes at the same times are kept unless they
+// also look like host-network pods. A Prometheus whose series name no pod
+// at all (the labels were dropped or renamed) is left as it is: nothing
+// tells its series apart.
+func podInterfaces(series []promSeries) []promSeries {
+	podOf := func(labels map[string]string) string {
+		if p := firstLabel(labels, seriesPodLabels...); p != "" {
+			return labels["namespace"] + "/" + p
+		}
+		return ""
+	}
+	// Series with the same interface and the same samples are one counter.
+	// Constant series are not compared: an idle interface bills nothing
+	// either way.
+	sig := func(s promSeries) string {
+		if len(s.Samples) < 2 || s.Samples[0].V == s.Samples[len(s.Samples)-1].V {
+			return ""
+		}
+		var b strings.Builder
+		b.WriteString(s.Labels["interface"])
+		for _, smp := range s.Samples {
+			b.WriteByte('|')
+			b.WriteString(strconv.FormatInt(smp.T.UnixMilli(), 10))
+			b.WriteByte('=')
+			b.WriteString(strconv.FormatFloat(smp.V, 'g', -1, 64))
+		}
+		return b.String()
+	}
+	named := false
+	sigs := make([]string, len(series))
+	ofNode := map[string]bool{}          // samples of the node's own series
+	pods := map[string]map[string]bool{} // samples -> the pods reporting them
+	interfaces := map[string]int{}       // pod -> its interfaces
+	for i, s := range series {
+		pod := podOf(s.Labels)
+		sigs[i] = sig(s)
+		if pod == "" {
+			if sigs[i] != "" {
+				ofNode[sigs[i]] = true
+			}
+			continue
+		}
+		named = true
+		interfaces[pod]++
+		if sigs[i] != "" {
+			if pods[sigs[i]] == nil {
+				pods[sigs[i]] = map[string]bool{}
+			}
+			pods[sigs[i]][pod] = true
+		}
+	}
+	if !named {
+		return series
+	}
+	kept := series[:0:0]
+	for i, s := range series {
+		pod := podOf(s.Labels)
+		if pod == "" {
+			continue
+		}
+		if g := sigs[i]; g != "" && (ofNode[g] || (interfaces[pod] > 1 && len(pods[g]) > 1)) {
+			continue
+		}
+		kept = append(kept, s)
+	}
+	return kept
+}
 
 // GPU utilization comes from the DCGM exporter, which labels each GPU with
 // the workload's namespace. Prometheus keeps that label as `namespace` when

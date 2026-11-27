@@ -99,7 +99,7 @@ func TestReview4TenantTokenFillsTheSKUCapOfTheOperatorsBoundGateway(t *testing.T
 func TestReview4EveryValueAnEventStoresIsChecked(t *testing.T) {
 	e := setup(t, func(c *config.Config) { c.IngestTokens = map[string]string{"tok-acme": "acme"} })
 	ws := now.Add(-5 * time.Minute)
-	ev := map[string]any{"id": "x\x07<b>" + strings.Repeat("i", 4096), "metric": usage.MetricGPUHours, "quantity": 0.5,
+	ev := map[string]any{"id": "x\x07<b>" + strings.Repeat("i", 4096), "metric": pushedMetric, "quantity": 0.5,
 		"unit":         "<img src=x onerror=alert(1)>\x07" + strings.Repeat("u", 4096),
 		"properties":   map[string]any{"sku": "free-tier", "note": "=HYPERLINK(\"https://example.invalid\")<script>"},
 		"window_start": ws, "window_end": ws.Add(time.Minute)}

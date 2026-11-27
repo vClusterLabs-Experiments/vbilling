@@ -35,8 +35,49 @@ A gateway that serves one tenant uses that tenant's token from api.tenantIngestT
 
 Keep the dashboard and the API on an operator network, and never hand the API token to a tenant.
 See https://vclusterlabs-experiments.github.io/vbilling/security.html
+{{- if .Values.configCheck.enabled }}
+
+Before every install and upgrade, a Job checks the new configuration the way vBilling
+does at start-up. An upgrade that fails on it changed nothing, and vBilling keeps metering:
+
+  kubectl -n {{ .Release.Namespace }} logs job/{{ include "vbilling.configCheckName" . }}
+{{- else }}
+
+WARNING: the configuration check is off (configCheck.enabled). vBilling is one pod: a value
+it refuses at start-up stops all metering until the release is rolled back.
+{{- end }}
+{{- $dataClass := .Values.persistence.storageClass | default "" }}
+{{- $archive := .Values.persistence.archive }}
 {{- if not .Values.persistence.enabled }}
 
 WARNING: persistence is disabled. The ledger is the durable outbox for usage that
 has not reached your billing platform yet; without a volume it is lost on restart.
+{{- else if not $archive.enabled }}
+
+WARNING: there is no archive volume (persistence.archive.enabled). The data volume holds
+the only copy of the usage ledger: losing that volume, or its node when the storage is
+node-local, loses the ledger, and segments older than 7 days are deleted without a copy
+for invoice disputes. Enable the archive on storage that does not fail together with the
+data volume (another storage class or failure domain): it then also holds the ledger mirror,
+a live copy from which vBilling restores itself. A bucket through a CSI driver holds the
+archive, but no mirror.
+{{- else if and (not $archive.existingClaim) (eq $dataClass ($archive.storageClass | default "")) }}
+
+WARNING: the data volume and the archive volume use the same storage class ({{ $dataClass | default "the cluster's default" }}).
+If that class is node-local, or all of it sits in one failure domain, one failure takes the
+ledger and its archive together. Give the archive another class (persistence.archive.storageClass)
+or a claim on other storage (persistence.archive.existingClaim).
+{{- end }}
+{{- if and .Values.persistence.enabled $archive.enabled (eq (include "vbilling.ledgerMirror" .) "off") }}
+
+WARNING: the ledger mirror is off (persistence.archive.mirror). The archive holds segments
+older than 7 days only: losing the data volume loses every newer record that has not
+reached your billing platform, and vBilling cannot restore itself.
+{{- end }}
+{{- if not (or .Values.nodeSelector .Values.affinity) }}
+
+NOTE: nothing says where vBilling runs (nodeSelector, affinity), so it can be scheduled on a
+GPU node that tenants fill and operators drain. Keep it on the nodes of the control plane
+cluster's own services, on storage that can follow the pod (persistence.storageClass):
+see deploy/helm/production-values.yaml.
 {{- end }}
