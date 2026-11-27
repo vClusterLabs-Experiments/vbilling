@@ -171,6 +171,15 @@ func (c *Client) CreateCustomer(ctx context.Context, req CreateCustomerRequest) 
 	return &resp.Data, nil
 }
 
+// SetCustomerName renames a customer (POST /v1/customers/{id}/setName).
+// Metronome truncates a name longer than 160 characters.
+func (c *Client) SetCustomerName(ctx context.Context, id, name string) error {
+	req := struct {
+		Name string `json:"name"`
+	}{Name: name}
+	return c.do(ctx, http.MethodPost, "/v1/customers/"+url.PathEscape(id)+"/setName", nil, req, nil)
+}
+
 // FindCustomerByAlias returns the active customer that holds an ingest
 // alias, nil if none does.
 func (c *Client) FindCustomerByAlias(ctx context.Context, alias string) (*Customer, error) {

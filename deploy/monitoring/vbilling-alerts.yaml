@@ -39,7 +39,7 @@ spec:
               Prometheus has had no vbilling_last_window_end_timestamp_seconds for 5 minutes: vBilling is not running,
               is waiting for its Lease, has not committed a window since it started, or cannot be scraped (/metrics
               needs the API token). A configuration vBilling refuses at start-up shows up here. Check the pod and its
-              log. Windows up to 6 hours old are metered once vBilling runs again; usage that gateways push in the
+              log. Windows up to 24 hours old are metered once vBilling runs again; usage that gateways push in the
               meantime is only kept if they retry.
         - alert: VBillingLastWindowStale
           expr: time() - vbilling_last_window_end_timestamp_seconds > 300
@@ -52,7 +52,7 @@ spec:
               vBilling runs but the last committed window ended more than 5 minutes ago (it is normally under 3
               minutes old). Check vbilling_collection_held (a window waiting for node heartbeats),
               vbilling_collection_failures_total and vbilling_discovery_failures_total, the pod log for
-              "[controller]" lines, and GET /api/v1/status. Windows up to 6 hours old are metered once collection
+              "[controller]" lines, and GET /api/v1/status. Windows up to 24 hours old are metered once collection
               works again; older ones are lost.
         # Only with Prometheus configured: without it the gauge is not there
         # (or zero), and the rule stays silent.

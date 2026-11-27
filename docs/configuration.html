@@ -534,7 +534,7 @@
             </tr>
             <tr>
               <td><code>MAX_BACKFILL</code></td>
-              <td>Fixed at 6h.</td>
+              <td>Fixed at 24h.</td>
             </tr>
             <tr>
               <td><code>METRONOME_STRIPE_COLLECTION_METHOD</code></td>
@@ -972,14 +972,14 @@ The configuration is valid: 6 check(s) passed, 0 warning(s).</span></code></div>
 [mirror] restored /var/lib/vbilling as it was at 2026-11-26T10:05:00Z, 3m12s ago (the mirror's last complete pass), with 23 state file(s). ...</span></code></div>
       <p>What happens next:</p>
       <ul>
-        <li><strong>Metering.</strong> Every window since the restored watermarks is metered again from the lifetimes of the objects vBilling finds, up to 6 hours back, and marked <code>backfilled</code>. Prometheus counters continue from the restored baselines: the increase since the recovery point is billed once.</li>
+        <li><strong>Metering.</strong> Every window since the restored watermarks is metered again from the lifetimes of the objects vBilling finds, up to 24 hours back, and marked <code>backfilled</code>. Prometheus counters continue from the restored baselines: the increase since the recovery point is billed once.</li>
         <li><strong>Delivery.</strong> Each destination is sent everything after its restored cursor. What a billing platform already received in the mirror's last seconds is sent again under the same event ID and deduplicated there. A paused destination stays paused, and one that waits for a start decision still waits.</li>
         <li><strong>State.</strong> Held events, dead letters, pause spans and billing states are as of the recovery point. A paused tenant stays paused and unbilled from its recorded second.</li>
         <li><strong>Not restored.</strong> Usage pushed to vBilling after the recovery point (the ingest API, per-request records), normally a second or two of it. Senders that retry, and request logs that vBilling pulls, fill it in: a retried push is counted once, whether or not its first copy was restored.</li>
       </ul>
       <div class="callout callout-warn">
         <div class="callout-icon">!</div>
-        <div>Restore soon. The restore log says how old the recovery point is and warns above a day: windows older than 6 hours are not metered again, and a billing platform that deduplicates by event ID for a day (Stripe) no longer recognizes what was being delivered when the copy was made. Compare <code>GET /api/v1/reconcile</code> with the billing platform for those hours. If the restore itself fails, vBilling stops instead of starting as a new install next to the copy of a ledger it lost; the log line names what to fix.</div>
+        <div>Restore soon. The restore log says how old the recovery point is and warns above a day: windows older than 24 hours are not metered again, and a billing platform that deduplicates by event ID for a day (Stripe) no longer recognizes what was being delivered when the copy was made. Compare <code>GET /api/v1/reconcile</code> with the billing platform for those hours. If the restore itself fails, vBilling stops instead of starting as a new install next to the copy of a ledger it lost; the log line names what to fix.</div>
       </div>
       <p>vBilling restores only a mirror it keeps. With <code>LEDGER_MIRROR=off</code>, or on a bucket in <code>auto</code>, a copy from earlier is named in the log and left alone, because nothing says how old it is. To start as a new install on purpose, empty the data directory and remove the mirror directory.</p>
 

@@ -209,7 +209,7 @@ type Config struct {
 // has one right value, so a setting only added a way to get billing wrong.
 const (
 	windowSize          = 60 * time.Second
-	maxBackfill         = 6 * time.Hour
+	maxBackfill         = 24 * time.Hour
 	offboardGrace       = time.Hour
 	reconcileInterval   = 30 * time.Second
 	ledgerRetention     = 7 * 24 * time.Hour // live segments; the archive keeps compressed copies
@@ -234,7 +234,7 @@ var RemovedSettings = map[string]string{
 	"ADAPTER":                            "use ADAPTERS",
 	"COLLECTION_INTERVAL":                "windows are always 60s",
 	"RECONCILE_INTERVAL":                 "fixed at 30s",
-	"MAX_BACKFILL":                       "fixed at 6h",
+	"MAX_BACKFILL":                       "fixed at 24h",
 	"OFFBOARD_GRACE":                     "fixed at 1h",
 	"RETENTION":                          "live segments are kept 7 days; ARCHIVE_DIR keeps compressed copies",
 	"ZONE":                               "the zone comes from each node's topology.kubernetes.io/zone label",

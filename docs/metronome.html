@@ -79,12 +79,12 @@
         <table class="config-table">
           <thead><tr><th></th><th>Default</th><th><code>METRONOME_PROVISION=true</code></th></tr></thead>
           <tbody>
-            <tr><td>Customers</td><td>Your portal creates them, with the tenant ID as one of their ingest aliases. vBilling never creates or changes one.</td><td>One per tenant, with the tenant ID as ingest alias. A customer that already holds the alias is adopted, never duplicated.</td></tr>
+            <tr><td>Customers</td><td>Your portal creates them, with the tenant ID as one of their ingest aliases. vBilling never creates or changes one.</td><td>One per tenant, with the tenant ID as ingest alias, named after the tenant's display name. When that name changes, vBilling renames the customer before the tenant's next usage, so invoices show the current name. A customer that already holds the alias is adopted, never duplicated, and keeps its own name, as do customers vBilling created before v0.3.3.</td></tr>
             <tr><td>Billable metrics</td><td>Finance adds them from <a href="#billable-metrics"><code>vbilling metronome billable-metrics</code></a>, before vBilling sends usage. vBilling finds them by event type, and holds the usage of a metric until one counts it.</td><td>Created at startup, matched by ID or name.</td></tr>
             <tr><td>Contracts</td><td>Your portal's, with your commits and credits. vBilling reads their rate cards for price coverage.</td><td>One per tenant, on <code>METRONOME_RATE_CARD</code> or the tenant's plan.</td></tr>
             <tr><td>Stripe link</td><td>Your portal's.</td><td>Created when a Stripe key is set.</td></tr>
             <tr><td><code>customer_id</code> on usage</td><td>The tenant ID, as ingest alias.</td><td>The customer ID vBilling created, found or was pinned to.</td></tr>
-            <tr><td>What vBilling writes</td><td>Usage events only.</td><td>Usage events, customers, billable metrics, contracts and Stripe links.</td></tr>
+            <tr><td>What vBilling writes</td><td>Usage events only.</td><td>Usage events, customers (and the names of those it created), billable metrics, contracts and Stripe links.</td></tr>
           </tbody>
         </table>
       </div>
@@ -107,6 +107,20 @@
       <h2 id="install">Install</h2>
       <p>Add the billable metrics to Metronome first. Metronome counts usage toward a billable metric only once the metric exists, so print the definitions vBilling's events need with the vBilling image, before you install it (pass the settings that declare custom metrics, such as <code>CUSTOM_METRICS</code>, as you will set them for vBilling), and add them to your Metronome configuration with a usage product and a rate for each one you sell (<a href="#billable-metrics">Billable metrics as configuration</a>):</p>
       <div class="code-block"><code><span class="cmd">docker</span> run <span class="flag">--rm</span> ghcr.io/vclusterlabs-experiments/vbilling:v0.3.3 metronome billable-metrics &gt; billable-metrics.json</code></div>
+      <p id="default-setup">In the default mode vBilling creates nothing, so this is what your Metronome configuration and portal create, and what happens to usage while a piece is missing:</p>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead><tr><th>Create</th><th>Exactly</th><th>While it is missing</th></tr></thead>
+          <tbody>
+            <tr><td>A billable metric per metric</td><td>As <code>vbilling metronome billable-metrics</code> prints it: SUM of <code>value</code>, event type filter on the metric code, property filters that require <code>value</code> and every group key, and a compound group key that includes <code>tenant_cluster</code>.</td><td>Held for every tenant, in every <code>PRICE_CHECK</code> mode but <code>off</code> (<a href="#uncounted">see below</a>).</td></tr>
+            <tr><td>A usage product per billable metric you sell</td><td>Its pricing group key and presentation group key together form a compound group key of the billable metric (<a href="#pricing">Pricing on dimensions</a>).</td><td>Unpriced.</td></tr>
+            <tr><td>A rate card</td><td>An entitled rate for each product and pricing group value you sell; a rate of 0 for what is included.</td><td>Unpriced.</td></tr>
+            <tr><td>A customer per tenant</td><td>With the tenant ID among its ingest aliases (<a href="#tenant-id">The tenant ID is the compute alias</a>). An alias belongs to one customer, archived customers included.</td><td>Unpriced: Metronome stores the usage under the alias and bills it to no one.</td></tr>
+            <tr><td>A contract per customer</td><td>On that rate card, starting no later than the first usage it should rate.</td><td>Unpriced.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Unpriced usage is held with <code>PRICE_CHECK=hold</code> and delivered and counted with <code>warn</code>; either way <code>GET /api/v1/pricing</code> names the missing piece (<a href="#price-coverage">Price coverage</a>). With <code>METRONOME_PROVISION=true</code> vBilling creates the billable metrics, the customers and the contracts; the usage products and the rate card stay yours.</p>
       <p>Then install vBilling. You need a Metronome API token. Keep it in a Secret; values passed with <code>--set</code> are stored in the Helm release. The webhook secret for the billing-state loop does not exist yet: it belongs to a webhook that can only point at vBilling once vBilling is installed and reachable, so it is added to the same Secret afterwards (<a href="#webhooks">Webhooks and billing state</a>). Until then vBilling meters and delivers as usual and answers <code>/webhooks/metronome</code> with a 404.</p>
       <div class="code-block"><code><span class="cmd">kubectl</span> create namespace vbilling-system
 <span class="cmd">kubectl</span> <span class="flag">-n</span> vbilling-system create secret generic vbilling-metronome \

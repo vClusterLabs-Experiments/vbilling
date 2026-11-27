@@ -15,8 +15,8 @@ import (
 // sameWindowSpan is how far behind the newest window of the scan a window
 // still holds the IDs of its events from windowed sources (see usageScan).
 // A second copy of such an event has the same window and is committed
-// within MAX_BACKFILL (6h) of the first.
-const sameWindowSpan = 8 * time.Hour
+// within MAX_BACKFILL (24h) of the first; two hours more for margin.
+const sameWindowSpan = 26 * time.Hour
 
 // usageScan finds the event IDs a usage scan has seen already, in memory
 // that does not grow with the range:

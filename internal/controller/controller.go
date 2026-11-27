@@ -77,6 +77,9 @@ type Controller struct {
 	promRetry time.Time
 	// promWaiting is when a waiting Prometheus window was last logged.
 	promWaiting time.Time
+	// batch is the most windows one metering run reads (backfillBatch;
+	// tests make it smaller).
+	batch int
 	// liveSince is when this controller started metering (Run). A window
 	// that ended before it was not watched as it happened: it is metered
 	// from what the API still shows, like any backfilled window.
@@ -349,7 +352,23 @@ func New(cfg *config.Config, disc Discoverer, coll Collector, sp *spool.Spool, t
 		}
 	}
 	return &Controller{cfg: cfg, disc: disc, coll: coll, spool: sp, tenants: tenants, dests: dests, tel: tel,
-		now: time.Now, lastSeen: map[string]time.Time{}, offboarded: map[string]map[string]bool{}, gaps: gaps, bound: bound}
+		now: time.Now, lastSeen: map[string]time.Time{}, offboarded: map[string]map[string]bool{}, gaps: gaps, bound: bound,
+		batch: backfillBatch}
+}
+
+// backfillBatch is the most windows one metering run reads. After a long
+// outage the missed windows are metered in runs of this many, oldest
+// first, one right after another: a run never holds more in memory than
+// six hours of windows, however long the backfill.
+const backfillBatch = 360
+
+// firstBatch keeps the oldest c.batch windows. more says windows are left
+// for the next run.
+func (c *Controller) firstBatch(windows []metrics.Window) (batch []metrics.Window, more bool) {
+	if c.batch > 0 && len(windows) > c.batch {
+		return windows[:c.batch], true
+	}
+	return windows, false
 }
 
 // Run reconciles tenants every ReconcileInterval and closes a metering
@@ -699,7 +718,7 @@ func (c *Controller) CollectDue(ctx context.Context) {
 			start = earliest
 		}
 	}
-	windows := windowsBetween(start, latestEnd, size, latestEnd)
+	windows, more := c.firstBatch(windowsBetween(start, latestEnd, size, latestEnd))
 	if n := len(windows); n > 0 && !c.live(latestEnd) {
 		// The newest window closed before this controller started: nothing
 		// watched it, so it is metered like the windows before it.
@@ -764,10 +783,19 @@ func (c *Controller) CollectDue(ctx context.Context) {
 		log.Printf("[controller] backfilled %d window(s) after a gap", backfilled)
 		c.tel.Add("vbilling_backfilled_windows_total", "Windows metered after a gap (restart or outage).", nil, float64(backfilled))
 	}
+	lastEnd := windows[len(windows)-1].End
+	if more {
+		// The rest of a long backfill is metered in the next run, a second
+		// from now.
+		c.mu.Lock()
+		c.collectionRetry = c.now().Add(time.Second)
+		c.mu.Unlock()
+		log.Printf("[controller] backfill continues: windows from %s to %s are metered next", lastEnd.Format(time.RFC3339), latestEnd.Format(time.RFC3339))
+	}
 	log.Printf("[controller] window %s: %d events for %d tenant cluster(s) (%d pods, %d GPU pods, %d nodes down)",
-		latestEnd.Format("15:04:05"), total, len(targets), st.Pods, st.GPUPods, st.NodesDown)
+		lastEnd.Format("15:04:05"), total, len(targets), st.Pods, st.GPUPods, st.NodesDown)
 	c.tel.Add("vbilling_events_metered_total", "Usage events written to the ledger by the collector.", nil, float64(total))
-	c.tel.Set("vbilling_last_window_end_timestamp_seconds", "End of the last committed metering window.", nil, float64(latestEnd.Unix()))
+	c.tel.Set("vbilling_last_window_end_timestamp_seconds", "End of the last committed metering window.", nil, float64(lastEnd.Unix()))
 	c.tel.Set("vbilling_collection_duration_seconds", "Duration of the last metering run.", nil, time.Since(started).Seconds())
 	c.tel.Set("vbilling_nodes_down", "Nodes excluded from billing as not ready or unhealthy.", nil, float64(st.NodesDown))
 	c.tel.Set("vbilling_pods_without_requests", "Running pods on shared nodes that request no CPU or memory, so CPU_MEMORY_BASIS=requests bills them nothing.", nil, float64(st.Unrequested))
@@ -1152,7 +1180,7 @@ func (c *Controller) CollectPrometheusDue(ctx context.Context) {
 			start = earliest
 		}
 	}
-	windows := windowsBetween(start, latestEnd, size, latestEnd)
+	windows, more := c.firstBatch(windowsBetween(start, latestEnd, size, latestEnd))
 	targets := c.targets()
 	now := c.now().UTC()
 	// The newest window is read once its samples have reached Prometheus
@@ -1161,7 +1189,7 @@ func (c *Controller) CollectPrometheusDue(ctx context.Context) {
 	c.mu.Lock()
 	c.promRetry = time.Time{}
 	c.mu.Unlock()
-	if s, ok := c.prom.(promSettler); ok && now.Before(latestEnd.Add(metrics.PromMaxWait)) {
+	if s, ok := c.prom.(promSettler); ok && !more && now.Before(latestEnd.Add(metrics.PromMaxWait)) {
 		// Only the clusters this window is read for are waited for.
 		read, _ := meteredIn(targets, windows[len(windows)-1])
 		if settled, waiting := s.Settled(ctx, read, latestEnd); !settled {
@@ -1226,6 +1254,13 @@ func (c *Controller) CollectPrometheusDue(ctx context.Context) {
 		"Counter samples that reached Prometheus too late for their own window and were billed in a later one.", nil, float64(late))
 	c.tel.Set("vbilling_prometheus_last_window_end_timestamp_seconds", "End of the last committed Prometheus window.", nil,
 		float64(windows[len(windows)-1].End.Unix()))
+	if more {
+		// The rest of a long backfill is read in the next run, a second
+		// from now (a failed read above waits for the next window instead).
+		c.mu.Lock()
+		c.promRetry = c.now().Add(time.Second)
+		c.mu.Unlock()
+	}
 	c.forgetDeparted()
 }
 

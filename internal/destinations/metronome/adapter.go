@@ -368,6 +368,7 @@ func (a *Adapter) ensureCustomer(ctx context.Context, t usage.Tenant) (string, e
 		return id, nil
 	}
 	if id, ok := a.state.Get("cus/" + t.ID); ok {
+		a.keepName(ctx, t, id)
 		return id, nil
 	}
 	if cus, err := a.c.FindCustomerByAlias(ctx, t.ID); err != nil {
@@ -377,10 +378,7 @@ func (a *Adapter) ensureCustomer(ctx context.Context, t usage.Tenant) (string, e
 		return cus.ID, nil
 	}
 
-	req := CreateCustomerRequest{Name: t.DisplayName, IngestAliases: []string{t.ID}}
-	if req.Name == "" {
-		req.Name = t.ID
-	}
+	req := CreateCustomerRequest{Name: customerName(t), IngestAliases: []string{t.ID}}
 	var stripeID string
 	if a.stripe != nil {
 		id, err := a.stripe.EnsureCustomer(ctx, t)
@@ -415,10 +413,48 @@ func (a *Adapter) ensureCustomer(ctx context.Context, t usage.Tenant) (string, e
 	}
 	log.Printf("[metronome] created customer %s for tenant %s", cus.ID, t.ID)
 	a.remember(t.ID, cus.ID)
+	// vBilling created this customer, so it keeps its name in step with the
+	// tenant's display name (keepName).
+	_ = a.state.Set("named/"+cus.ID, req.Name)
 	if stripeID != "" {
 		_ = a.state.Set("link/"+cus.ID, stripeID)
 	}
 	return cus.ID, nil
+}
+
+// customerName is the name vBilling gives a tenant's customer: its display
+// name, or its ID when it has none.
+func customerName(t usage.Tenant) string {
+	if t.DisplayName != "" {
+		return t.DisplayName
+	}
+	return t.ID
+}
+
+// keepName gives a customer vBilling created the tenant's display name
+// after the tenant was renamed, so invoices show the current name. Only
+// customers vBilling created are renamed (state key named/<customer>,
+// written at creation since v0.3.3): a customer vBilling found by its alias
+// or was given (vbilling.vcluster.com/metronome-customer-id) belongs to
+// whoever made it and keeps its name. A rename never holds up usage: a
+// failed one is logged and tried again the next time the tenant is set up
+// (when it changes again, or after a restart).
+func (a *Adapter) keepName(ctx context.Context, t usage.Tenant, cusID string) {
+	set, ok := a.state.Get("named/" + cusID)
+	if !ok {
+		return
+	}
+	want := customerName(t)
+	if set == want {
+		return
+	}
+	if err := a.c.SetCustomerName(ctx, cusID, want); err != nil {
+		log.Printf("[metronome] WARNING: could not rename customer %s of tenant %s from %q to %q: %v; tried again the next time the tenant is set up",
+			cusID, t.ID, set, want, err)
+		return
+	}
+	_ = a.state.Set("named/"+cusID, want)
+	log.Printf("[metronome] customer %s of tenant %s renamed from %q to %q", cusID, t.ID, set, want)
 }
 
 func (a *Adapter) remember(tenant, cus string) {

@@ -184,7 +184,7 @@ experimental:
 
 vCluster exports kubeconfigs for `localhost`; vBilling connects to the cluster's Service instead and verifies TLS against `<name>.<namespace>`. vBilling never uses a cluster's admin kubeconfig, and with `TENANT_SOURCE=platform` it reaches clusters only through the vCluster Platform proxy.
 
-**Outages.** If a cluster's API cannot be read, the rest of the fleet is still metered, and the missed windows are filled as soon as it answers (up to 6 hours back). Fills are late ledger events deduplicated by ID, so a repeated fill never bills twice.
+**Outages.** If a cluster's API cannot be read, the rest of the fleet is still metered, and the missed windows are filled as soon as it answers (up to 24 hours back). Fills are late ledger events deduplicated by ID, so a repeated fill never bills twice.
 
 ## Billing adapters
 
@@ -279,7 +279,7 @@ On nodes, `vbilling.vcluster.com/capacity-type` (`on-demand`, `spot`, `preemptib
 
 | Guarantee | How |
 |---|---|
-| No usage lost on restart, upgrade or billing platform outage | Windows are committed to an fsynced, append-only ledger on a PVC before delivery. Each destination has a persisted cursor. On restart, missed windows (up to 6 hours back) are backfilled from object lifetimes. |
+| No usage lost on restart, upgrade or billing platform outage | Windows are committed to an fsynced, append-only ledger on a PVC before delivery. Each destination has a persisted cursor. On restart, missed windows (up to 24 hours back) are backfilled from the lifetimes of the objects that still exist; an object deleted while vBilling was down is not in them. |
 | No duplicates | Event IDs are a hash of the event's identity (tenant, metric, window, dimensions), never of its quantity. Stripe dedupes on `identifier`, Metronome on `transaction_id` (34 days), Lago on `transaction_id`. A window can never be committed twice. |
 | Half-written windows never escape | A window is a single write plus fsync ending in a commit record. A torn or uncommitted tail is truncated on startup and collected again. |
 | Tamper evidence | Every ledger record is SHA-256 chained to the previous one. `GET /api/v1/ledger/verify` re-hashes the whole retained ledger. |

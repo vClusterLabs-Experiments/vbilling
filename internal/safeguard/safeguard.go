@@ -101,9 +101,9 @@ const tolerance = 1e-6
 const readLimit = 200_000
 
 // checkWithin is how far back from the newest window a pass checks: past
-// MAX_BACKFILL (6h), the reach of Kubernetes and Prometheus backfill and of
+// MAX_BACKFILL (24h), the reach of Kubernetes and Prometheus backfill and of
 // tenant API fills.
-const checkWithin = 24 * time.Hour
+const checkWithin = 26 * time.Hour
 
 // Finding is one violation in one window.
 type Finding struct {
@@ -218,7 +218,7 @@ func (c *Checker) Once() []Finding {
 		c.report(w.end, findings, checked)
 		all = append(all, findings...)
 	}
-	c.prune(to.Add(-7 * time.Hour))
+	c.prune(to.Add(-checkWithin - time.Hour))
 	return all
 }
 

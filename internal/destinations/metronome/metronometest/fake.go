@@ -591,6 +591,9 @@ func endpointOf(r *http.Request) string {
 	if strings.HasPrefix(p, "/v1/customers/") && strings.Count(p, "/") == 3 {
 		p = "/v1/customers/{id}"
 	}
+	if strings.HasPrefix(p, "/v1/customers/") && strings.HasSuffix(p, "/setName") && strings.Count(p, "/") == 4 {
+		p = "/v1/customers/{id}/setName"
+	}
 	return r.Method + " " + p
 }
 
@@ -623,6 +626,8 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.reply(w, http.StatusOK, map[string]any{"data": s.customerJSON(c)})
 	case "POST /v1/customers":
 		s.createCustomer(w, body)
+	case "POST /v1/customers/{id}/setName":
+		s.setCustomerName(w, r, key, body)
 	case "GET /v1/billable-metrics":
 		s.listBillableMetrics(w, r, body)
 	case "POST /v1/billable-metrics/create":
@@ -750,6 +755,29 @@ func (s *Server) createCustomer(w http.ResponseWriter, body []byte) {
 	}
 	s.writes = append(s.writes, "POST /v1/customers")
 	s.reply(w, http.StatusOK, map[string]any{"data": s.customerJSON(s.customerLocked(id))})
+}
+
+// setCustomerName renames a customer; Metronome truncates names longer
+// than 160 characters.
+func (s *Server) setCustomerName(w http.ResponseWriter, r *http.Request, key string, body []byte) {
+	if !s.checkRequest(w, "set_customer_name", body) {
+		return
+	}
+	c := s.customerLocked(strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/customers/"), "/setName"))
+	if c == nil {
+		s.errorf(w, http.StatusNotFound, "customer not found")
+		return
+	}
+	var req struct {
+		Name string `json:"name"`
+	}
+	json.Unmarshal(body, &req)
+	if n := []rune(req.Name); len(n) > 160 {
+		req.Name = string(n[:160])
+	}
+	c.Name = req.Name
+	s.writes = append(s.writes, key)
+	s.reply(w, http.StatusOK, map[string]any{"data": s.customerJSON(c)})
 }
 
 func (s *Server) listBillableMetrics(w http.ResponseWriter, r *http.Request, body []byte) {

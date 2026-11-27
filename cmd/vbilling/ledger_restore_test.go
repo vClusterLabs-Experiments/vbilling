@@ -221,7 +221,7 @@ func TestLedgerRestoreAfterLosingTheDataVolume(t *testing.T) {
 		"records          seq 1-3, 3 records in 1 segment(s), verified",
 		"What vBilling does when it starts on " + data,
 		"the next record links to seq 15",
-		"up to 6 hours back",
+		"up to 24 hours back",
 		"deduplicated",
 		"Not restored: usage pushed to vBilling after the recovery point",
 	} {

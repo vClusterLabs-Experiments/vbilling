@@ -85,7 +85,7 @@
           <tbody>
             <tr>
               <td><strong>Kubernetes objects</strong><br>Pods, nodes, volumes and load balancers, read from the control plane cluster and from each cluster's own API</td>
-              <td><strong>Exact.</strong> Quantities come from object lifetimes, to the second. Windows missed while vBilling was down are backfilled from those lifetimes, up to 6 hours back (a fixed limit).</td>
+              <td><strong>Exact.</strong> Quantities come from object lifetimes, to the second. Windows missed while vBilling was down are backfilled from those lifetimes, up to 24 hours back (a fixed limit). An object deleted while vBilling was down is not in them.</td>
               <td>CPU and memory usage from metrics-server (<code>CPU_MEMORY_BASIS=usage</code>) is a sample of the live window and is never backfilled. A cluster that syncs to namespaces of their own (<code>sync.toHost.namespaces</code>) is billed for what it synced there: vCluster labels each of those namespaces with the cluster's name and namespace (<code>vcluster.loft.sh/vcluster-name</code>, <code>vcluster.loft.sh/vcluster-namespace</code>), and those labels say whose the objects are, whoever else has the name. Objects in a namespace where another cluster runs, or ran, are never billed to a cluster that only shares its name, so what a deleted cluster left behind never bills to its namesake. In a namespace without the labels, the cluster's name in <code>vcluster.loft.sh/managed-by</code> decides only when no other cluster on the control plane cluster has it and no cluster ran there; otherwise the objects are billed to neither, and <code>synced-namespaces/&lt;cluster&gt;</code> fails.</td>
             </tr>
             <tr>
@@ -414,7 +414,7 @@ callback_settings:
       <h3 id="prometheus-outages">Outages</h3>
       <p>Prometheus usage is committed under its own ledger source, with its own watermark, after the Kubernetes windows. Kubernetes metering never waits for Prometheus.</p>
       <ul>
-        <li><strong>vBilling was down:</strong> on restart it reads every window it missed, up to 6 hours back (a fixed limit), and each counter sample lands in its own window. A counter's usage from before that is billed in the first window read.</li>
+        <li><strong>vBilling was down:</strong> on restart it reads every window it missed, up to 24 hours back (a fixed limit), and each counter sample lands in its own window. A counter's usage from before that is billed in the first window read.</li>
         <li><strong>Prometheus is down</strong> (every read fails): nothing is committed and the sources turn <code>failing</code>. The windows wait, and once Prometheus answers they are read one by one, counters and queries alike, so each window gets its own usage.</li>
         <li><strong>Only some reads fail</strong> (one cluster's own Prometheus, one metric): the window is committed without them. Those counters keep their last sample, so the first window that reads them again bills the whole increase since then. The total stays exact; that usage lands in the recovery window. A query that failed has no usage for that window.</li>
       </ul>
@@ -563,7 +563,7 @@ crossChecks:
       </div>
       <div class="callout callout-warn">
         <div class="callout-icon">!</div>
-        <div>Several values this page mentions are fixed, not settings: windows are 60 seconds, records settle for 30 seconds and are kept 7 days, a record may be at most 167 hours old, backfill reaches 6 hours back, the Prometheus lookback is 10 minutes, every record needs a request ID, and records are archived whenever the archive is on. The settings that used to change them (<code>COLLECTION_INTERVAL</code>, <code>RECORDS_SETTLE</code>, <code>RECORDS_RETENTION</code>, <code>MAX_BACKFILL</code>, <code>PROMETHEUS_LOOKBACK</code>, <code>RECORDS_ALLOW_UNKEYED</code>, <code>RECORDS_ARCHIVE</code>) were removed in v0.3.1: a value still set logs a warning and changes nothing. See <a href="configuration.html">Configuration</a> for the full list.</div>
+        <div>Several values this page mentions are fixed, not settings: windows are 60 seconds, records settle for 30 seconds and are kept 7 days, a record may be at most 167 hours old, backfill reaches 24 hours back, the Prometheus lookback is 10 minutes, every record needs a request ID, and records are archived whenever the archive is on. The settings that used to change them (<code>COLLECTION_INTERVAL</code>, <code>RECORDS_SETTLE</code>, <code>RECORDS_RETENTION</code>, <code>MAX_BACKFILL</code>, <code>PROMETHEUS_LOOKBACK</code>, <code>RECORDS_ALLOW_UNKEYED</code>, <code>RECORDS_ARCHIVE</code>) were removed in v0.3.1: a value still set logs a warning and changes nothing. See <a href="configuration.html">Configuration</a> for the full list.</div>
       </div>
       <p>Every setting is described in <a href="configuration.html#records">Configuration</a>.</p>
 

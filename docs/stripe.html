@@ -367,7 +367,7 @@ spec:
         <table class="config-table">
           <thead><tr><th>Stripe limit</th><th>What vBilling does</th></tr></thead>
           <tbody>
-            <tr><td>Meter events at most 35 days old</td><td>Older events are dead-lettered as <code>older than Stripe's 35-day meter event window</code>. Normal backfills (<code>billing.maxBackfill</code>, default 6h) stay far inside it.</td></tr>
+            <tr><td>Meter events at most 35 days old</td><td>Older events are dead-lettered as <code>older than Stripe's 35-day meter event window</code>. Backfills (at most 24 hours back) stay far inside it.</td></tr>
             <tr><td>Identifiers unique for at least 24 hours</td><td>Durable receipts protect unacknowledged successes; uncertain attempts stop retrying after 23 hours. Old cursor rewinds are refused.</td></tr>
             <tr><td>Meters invoiced from the subscription's start, and only until its period's invoice is finalized</td><td>Automatic subscriptions start at the tenant's first usage (above), and usage dated before the start is dead-lettered. Usage for a period whose invoice Stripe already finalized is accepted by Stripe and shows in meter summaries, but is not invoiced; vBilling does not detect that yet. It needs vBilling to be down or backlogged past the period's end plus Stripe's finalization grace period (one hour by default).</td></tr>
             <tr><td>Event names up to 100 characters</td><td>Longer split meter names end in a hash.</td></tr>
