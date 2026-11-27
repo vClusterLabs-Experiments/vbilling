@@ -195,7 +195,7 @@ func (a *Adapter) SendEvents(ctx context.Context, events []usage.Event) error {
 	skus := map[string][]string{} // metric -> distinct SKUs in this batch
 	seen := map[[2]string]bool{}
 	for i := range events {
-		if a.Accepts(events[i].Metric) {
+		if destinations.AcceptsEvent(a, &events[i]) {
 			lagoEvents = append(lagoEvents, ToEvent(&events[i]))
 			if key := [2]string{events[i].Metric, events[i].SKU}; key[1] != "" && !seen[key] {
 				seen[key] = true

@@ -390,7 +390,7 @@ func (a *accumulator) settleAllowances(r *allowanceRules) {
 				ev.Properties[name] = v
 			}
 		}
-		ev.Properties["overage_gib_hours"] = above
+		ev.Properties[usage.PropOverageGiBHours] = above
 		if above > 0 {
 			o := *ev
 			o.Metric, o.Unit, o.ID, o.Quantity = usage.MetricStorageOverageGBHours, "", "", 0

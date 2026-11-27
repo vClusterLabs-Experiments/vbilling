@@ -1561,7 +1561,7 @@ func (s *Server) reconcileOne(ctx context.Context, d destinations.Destination, r
 	type key struct{ tenant, metric string }
 	ledger, dead := map[key]float64{}, map[key]float64{}
 	in := func(e *usage.Event) bool {
-		return !e.WindowStart.Before(from) && e.WindowStart.Before(to) && destinations.Accepts(d, e.Metric)
+		return !e.WindowStart.Before(from) && e.WindowStart.Before(to) && destinations.AcceptsEvent(d, e)
 	}
 	// Billing platforms report totals per tenant and metric only, so filters
 	// pick which (tenant, metric) pairs to compare, and each comparison covers

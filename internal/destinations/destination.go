@@ -157,6 +157,21 @@ func Accepts(d Destination, metric string) bool {
 	return true
 }
 
+// AcceptsEvent applies a destination's EventFilter to one event. Where how
+// an event was metered decides whether it is billed (storage under an
+// allowance, see usage.MeteredBillable), the event decides, so switching
+// ALLOWANCES_FILE never drops or doubles usage metered before the switch
+// and delivered after it. Destinations without a filter take everything.
+func AcceptsEvent(d Destination, e *usage.Event) bool {
+	if _, ok := d.(EventFilter); !ok {
+		return true
+	}
+	if billable, decided := usage.MeteredBillable(e); decided {
+		return billable
+	}
+	return Accepts(d, e.Metric)
+}
+
 // BillableOnly is an EventFilter for billing engines: builtin billable
 // metrics plus operator-declared custom metrics.
 func BillableOnly(metric string) bool {

@@ -855,8 +855,11 @@ func (c *Collector) meterWholeNode(name string, n *nodeInfo, windows []Window, a
 			downs = append(downs, sp)
 		}
 	}
-	// Billed: its life, but neither paused nor down (the node-hours below).
-	uses.node(pause.Outside(pause.Union(paused, downs), n.created, n.deletedAt))
+	// A node includes its storage allowance for as long as the cluster has
+	// it, also while it is down or the cluster is paused: the tenant still
+	// holds the instance, and a hardware failure must not raise its storage
+	// bill.
+	uses.node(pause.Outside(nil, n.created, n.deletedAt))
 	for _, w := range windows {
 		acc := accs[w.End]
 		// A paused cluster's nodes are idle and unusable: their paused time

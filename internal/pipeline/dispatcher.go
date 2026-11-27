@@ -403,7 +403,7 @@ func (d *Dispatcher) loop(ctx context.Context, dest destinations.Destination) {
 			if r.Type != spool.TypeEvent || r.Event == nil {
 				continue
 			}
-			if !destinations.Accepts(dest, r.Event.Metric) {
+			if !destinations.AcceptsEvent(dest, r.Event) {
 				skipped++
 				continue
 			}

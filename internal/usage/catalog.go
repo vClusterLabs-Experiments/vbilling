@@ -214,6 +214,30 @@ func SetBillable(code string, billable bool) {
 	}
 }
 
+// PropOverageGiBHours is on every storage event metered under an allowance
+// (ALLOWANCES_FILE): the part of the event above the allowance, which is
+// billed as its own vcluster_storage_overage_gb_hours event.
+const PropOverageGiBHours = "overage_gib_hours"
+
+// MeteredBillable says whether billing platforms get an event by how it was
+// metered, for the metrics where that, not today's catalog, decides.
+// Switching allowances on or off changes the catalog at once, while events
+// metered before the switch may not be delivered yet: a storage event
+// metered under an allowance is billed through its overage event (false),
+// one metered without an allowance is billed itself (true), and an overage
+// event is billed (true) even after allowances are switched off. decided is
+// false for every other event: the catalog decides.
+func MeteredBillable(e *Event) (billable, decided bool) {
+	switch e.Metric {
+	case MetricStorageGBHours:
+		_, under := e.Properties[PropOverageGiBHours]
+		return !under, true
+	case MetricStorageOverageGBHours:
+		return true, true
+	}
+	return false, false
+}
+
 // UseStorageAllowances switches storage billing to the allowances of
 // ALLOWANCES_FILE, or back. With them, vcluster_storage_overage_gb_hours is
 // in the catalog and bills storage, and vcluster_storage_gb_hours stays in

@@ -922,7 +922,7 @@ func (a *Adapter) SendEvents(ctx context.Context, events []usage.Event) error {
 	var batch []IngestEvent
 	for i := range events {
 		e := &events[i]
-		if !a.Accepts(e.Metric) {
+		if !destinations.AcceptsEvent(a, e) {
 			continue
 		}
 		if a.now().Sub(e.WindowStart) > maxEventAge {

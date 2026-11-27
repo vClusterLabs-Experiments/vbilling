@@ -600,7 +600,7 @@ func (a *Adapter) SendEvents(ctx context.Context, events []usage.Event) error {
 	var jobs []job
 	var confirmed []string
 	for _, ev := range events {
-		if !a.Accepts(ev.Metric) {
+		if !destinations.AcceptsEvent(a, &ev) {
 			continue
 		}
 		if a.sent.Has(ev.ID) {

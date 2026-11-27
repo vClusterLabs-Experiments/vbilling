@@ -221,15 +221,16 @@ func TestAllowancePerNodeFollowsTheNodesBilled(t *testing.T) {
 		t.Errorf("overage = %v GiB-seconds, want %v: 64 GiB included, then 96, then 64", got, want)
 	}
 
-	// A node that is not ready is not billed, and includes nothing then.
+	// A node that is not ready is not billed, but still includes its
+	// storage: the tenant still holds it.
 	down := tenantConn(node("flaky", nil, 0, false, func(n *corev1.Node) {
 		n.Status.Conditions[0].LastTransitionTime = metav1.NewTime(ws.Add(30 * time.Second))
 	}), boundPVC("ckpt", "40Gi"))
 	evs = meterAllowed(t, perNode, nil, latest(), func(c *Collector) {
 		c.UseTenantAPI(fakeTenantAPI{conns: map[string]*TenantConn{"gpu": down}})
 	})[we]
-	if got := overage(evs); got != 8*30+40*30 {
-		t.Errorf("overage = %v GiB-seconds, want 1440: 8 GiB above while the node is billed, all 40 once it is down", got)
+	if got := overage(evs); got != 8*60 {
+		t.Errorf("overage = %v GiB-seconds, want 480: 8 GiB above the node's 32, also while it is down", got)
 	}
 
 	// A cluster without nodes of its own includes nothing.
@@ -326,9 +327,10 @@ func TestAllowanceAcrossWindowBoundaries(t *testing.T) {
 }
 
 // While a cluster is paused its volumes keep billing (PAUSE_KEEP_BILLING
-// keeps storage by default) and its nodes do not: an allowance per node
-// includes nothing then, one per cluster still applies. Where storage stops
-// billing too, the allowance covers nothing of the paused time either.
+// keeps storage by default) and its nodes do not, but the cluster still
+// holds them: an allowance per node applies as one per cluster does. Where
+// storage stops billing too, the allowance covers nothing of the paused
+// time either.
 func TestAllowanceWhilePaused(t *testing.T) {
 	tg := target("gpu", true)
 	tg.Paused = []pause.Span{{From: ws.Add(30 * time.Second), By: "vbilling"}}
@@ -337,7 +339,7 @@ func TestAllowanceWhilePaused(t *testing.T) {
 		per           string
 		storage, want float64 // GiB-seconds
 	}{
-		{pause.DefaultKeep, PerNode, 100 * 60, 68*30 + 100*30},
+		{pause.DefaultKeep, PerNode, 100 * 60, 68 * 60},
 		{pause.DefaultKeep, PerCluster, 100 * 60, 68 * 60},
 		{"none", PerNode, 100 * 30, 68 * 30},
 		{"none", PerCluster, 100 * 30, 68 * 30},
