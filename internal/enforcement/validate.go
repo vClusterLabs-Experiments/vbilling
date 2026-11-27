@@ -9,11 +9,12 @@ import (
 )
 
 // ValidateConfig checks everything enforcement reads from the configuration:
-// ENFORCEMENT_MODE, ENFORCEMENT_RULES, ENFORCEMENT_IN_CLUSTER,
-// ENFORCEMENT_LITELLM (with LITELLM_URL and LITELLM_API_KEY),
-// PAUSE_KEEP_BILLING and the pause drain timeout. It reads nothing but cfg:
-// no cluster, no file, no network, and it changes nothing. It returns the
-// first problem, worded as start-up reports it, or nil.
+// ENFORCEMENT_MODE, ENFORCEMENT_RULES, ENFORCEMENT_ESCALATIONS,
+// ENFORCEMENT_IN_CLUSTER, ENFORCEMENT_LITELLM (with LITELLM_URL and
+// LITELLM_API_KEY), PAUSE_KEEP_BILLING and the pause drain timeout. It
+// reads nothing but cfg: no cluster, no file, no network, and it changes
+// nothing. It returns the first problem, worded as start-up reports it, or
+// nil.
 //
 // vBilling calls it before it takes its Lease, so a setting enforcement
 // cannot use stops a new instance at once instead of after the wait for
@@ -26,6 +27,9 @@ func ValidateConfig(cfg *config.Config) error {
 	}
 	if _, err := ParseRules(cfg.EnforcementRules); err != nil {
 		return fmt.Errorf("ENFORCEMENT_RULES: %w", err)
+	}
+	if _, err := ParseEscalations(cfg.EnforcementEscalations); err != nil {
+		return fmt.Errorf("ENFORCEMENT_ESCALATIONS: %w", err)
 	}
 	if cfg.EnforcementInCluster && !cfg.TenantAPI {
 		return errors.New("ENFORCEMENT_IN_CLUSTER needs TENANT_API=true")

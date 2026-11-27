@@ -456,6 +456,10 @@ func main() {
 	// A wallet refilled without a payment webhook (a commit or credit added
 	// to the contract) lifts the pause its threshold notification raised.
 	go every(ctx, enforcement.RecheckInterval, enf.RecheckHolds)
+	// Grace periods: a billing hold past its escalation's time is raised
+	// (ENFORCEMENT_ESCALATIONS), including one that passed it while
+	// vBilling was down.
+	go every(ctx, enforcement.EscalateInterval, enf.Escalate)
 	go func() {
 		defer wg.Done()
 		compactLoop(ctx, recSpool, nil)
@@ -567,6 +571,13 @@ func newEnforcer(cfg *config.Config, kube kubernetes.Interface, ctrl *controller
 	if err != nil {
 		log.Fatalf("ENFORCEMENT_RULES: %v", err)
 	}
+	escalations, err := enforcement.ParseEscalations(cfg.EnforcementEscalations)
+	if err != nil {
+		log.Fatalf("ENFORCEMENT_ESCALATIONS: %v", err)
+	}
+	for _, r := range escalations {
+		log.Printf("Escalation %s: a billing hold that stays %s that long is raised to %s", r, r.From, r.To)
+	}
 	resolvers := map[string]destinations.CustomerResolver{}
 	for _, d := range dests {
 		switch a := d.(type) {
@@ -610,6 +621,7 @@ func newEnforcer(cfg *config.Config, kube kubernetes.Interface, ctrl *controller
 		StripeWebhookSecret:    cfg.StripeWebhookSecret,
 		MetronomeWebhookSecret: cfg.MetronomeWebhookSecret,
 		Rules:                  rules,
+		Escalations:            escalations,
 		Clusters:               ctrl.ClustersOf,
 		Resolvers:              resolvers,
 		State:                  state,

@@ -182,8 +182,8 @@ th .est { color: var(--warning); }
     </div>
     <div class="card">
       <h2>Billing state</h2>
-      <p class="desc">From Stripe and Metronome webhooks. <span id="mode"></span></p>
-      <div class="scroll"><table id="states"><thead><tr><th>Tenant</th><th>State</th><th>Reason</th><th>Since</th></tr></thead><tbody></tbody></table></div>
+      <p class="desc">From Stripe and Metronome webhooks, the API and escalations. Next is the state an escalation raises the tenant to, and when. <span id="mode"></span></p>
+      <div class="scroll"><table id="states"><thead><tr><th>Tenant</th><th>State</th><th>Reason</th><th>Since</th><th>Next</th></tr></thead><tbody></tbody></table></div>
     </div>
   </section>
 </main>
@@ -268,6 +268,7 @@ function qs(extra) {
 }
 const fmt = (n, d = 2) => n >= 1000 ? n.toLocaleString(undefined, { maximumFractionDigits: 0 }) : n.toLocaleString(undefined, { maximumFractionDigits: d });
 const ago = (t) => { if (!t) return "never"; const s = (Date.now() - new Date(t)) / 1000; return s < 90 ? Math.round(s) + "s ago" : s < 5400 ? Math.round(s / 60) + "m ago" : Math.round(s / 3600) + "h ago"; };
+const until = (t) => { const s = (new Date(t) - Date.now()) / 1000; return s <= 0 ? "now" : s < 5400 ? "in " + Math.max(1, Math.round(s / 60)) + "m" : s < 172800 ? "in " + Math.round(s / 3600) + "h" : "in " + Math.round(s / 86400) + "d"; };
 
 // Status icons, as SVG element lists.
 const ICONS = {
@@ -554,8 +555,10 @@ async function loadStates() {
     el("td", null, tenantCell(x.tenant)),
     el("td", null, badge(own(STATE_LEVEL, x.state, "warning"), x.state)),
     el("td", null, x.reason),
-    el("td", null, ago(x.since))));
-  $("#states tbody").replaceChildren(...(rows.length ? rows : [emptyRow(4, "All tenants in good standing.")]));
+    el("td", null, ago(x.since)),
+    el("td", null, x.escalation ? withTip(el("span", null, x.escalation.to + " " + until(x.escalation.at)),
+      "Escalation " + x.escalation.rule, "Due " + new Date(x.escalation.at).toISOString().replace(/\.\d+Z$/, "Z")) : "")));
+  $("#states tbody").replaceChildren(...(rows.length ? rows : [emptyRow(5, "All tenants in good standing.")]));
 }
 async function refresh() {
   try {

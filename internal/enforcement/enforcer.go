@@ -19,7 +19,9 @@
 // subscription never lowers it by itself: it makes vBilling read the billing
 // platforms again, and the hold clears only when they show nothing owed.
 // Webhooks apply in the order the billing platform says they happened, and
-// each once.
+// each once. Escalation rules (ENFORCEMENT_ESCALATIONS, escalate.go) raise a
+// billing hold that stayed at one state for a set time, such as delinquent
+// to suspended after 72 hours: a grace period.
 //
 // Suspension stops growth, not service: running workloads keep running.
 // Pausing (state "paused", enforce mode) stops service: each of the tenant's
@@ -176,6 +178,12 @@ type TenantState struct {
 	// operator. It outlives the hold, so a webhook about something older,
 	// delivered late or retried, never sets the hold again.
 	EventTimes map[string]time.Time `json:"event_times,omitempty"`
+	// EscalatedBy is the escalation rule that raised the hold the state
+	// comes from (escalate.go).
+	EscalatedBy string `json:"escalated_by,omitempty"`
+	// Escalation is when the billing hold raises the tenant's state next,
+	// and to what. It is computed when the state is read, never stored.
+	Escalation *NextEscalation `json:"escalation,omitempty"`
 }
 
 // Hold is one reason for a tenant's state. A billing hold records no more
@@ -188,6 +196,12 @@ type Hold struct {
 	Source    string    `json:"source"`
 	EventType string    `json:"event_type"`
 	Since     time.Time `json:"since"`
+	// EscalatedBy is the escalation rule that raised the hold to its state
+	// (from:after:to); empty when a signal or an operator set it.
+	EscalatedBy string `json:"escalated_by,omitempty"`
+	// Escalation is when the hold escalates next: computed when the state
+	// is read, never stored.
+	Escalation *NextEscalation `json:"escalation,omitempty"`
 }
 
 // HoldBilling is the hold billing webhooks raise, and clear once the billing
@@ -212,6 +226,7 @@ func effective(tenant string, holds map[string]Hold) TenantState {
 		h := holds[n]
 		if severity[h.State] > severity[ts.State] || (ts.Since.IsZero() && h.State == ts.State) {
 			ts.State, ts.Reason, ts.Source, ts.EventType, ts.Since, ts.Hold = h.State, h.Reason, h.Source, h.EventType, h.Since, n
+			ts.EscalatedBy = h.EscalatedBy
 			if n != HoldBilling {
 				ts.Reason = n + ": " + h.Reason
 			}
@@ -228,6 +243,9 @@ type Options struct {
 	Rules                  map[string]State // event type -> state overrides
 	Clusters               func(tenant string) []discovery.TenantCluster
 	Resolvers              map[string]destinations.CustomerResolver // "stripe", "metronome"
+	// Escalations raise a billing hold that stayed at a state for a set
+	// time (ENFORCEMENT_ESCALATIONS, see ParseEscalations and Escalate).
+	Escalations []Escalation
 	// State keeps billing states and the IDs of applied webhook events
 	// (DATA_DIR/billing-state.json).
 	State     *kv.Store
@@ -360,6 +378,10 @@ type Enforcer struct {
 	mu     sync.Mutex
 	states map[string]TenantState
 
+	// The escalation rules as configured, and by the state they start at.
+	rules       []Escalation
+	escalations map[State]Escalation
+
 	// applied are the webhook events already applied (ID -> when), kept
 	// for appliedKeep and at most appliedMax of them, in State.
 	evMu    sync.Mutex
@@ -426,7 +448,12 @@ func New(kube kubernetes.Interface, opts Options) *Enforcer {
 		workers: map[string]*worker{}, status: map[string]PauseStatus{},
 		failing: map[string]time.Time{}, checked: map[string]ownCheck{}, stopped: map[string]time.Time{}, verifiedAt: map[string]time.Time{},
 		older: map[string]bool{}, records: map[string]pauseRecord{}, exported: map[string]State{},
-		unlocks: map[string]unlockNote{}, refused: map[string]string{}, installed: map[string]bool{}, nudgeWarned: map[string]bool{}, unverified: map[string]bool{}}
+		unlocks: map[string]unlockNote{}, refused: map[string]string{}, installed: map[string]bool{}, nudgeWarned: map[string]bool{}, unverified: map[string]bool{},
+		rules: append([]Escalation(nil), opts.Escalations...), escalations: map[State]Escalation{}}
+	for _, r := range e.rules {
+		e.escalations[r.From] = r
+		opts.Telemetry.Add(escalationsMetric, escalationsHelp, map[string]string{"from": string(r.From), "to": string(r.To)}, 0)
+	}
 	for tenant, raw := range opts.State.WithPrefix("state/") {
 		var ts TenantState
 		if json.Unmarshal([]byte(raw), &ts) == nil {
@@ -958,6 +985,10 @@ type update struct {
 	// were read again for it (read, see stillOwed) and showed nothing owed.
 	read bool
 	owed []string
+	// escalate raises the hold by an escalation rule (Escalate), only while
+	// it is still at the rule's state with the since it was read with.
+	escalate *Escalation
+	since    time.Time
 }
 
 // storeResult says what store did with an update.
@@ -993,7 +1024,15 @@ func (e *Enforcer) store(tenant string, u update) (ts, prev TenantState, res sto
 	}
 	kept := ""      // why the update leaves the hold as it is
 	advance := true // whether the hold's newest event time moves to this one
-	if u.webhook {
+	if u.escalate != nil {
+		cur, held := holds[u.hold]
+		if !held || cur.State != u.escalate.From || !cur.Since.Equal(u.since) {
+			return prev, prev, storeResult{outStale, "the hold changed since it was read"}, nil
+		}
+		// An escalation is no billing event: a payment made before it and
+		// delivered after it still applies.
+		advance = false
+	} else if u.webhook {
 		if !u.at.IsZero() {
 			at = u.at.UTC()
 		}
@@ -1029,13 +1068,23 @@ func (e *Enforcer) store(tenant string, u update) (ts, prev TenantState, res sto
 		}
 	}
 	if kept == "" {
-		if u.state == Active {
+		switch {
+		case u.escalate != nil:
+			// The hold keeps what raised it (its source and event type, which
+			// decide what lifts it) and reaches the rule's state now: the next
+			// rule's clock starts here.
+			h := holds[u.hold]
+			h.State, h.Reason, h.EscalatedBy, h.Since = u.escalate.To, u.reason, u.escalate.String(), now
+			holds[u.hold] = h
+		case u.state == Active:
 			delete(holds, u.hold)
-		} else {
+		default:
 			// An operator's change replaces the hold.
 			h := Hold{State: u.state, Reason: u.reason, Source: u.source, EventType: u.eventType, Since: now}
 			if old, ok := holds[u.hold]; ok && old.State == u.state {
-				h.Since = old.Since
+				// The same state: its clock, and the escalation that raised
+				// it, carry on.
+				h.Since, h.EscalatedBy = old.Since, old.EscalatedBy
 			}
 			holds[u.hold] = h
 		}
@@ -1643,24 +1692,30 @@ func (e *Enforcer) HasState(tenant string) bool {
 	return ok
 }
 
-// States returns all recorded tenant states.
+// States returns all recorded tenant states, each with its next
+// escalation.
 func (e *Enforcer) States() []TenantState {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	out := make([]TenantState, 0, len(e.states))
 	for _, s := range e.states {
 		out = append(out, s)
 	}
+	e.mu.Unlock()
 	sort.Slice(out, func(i, j int) bool { return out[i].Tenant < out[j].Tenant })
+	for i := range out {
+		out[i] = e.withEscalation(out[i])
+	}
 	return out
 }
 
-// StateOf returns a tenant's state (active when unknown).
+// StateOf returns a tenant's state (active when unknown), with its next
+// escalation.
 func (e *Enforcer) StateOf(tenant string) TenantState {
 	e.mu.Lock()
-	defer e.mu.Unlock()
-	if s, ok := e.states[tenant]; ok {
-		return s
+	s, ok := e.states[tenant]
+	e.mu.Unlock()
+	if !ok {
+		return TenantState{Tenant: tenant, State: Active}
 	}
-	return TenantState{Tenant: tenant, State: Active}
+	return e.withEscalation(s)
 }

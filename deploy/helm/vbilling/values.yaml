@@ -311,6 +311,16 @@ enforcement:
   # one Metronome threshold notification (it wins over its type), e.g.
   # "alerts.low_remaining_commit_balance_reached=paused,alert:Wallet below $50=warning"
   rules: ""
+  # Grace periods (ENFORCEMENT_ESCALATIONS): a billing hold that stays at
+  # from for after is raised to to. after takes d, h, m and s, at least 1m.
+  # Only delinquent and suspended escalate, by one rule each; the clock
+  # starts when the hold reached its state, and a payment that lifts the
+  # hold ends it. Operator holds never escalate. GET /api/v1/billing-states
+  # shows each tenant's next escalation (escalation.to, escalation.at).
+  # See docs/private-nodes.html#escalations.
+  escalations: []
+  # - {from: delinquent, after: 72h, to: suspended}
+  # - {from: suspended, after: 7d, to: paused}
   # enforce mode: block a suspended or paused tenant's LiteLLM teams (its
   # tenant ID and vbilling.vcluster.com/aliases) and unblock them when it is
   # active again; blocks set by an administrator are never lifted. Uses

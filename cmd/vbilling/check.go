@@ -229,6 +229,17 @@ func (st *startupConfig) load(opts startupOptions) error {
 	if cfg.EnforcementRules != "" {
 		st.ok("ENFORCEMENT_RULES: %d rule(s)", len(rules))
 	}
+	escalations, err := enforcement.ParseEscalations(cfg.EnforcementEscalations)
+	if err != nil {
+		return fmt.Errorf("ENFORCEMENT_ESCALATIONS: %w", err)
+	}
+	if len(escalations) > 0 {
+		names := make([]string, len(escalations))
+		for i, r := range escalations {
+			names[i] = r.String()
+		}
+		st.ok("ENFORCEMENT_ESCALATIONS: %s", strings.Join(names, ", "))
+	}
 
 	pulls, err := records.LoadPullSpecs(cfg.RecordsPullFile, st.formats)
 	if err != nil {

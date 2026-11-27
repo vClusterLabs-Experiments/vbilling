@@ -204,6 +204,19 @@
       "properties": {
         "mode": {"type": "string"},
         "rules": {"type": "string"},
+        "escalations": {
+          "description": "ENFORCEMENT_ESCALATIONS: a billing hold that stays at from for after (d, h, m or s, at least 1m) is raised to to.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "from": {"type": "string"},
+              "after": {"type": "string"},
+              "to": {"type": "string"}
+            },
+            "required": ["from", "after", "to"]
+          }
+        },
         "gateway": {"type": "object", "properties": {"litellm": {"type": "boolean"}}},
         "admissionPolicy": {"type": "object", "properties": {"enabled": {"type": "boolean"}}},
         "inCluster": {"type": "boolean"},

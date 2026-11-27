@@ -1976,6 +1976,10 @@ func (s *Server) billingStates(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := map[string]any{"mode": s.cfg.EnforcementMode, "states": s.enf.States(), "pauses": s.enf.Pauses()}
+	if rules := s.enf.Escalations(); len(rules) > 0 {
+		// The grace periods each state's escalation is computed from.
+		out["escalations"] = rules
+	}
 	if s.pauses != nil {
 		// When each cluster was paused (to the second): capacity is not
 		// billed for these spans, except what PAUSE_KEEP_BILLING keeps.

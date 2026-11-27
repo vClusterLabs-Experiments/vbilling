@@ -324,6 +324,33 @@ metering: {customMetrics: "inference_input_tokens:tokens:model|region"}
         self.assertEqual(created["metadata"]["name"], "vbilling")
 
 
+class EscalationTests(unittest.TestCase):
+    """Grace periods are a list in the values, and reach vBilling and its
+    configuration check as ENFORCEMENT_ESCALATIONS."""
+
+    def test_the_list_renders_the_setting_for_the_pod_and_the_check(self):
+        docs = render(*TOKENS, values=[values_file(self, """
+enforcement:
+  escalations:
+    - {from: delinquent, after: 72h, to: suspended}
+    - {from: suspended, after: 7d, to: paused}
+""")])
+        for kind in ("StatefulSet", "Job"):
+            self.assertEqual(env(one(docs, kind))["ENFORCEMENT_ESCALATIONS"]["value"],
+                             "delinquent:72h:suspended,suspended:7d:paused", kind)
+
+    def test_without_escalations_the_setting_is_not_there(self):
+        self.assertEqual(chartlib.yaml_file(chartlib.CHART / "values.yaml")["enforcement"]["escalations"], [])
+        self.assertNotIn("ENFORCEMENT_ESCALATIONS", env(one(render(*TOKENS), "StatefulSet")))
+
+    def test_the_schema_refuses_an_escalation_that_is_not_a_list_of_rules(self):
+        for wrong in (["--set", "enforcement.escalations=delinquent:72h:suspended"],
+                      ["--set", "enforcement.escalations[0].from=delinquent", "--set", "enforcement.escalations[0].to=suspended"]):
+            with self.assertRaises(HelmError, msg=wrong) as refused:
+                render(*TOKENS, *wrong)
+            self.assertIn("schema", str(refused.exception), wrong)
+
+
 class PlacementTests(unittest.TestCase):
     """In the validation lab vBilling ran on the control plane
     cluster's only node, a GPU node, with its ledger and its archive on

@@ -145,6 +145,9 @@ type Config struct {
 	// Enforcement of billing state on tenant clusters: observe | annotate | enforce.
 	EnforcementMode  string
 	EnforcementRules string // "event.type=state,..." overrides
+	// EnforcementEscalations are grace periods, "from:after:to,...": a
+	// billing hold at from for after is raised to to.
+	EnforcementEscalations string
 	// EnforcementInCluster also installs an admission policy inside each
 	// suspended tenant's clusters through their own API (enforce mode). It
 	// is the only enforcement that reaches clusters with their own nodes,
@@ -377,6 +380,8 @@ func Load() *Config {
 		PauseKeepBilling:     envOr("PAUSE_KEEP_BILLING", "storage,load_balancers"),
 		PauseDrainTimeout:    pauseDrainTimeout,
 		PauseKeepNamespaces:  envList("PAUSE_KEEP_NAMESPACES", nil), // nil: enforcement.DefaultKeepNamespaces
+
+		EnforcementEscalations: os.Getenv("ENFORCEMENT_ESCALATIONS"),
 
 		LagoAPIURL:       envOr("LAGO_API_URL", "http://localhost:3000"),
 		LagoAPIKey:       secretEnv("LAGO_API_KEY"),

@@ -347,6 +347,11 @@
               <td class="td-default">(none)</td>
             </tr>
             <tr>
+              <td><code>ENFORCEMENT_ESCALATIONS</code></td>
+              <td>Grace periods, <code>from:after:to,...</code>: a billing hold that stays at <code>from</code> for <code>after</code> is raised to <code>to</code>, for example <code>delinquent:72h:suspended,suspended:7d:paused</code>. <code>after</code> takes <code>d</code>, <code>h</code>, <code>m</code> and <code>s</code>, at least <code>1m</code>. Only <code>delinquent</code> and <code>suspended</code> escalate, by one rule each, to a more severe state. The clock starts when the hold reached its state and survives restarts; a payment that lifts the hold ends it. Operator holds never escalate. <code>GET /api/v1/billing-states</code> shows each tenant's next escalation (<code>escalation.to</code>, <code>escalation.at</code>). Helm: <code>enforcement.escalations</code>, a list of <code>{from, after, to}</code>. See <a href="private-nodes.html#escalations">Grace periods</a>.</td>
+              <td class="td-default">(none)</td>
+            </tr>
+            <tr>
               <td><code>ENFORCEMENT_IN_CLUSTER</code></td>
               <td>In <code>enforce</code> mode, also install the <code>vbilling-suspended</code> admission policy inside each of a suspended tenant's clusters, through their own API. The only enforcement that reaches clusters with their own nodes. Needs write access to admission policies in each cluster. See <a href="private-nodes.html#enforcement">Billing-state enforcement inside the cluster</a>.</td>
               <td class="td-default">false</td>
@@ -807,6 +812,11 @@
               <td><code>enforcement.mode / rules / inCluster</code></td>
               <td>ENFORCEMENT_MODE / ENFORCEMENT_RULES / ENFORCEMENT_IN_CLUSTER</td>
               <td class="td-default">observe / &quot;&quot; / false</td>
+            </tr>
+            <tr>
+              <td><code>enforcement.escalations</code></td>
+              <td>ENFORCEMENT_ESCALATIONS, as a list of <code>{from, after, to}</code>, for example <code>- {from: delinquent, after: 72h, to: suspended}</code></td>
+              <td class="td-default">[]</td>
             </tr>
             <tr>
               <td><code>enforcement.pause.keepBilling / keepNamespaces</code></td>

@@ -201,7 +201,7 @@
       <ul>
         <li><code>GET /api/v1/pricing?destination=lago</code> lists every SKU Lago bills at 0 by accident (see <a href="#price-coverage">Price coverage</a>).</li>
         <li><code>GET /api/v1/reconcile</code> covers Stripe and Metronome. For Lago, compare the ledger (<code>GET /api/v1/usage</code>) with Lago's current usage for the subscription.</li>
-        <li>Lago sends no billing signals to vBilling. Set billing states from your own automation with <code>PUT /api/v1/billing-states/{tenant}</code>, for example <code>{"state": "suspended", "reason": "invoice overdue"}</code>.</li>
+        <li>Lago sends no billing signals to vBilling. Set billing states from your own automation with <code>PUT /api/v1/billing-states/{tenant}</code>, for example <code>{"state": "suspended", "reason": "invoice overdue"}</code>. For <a href="private-nodes.html#escalations">grace periods</a> (<code>enforcement.escalations</code>) to raise the state over time, name the billing hold: <code>{"state": "delinquent", "hold": "billing", "reason": "invoice overdue"}</code>. A hold without <code>hold</code> is the operator's, and never escalates.</li>
         <li>Lago also receives <code>vcluster_gpu_utilization</code>, an informational metric that v0.1 created in Lago and existing plans may still reference. Leave it unpriced.</li>
       </ul>
 

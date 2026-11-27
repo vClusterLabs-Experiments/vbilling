@@ -328,6 +328,8 @@ Clusters with their own nodes (Private Nodes, Auto Nodes, Standalone) run their 
 
 **Holds.** A tenant's state is the most severe of its holds. Billing webhooks own the `billing` hold. `PUT /api/v1/billing-states/{tenant}` sets the `operator` hold, or the one it names (`{"state": "suspended", "hold": "abuse", "reason": "..."}`); no webhook touches those, and only an operator clears them by setting them `active`. A payment therefore never lifts an operator's hold. A portal that wants a payment to lift its hold passes `"hold": "billing"`: a payment then clears it once nothing is owed.
 
+**Grace periods.** `ENFORCEMENT_ESCALATIONS` (Helm `enforcement.escalations`, a list of `{from, after, to}`) raises a billing hold that stays at one state too long: `delinquent:72h:suspended,suspended:7d:paused` suspends a tenant 72 hours after it became delinquent and pauses it 7 days after that. The clock starts when the hold reached its state and survives restarts; a payment that lifts the hold ends it at any point. Only `delinquent` and `suspended` escalate, and operator holds never do. `GET /api/v1/billing-states` shows each tenant's next escalation (`escalation.to`, `escalation.at`) and the rule that raised an escalated state (`escalated_by`). Snapshots and deletion after a final grace are left to your automation: see [Grace periods](https://vclusterlabs-experiments.github.io/vbilling/private-nodes.html#escalations).
+
 Payment failures on invoices that Stripe collects arrive through Stripe's webhooks, so in Metronome + Stripe mode, send Stripe's webhooks to vBilling as well. Billing states are always available: Stripe and Metronome webhooks set them once `STRIPE_WEBHOOK_SECRET` or `METRONOME_WEBHOOK_SECRET` is set, and `PUT /api/v1/billing-states/{tenant}` sets them from anything else, such as Lago or a custom billing platform.
 
 ## Usage from AI gateways
@@ -446,7 +448,7 @@ Every endpoint except `/healthz` and `/readyz` needs the API token (`Authorizati
 | `GET /api/v1/destinations`, `GET …/{name}/dead-letters`, `POST …/{name}/dead-letters/replay`, `POST …/{name}/cursor` | Delivery operations: each destination's state (`delivering`, `paused`, `awaiting_start`, `detached`), backlog, and tenants it could not set up; Stripe refuses rewinds containing usage older than 23 hours |
 | `POST /api/v1/destinations/{name}/pause`, `…/resume`, `…/start` | Hold delivery to a destination on purpose and continue from its cursor; decide where a destination that was removed and added again starts (`{"from": "cursor" \| "head" \| "<time>"}`) |
 | `GET`, `PUT /api/v1/destinations/stripe/delivery/{id}` | Inspect an outstanding delivery receipt; resolve an ambiguous outcome as `delivered` or `not_delivered` with a reconciliation `reason`, then replay the dead letter |
-| `GET /api/v1/tenants`, `GET /api/v1/billing-states`, `PUT /api/v1/billing-states/{tenant}` | Tenants and billing state (`{"state", "reason", "hold"}`; `hold` defaults to `operator`) |
+| `GET /api/v1/tenants`, `GET /api/v1/billing-states`, `PUT /api/v1/billing-states/{tenant}` | Tenants and billing state, with each tenant's next escalation (`{"state", "reason", "hold"}`; `hold` defaults to `operator`) |
 | `POST /webhooks/stripe`, `POST /webhooks/metronome` | Billing signals |
 
 `API_TOKEN` protects everything under `/api` (bearer). Keep the Service internal, or put it behind your portal.
@@ -456,7 +458,7 @@ Every endpoint except `/healthz` and `/readyz` needs the API token (`Authorizati
 Notable metrics on `/metrics`:
 - **Delivery:** `vbilling_events_delivered_total{destination}`, `vbilling_delivery_failures_total{destination}`, `vbilling_events_dead_lettered_total{destination}`, `vbilling_destination_lag_records`, `vbilling_destination_lag_seconds`, `vbilling_destination_state{destination,state}`, `vbilling_tenants_blocked{destination}`, `vbilling_parked_events{destination}`, `vbilling_destination_ready`
 - **Metering:** `vbilling_events_metered_total`, `vbilling_backfilled_windows_total`, `vbilling_last_window_end_timestamp_seconds`, `vbilling_nodes_down`, `vbilling_excluded_clusters`
-- **Tenants and enforcement:** `vbilling_tenant_billing_state{tenant,state}` (a series for every known tenant), `vbilling_tenant_id_changes_total`, `vbilling_webhooks_total{source,result}`, `vbilling_enforcement_repairs_total{kind}`
+- **Tenants and enforcement:** `vbilling_tenant_billing_state{tenant,state}` (a series for every known tenant), `vbilling_tenant_id_changes_total`, `vbilling_webhooks_total{source,result}`, `vbilling_enforcement_repairs_total{kind}`, `vbilling_enforcement_escalations_total{from,to}`
 - **Ledger:** `vbilling_ledger_bytes`, `vbilling_ledger_mirror_lag_seconds`, `vbilling_ledger_mirror_errors_total`, `vbilling_volume_free_bytes{volume}`, `vbilling_volume_size_bytes{volume}`
 - **Pricing:** `vbilling_unpriced_series{destination}`, `vbilling_price_series{destination,status}`, `vbilling_held_events{destination}`, `vbilling_events_released_total{destination}`, `vbilling_price_check_errors_total{destination}`
 - **Sources:** `vbilling_sources{kind,status}`, `vbilling_crosscheck_divergence_ratio{check,tenant}`, `vbilling_prometheus_events_total`, `vbilling_prometheus_late_samples_total`, `vbilling_prometheus_last_window_end_timestamp_seconds`
@@ -487,7 +489,7 @@ Most installs set about ten settings: `ADAPTERS`, that billing platform's creden
 | `CROSS_CHECKS` (`crossChecks`) | | `primary=secondary[:tolerance%],...` |
 | `DEFAULT_PLAN_CODE`, `PLAN_BY_CLASS`, `BILLING_CURRENCY` (`billing.*`) | `vcluster-standard`, , `USD` | |
 | `PRICE_CHECK` (`billing.priceCheck.mode`) | `warn` | `warn`, `hold` (hold unpriced usage, released unpriced after 23 hours, before its invoice period can be final), or `off` |
-| `ENFORCEMENT_MODE`, `ENFORCEMENT_RULES`, `ENFORCEMENT_IN_CLUSTER`, `ENFORCEMENT_LITELLM` (`enforcement.*`) | `observe` | |
+| `ENFORCEMENT_MODE`, `ENFORCEMENT_RULES`, `ENFORCEMENT_ESCALATIONS`, `ENFORCEMENT_IN_CLUSTER`, `ENFORCEMENT_LITELLM` (`enforcement.*`) | `observe` | `ENFORCEMENT_ESCALATIONS`: grace periods, `from:after:to,...` |
 | `PAUSE_KEEP_BILLING`, `PAUSE_KEEP_NAMESPACES` (`enforcement.pause.*`) | `storage,load_balancers` | What keeps billing while paused; namespaces whose infrastructure DaemonSets keep running |
 | `STRIPE_API_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_SPLIT_METERS_BY`, `STRIPE_AUTO_SUBSCRIBE`, `STRIPE_PRICE_CARD` (`stripe.*`) | , , `sku` | Meters are split by these event fields; add `capacity_type` to price spot differently |
 | `METRONOME_API_TOKEN`, `METRONOME_WEBHOOK_SECRET`, `METRONOME_PROVISION`, `METRONOME_RATE_CARD` (`metronome.*`) | | `METRONOME_PROVISION=false` (default): vBilling only sends usage and reads; your customers, metrics and contracts stay yours |

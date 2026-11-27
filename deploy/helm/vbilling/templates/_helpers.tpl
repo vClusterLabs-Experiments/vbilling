@@ -515,6 +515,10 @@ bare on or off as a boolean, so both spellings are taken.
   value: {{ .Values.enforcement.mode | quote }}
 - name: ENFORCEMENT_RULES
   value: {{ .Values.enforcement.rules | quote }}
+{{- if .Values.enforcement.escalations }}
+- name: ENFORCEMENT_ESCALATIONS
+  value: {{ $e := list }}{{ range .Values.enforcement.escalations }}{{ $e = append $e (printf "%v:%v:%v" .from .after .to) }}{{ end }}{{ join "," $e | quote }}
+{{- end }}
 - name: ENFORCEMENT_IN_CLUSTER
   value: {{ .Values.enforcement.inCluster | quote }}
 - name: ENFORCEMENT_LITELLM

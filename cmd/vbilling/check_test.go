@@ -211,6 +211,8 @@ func TestCheckConfigStopsWithTheStartupErrorOnEachInvalidInput(t *testing.T) {
 			want: `CROSS_CHECKS: cross-check "inference_output_tokens=vllm_output_tokens:2%": unknown metric "inference_output_tokens"`},
 		{name: "enforcement rule with an unknown state", env: map[string]string{"ENFORCEMENT_RULES": "alert:vbtest-bad=frozen"},
 			want: `ENFORCEMENT_RULES: enforcement rule "alert:vbtest-bad=frozen" must be event.type=state or alert:<notification ID or name>=state (states: active, warning, delinquent, suspended, paused)`},
+		{name: "escalation that lowers the state", env: map[string]string{"ENFORCEMENT_ESCALATIONS": "delinquent:72h:suspended,suspended:7d:delinquent"},
+			want: `ENFORCEMENT_ESCALATIONS: escalations loop: delinquent -> suspended -> delinquent`},
 		{name: "pause keeps an unknown kind billing", env: map[string]string{"PAUSE_KEEP_BILLING": "storage,gpus"},
 			want: `PAUSE_KEEP_BILLING: unknown "gpus" (use storage, load_balancers, nodes, control_plane, workloads, or none)`},
 
@@ -395,6 +397,15 @@ func TestCheckConfigListsWhatItCheckedAndTouchesNothing(t *testing.T) {
 	}
 	if entries, _ := os.ReadDir(volumes); len(entries) != 0 {
 		t.Errorf("start-up created %v before it had its Lease", entries)
+	}
+}
+
+// Grace periods are checked like every other setting, and the report names
+// them as start-up applies them.
+func TestCheckConfigListsTheEscalations(t *testing.T) {
+	r := vbilling(t, map[string]string{"ADAPTERS": "noop", "ENFORCEMENT_ESCALATIONS": "delinquent:72h:suspended, suspended:7d:paused"}, "check-config")
+	if r.code != 0 || !strings.Contains(r.stdout, "ok       ENFORCEMENT_ESCALATIONS: delinquent:72h:suspended, suspended:7d:paused\n") {
+		t.Fatalf("exit %d\n%s%s", r.code, r.stdout, r.stderr)
 	}
 }
 

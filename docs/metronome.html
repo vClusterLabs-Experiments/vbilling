@@ -297,6 +297,13 @@ enforcement:
       <div class="code-block"><code>enforcement:
   rules: <span class="string">"alerts.low_remaining_commit_balance_reached=paused,alert:Wallet below $50=warning"</span></code></div>
       <p>A name in a rule may hold <code>=</code> but not a comma; use the notification's ID for a name that has one.</p>
+      <p><strong>A grace period before the pause.</strong> To give a customer time to top up, map the zero-balance notification to <code>delinquent</code> instead of <code>paused</code>, and let escalations raise it. With these values the tenant is suspended three days after its wallet ran out and paused a week after that:</p>
+      <div class="code-block"><code>enforcement:
+  rules: <span class="string">"alerts.low_remaining_commit_balance_reached=delinquent,alert:Wallet below $50=warning"</span>
+  escalations:
+    - {from: delinquent, after: 72h, to: suspended}
+    - {from: suspended, after: 7d, to: paused}</code></div>
+      <p>The escalated hold still comes from the notification, so a top-up lifts it at any point, through its payment webhook or the minute-by-minute read once the notification clears. <code>GET /api/v1/billing-states</code> shows when the next step is due (<code>escalation.at</code>). See <a href="private-nodes.html#escalations">Grace periods</a>, and <a href="private-nodes.html#lifecycle">the recipe</a> that also snapshots and deletes the clusters of a customer who never pays.</p>
       <p><strong>New customers that start disabled.</strong> To keep a customer's clusters paused until its first payment, have the portal set a billing hold at signup: <code>PUT /api/v1/billing-states/&lt;tenant&gt;</code> with <code>{"state": "paused", "hold": "billing", "reason": "awaiting first payment"}</code>. It applies to clusters created later too. The first <code>payment_gate.payment_status</code> <code>paid</code> lifts it once Metronome shows nothing owed; the minute-by-minute read does not, because no notification raised it.</p>
       <p>Pick the notification that watches the balance the wallet is made of:</p>
       <div class="config-table-wrap">

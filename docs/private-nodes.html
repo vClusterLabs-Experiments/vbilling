@@ -414,7 +414,7 @@ subjects:
   <span class="flag">--set</span> enforcement.admissionPolicy.enabled=true   <span class="comment"># the control plane cluster's policy, for shared and dedicated nodes</span></code></div>
 
       <h3 id="holds">Holds</h3>
-      <p>A tenant can be held for more than one reason. Billing webhooks own the <code>billing</code> hold. Operators set others through the API: <code>operator</code> by default, or one they name, such as <code>abuse</code> or <code>support</code>. No webhook touches those, and only an operator clears them. The tenant's state is the most severe of its holds, so a payment that clears the billing hold never lifts an operator's hold.</p>
+      <p>A tenant can be held for more than one reason. Billing webhooks own the <code>billing</code> hold. Operators set others through the API: <code>operator</code> by default, or one they name, such as <code>abuse</code> or <code>support</code>. No webhook touches those, and only an operator clears them. The tenant's state is the most severe of its holds, so a payment that clears the billing hold never lifts an operator's hold. The billing hold can also rise after a grace period (see <a href="#escalations">Grace periods</a>); an operator's holds never do.</p>
       <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-X</span> PUT localhost:8080/api/v1/billing-states/globex <span class="flag">-H</span> <span class="string">"Authorization: Bearer $API_TOKEN"</span> \
   <span class="flag">-d</span> <span class="string">'{"state": "suspended", "hold": "abuse", "reason": "outbound spam reported"}'</span>
 <span class="comment"># later, after the review</span>
@@ -479,7 +479,7 @@ ENFORCEMENT_RULES=<span class="string">"alerts.low_remaining_commit_balance_reac
       <p><strong>A pause lowered to a suspension</strong> (the <code>billing</code> hold is paid while an <code>abuse</code> hold at <code>suspended</code> remains) first restores the cluster and then suspends it: <code>suspended</code> means that what runs keeps running and nothing new starts, and after a pause nothing runs. vBilling resumes the cluster, holds the suspension back until the workloads it stopped have their pods again, and then blocks new pods. That takes as long as the workloads need, at most 2 minutes after the cluster's API answers again (12 minutes after the resume if it never does); <code>pauses[].restoring_until</code> in <code>GET /api/v1/billing-states</code> shows the limit. During that time the cluster accepts any pod. Only a pause recorded by vBilling starts a restore, once per pause: no annotation or label on the cluster can start or extend one.</p>
       <h3 id="pause-scope">Limits</h3>
       <ul>
-        <li>vBilling never deletes a cluster. For a grace period followed by deletion, use the <code>since</code> of the tenant's state and <code>pause_spans</code> from <code>GET /api/v1/billing-states</code> in your own automation.</li>
+        <li>vBilling never deletes a cluster. <a href="#escalations">Escalations</a> take a tenant from <code>delinquent</code> to <code>paused</code> after grace periods; deleting its clusters after a final grace is your automation's, as in <a href="#lifecycle">the recipe</a>.</li>
         <li>A cluster vBilling reaches only through its own API (vCluster Standalone, <code>TENANT_CLUSTERS_FILE</code>) has no control plane in the control plane cluster to stop. Its pause is the pause policy plus drained nodes, applied and checked again every 15 seconds. A cluster admin inside it can undo that between two checks: capacity stops billing only between checks that found nothing running and the pause policy in place, and a check that cannot drain the cluster stops none.</li>
         <li>A workload whose pods tolerate the pause taint is deleted like any other. If its controller schedules it again before the control plane stops, the pause is not verified and the cluster keeps billing.</li>
         <li>Kept DaemonSets keep running while paused, and a tenant's admins are cluster admins inside its clusters: they can run a privileged container in a kept namespace and reach a node's GPUs without requesting them. <code>PAUSE_KEEP_NAMESPACES=none</code> stops kept DaemonSets, but not what a privileged pod started outside Kubernetes before the pause (see <a href="#pause-unverified">When a pause cannot be verified</a>). For tenants you do not trust on nodes of their own, add <code>nodes</code> to <code>PAUSE_KEEP_BILLING</code>, so their nodes keep billing while paused, and have the node provider (vMetal, Auto Nodes) power paused nodes off or release them.</li>
@@ -498,6 +498,73 @@ ENFORCEMENT_RULES=<span class="string">"alerts.low_remaining_commit_balance_reac
         <div class="callout-icon">&#10003;</div>
         <div>In a live run of vBilling v0.3.0 on kind with vCluster 0.36 (<code>scripts/e2e-pause.sh</code>, 20 checks; v0.3.1 stops capacity billing once the pause is verified rather than at the mark), the pause took effect at 04:06:04.1887. That window billed 0.001163533 control plane hours, exactly the 4.19 seconds before the pause, and the following windows billed no CPU and no control plane hours while the 1 GiB volume billed exactly 2 GiB-minutes. <code>vcluster connect</code> refused the paused cluster, a control plane scaled back up by hand was paused again after 9 seconds, and clearing the hold brought the cluster and its workload back.</div>
       </div>
+
+      <h2 id="escalations">Grace periods</h2>
+      <p>A billing hold can rise on its own after a grace period. <code>ENFORCEMENT_ESCALATIONS</code> (Helm <code>enforcement.escalations</code>) lists the rules: a billing hold that stays at <code>from</code> for <code>after</code> is raised to <code>to</code>. <code>after</code> takes <code>d</code>, <code>h</code>, <code>m</code> and <code>s</code>.</p>
+      <div class="code-block"><code>enforcement:
+  escalations:
+    - {from: delinquent, after: 72h, to: suspended}
+    - {from: suspended, after: 7d, to: paused}
+
+<span class="comment"># the same as an environment variable</span>
+ENFORCEMENT_ESCALATIONS=<span class="string">"delinquent:72h:suspended,suspended:7d:paused"</span></code></div>
+      <ul>
+        <li><strong>The clock</strong> starts when the billing hold reached its state, the <code>since</code> of <code>holds.billing</code>. It is stored with the hold, so a restart keeps it. A hold that passed its time while vBilling was down escalates within 10 seconds of the start.</li>
+        <li><strong>Escalations chain.</strong> An escalation starts the next rule's clock: with the rules above, a tenant is suspended 72 hours after it became delinquent, and paused 7 days after the suspension. A hold that passed several deadlines while vBilling was down rises one state at a time, and each state lasts its full grace.</li>
+        <li><strong>A payment ends it.</strong> A payment that lifts the billing hold, at any point, makes the tenant active and resumes a paused cluster. A payment while something is still owed changes nothing, the clock included.</li>
+        <li><strong>New billing signals.</strong> A signal below the escalated state, or at it, keeps the hold's state, its clock and the rule that raised it (a signal at the same state brings its own reason). A signal above it raises the hold, and the clock of the new state starts. A billing hold that is lowered (a payment that a rule maps to a lower state while nothing is owed, or a <code>PUT</code> with <code>"hold": "billing"</code>) starts the clock again from its new state.</li>
+        <li><strong>Only the billing hold escalates.</strong> That is the hold webhooks and Metronome threshold notifications raise, and the hold a <code>PUT</code> sets with <code>"hold": "billing"</code>, as Lago or a custom billing platform does. Holds an operator sets under any other name (<code>operator</code>, <code>support</code>, <code>abuse</code>) never escalate: the operator chose their state. An escalated hold keeps what raised it and lifts on the same terms: a hold a Metronome notification raised still lifts when the notification clears.</li>
+        <li><strong>Effects.</strong> An escalation is a state change like any other: <code>ENFORCEMENT_MODE</code> decides what it does (<code>observe</code> records it, <code>enforce</code> suspends or pauses). It is logged with its rule, emitted as a Kubernetes event in <code>annotate</code> and <code>enforce</code> mode, and counted in <code>vbilling_enforcement_escalations_total{from,to}</code>. The reason says why, for example <code>delinquent for 72h: invoice payment failed (attempt 2)</code>.</li>
+        <li><strong>Rules.</strong> Only <code>delinquent</code> and <code>suspended</code> escalate, by one rule each, to a more severe state, after at least a minute. A warning does not escalate: it blocks nothing, and it can stay after what raised it recovered, such as a Metronome balance warning after a refill that sent no payment. <code>vbilling check-config</code> refuses rules that break this. A new rule applies to holds already in place: a tenant delinquent for longer than the grace when the rule is added is suspended within 10 seconds of the restart.</li>
+      </ul>
+      <p><code>GET /api/v1/billing-states</code> lists the rules under <code>escalations</code> and shows each tenant's next escalation:</p>
+      <div class="code-block"><code>{
+  <span class="string">"tenant"</span>: <span class="string">"acme"</span>,
+  <span class="string">"state"</span>: <span class="string">"suspended"</span>,
+  <span class="string">"reason"</span>: <span class="string">"delinquent for 72h: invoice payment failed (attempt 2)"</span>,
+  <span class="string">"since"</span>: <span class="string">"2026-11-30T09:00:04Z"</span>,
+  <span class="string">"escalated_by"</span>: <span class="string">"delinquent:72h:suspended"</span>,
+  <span class="string">"escalation"</span>: {<span class="string">"to"</span>: <span class="string">"paused"</span>, <span class="string">"at"</span>: <span class="string">"2026-12-07T09:00:04Z"</span>, <span class="string">"rule"</span>: <span class="string">"suspended:7d:paused"</span>},
+  <span class="string">"holds"</span>: {<span class="string">"billing"</span>: {<span class="string">"state"</span>: <span class="string">"suspended"</span>, <span class="string">"since"</span>: <span class="string">"2026-11-30T09:00:04Z"</span>, <span class="string">"escalated_by"</span>: <span class="string">"delinquent:72h:suspended"</span>, ...}}
+}</code></div>
+      <p><code>escalation</code> is there while an escalation would raise the tenant's state; <code>holds.billing.escalation</code> shows the billing hold's own, also while another hold keeps the tenant higher. <code>escalated_by</code> names the rule that raised the state. The dashboard shows the next escalation in its billing state table.</p>
+
+      <h3 id="lifecycle">Recipe: from a low balance to deletion</h3>
+      <p>A lifecycle for prepaid wallets in Metronome: a low balance warns, a zero balance makes the tenant delinquent, it is suspended 3 days later and paused 7 days after that, and 30 days into the pause its clusters are deleted, each with a snapshot first. A payment at any point restores the tenant. vBilling runs the lifecycle up to the pause:</p>
+      <div class="code-block"><code>enforcement:
+  mode: enforce
+  inCluster: true   <span class="comment"># clusters with their own nodes</span>
+  rules: <span class="string">"alerts.low_remaining_commit_balance_reached=delinquent,alert:Wallet below $50=warning"</span>
+  escalations:
+    - {from: delinquent, after: 72h, to: suspended}
+    - {from: suspended, after: 7d, to: paused}</code></div>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead><tr><th>When</th><th>State</th><th>What happens</th></tr></thead>
+          <tbody>
+            <tr><td>The balance falls below $50</td><td><code>warning</code></td><td>Nothing is blocked.</td></tr>
+            <tr><td>The balance reaches zero</td><td><code>delinquent</code></td><td>Nothing is blocked yet. The grace starts.</td></tr>
+            <tr><td>72 hours later</td><td><code>suspended</code></td><td>New pods are denied; running workloads keep running.</td></tr>
+            <tr><td>7 days later</td><td><code>paused</code></td><td>Each cluster's control plane stops, and its capacity stops billing once the pause is verified.</td></tr>
+            <tr><td>30 days into the pause</td><td><code>paused</code></td><td>Your automation deletes the clusters, with a snapshot of each.</td></tr>
+            <tr><td>A top-up, at any point</td><td><code>active</code></td><td>vBilling lifts the hold once Metronome shows nothing owed, and resumes paused clusters.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>The rest is your automation's. It reads <code>GET /api/v1/billing-states</code> every few minutes, and per tenant it needs <code>state</code>, <code>since</code>, <code>escalation.to</code> and <code>escalation.at</code>. The tenant's clusters, and their projects, come from where you manage them, such as vCluster Platform.</p>
+      <ol>
+        <li><strong>Snapshot before the pause.</strong> When <code>escalation.to</code> is <code>paused</code>, snapshot each of the tenant's clusters well before <code>escalation.at</code>, while its control plane still runs: a paused cluster's control plane is scaled to zero, and nothing can snapshot it. <code>vcluster snapshot create</code> files a request that vCluster processes in the background, so check that it finished. Run both with the kube context of the control plane cluster that hosts the cluster; <code>&lt;namespace&gt;</code> is the namespace its control plane runs in:
+          <div class="code-block"><code><span class="cmd">vcluster</span> snapshot create &lt;cluster&gt; s3://&lt;bucket&gt;/&lt;tenant&gt;/&lt;cluster&gt;.tar.gz <span class="flag">-n</span> &lt;namespace&gt; <span class="flag">--driver</span> helm
+<span class="cmd">vcluster</span> snapshot get &lt;cluster&gt; s3://&lt;bucket&gt;/&lt;tenant&gt;/&lt;cluster&gt;.tar.gz <span class="flag">-n</span> &lt;namespace&gt;</code></div>
+          A snapshot holds the cluster's objects. Check whether your vCluster version and its snapshot settings also cover the data on its volumes before a deletion relies on it.</li>
+        <li><strong>Delete after the final grace.</strong> When <code>state</code> is <code>paused</code>, <code>since</code> is more than 30 days ago, and every cluster of the tenant has a finished snapshot, delete each through the vCluster Platform API, with an access key of your automation's that may delete them:
+          <div class="code-block"><code><span class="cmd">curl</span> <span class="flag">-X</span> DELETE <span class="flag">-H</span> <span class="string">"Authorization: Bearer $PLATFORM_ACCESS_KEY"</span> \
+  <span class="string">"$PLATFORM_URL/kubernetes/management/apis/management.loft.sh/v1/namespaces/p-&lt;project&gt;/virtualclusterinstances/&lt;cluster&gt;"</span></code></div>
+          <code>p-&lt;project&gt;</code> is the project's namespace in vCluster Platform, unless it is set up with another prefix. A deleted cluster stops billing at the second it is deleted. A tenant left without clusters is offboarded from its billing platforms an hour after its last usage (see each billing platform's page); its billing hold stays.</li>
+        <li><strong>Restore on payment.</strong> A payment that lifts the billing hold makes the tenant <code>active</code>, and vBilling resumes the clusters it paused. For a payment vBilling does not see, such as a bank transfer, clear the hold yourself: <code>PUT /api/v1/billing-states/&lt;tenant&gt;</code> with <code>{"state": "active", "hold": "billing", "reason": "paid by bank transfer"}</code>. Bring a deleted cluster back only after that, or vBilling pauses it again: create it again with its configuration, then restore it from its snapshot:
+          <div class="code-block"><code><span class="cmd">vcluster</span> restore &lt;cluster&gt; s3://&lt;bucket&gt;/&lt;tenant&gt;/&lt;cluster&gt;.tar.gz <span class="flag">-n</span> &lt;namespace&gt; <span class="flag">--driver</span> helm</code></div></li>
+      </ol>
+      <p>A tenant can also reach <code>paused</code> without the escalation, through a rule or a <code>PUT</code> that pauses at once. Its clusters then have no snapshot from the first step: keep every pause behind an escalation, or snapshot on a schedule as well.</p>
 
       <h2 id="whole-gpus">Whole GPUs, however they are carved</h2>
       <p>Dedicated and private nodes are billed for physical GPUs. MIG slices (mixed or single strategy, GKE GPU partitions) and time-slicing replicas (NVIDIA or GKE time-sharing) are converted back: a node exposing 56 MIG slices of 1g.10gb, or 32 time-sliced devices with 4 replicas, bills 8 GPUs. GPUs offered only through DRA ResourceSlices count too. On a cluster's own nodes, time-slicing replicas count only when GPU Feature Discovery's GPU count adds up with them, and a node never bills fewer GPUs than it had (<a href="#private-first-seen">A node bills as vBilling first saw it</a>).</p>
