@@ -129,7 +129,7 @@ func (c *Controller) observeExclusions(metered, excluded []discovery.TenantClust
 				"remove the setting to meter it again; the excluded time is never billed afterwards")
 		}
 	}
-	c.tel.Set("vbilling_excluded_clusters", "Tenant clusters excluded from metering (vbilling.vcluster.com/exclude).", nil, float64(len(excluded)))
+	c.tel.Set("vbilling_excluded_clusters", "Clusters excluded from metering (vbilling.vcluster.com/exclude).", nil, float64(len(excluded)))
 }
 
 // observeDepartures remembers the clusters that were metered and are gone,

@@ -421,7 +421,7 @@ const checkConfigUsage = `Usage: vbilling check-config [--allow-missing-secrets]
 Reads and checks the configuration exactly as start-up does: the settings in
 the environment and every file they name (custom metrics, Prometheus metric
 definitions, storage allowances, records formats and pulls, price cards, the
-tenant clusters file, the vCluster Platform CA). Exits 0 and lists what it
+TENANT_CLUSTERS_FILE, the vCluster Platform CA). Exits 0 and lists what it
 checked, or exits 1 with the error vBilling would stop with at start-up.
 
 It contacts nothing (no Kubernetes API, billing platform, Prometheus or
