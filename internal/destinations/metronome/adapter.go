@@ -139,7 +139,17 @@ func GroupKeys(def usage.MetricDef) []string {
 	return out
 }
 
-func metricName(def usage.MetricDef) string { return def.Name + " [" + def.Code + "]" }
+// metricName names a metric's billable metric: "GPU Hours
+// [vcluster_gpu_hours]", followed by the keys PRICING_KEYS adds ("by
+// gpu_type, zone"). Metronome cannot change a billable metric's group keys,
+// so another key set is another billable metric, under another name.
+func metricName(def usage.MetricDef) string {
+	name := def.Name + " [" + def.Code + "]"
+	if extra := usage.ExtraPricingKeys(def.Code); len(extra) > 0 && !def.Custom {
+		name += " by " + strings.Join(extra, ", ")
+	}
+	return name
+}
 
 // BillableMetricFor is the billable metric a metric's events need: the SUM
 // of the value property, filtered on the event type (the metric code),
@@ -166,10 +176,16 @@ func BillableMetricFor(def usage.MetricDef) BillableMetric {
 	return bm
 }
 
-// Bootstrap, with METRONOME_PROVISION, creates one billable metric per
-// billable metric code (BillableMetricFor), matching existing ones by stored
-// ID or by name, never duplicating them. Without it nothing is created: it
-// logs the metrics no billable metric in Metronome counts yet. Metronome
+// Bootstrap, with METRONOME_PROVISION, makes sure each billable metric code
+// has a billable metric as BillableMetricFor defines it, and uses it: the
+// one vBilling used before (stored ID) while its group keys are still the
+// metric's, else an active one with its name and group keys, else a new
+// one. Metronome cannot change a billable metric's group keys, so when
+// PRICING_KEYS (or a custom metric's group keys) changes them, vBilling
+// creates another billable metric and leaves the old one as it is: it
+// never changes or archives a billable metric (see keysChanged). Without
+// METRONOME_PROVISION nothing is created: it logs the metrics no billable
+// metric in Metronome counts yet, or not on their pricing keys. Metronome
 // never bills usage sent before its billable metric exists, so price
 // coverage reports such usage as uncounted (see Uncounted), and the pricing
 // gate holds it until a billable metric counts it.
@@ -182,36 +198,149 @@ func (a *Adapter) Bootstrap(ctx context.Context, metrics []usage.MetricDef) erro
 	if err != nil {
 		return fmt.Errorf("list billable metrics: %w", err)
 	}
-	byID, byName := map[string]bool{}, map[string]string{}
+	active := map[string]BillableMetric{}
 	for _, m := range existing {
-		if m.ArchivedAt != "" {
-			continue
+		if m.ArchivedAt == "" {
+			active[m.ID] = m
 		}
-		byID[m.ID] = true
-		byName[m.Name] = m.ID
 	}
 	var errs []error
 	for _, def := range metrics {
 		if !def.Billable {
 			continue
 		}
-		if id, ok := a.state.Get("bm/" + def.Code); ok && byID[id] {
-			a.setMetric(def.Code, id)
+		want := BillableMetricFor(def)
+		keys := GroupKeys(def)
+		var prev *BillableMetric // the one vBilling used so far, while it is active
+		if id, ok := a.state.Get("bm/" + def.Code); ok {
+			if m, ok := active[id]; ok {
+				prev = &m
+			}
+		}
+		if prev != nil && groupsOn(*prev, keys) {
+			a.setMetric(def.Code, prev.ID)
 			continue
 		}
-		if id, ok := byName[metricName(def)]; ok {
-			a.setMetric(def.Code, id)
+		if m := ownMetric(existing, want, def.Code, keys); m != nil {
+			a.setMetric(def.Code, m.ID)
+			if prev != nil {
+				a.keysChanged(def, *prev, *m, false)
+			}
 			continue
 		}
-		id, err := a.c.CreateBillableMetric(ctx, BillableMetricFor(def))
+		if prev == nil {
+			// State lost (or a first start): the billable metric of the
+			// metric's earlier key set, under its name, if there is one.
+			prev = earlierMetric(existing, def, keys)
+		}
+		if nameTaken(existing, want.Name) {
+			// Another billable metric has the name, with other group keys.
+			want.Name = keyedName(want.Name, keys)
+		}
+		id, err := a.c.CreateBillableMetric(ctx, want)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("create billable metric %s: %w", def.Code, err))
 			continue
 		}
-		log.Printf("[metronome] created billable metric %s (%s)", def.Code, id)
+		log.Printf("[metronome] created billable metric %s (%s): %q, grouped on %s", def.Code, id, want.Name, strings.Join(keys, ", "))
+		want.ID = id
 		a.setMetric(def.Code, id)
+		if prev != nil {
+			a.keysChanged(def, *prev, want, true)
+		}
 	}
 	return errors.Join(errs...)
+}
+
+// groupsOn reports whether a billable metric has keys as one of its compound
+// group keys, in any order (no group keys, when keys is empty).
+func groupsOn(m BillableMetric, keys []string) bool {
+	if len(keys) == 0 {
+		return len(m.GroupKeys) == 0
+	}
+	for _, gk := range m.GroupKeys {
+		if len(gk) == len(keys) && !slices.ContainsFunc(keys, func(k string) bool { return !slices.Contains(gk, k) }) {
+			return true
+		}
+	}
+	return false
+}
+
+// groupedKeys are all the keys a billable metric groups on.
+func groupedKeys(m BillableMetric) []string {
+	var out []string
+	for _, gk := range m.GroupKeys {
+		for _, k := range gk {
+			if !slices.Contains(out, k) {
+				out = append(out, k)
+			}
+		}
+	}
+	return out
+}
+
+// keyedName is a billable metric name made distinct by its group keys, for
+// when another billable metric has the name.
+func keyedName(name string, keys []string) string {
+	sorted := slices.Sorted(slices.Values(keys))
+	return name + " #" + shortHash(strings.Join(sorted, ","))
+}
+
+// ownMetric returns an active billable metric vBilling can use for a
+// metric's usage as want defines it: its name (or keyedName), the SUM of
+// value on the metric's event type, and the same group keys.
+func ownMetric(existing []BillableMetric, want BillableMetric, code string, keys []string) *BillableMetric {
+	alt := keyedName(want.Name, keys)
+	for i := range existing {
+		m := existing[i]
+		if m.ArchivedAt == "" && (m.Name == want.Name || m.Name == alt) && len(summing([]BillableMetric{m}, code)) == 1 && groupsOn(m, keys) {
+			return &existing[i]
+		}
+	}
+	return nil
+}
+
+// nameTaken reports whether an active billable metric has the name.
+func nameTaken(existing []BillableMetric, name string) bool {
+	return slices.ContainsFunc(existing, func(m BillableMetric) bool { return m.ArchivedAt == "" && m.Name == name })
+}
+
+// earlierMetric returns an active billable metric vBilling would have made
+// for a metric with other group keys: named like it ("Name [code]", with or
+// without keys), summing value on its event type.
+func earlierMetric(existing []BillableMetric, def usage.MetricDef, keys []string) *BillableMetric {
+	base := def.Name + " [" + def.Code + "]"
+	for i := range existing {
+		m := existing[i]
+		if m.ArchivedAt != "" || groupsOn(m, keys) || len(summing([]BillableMetric{m}, def.Code)) == 0 {
+			continue
+		}
+		if m.Name == base || strings.HasPrefix(m.Name, base+" by ") || strings.HasPrefix(m.Name, base+" #") {
+			return &existing[i]
+		}
+	}
+	return nil
+}
+
+// keysChanged says, when vBilling moves a metric to another billable metric
+// because its group keys changed, what that means and what Finance does
+// next. Both billable metrics count the usage from now on; products on the
+// old one keep billing it until their rates end. vBilling never changes or
+// archives either.
+func (a *Adapter) keysChanged(def usage.MetricDef, old, now BillableMetric, created bool) {
+	verb := "uses"
+	if created {
+		verb = "created"
+	}
+	oldKeys := strings.Join(groupedKeys(old), ", ")
+	if oldKeys == "" {
+		oldKeys = "nothing"
+	}
+	log.Printf("[metronome] WARNING: %s is now grouped on %s, and Metronome cannot change a billable metric's group keys: vBilling %s billable metric %q (%s) for it "+
+		"and checks prices on that one. Billable metric %q (%s), grouped on %s, still counts the same usage: products on it keep billing until their rates end. "+
+		"Create usage products on %q, add their rates to the rate cards, and end the rates of the products on %q at the same time, or each bills this usage. "+
+		"vBilling never changes or archives either billable metric",
+		def.Code, strings.Join(GroupKeys(def), ", "), verb, now.Name, now.ID, old.Name, old.ID, oldKeys, now.Name, old.Name)
 }
 
 // reportCatalog logs, read-only, the billable metrics of the catalog that no
@@ -222,16 +351,26 @@ func (a *Adapter) reportCatalog(ctx context.Context, defs []usage.MetricDef) {
 		log.Printf("[metronome] could not list billable metrics (%v); price coverage reads them again", err)
 		return
 	}
+	const prints = "`vbilling metronome billable-metrics` prints the definitions vBilling expects"
 	var missing []string
 	for _, def := range defs {
-		if def.Billable && len(summing(bms, def.Code)) == 0 {
+		if !def.Billable {
+			continue
+		}
+		counting := summing(bms, def.Code)
+		if len(counting) == 0 {
 			missing = append(missing, def.Code)
+			continue
+		}
+		if keys := ungroupedKeys(counting, def); len(keys) > 0 {
+			log.Printf("[metronome] WARNING: PRICING_KEYS prices %s on %s, but no billable metric that sums its value groups on it, so no rate can depend on it: "+
+				"add the billable metric %q (%s; Metronome cannot change the group keys of an existing one), and move the rates to usage products on it",
+				def.Code, strings.Join(keys, ", "), metricName(def), prints)
 		}
 	}
 	if len(missing) == 0 {
 		return
 	}
-	const prints = "`vbilling metronome billable-metrics` prints the definitions vBilling expects"
 	hold := pipeline.MaxUnpricedHold
 	if mh := a.cfg.PriceCheckMaxHold; mh > 0 && mh < hold {
 		hold = mh
@@ -247,6 +386,18 @@ func (a *Adapter) reportCatalog(ctx context.Context, defs []usage.MetricDef) {
 		log.Printf("[metronome] no billable metric sums the value of event type(s) %s yet: vBilling holds that usage until one does, for at most %s, "+
 			"because Metronome never bills usage sent before its billable metric exists (%s)", strings.Join(missing, ", "), hold, prints)
 	}
+}
+
+// ungroupedKeys returns the keys PRICING_KEYS adds to a metric that none of
+// the given billable metrics groups on.
+func ungroupedKeys(bms []BillableMetric, def usage.MetricDef) []string {
+	var out []string
+	for _, k := range usage.ExtraPricingKeys(def.Code) {
+		if !slices.ContainsFunc(bms, func(m BillableMetric) bool { return slices.Contains(groupedKeys(m), k) }) {
+			out = append(out, k)
+		}
+	}
+	return out
 }
 
 func (a *Adapter) setMetric(code, id string) {

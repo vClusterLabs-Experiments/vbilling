@@ -99,14 +99,16 @@
         <table class="config-table">
           <thead><tr><th>Metric</th><th>Quantity</th><th>Dimensions</th></tr></thead>
           <tbody>
-            <tr><td><code>vcluster_private_node_hours</code></td><td>Hours the node was healthy</td><td><code>sku</code> (SKU label, instance type, or <code>&lt;n&gt;x&lt;GPU model&gt;</code>), <code>capacity_type</code>, <code>instance_type</code>, <code>node</code></td></tr>
+            <tr><td><code>vcluster_private_node_hours</code></td><td>Hours the node was healthy</td><td><code>sku</code> (SKU label, instance type, or <code>&lt;n&gt;x&lt;GPU model&gt;</code>), <code>capacity_type</code>, <code>instance_type</code>, <code>node</code>, <code>vcpus</code>, <code>memory_gib</code>, <code>gpu_count</code>, <code>public_ip</code>, <code>disk_gib</code></td></tr>
+            <tr><td><code>vcluster_public_ip_hours</code></td><td>Public IP addresses &times; the same hours</td><td><code>ip_family</code> (<code>ipv4</code> or <code>ipv6</code>), <code>billing_mode=dedicated_node</code>, <code>node</code></td></tr>
             <tr><td><code>vcluster_gpu_hours</code></td><td>GPU capacity &times; hours</td><td><code>billing_mode=dedicated_node</code>, <code>sku</code>, <code>gpu_type</code></td></tr>
-            <tr><td><code>vcluster_cpu_core_hours</code></td><td>CPU capacity &times; hours</td><td><code>billing_mode=dedicated_node</code></td></tr>
-            <tr><td><code>vcluster_memory_gb_hours</code></td><td>Memory capacity (GiB) &times; hours</td><td><code>billing_mode=dedicated_node</code></td></tr>
+            <tr><td><code>vcluster_cpu_core_hours</code></td><td>CPU capacity &times; hours</td><td><code>billing_mode=dedicated_node</code>, and the node's <code>sku</code> when <code>sku</code> is a pricing key of the metric</td></tr>
+            <tr><td><code>vcluster_memory_gb_hours</code></td><td>Memory capacity (GiB) &times; hours</td><td><code>billing_mode=dedicated_node</code>, and the node's <code>sku</code> as for CPU</td></tr>
           </tbody>
         </table>
       </div>
-      <p>Price either the node-hours by SKU, or the capacity components by <code>billing_mode</code>, whichever matches how you sell. Set the other to zero.</p>
+      <p>Price either the node-hours by SKU, or the capacity components by <code>billing_mode</code>, whichever matches how you sell. Set the other to zero. <code>PRICING_KEYS</code> adds keys a rate card can price on, such as <code>public_ip</code> on node-hours (see <a href="metrics.html#pricing-keys">Pricing keys</a>).</p>
+      <p id="public-ip"><strong>Public IP addresses.</strong> A node's public IP is an <code>ExternalIP</code> address in its status outside the private (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16), shared (100.64.0.0/10), loopback, link-local and IPv6 unique-local (fc00::/7) ranges. Each one bills <code>vcluster_public_ip_hours</code> for the time the node's node-hours bill, and makes <code>public_ip</code> <code>true</code> on them. A node with two public addresses bills two. An <code>InternalIP</code> never counts, even a public one: report public addresses as <code>ExternalIP</code>, as cloud controller managers do. Load balancer addresses bill as <code>vcluster_lb_hours</code> only. A cluster's own nodes report their addresses from inside the cluster, so like the rest of their status they are only as reliable as whoever runs the cluster: where you cannot trust them, bill the addresses from your own inventory, as a custom metric sent through the ingest API.</p>
 
       <h2 id="no-double-billing">No double billing</h2>
       <p>Pods that run on the tenant's own dedicated nodes are not metered again as shared usage: the node allocation already covers them. (v0.1 billed both the pods and the node.) A pod from a different tenant that lands on an untainted dedicated node is billed to its own tenant as shared usage.</p>

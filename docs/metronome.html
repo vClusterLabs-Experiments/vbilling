@@ -80,7 +80,7 @@
           <thead><tr><th></th><th>Default</th><th><code>METRONOME_PROVISION=true</code></th></tr></thead>
           <tbody>
             <tr><td>Customers</td><td>Your portal creates them, with the tenant ID as one of their ingest aliases. vBilling never creates or changes one.</td><td>One per tenant, with the tenant ID as ingest alias, named after the tenant's display name. When that name changes, vBilling renames the customer before the tenant's next usage, so invoices show the current name. A customer that already holds the alias is adopted, never duplicated, and keeps its own name, as do customers vBilling created before v0.3.3.</td></tr>
-            <tr><td>Billable metrics</td><td>Finance adds them from <a href="#billable-metrics"><code>vbilling metronome billable-metrics</code></a>, before vBilling sends usage. vBilling finds them by event type, and holds the usage of a metric until one counts it.</td><td>Created at startup, matched by ID or name.</td></tr>
+            <tr><td>Billable metrics</td><td>Finance adds them from <a href="#billable-metrics"><code>vbilling metronome billable-metrics</code></a>, before vBilling sends usage. vBilling finds them by event type, and holds the usage of a metric until one counts it.</td><td>Created at startup, matched by ID, or by name and group keys. A changed key set gets a new one (<a href="#pricing-keys">Changing pricing keys</a>).</td></tr>
             <tr><td>Contracts</td><td>Your portal's, with your commits and credits. vBilling reads their rate cards for price coverage.</td><td>One per tenant, on <code>METRONOME_RATE_CARD</code> or the tenant's plan.</td></tr>
             <tr><td>Stripe link</td><td>Your portal's.</td><td>Created when a Stripe key is set.</td></tr>
             <tr><td><code>customer_id</code> on usage</td><td>The tenant ID, as ingest alias.</td><td>The customer ID vBilling created, found or was pinned to.</td></tr>
@@ -133,7 +133,7 @@
       <p>Then point a Metronome webhook at vBilling and add its secret (<a href="#webhooks">Webhooks and billing state</a>).</p>
       <p id="uncounted">Usage of a metric no billable metric counts yet, for example a custom metric added later, is held in vBilling, in both modes and with <code>PRICE_CHECK=warn</code> as with <code>hold</code>: Metronome would never bill it. Price coverage reports it <code>unpriced</code> with <code>"uncounted": true</code> and the hint <code>no billable metric counts this event type yet: add it (vbilling metronome billable-metrics prints it)</code>. It is held the way <code>PRICE_CHECK=hold</code> holds unpriced usage (see <a href="#price-coverage">Price coverage</a>): durably, in <code>DATA_DIR/held</code>, before the delivery cursor moves past it, and shown in <code>GET /api/v1/pricing</code>, <code>GET /api/v1/usage</code> (<code>held</code>), <code>/api/v1/destinations</code> and source health. Within a minute of the billable metric appearing (or at once on <code>POST /api/v1/pricing/check</code>), vBilling sends what it held, in ledger order, before newer usage of the series. Usage held for 23 hours is released anyway, before its invoice period can be final, and the <code>pricing/metronome/...</code> source turns <code>failing</code>: Metronome keeps that usage but bills none of it, and only its support can reflow it into a billable metric added later. An event Metronome refuses, such as one older than its 34-day window, is dead-lettered, never dropped.</p>
       <p>Two cases are not held for want of a billable metric. While a SQL billable metric is active, usage no other billable metric counts is reported <code>unknown</code> and sent: a SQL billable metric may count any event type, and vBilling cannot tell which. Usage that the property filters of every billable metric on its event type leave out, for example a new SKU, is a price gap like a missing rate: <code>unpriced</code>, and held only with <code>PRICE_CHECK=hold</code>. With <code>PRICE_CHECK=off</code> nothing is held, and usage no billable metric counts is sent and never billed.</p>
-      <p>To let vBilling create its own objects instead, on a Metronome account that exists for it, turn on <code>METRONOME_PROVISION</code> with the chart value <code>metronome.provision=true</code>. vBilling then creates or adopts billable metrics by name, so do not also create them by hand: two billable metrics with the same name leave it to Metronome's list order which one vBilling uses.</p>
+      <p>To let vBilling create its own objects instead, on a Metronome account that exists for it, turn on <code>METRONOME_PROVISION</code> with the chart value <code>metronome.provision=true</code>. vBilling then creates or adopts billable metrics by name and group keys, so do not also create them by hand: two billable metrics with the same name and group keys leave it to Metronome's list order which one vBilling uses. One with vBilling's name but other group keys is never adopted: vBilling creates its own, under a name that ends in a hash of its keys.</p>
       <div class="code-block"><code><span class="cmd">helm</span> upgrade vbilling deploy/helm/vbilling <span class="flag">-n</span> vbilling-system <span class="flag">--reuse-values</span> \
   <span class="flag">--set</span> metronome.provision=true \
   <span class="flag">--set</span> metronome.rateCard=<span class="string">payg-usd</span></code></div>
@@ -156,6 +156,7 @@
             <tr><td><code>stripe.existingSecret</code></td><td><code>STRIPE_API_KEY</code>, <code>STRIPE_WEBHOOK_SECRET</code></td><td>(none)</td><td>Secret with the key <code>api-key</code> and, for Stripe webhooks, <code>webhook-secret</code>.</td></tr>
             <tr><td><code>enforcement.rules</code></td><td><code>ENFORCEMENT_RULES</code></td><td>(none)</td><td>Maps a webhook event type to a billing state, for example <code>alerts.low_remaining_commit_balance_reached=paused</code>.</td></tr>
             <tr><td><code>billing.priceCheck.mode</code></td><td><code>PRICE_CHECK</code></td><td><code>warn</code></td><td><code>warn</code>, <code>hold</code> or <code>off</code>. See <a href="#price-coverage">Price coverage</a>.</td></tr>
+            <tr><td><code>billing.pricingKeys</code></td><td><code>PRICING_KEYS</code></td><td>(none)</td><td>More group keys for built-in metrics, by metric, for example <code>{vcluster_private_node_hours: [public_ip]}</code>. A new key set needs a new billable metric: see <a href="#pricing-keys">Changing pricing keys</a>.</td></tr>
             <tr><td><code>metronome.apiBase</code></td><td><code>METRONOME_API_BASE</code></td><td><code>https://api.metronome.com</code></td><td>API base URL.</td></tr>
             <tr><td><code>metronome.apiToken</code>, <code>metronome.webhookSecret</code></td><td></td><td>(none)</td><td>Inline alternatives to the Secret. Avoid them.</td></tr>
           </tbody>
@@ -191,7 +192,7 @@
             <tr><td><code>unit</code>, <code>window_start</code>, <code>window_end</code>, <code>schema_version</code>, <code>source</code></td><td>The unit, the window, <code>vbilling.usage/v1</code>, and where the quantity comes from (<code>collector</code> for Kubernetes objects, <code>prometheus</code>, <code>records</code>, ...).</td></tr>
             <tr><td><code>region</code>, <code>sku</code>, <code>project</code>, <code>resource_id</code></td><td>The region, the SKU (the node's <code>SKU_LABEL</code> label, else its instance type or GPU model; the storage class for storage), the project, and the node name on per-node events (the cluster ID otherwise).</td></tr>
             <tr><td><code>tenant_cluster</code>, <code>capacity_type</code>, <code>billing_mode</code>, ...</td><td>The event's dimensions: the cluster, <code>on-demand</code>, <code>spot</code>, <code>preemptible</code> or <code>reserved</code>, <code>shared</code>, <code>dedicated_node</code> or <code>private_node</code>, and where they apply the GPU type and profile, node, instance type, zone and tenant class.</td></tr>
-            <tr><td><code>vcpus</code>, <code>memory_gib</code>, <code>gpu_count</code>, <code>public_ip</code></td><td>On <code>vcluster_private_node_hours</code> only, for dedicated and private nodes: the node's CPU capacity in cores, its memory capacity in GiB (one decimal), its physical GPUs (MIG and time-slicing converted back to whole GPUs), and <code>true</code> when it has an <code>ExternalIP</code> address. They describe the instance and are not group keys.</td></tr>
+            <tr><td><code>vcpus</code>, <code>memory_gib</code>, <code>gpu_count</code>, <code>public_ip</code></td><td>On <code>vcluster_private_node_hours</code> only, for dedicated and private nodes: the node's CPU capacity in cores, its memory capacity in GiB (one decimal), its physical GPUs (MIG and time-slicing converted back to whole GPUs), and <code>true</code> when it has a public IP address (an <code>ExternalIP</code> outside the private, shared, loopback, link-local and IPv6 unique-local ranges). They describe the instance, and are group keys only when <a href="#pricing-keys"><code>PRICING_KEYS</code></a> adds them.</td></tr>
             <tr><td><code>accuracy</code></td><td><code>estimate</code> on quantities that are estimates: metrics the catalog marks as estimates (PromQL <code>query:</code> metrics, CPU and memory with <code>CPU_MEMORY_BASIS</code> other than <code>requests</code>, egress from <code>EGRESS_QUERY</code>), and any event that marks itself as an estimate. Absent on exact quantities. The webhook adapter adds the same property for its consumers.</td></tr>
           </tbody>
         </table>
@@ -248,11 +249,13 @@
             <tr><td><code>vcluster_storage_overage_gb_hours</code> (with storage allowances)</td><td>GiB-hours</td><td><code>region, sku, tenant_cluster</code></td></tr>
             <tr><td><code>vcluster_instance_hours</code> (control plane hours)</td><td>hours</td><td><code>region, tenant_class, tenant_cluster</code></td></tr>
             <tr><td><code>vcluster_private_node_hours</code></td><td>node-hours</td><td><code>region, sku, capacity_type, tenant_cluster</code></td></tr>
+            <tr><td><code>vcluster_public_ip_hours</code></td><td>ip-hours</td><td><code>region, tenant_cluster</code></td></tr>
             <tr><td><code>vcluster_network_egress_gb</code></td><td>GiB</td><td><code>region, tenant_cluster</code></td></tr>
             <tr><td><code>vcluster_lb_hours</code></td><td>hours</td><td><code>region, tenant_cluster</code></td></tr>
           </tbody>
         </table>
       </div>
+      <p>These are the group keys without <code>PRICING_KEYS</code>. The keys it adds to a metric go before <code>tenant_cluster</code>, and the printed name lists them: <code>Dedicated Node Hours [vcluster_private_node_hours] by public_ip</code> groups on <code>region, sku, capacity_type, public_ip, tenant_cluster</code> (see <a href="#pricing-keys">Changing pricing keys</a>).</p>
       <p>Name them as you like: vBilling finds a metric's billable metrics by their event type filter and their SUM of <code>value</code>, not by name. Property filters may narrow one, for example to the SKUs you sell; price coverage then reports the usage they leave out. Custom metrics, from <code>CUSTOM_METRICS</code>, gateway formats or PromQL, get a definition too, grouped on the keys you declare. <code>vcluster_gpu_utilization</code> and <code>vcluster_gpu_downtime_hours</code> are informational and never sent to Metronome. With <code>METRONOME_PROVISION=true</code> vBilling creates the same billable metrics at startup.</p>
 
       <h3 id="pricing">Pricing on dimensions</h3>
@@ -268,20 +271,37 @@ presentation_group_key: [tenant_cluster]</code></div>
         <li><strong>Instance profile:</strong> <code>sku</code> on node-hours is the node's profile when <code>SKU_LABEL</code> names the node label that carries it, else its instance type or GPU model, so each profile gets its own rate.</li>
         <li><strong>Region:</strong> <code>region</code> is the vBilling instance's <code>region</code> (<code>REGION</code>), stamped on every event. It is never read from a node: run one vBilling per region to price regions differently.</li>
         <li><strong>Capacity type:</strong> <code>capacity_type</code> is <code>on-demand</code>, <code>spot</code>, <code>preemptible</code> or <code>reserved</code>. A discount is a lower rate; quantities stay physical.</li>
-        <li><strong>Public IP:</strong> a second billable metric on the same event type counts the node-hours of nodes with a public address, one per node:</li>
+        <li><strong>Public IP:</strong> <code>vcluster_public_ip_hours</code> counts the public addresses of the nodes billed whole to a tenant, one ip-hour per address and hour, for the time their node-hours bill (see <a href="metrics.html#public-ip-hours">Public IP Hours</a>). Give it a usage product and a rate per region. To price an instance profile with a public IP apart from the same profile without one, add <code>public_ip</code> to node-hours' pricing keys instead, or as well.</li>
+        <li><strong>More keys:</strong> <code>PRICING_KEYS</code> adds the keys a metric's events carry to its group key: <code>gpu_type</code> on GPU hours to price per profile and per GPU model, <code>sku</code> on CPU and memory hours for the node's SKU, <code>vcpus</code>, <code>memory_gib</code>, <code>gpu_count</code>, <code>public_ip</code> or <code>zone</code> on node-hours. <a href="metrics.html#pricing-keys">Pricing keys</a> lists them per metric.</li>
       </ul>
-      <div class="code-block"><code>{
-  "name": "Public IP Hours",
-  "aggregation_type": "SUM",
-  "aggregation_key": "value",
-  "event_type_filter": { "in_values": ["vcluster_private_node_hours"] },
-  "property_filters": [
-    { "name": "value", "exists": true },
-    { "name": "public_ip", "in_values": ["true"] }
-  ]
-}</code></div>
+      <div class="code-block"><code><span class="comment"># values.yaml: an instance profile with and without a public IP, and its public addresses</span>
+billing:
+  pricingKeys:
+    vcluster_private_node_hours: [public_ip]
+
+<span class="comment"># Usage product on the vcluster_private_node_hours billable metric</span>
+pricing_group_key:      [region, sku, capacity_type, public_ip]
+presentation_group_key: [tenant_cluster]
+
+<span class="comment"># Usage product on the vcluster_public_ip_hours billable metric</span>
+pricing_group_key:      [region]
+presentation_group_key: [tenant_cluster]</code></div>
       <p>Price whole nodes either by node-hours or by their GPU, CPU and memory hours, not both (see <a href="private-nodes.html#billed">what gets billed</a>). Node disks are not metered. vBilling sends quantities only: the rate card sets prices and currency.</p>
       <p><strong>Included storage.</strong> A tiered rate with free units applies them once to a customer's total for the product, so it cannot include 32 GiB with every node, every cluster or every volume. Set the allowance in vBilling instead (<code>billing.allowances</code>, see <a href="pricing-models.html#allowances">Included storage</a>). Storage then reaches Metronome as <code>vcluster_storage_overage_gb_hours</code>, the GiB-hours above the allowance, for every storage class. Give it a billable metric before you turn allowances on (<code>vbilling metronome billable-metrics</code> prints it; with <code>METRONOME_PROVISION=true</code> vBilling creates it), or its usage is held as uncounted. Add a usage product on it with a flat rate per storage class, <code>pricing_group_key: [region, sku]</code> and <code>presentation_group_key: [tenant_cluster]</code>, and no free tier: the allowance is applied already. <code>vcluster_storage_gb_hours</code> is then informational. It is not sent, needs no billable metric, and price coverage does not check or hold it.</p>
+
+      <h3 id="pricing-keys">Changing pricing keys</h3>
+      <p>Metronome cannot change a billable metric's group keys, so a metric whose <code>PRICING_KEYS</code> change needs a new billable metric, with its own products and rates. Both billable metrics count the metric's usage from then on, because both filter on its event type. vBilling never changes or archives a billable metric.</p>
+      <p>In the default mode, Finance makes the switch:</p>
+      <ol>
+        <li>Run <code>vbilling metronome billable-metrics</code> with the new <code>PRICING_KEYS</code>, with the image before the upgrade (see <a href="#install">Install</a>). A metric whose keys changed has a new group key and a name that lists the added keys.</li>
+        <li>Create those billable metrics in Metronome before the upgrade: Metronome counts only usage sent after a billable metric exists. The new one requires the new keys, so it counts nothing until vBilling sends them; the old one keeps counting.</li>
+        <li>Upgrade vBilling with the new <code>billing.pricingKeys</code>. From the next window on, events carry the new keys, with <code>none</code> where an event has no value.</li>
+        <li>Create a usage product on each new billable metric, with the new keys in its <code>pricing_group_key</code>. Add its rates to the rate cards from a time T, and end the rates of the old products at T: while products on both billable metrics have rates, Metronome bills the usage twice.</li>
+        <li>Check <code>GET /api/v1/pricing</code>: each combination of the keys has its own row. While the only billable metric that counts a metric's usage does not group on a key, its rows carry a <code>note</code> that says so, and so does the log at startup.</li>
+        <li>Archive the old products, and the old billable metric, once no rate uses them.</li>
+      </ol>
+      <p>With <code>METRONOME_PROVISION=true</code>, vBilling makes step 2 itself: at startup it creates the billable metric of the new key set, with a <code>WARNING</code> that names both billable metrics and the steps left. It checks prices and reconciles on the new one from then on, so the metric's series read unpriced until the new product has rates. With <code>PRICE_CHECK=hold</code> that usage waits for them, for at most 23 hours: create the product and its rates right after the upgrade. Products on the old billable metric keep billing until you end their rates. Set the old keys again, and vBilling uses the old billable metric again: it finds a billable metric by its name and group keys, and never adopts one whose group keys differ.</p>
+      <p>Reconciliation compares the ledger with one billable metric per metric, vBilling's definition first. On the day of the switch that is the new one, which counts usage only from when vBilling sent the new keys: expect that day to differ from the ledger.</p>
 
       <h2 id="prepaid-loop">The prepaid wallet loop</h2>
       <p>An AI Cloud that sells prepaid capacity keeps the wallet in Metronome: the portal's contract carries prepaid commits, and a top-up adds a commit. vBilling closes the loop around that wallet:</p>
@@ -329,6 +349,7 @@ enforcement:
         <li>a usage product meters that billable metric;</li>
         <li>an active contract of the tenant's own customer, the customer that holds the tenant ID as ingest alias, has a rate card with an entitled rate for that product, in effect now, whose <code>pricing_group_values</code> match the series on every key of the product's <code>pricing_group_key</code>. Values an event does not carry match <code>none</code>, as vBilling sends them. A product without a pricing group key prices every SKU with one rate.</li>
       </ul>
+      <p>The keys <code>PRICING_KEYS</code> adds are pricing keys like the others: each combination of their values is a series of its own. When no billable metric that counts a series groups on such a key, no rate can depend on it; the series' row then has a <code>note</code> that names the key and the billable metric to add (see <a href="#pricing-keys">Changing pricing keys</a>).</p>
       <p><code>METRONOME_RATE_CARD</code> and the tenant's plan play no part: the customer's contracts decide. vBilling reads each tenant's customer and contracts when its usage first appears, and again at a check once that read is 5 minutes old; tenants on the same rate card share their series. With <code>METRONOME_PROVISION=true</code> the same holds: the check reads the rate card of the contract that rates the tenant's usage, the one vBilling created from the tenant's <code>vbilling.vcluster.com/plan</code>, else <code>METRONOME_RATE_CARD</code>, and the billable metric is the one vBilling created. A contract stays on the rate card it was created on. If the alias in that setting is later pointed at another rate card, the tenant's usage is still rated, and checked, on the contract's card; vBilling logs a <code>WARNING</code> and puts a <code>note</code> on the tenant's rows that names both cards. A tenant moves to another rate card only when its setting changes: the new contract then starts at 00:00 UTC that day and the old one ends there.</p>
       <div class="config-table-wrap">
         <table class="config-table">

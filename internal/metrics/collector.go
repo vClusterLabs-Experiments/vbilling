@@ -711,6 +711,7 @@ func ownedFilter(all []map[string]string, clusterName string, includeControlPlan
 func (c *Collector) meterPods(pods []podEntry, include func(*corev1.Pod) bool, nsOf func(*corev1.Pod) string,
 	nodes, skip map[string]*nodeInfo, dra *draIndex, windows []Window, accs map[time.Time]*accumulator, st *Stats,
 	base baseFn, usageByPod map[string][2]float64, mode string, paused []pause.Span) {
+	skuOn := nodeSKUMetrics()
 	for _, e := range pods {
 		p := e.pod
 		if !include(p) {
@@ -824,6 +825,9 @@ func (c *Collector) meterPods(pods []podEntry, include func(*corev1.Pod) bool, n
 				ev := withNS(base(m.metric, n))
 				ev.Dimensions[usage.DimCapacityType] = capType
 				ev.Dimensions[usage.DimBillingMode] = mode
+				if n != nil && skuOn[m.metric] {
+					ev.SKU = nodeSKU(n)
+				}
 				props := map[string]any{"basis": c.opts.Basis}
 				if sampled {
 					props["estimate"] = true
@@ -834,13 +838,26 @@ func (c *Collector) meterPods(pods []podEntry, include func(*corev1.Pod) bool, n
 	}
 }
 
+// nodeSKUMetrics are the metrics among CPU core-hours and memory GiB-hours
+// whose events carry the SKU of the node they ran on (nodeSKU): those
+// PRICING_KEYS prices on sku. The others carry no SKU, as before, so a
+// billing platform that splits usage per SKU (Stripe meters, Lago charge
+// filters) sees no change unless sku is a pricing key.
+func nodeSKUMetrics() map[string]bool {
+	return map[string]bool{
+		usage.MetricCPUCoreHours:  usage.HasPricingKey(usage.MetricCPUCoreHours, "sku"),
+		usage.MetricMemoryGBHours: usage.HasPricingKey(usage.MetricMemoryGBHours, "sku"),
+	}
+}
+
 // meterWholeNode bills a node's full capacity (node-hours, whole GPUs, CPU
-// and memory) to one tenant cluster: dedicated nodes of the control plane
-// cluster and private nodes of the tenant cluster itself.
+// and memory) and its public IP addresses to one cluster: dedicated nodes
+// of the control plane cluster and the cluster's own (private) nodes.
 //
-// uses records the times the node was billed, for storage allowances per
-// node.
+// uses records the times the node was the cluster's, for storage
+// allowances per node.
 func (c *Collector) meterWholeNode(name string, n *nodeInfo, windows []Window, accs map[time.Time]*accumulator, base baseFn, mode string, paused []pause.Span, uses *storageUses) {
+	skuOn := nodeSKUMetrics()
 	life := []pause.Span{{From: n.created, To: n.deletedAt}}
 	// The node's downtime within its life.
 	var downs []pause.Span
@@ -878,11 +895,24 @@ func (c *Collector) meterWholeNode(name string, n *nodeInfo, windows []Window, a
 			nodeEv.Dimensions[usage.DimInstanceType] = n.instanceType
 		}
 		// vCPUs, memory, GPUs and public IP of the instance: not group keys,
-		// so nothing is priced on them unless a billing platform chooses to.
+		// so nothing is priced on them unless PRICING_KEYS adds them.
 		for k, v := range n.instanceAttributes() {
 			nodeEv.Dimensions[k] = v
 		}
 		acc.add(nodeEv, h, nil)
+		// Its public IP addresses, for the time its node-hours bill: one
+		// event per address family, so IPv4 and IPv6 can be priced apart.
+		// A load balancer's address is not a node address: it bills as
+		// load balancer hours.
+		for _, fam := range n.publicIPFamilies() {
+			ipEv := base(usage.MetricPublicIPHours, n)
+			ipEv.ResourceID = name
+			ipEv.Dimensions[usage.DimIPFamily] = fam.name
+			ipEv.Dimensions[usage.DimCapacityType] = n.capacityType
+			ipEv.Dimensions[usage.DimBillingMode] = mode
+			ipEv.Dimensions[usage.DimNode] = name
+			acc.add(ipEv, float64(fam.count)*h, map[string]any{"public_ips": fam.count})
+		}
 		if gpus := n.physicalGPUs(); gpus > 0 {
 			gev := base(usage.MetricGPUHours, n)
 			gev.ResourceID = name
@@ -926,6 +956,9 @@ func (c *Collector) meterWholeNode(name string, n *nodeInfo, windows []Window, a
 		}{{usage.MetricCPUCoreHours, n.cpuCapacity}, {usage.MetricMemoryGBHours, n.memCapacity / gib}} {
 			ev := base(m.metric, n)
 			ev.ResourceID = name
+			if skuOn[m.metric] {
+				ev.SKU = sku // the node's, as on its node-hours
+			}
 			ev.Dimensions[usage.DimCapacityType] = n.capacityType
 			ev.Dimensions[usage.DimBillingMode] = mode
 			ev.Dimensions[usage.DimNode] = name

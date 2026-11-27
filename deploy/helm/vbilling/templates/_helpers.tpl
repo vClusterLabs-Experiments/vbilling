@@ -461,6 +461,10 @@ bare on or off as a boolean, so both spellings are taken.
 - name: PLAN_BY_CLASS
   value: {{ $p := list }}{{ range $k, $v := .Values.billing.planByClass }}{{ $p = append $p (printf "%s=%s" $k $v) }}{{ end }}{{ join "," $p | quote }}
 {{- end }}
+{{- if .Values.billing.pricingKeys }}
+- name: PRICING_KEYS
+  value: {{ $pk := list }}{{ range $metric, $keys := .Values.billing.pricingKeys }}{{ if $keys }}{{ $pk = append $pk (printf "%s:%s" $metric (join "|" $keys)) }}{{ end }}{{ end }}{{ join "," $pk | quote }}
+{{- end }}
 {{- if .Values.crossChecks }}
 - name: CROSS_CHECKS
   value: {{ $c := list }}{{ range .Values.crossChecks }}{{ $c = append $c (printf "%s=%s:%v%%" .primary .secondary (.tolerancePercent | default 1)) }}{{ end }}{{ join "," $c | quote }}

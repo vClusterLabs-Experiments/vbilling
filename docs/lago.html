@@ -135,6 +135,7 @@
 
       <h3 id="sku-filters">One line per SKU</h3>
       <p>Lago prices an event property only through filters. The first time vBilling sends usage with a new <code>sku</code> for a metric, it adds the value to the billable metric's <code>sku</code> filter, then adds a charge filter for it to the metric's charge on each managed plan. Current usage and invoices then show one line per SKU. Lago applies filters when it computes usage, so usage sent before the filter existed counts under it too.</p>
+      <p>The keys <a href="metrics.html#pricing-keys"><code>PRICING_KEYS</code></a> adds to a metric get the same first step: vBilling adds each value usage carries to the billable metric's filter on that key, so you can add a charge filter for it, for example <code>public_ip=true</code> on node-hours or <code>ip_family=ipv4</code> on public IP hours. It creates no charge filter for them and sets no price: an event matches the filter with the most keys, so a combination you do not price costs what its SKU or charge costs. The price check reads each combination.</p>
       <ul>
         <li>A new filter costs what its metric's charge costs, unless the price card has an amount for the SKU. Splitting a SKU out never changes what its usage is billed.</li>
         <li>vBilling never adds a filter for a SKU that a filter in Lago already prices, and leaves charges that are not <code>standard</code> (graduated, package, volume, percentage) to you.</li>

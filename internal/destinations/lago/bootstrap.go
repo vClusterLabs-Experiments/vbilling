@@ -23,6 +23,7 @@ const (
 	MetricNetworkEgressGB  = usage.MetricNetworkEgressGB
 	MetricLBHours          = usage.MetricLBHours
 	MetricPrivateNodeHours = usage.MetricPrivateNodeHours
+	MetricPublicIPHours    = usage.MetricPublicIPHours
 )
 
 // lagoMetrics lists the billable metrics vBilling creates in Lago. Other
@@ -92,6 +93,13 @@ func lagoMetrics(catalog []usage.MetricDef) []BillableMetric {
 			Description:     "Dedicated node hours allocated to a vCluster tenant (private node mode)",
 			AggregationType: "sum_agg",
 			FieldName:       "private_node_hours",
+		},
+		{
+			Name:            "vCluster Public IP Hours",
+			Code:            MetricPublicIPHours,
+			Description:     "Hours of the public IP addresses of nodes billed whole to a tenant",
+			AggregationType: "sum_agg",
+			FieldName:       "public_ip_hours",
 		},
 	}
 	listed := map[string]bool{}

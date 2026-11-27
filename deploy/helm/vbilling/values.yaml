@@ -57,6 +57,17 @@ billing:
   planByClass: {}
   #  enterprise: vcluster-enterprise
   #  dev: vcluster-dev
+  # More keys to price built-in metrics on (PRICING_KEYS), by metric code.
+  # Each key must be one the metric's events carry: check-config lists them.
+  # Not with the stripe adapter (split Stripe meters with stripe.splitMetersBy).
+  # On Metronome a new key set is a new billable metric: see the Metronome
+  # page before you change it on a running install.
+  pricingKeys: {}
+  #  vcluster_private_node_hours: [public_ip, zone]
+  #  vcluster_gpu_hours: [gpu_type]
+  #  vcluster_cpu_core_hours: [sku]     # the node's SKU, as on its node-hours
+  #  vcluster_memory_gb_hours: [sku]
+  #  vcluster_public_ip_hours: [ip_family]
   # Price coverage: vBilling reads (never writes) each billing platform's
   # products, rates, prices and charges, and reports usage it has no price
   # for (GET /api/v1/pricing). warn: report only. hold: also keep that usage

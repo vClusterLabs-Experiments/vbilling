@@ -196,7 +196,7 @@
             </tr>
             <tr>
               <td><code>SKU_LABEL</code></td>
-              <td>Node label whose value is the SKU (for example <code>vbilling.vcluster.com/sku</code>).</td>
+              <td>Node label whose value is the SKU (for example <code>vbilling.vcluster.com/sku</code>): of a whole node's node-hours, of the GPU hours on the node, and, with <code>sku</code> in their <a href="#pricing-keys">pricing keys</a>, of CPU and memory hours.</td>
               <td class="td-default">(none)</td>
             </tr>
             <tr>
@@ -311,6 +311,16 @@
           <thead><tr><th>Variable</th><th>Description</th><th>Default</th></tr></thead>
           <tbody>
             <tr><td><code>PRICE_CHECK</code></td><td><code>warn</code>: report usage a billing platform has no price for, and hold Metronome usage no billable metric counts yet, which Metronome would never bill. <code>hold</code>: also keep the events of an unpriced series (metric, SKU, plan) out of that destination. They stay in the ledger and in <code>DATA_DIR/held</code>, and ship in ledger order once the price exists, or without a price after 23 hours, before their invoice period can be final; other series and destinations are not delayed. <code>off</code>: no checks, and nothing held. Switching from <code>hold</code> back to <code>warn</code> releases what is held for a price; <code>off</code> releases everything held.</td><td class="td-default">warn</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <h3 id="pricing-keys">Pricing keys</h3>
+      <p>Each built-in metric has the keys a rate card prices it on (its group keys, such as <code>region</code> and <code>sku</code> for GPU hours). <code>PRICING_KEYS</code> adds more, from the dimensions the metric's events carry: an instance profile with a public IP and one without, GPU hours per profile and per GPU model, CPU and memory per node SKU. <a href="metrics.html#pricing-keys">Pricing keys</a> on the metrics page lists the keys each metric takes.</p>
+      <div class="config-table-wrap">
+        <table class="config-table">
+          <thead><tr><th>Variable</th><th>Description</th><th>Default</th></tr></thead>
+          <tbody>
+            <tr><td><code>PRICING_KEYS</code></td><td>More pricing keys for built-in metrics, <code>metric:key|key,metric:key</code>, for example <code>vcluster_private_node_hours:public_ip|zone,vcluster_gpu_hours:gpu_type</code>. A key the metric's events do not carry is refused at start-up and by <code>vbilling check-config</code>, with the keys it takes. An event with no value for a key carries <code>none</code> at Metronome, which requires every group key on every event. Custom metrics declare their own group keys. Not with the stripe adapter: Stripe meters cannot price on dimensions, so split them with <code>STRIPE_SPLIT_METERS_BY</code>. On Metronome a new key set needs a new billable metric: read <a href="metronome.html#pricing-keys">Changing pricing keys</a> before you change it on a running install.</td><td class="td-default">(none)</td></tr>
           </tbody>
         </table>
       </div>
@@ -709,6 +719,11 @@
               <td class="td-default">{}</td>
             </tr>
             <tr>
+              <td><code>billing.pricingKeys</code></td>
+              <td>PRICING_KEYS, from a map <code>{metric: [key, ...]}</code>, for example <code>{vcluster_private_node_hours: [public_ip, zone]}</code></td>
+              <td class="td-default">{}</td>
+            </tr>
+            <tr>
               <td><code>billing.priceCheck.mode</code></td>
               <td>PRICE_CHECK</td>
               <td class="td-default">warn</td>
@@ -1068,7 +1083,7 @@ The configuration is valid: 6 check(s) passed, 0 warning(s).</span></code></div>
       <p>Usage and reconciliation queries can only include retained ledger and archive data. Without archival, month-to-date totals become incomplete after consumed segments pass retention. Enabling archival later cannot reconstruct segments already deleted. Verify the archive's chain and retain the full data directory, including <code>source.json</code>, destination state, cursors and held usage, together in backups. The ledger mirror is such a copy, kept current by vBilling itself.</p>
 
       <h2 id="lago-pricing">Lago Pricing Configuration</h2>
-      <p>vBilling bootstraps a billable metric for each of its 9 built-in metrics and for every custom metric, among them <code>inference_input_tokens</code> and <code>inference_output_tokens</code>, which v0.3 always declares, and a <code>vcluster-standard</code> plan on startup. With storage allowances it also creates <code>vcluster_storage_overage_gb_hours</code> (field name: the code), which then carries storage: price that charge, not <code>vcluster_storage_gb_hours</code>. All charges default to <strong>$0.00</strong> per unit unless a <a href="lago.html#price-card">price card</a> sets them. You must configure pricing in the Lago UI or API to actually generate non-zero invoices.</p>
+      <p>vBilling bootstraps a billable metric for each of its 10 built-in metrics and for every custom metric, among them <code>inference_input_tokens</code> and <code>inference_output_tokens</code>, which v0.3 always declares, and a <code>vcluster-standard</code> plan on startup. With storage allowances it also creates <code>vcluster_storage_overage_gb_hours</code> (field name: the code), which then carries storage: price that charge, not <code>vcluster_storage_gb_hours</code>. All charges default to <strong>$0.00</strong> per unit unless a <a href="lago.html#price-card">price card</a> sets them. You must configure pricing in the Lago UI or API to actually generate non-zero invoices.</p>
 
       <h3>Charges to configure</h3>
       <p>In the Lago UI, go to <strong>Plans &gt; vCluster Standard &gt; Edit</strong> and set the per-unit price for each charge:</p>
@@ -1133,6 +1148,12 @@ The configuration is valid: 6 check(s) passed, 0 warning(s).</span></code></div>
               <td>Standard (per unit)</td>
               <td class="td-default">$1.00</td>
             </tr>
+            <tr>
+              <td><code>vcluster_public_ip_hours</code></td>
+              <td><code>public_ip_hours</code></td>
+              <td>Standard (per unit)</td>
+              <td class="td-default">$0.005</td>
+            </tr>
           </tbody>
         </table>
       </div>
@@ -1148,7 +1169,8 @@ GPU Hours (default):   <span class="string">$3.50</span>   <span class="comment"
 GPU Hours (H100):      <span class="string">$5.50</span>   <span class="comment"># premium for latest gen</span>
 Network Egress/GB:     <span class="string">$0.08</span>   <span class="comment"># cross-DC traffic</span>
 LoadBalancer Hours:    <span class="string">$0.05</span>   <span class="comment"># dedicated L4 LB</span>
-Private Node Hours:    <span class="string">$2.00</span>   <span class="comment"># full node reservation</span></code></div>
+Private Node Hours:    <span class="string">$2.00</span>   <span class="comment"># full node reservation</span>
+Public IP Hours:       <span class="string">$0.005</span>  <span class="comment"># per public address of a node</span></code></div>
 
       <h3>Example: Internal platform team pricing</h3>
       <p>For an IDP (Internal Developer Platform) team doing internal chargebacks, use lower prices that reflect shared infrastructure costs:</p>
@@ -1167,11 +1189,11 @@ Private Node Hours:    <span class="string">$0.50</span>   <span class="comment"
         <div>If you see usage events in Lago but invoices show $0.00, it means the charge amounts are still set to their defaults ($0). Edit the plan charges in the Lago UI.</div>
       </div>
 
-      <p>To price H100 hours differently from L40S hours in Lago, add <strong>charge filters</strong> on the <code>sku</code> (or <code>gpu_type</code>) event property. vBilling sends every dimension as an event property: <code>sku</code>, <code>region</code>, <code>capacity_type</code>, <code>billing_mode</code>, <code>tenant_class</code> and <code>tenant_cluster</code>. Spot and preemptible discounts are a filter on <code>capacity_type</code>.</p>
+      <p>To price H100 hours differently from L40S hours in Lago, add <strong>charge filters</strong> on the <code>sku</code> (or <code>gpu_type</code>) event property. vBilling sends every dimension as an event property: <code>sku</code>, <code>region</code>, <code>capacity_type</code>, <code>billing_mode</code>, <code>tenant_class</code> and <code>tenant_cluster</code>. Spot and preemptible discounts are a filter on <code>capacity_type</code>. For a key in <a href="#pricing-keys"><code>PRICING_KEYS</code></a>, vBilling adds the values usage carries to the billable metric's filters, as it does for SKUs, so a charge filter can price them; the price check reads each combination against the charge filters.</p>
 
       <h2 id="stripe-metronome-pricing">Stripe and Metronome Pricing</h2>
       <p><strong>Stripe:</strong> vBilling creates a Billing Meter per metric and, because Stripe meters cannot price on dimensions, a meter per SKU as new SKUs appear (for example <code>vcluster_gpu_hours__nvidia_h100_80gb_hbm3</code>). Create a metered price on each meter you charge for. To subscribe new tenants automatically, tag the prices <code>metadata[vbilling_plan]=vcluster-standard</code> (or the tenant's <code>plan</code> annotation) and enable <code>stripe.autoSubscribe</code>.</p>
-      <p><strong>Metronome:</strong> vBilling's billable metrics are SUM metrics on <code>value</code>, one per metric code (with <code>METRONOME_PROVISION=true</code> vBilling creates them, named <code>&lt;Metric&gt; [&lt;code&gt;]</code>; otherwise <code>vbilling metronome billable-metrics</code> prints them for your catalog), each with one compound group key: <code>region, sku, capacity_type, billing_mode, tenant_cluster</code> for GPU hours. On your rate card, add a usage product per metric with <code>pricing_group_key</code> set to the dimensions you price on and <code>presentation_group_key: [tenant_cluster]</code> for invoice lines per cluster; together the two must form the metric's group key (for GPU hours, <code>pricing_group_key: [region, sku, capacity_type, billing_mode]</code>). Rate cards carry the currency, so use one rate card per currency. Point <code>metronome.rateCard</code> or a tenant's <code>plan</code> annotation at it.</p>
+      <p><strong>Metronome:</strong> vBilling's billable metrics are SUM metrics on <code>value</code>, one per metric code (with <code>METRONOME_PROVISION=true</code> vBilling creates them, named <code>&lt;Metric&gt; [&lt;code&gt;]</code>; otherwise <code>vbilling metronome billable-metrics</code> prints them for your catalog), each with one compound group key: <code>region, sku, capacity_type, billing_mode, tenant_cluster</code> for GPU hours. On your rate card, add a usage product per metric with <code>pricing_group_key</code> set to the dimensions you price on and <code>presentation_group_key: [tenant_cluster]</code> for invoice lines per cluster; together the two must form the metric's group key (for GPU hours, <code>pricing_group_key: [region, sku, capacity_type, billing_mode]</code>). <a href="#pricing-keys"><code>PRICING_KEYS</code></a> adds keys to that group key. Rate cards carry the currency, so use one rate card per currency. Point <code>metronome.rateCard</code> or a tenant's <code>plan</code> annotation at it.</p>
 
 
     </main>

@@ -2,6 +2,7 @@ package usage
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -20,6 +21,10 @@ const (
 	MetricNetworkEgressGB  = "vcluster_network_egress_gb"
 	MetricLBHours          = "vcluster_lb_hours"
 	MetricPrivateNodeHours = "vcluster_private_node_hours"
+	// MetricPublicIPHours counts the public IP addresses of the nodes billed
+	// whole to a tenant (dedicated and private nodes), for the time their
+	// node-hours bill: one address for one hour is one ip-hour.
+	MetricPublicIPHours = "vcluster_public_ip_hours"
 	// MetricGPUDowntimeHours records GPU time that was allocated but not
 	// billed because the node was unhealthy. It is informational: it makes
 	// downtime credits auditable without ever reaching an invoice.
@@ -42,8 +47,10 @@ type MetricDef struct {
 	// only reach the ledger, webhooks and exports.
 	Billable bool `json:"billable"`
 	// GroupKeys are the dimensions a rating engine should be able to price
-	// on. Every event of the metric carries all of them (tenant_cluster is
-	// added for invoice presentation), so backends can require them.
+	// on: the metric's own, then the ones PRICING_KEYS adds (sorted). Every
+	// event of the metric carries all of them, with a placeholder where it
+	// has no value (tenant_cluster is added for invoice presentation), so
+	// billing platforms can require them.
 	GroupKeys []string `json:"group_keys,omitempty"`
 	// Custom marks operator-declared metrics (ingest API).
 	Custom bool `json:"custom,omitempty"`
@@ -94,6 +101,9 @@ var builtin = []MetricDef{
 	{Code: MetricPrivateNodeHours, Name: "Dedicated Node Hours", Unit: "node-hours", Billable: true,
 		Description: "Whole nodes allocated to one tenant, billed for full capacity.",
 		GroupKeys:   []string{"region", "sku", DimCapacityType}, Accuracy: AccuracyExact, Source: SourceKubernetes},
+	{Code: MetricPublicIPHours, Name: "Public IP Hours", Unit: "ip-hours", Billable: true,
+		Description: "Public IP addresses of whole nodes (dedicated and private nodes), for the hours their node-hours bill. Load balancer addresses are load balancer hours.",
+		GroupKeys:   []string{"region"}, Accuracy: AccuracyExact, Source: SourceKubernetes},
 	{Code: MetricNetworkEgressGB, Name: "Network Egress GiB", Unit: "gib", Billable: true,
 		Description: "Bytes the cluster's pods transmit on their own network interfaces, to any destination (requires Prometheus).",
 		GroupKeys:   []string{"region"}, Accuracy: AccuracyExact, Source: SourcePrometheus},
@@ -114,7 +124,195 @@ var (
 	// off are built-in metrics the configuration switched off (SetEnabled).
 	// The storage overage is off until an allowance is configured.
 	off = map[string]bool{MetricStorageOverageGBHours: true}
+	// ownKeys are each built-in metric's own group keys, without the ones
+	// PRICING_KEYS adds (SetPricingKeys).
+	ownKeys = func() map[string][]string {
+		out := map[string][]string{}
+		for _, d := range builtin {
+			out[d.Code] = d.GroupKeys
+		}
+		return out
+	}()
+	// extraKeys are the keys PRICING_KEYS added to built-in metrics, sorted.
+	extraKeys = map[string][]string{}
 )
+
+// pricingKeyChoices are, per built-in billable metric, the keys PRICING_KEYS
+// may add to its group keys: the dimensions (or the sku or project field) its
+// events carry. Keys that name a single object (tenant_cluster, node,
+// namespace, resource_id) are not among them: tenant_cluster is a
+// presentation key already, and the others would make a price per object.
+// An event without a value for a key carries a placeholder at the billing
+// platforms that need one (Metronome).
+var pricingKeyChoices = map[string][]string{
+	MetricGPUHours: {DimGPUType, DimGPUProfile, DimZone, DimTenantClass, "project"},
+	// sku is the node's SKU (see the collector's nodeSKU): events carry it
+	// only when sku is one of the metric's pricing keys.
+	MetricCPUCoreHours:   {"sku", DimZone, DimTenantClass, "project"},
+	MetricMemoryGBHours:  {"sku", DimZone, DimTenantClass, "project"},
+	MetricStorageGBHours: {DimTenantClass, "project"},
+	// Overage events are copies of storage events: the same keys.
+	MetricStorageOverageGBHours: {DimTenantClass, "project"},
+	MetricInstanceHours:         {"project"},
+	MetricPrivateNodeHours: {DimBillingMode, DimInstanceType, DimVCPUs, DimMemoryGiB, DimGPUCount, DimPublicIP, DimDiskGiB,
+		DimZone, DimTenantClass, "project"},
+	MetricPublicIPHours:   {DimIPFamily, DimCapacityType, DimBillingMode, DimZone, DimTenantClass, "project"},
+	MetricNetworkEgressGB: {DimTenantClass, "project"},
+	MetricLBHours:         {DimTenantClass, "project"},
+}
+
+// objectKeys name one object each: never a pricing key PRICING_KEYS adds.
+var objectKeys = map[string]bool{DimTenantCluster: true, DimNode: true, DimNamespace: true, "resource_id": true, DimMeteringSource: true}
+
+// PricingKeyChoices returns every key a built-in billable metric can be
+// priced on: its own group keys, then the ones PRICING_KEYS may add. It is
+// nil for any other metric.
+func PricingKeyChoices(code string) []string {
+	more, ok := pricingKeyChoices[code]
+	if !ok {
+		return nil
+	}
+	return append(append([]string(nil), ownKeys[code]...), more...)
+}
+
+// ParsePricingKeys parses PRICING_KEYS, "metric:key|key,metric:key": keys
+// to price built-in metrics on besides their own group keys. Every metric
+// must be a built-in billable metric (custom metrics declare their own
+// group keys) and every key one its events carry (PricingKeyChoices). A
+// metric listed twice gets the keys of both entries; a key that is one of
+// the metric's own group keys already adds nothing. The keys of each metric
+// come back sorted.
+func ParsePricingKeys(spec string) (map[string][]string, error) {
+	out := map[string][]string{}
+	for _, item := range strings.Split(spec, ",") {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		code, list, ok := strings.Cut(item, ":")
+		code = strings.TrimSpace(code)
+		if !ok || code == "" || strings.TrimSpace(list) == "" {
+			return nil, fmt.Errorf("entry %q must be metric:key|key", item)
+		}
+		def, builtIn := builtinDef(code)
+		switch {
+		case !builtIn:
+			return nil, fmt.Errorf("%q is not a built-in metric: PRICING_KEYS adds keys to built-in metrics, and custom metrics declare their own group keys "+
+				"(CUSTOM_METRICS, groupKeys in metering.customMetrics). Built-in metrics: %s", code, strings.Join(pricedMetrics(), ", "))
+		case !def.Billable:
+			return nil, fmt.Errorf("%s is informational: no billing platform prices it", code)
+		}
+		choices := PricingKeyChoices(code)
+		for _, k := range strings.Split(list, "|") {
+			k = strings.TrimSpace(k)
+			switch {
+			case k == "":
+				return nil, fmt.Errorf("entry %q has an empty key", item)
+			case objectKeys[k]:
+				return nil, fmt.Errorf("%s cannot be priced on %q: it names one object (a cluster, node, namespace or resource), so each would need its own price. "+
+					"It can be priced on %s", code, k, strings.Join(choices, ", "))
+			case !slices.Contains(choices, k):
+				return nil, fmt.Errorf("%s cannot be priced on %q: its events do not carry it. It can be priced on %s", code, k, strings.Join(choices, ", "))
+			case slices.Contains(ownKeys[code], k), slices.Contains(out[code], k):
+				// A pricing key already.
+			default:
+				out[code] = append(out[code], k)
+			}
+		}
+		if out[code] == nil {
+			out[code] = []string{} // listed, nothing to add: not an error
+		}
+	}
+	for code, keys := range out {
+		if len(keys) == 0 {
+			delete(out, code)
+			continue
+		}
+		sort.Strings(keys)
+	}
+	return out, nil
+}
+
+// pricedMetrics lists the built-in billable metrics, in catalog order.
+func pricedMetrics() []string {
+	catMu.RLock()
+	defer catMu.RUnlock()
+	var out []string
+	for _, d := range builtin {
+		if _, ok := pricingKeyChoices[d.Code]; ok {
+			out = append(out, d.Code)
+		}
+	}
+	return out
+}
+
+// builtinDef finds a built-in metric as declared, before PRICING_KEYS.
+func builtinDef(code string) (MetricDef, bool) {
+	catMu.RLock()
+	defer catMu.RUnlock()
+	for _, d := range builtin {
+		if d.Code == code {
+			d.GroupKeys = ownKeys[code]
+			return d, true
+		}
+	}
+	return MetricDef{}, false
+}
+
+// SetPricingKeys makes keys (ParsePricingKeys' answer) the extra pricing
+// keys of built-in metrics, replacing those set before: a metric's group
+// keys become its own, then these, sorted. nil clears them. Keys
+// ParsePricingKeys would refuse are refused here too.
+func SetPricingKeys(keys map[string][]string) error {
+	var spec []string
+	for code, ks := range keys {
+		if len(ks) > 0 {
+			spec = append(spec, code+":"+strings.Join(ks, "|"))
+		}
+	}
+	clean, err := ParsePricingKeys(strings.Join(spec, ","))
+	if err != nil {
+		return err
+	}
+	catMu.Lock()
+	defer catMu.Unlock()
+	extraKeys = clean
+	for i := range builtin {
+		code := builtin[i].Code
+		builtin[i].GroupKeys = append(append([]string(nil), ownKeys[code]...), clean[code]...)
+	}
+	return nil
+}
+
+// ExtraPricingKeys returns the keys PRICING_KEYS added to a metric, sorted
+// (none for a metric it does not name).
+func ExtraPricingKeys(code string) []string {
+	catMu.RLock()
+	defer catMu.RUnlock()
+	return slices.Clone(extraKeys[code])
+}
+
+// HasPricingKey reports whether a metric is priced on key: it is one of
+// its group keys.
+func HasPricingKey(code, key string) bool {
+	def, ok := Lookup(code)
+	return ok && slices.Contains(def.GroupKeys, key)
+}
+
+// FormatPricingKeys renders pricing keys the way PRICING_KEYS takes them,
+// sorted by metric.
+func FormatPricingKeys(keys map[string][]string) string {
+	codes := make([]string, 0, len(keys))
+	for code := range keys {
+		codes = append(codes, code)
+	}
+	sort.Strings(codes)
+	parts := make([]string, 0, len(codes))
+	for _, code := range codes {
+		parts = append(parts, code+":"+strings.Join(keys[code], "|"))
+	}
+	return strings.Join(parts, ",")
+}
 
 // Catalog returns builtin metrics followed by operator-declared custom ones.
 // A built-in metric the configuration switched off is left out, so no

@@ -3,11 +3,15 @@ package lago
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
+	"slices"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/vclusterlabs-experiments/vbilling/internal/usage"
 )
 
 // Lago's charge filter value for "every value of this key".
@@ -221,6 +225,134 @@ func (a *Adapter) addSKUFilters(ctx context.Context, planCode string, bm *Billab
 	}
 	log.Printf("[lago] plan %s: added %s charge filters for sku %s", planCode, bm.Code, strings.Join(added, ", "))
 	return nil
+}
+
+// keyValueKey is the adapter state of a value vBilling added to the filter
+// of a key PRICING_KEYS prices a metric on.
+func keyValueKey(metric, key, value string) string {
+	return "keyvalue/" + metric + "/" + key + "/" + value
+}
+
+// keyValues adds to values (metric -> key -> values) the values one event
+// or series carries for the keys PRICING_KEYS prices its metric on, besides
+// sku (syncSKUs). A key without a value is left out: Lago prices such usage
+// with the filters that do not name the key.
+func keyValues(values map[string]map[string][]string, metric string, value func(key string) string) {
+	for _, k := range usage.ExtraPricingKeys(metric) {
+		v := value(k)
+		if k == "sku" || v == "" {
+			continue
+		}
+		if values[metric] == nil {
+			values[metric] = map[string][]string{}
+		}
+		if !slices.Contains(values[metric][k], v) {
+			values[metric][k] = append(values[metric][k], v)
+		}
+	}
+}
+
+// syncKeyValues adds the values of the keys PRICING_KEYS prices metrics on
+// to the filters of their billable metrics in Lago, as syncSKUs does for
+// SKUs: Lago accepts a charge filter only for a value its billable metric
+// lists. It adds no charge filter and no price: whoever prices the usage
+// adds charge filters for the combinations that cost something else, and
+// the price check reads them. Values added once are remembered in the
+// adapter state. With backoff (after a delivery), a metric whose values
+// could not be added waits before it is tried again.
+func (a *Adapter) syncKeyValues(ctx context.Context, values map[string]map[string][]string, backoff bool) error {
+	if len(values) == 0 {
+		return nil
+	}
+	a.planMu.Lock()
+	defer a.planMu.Unlock()
+	metrics := make([]string, 0, len(values))
+	for m := range values {
+		metrics = append(metrics, m)
+	}
+	sort.Strings(metrics)
+	var errs []error
+	for _, metric := range metrics {
+		pending := map[string][]string{}
+		var keys []string
+		for k, vs := range values[metric] {
+			for _, v := range vs {
+				if _, done := a.state.Get(keyValueKey(metric, k, v)); !done {
+					if pending[k] == nil {
+						keys = append(keys, k)
+					}
+					pending[k] = append(pending[k], v)
+				}
+			}
+		}
+		if len(pending) == 0 {
+			continue
+		}
+		retryKey := "values/" + metric
+		if r, ok := a.skuRetry[retryKey]; backoff && ok && a.now().Before(r.at) {
+			continue
+		}
+		sort.Strings(keys)
+		found, err := a.addKeyValues(ctx, metric, keys, pending)
+		if err != nil {
+			if backoff {
+				r := a.skuRetry[retryKey]
+				r.delay = min(max(2*r.delay, skuRetryMin), skuRetryMax)
+				r.at = a.now().Add(r.delay)
+				a.skuRetry[retryKey] = r
+				log.Printf("[lago] filter values for %s not added, retrying in %s (usage is still delivered): %v", metric, r.delay, err)
+			}
+			errs = append(errs, err)
+			continue
+		}
+		delete(a.skuRetry, retryKey)
+		if !found {
+			continue // added once the billable metric exists
+		}
+		for k, vs := range pending {
+			for _, v := range vs {
+				if err := a.state.Set(keyValueKey(metric, k, v), "1"); err != nil {
+					log.Printf("[lago] save state: %v", err)
+				}
+			}
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// addKeyValues adds values to the filters of one billable metric, keeping
+// every other key and value it has. found is false when Lago has no such
+// billable metric (the price check reports it). a.planMu held.
+func (a *Adapter) addKeyValues(ctx context.Context, metric string, keys []string, values map[string][]string) (found bool, err error) {
+	ctx, cancel := context.WithTimeout(ctx, skuSyncTimeout)
+	defer cancel()
+	bm, err := a.client.GetBillableMetric(ctx, metric)
+	if isNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("get billable metric %s: %w", metric, err)
+	}
+	filters := bm.Filters
+	var added []string
+	for _, k := range keys {
+		var more []string
+		filters, more = withFilterValues(filters, k, values[k])
+		for _, v := range more {
+			added = append(added, k+"="+v)
+		}
+	}
+	if len(added) == 0 {
+		a.noteFilterDims(bm)
+		return true, nil
+	}
+	if _, err := a.client.UpdateBillableMetricFilters(ctx, metric, filters); err != nil {
+		return false, fmt.Errorf("billable metric %s: add filter values %s: %w", metric, strings.Join(added, ", "), err)
+	}
+	bm.Filters = filters
+	a.noteFilterDims(bm)
+	log.Printf("[lago] billable metric %s: added filter values %s (no price set)", metric, strings.Join(added, ", "))
+	return true, nil
 }
 
 // coversSKU reports whether an existing filter already prices sku, alone or

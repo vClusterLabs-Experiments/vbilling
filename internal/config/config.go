@@ -6,9 +6,12 @@ package config
 import (
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/vclusterlabs-experiments/vbilling/internal/usage"
 )
 
 type Config struct {
@@ -129,6 +132,9 @@ type Config struct {
 	// Billing defaults.
 	DefaultPlanCode string
 	BillingCurrency string
+	// PricingKeys (PRICING_KEYS) adds pricing keys to built-in metrics:
+	// "metric:key|key,metric:key" (usage.ParsePricingKeys).
+	PricingKeys string
 
 	// Price coverage (internal/pricing): warn reports usage a billing
 	// platform has no price for; hold also keeps that usage from it until
@@ -368,6 +374,7 @@ func Load() *Config {
 
 		DefaultPlanCode: envOr("DEFAULT_PLAN_CODE", "vcluster-standard"),
 		BillingCurrency: envOr("BILLING_CURRENCY", "USD"),
+		PricingKeys:     os.Getenv("PRICING_KEYS"),
 
 		PriceCheck:         envOr("PRICE_CHECK", "warn"),
 		PriceCheckInterval: priceCheckInterval,
@@ -606,10 +613,29 @@ func (c *Config) Validate() error {
 	default:
 		return fmt.Errorf("PRICE_CHECK %q must be warn, hold or off", c.PriceCheck)
 	}
+	if err := c.validatePricingKeys(); err != nil {
+		return err
+	}
 	switch c.PrometheusPreset {
 	case "", "default", "vcluster-platform":
 	default:
 		return fmt.Errorf("PROMETHEUS_PRESET %q must be empty, default or vcluster-platform", c.PrometheusPreset)
+	}
+	return nil
+}
+
+// validatePricingKeys checks PRICING_KEYS: built-in billable metrics, keys
+// their events carry, and no stripe adapter. A Stripe meter cannot price on
+// dimensions: vBilling splits meters by STRIPE_SPLIT_METERS_BY, the same
+// keys for every metric, and its price card prices SKUs.
+func (c *Config) validatePricingKeys() error {
+	keys, err := usage.ParsePricingKeys(c.PricingKeys)
+	if err != nil {
+		return fmt.Errorf("PRICING_KEYS: %w", err)
+	}
+	if len(keys) > 0 && slices.Contains(c.Adapters, "stripe") {
+		return fmt.Errorf("PRICING_KEYS does not work with the stripe adapter: a Stripe meter cannot price on dimensions, and vBilling splits meters " +
+			"by STRIPE_SPLIT_METERS_BY (stripe.splitMetersBy), the same keys for every metric. Split Stripe meters that way, or remove PRICING_KEYS")
 	}
 	return nil
 }

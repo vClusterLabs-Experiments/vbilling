@@ -2,6 +2,8 @@ package metrics
 
 import (
 	"context"
+	"net/netip"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -38,7 +40,9 @@ type nodeInfo struct {
 	labels          map[string]string
 	deletedAt       time.Time // set for nodes seen deleted (Auto Nodes scale-down); zero = present
 	draGPUs         float64   // whole GPUs the node offers through DRA ResourceSlices
-	externalIP      bool      // the node has an ExternalIP address
+	// publicIPs are the node's distinct ExternalIP addresses that are public
+	// (publicIP), in the order the node reports them.
+	publicIPs []netip.Addr
 
 	// MIG and sharing. migProfile is set when every advertised GPU device is
 	// a MIG slice (NVIDIA "single" strategy, GKE GPU partitions). Under the
@@ -151,8 +155,11 @@ func (c *Collector) parseNodeAs(n *corev1.Node, renewed time.Time, private bool)
 		ni.diskCapacity = float64(q.Value())
 	}
 	for _, addr := range n.Status.Addresses {
-		if addr.Type == corev1.NodeExternalIP && addr.Address != "" {
-			ni.externalIP = true
+		if addr.Type != corev1.NodeExternalIP {
+			continue
+		}
+		if ip, ok := publicIP(addr.Address); ok && !slices.Contains(ni.publicIPs, ip) {
+			ni.publicIPs = append(ni.publicIPs, ip)
 		}
 	}
 	if r, err := strconv.Atoi(n.Labels["nvidia.com/gpu.replicas"]); err == nil && r > 1 &&
@@ -281,17 +288,64 @@ func (n *nodeInfo) advertisedGPUs() float64 {
 
 // instanceAttributes describe a whole node on its node-hour events, the way
 // instance-level SKUs are defined: vCPUs and memory from its capacity,
-// physical GPUs, and whether it has a public address.
+// physical GPUs, and whether it has a public IP address.
 func (n *nodeInfo) instanceAttributes() map[string]string {
 	out := map[string]string{
 		usage.DimVCPUs:     strconv.FormatFloat(n.cpuCapacity, 'f', -1, 64),
 		usage.DimMemoryGiB: strings.TrimSuffix(strconv.FormatFloat(n.memCapacity/gib, 'f', 1, 64), ".0"),
 		usage.DimGPUCount:  strconv.FormatFloat(n.instanceGPUs(), 'f', -1, 64),
-		usage.DimPublicIP:  strconv.FormatBool(n.externalIP),
+		usage.DimPublicIP:  strconv.FormatBool(len(n.publicIPs) > 0),
 	}
 	// The node's own disk, where its kubelet reports one.
 	if n.diskCapacity > 0 {
 		out[usage.DimDiskGiB] = strings.TrimSuffix(strconv.FormatFloat(n.diskCapacity/gib, 'f', 1, 64), ".0")
+	}
+	return out
+}
+
+// sharedAddressSpace is 100.64.0.0/10 (RFC 6598), which carrier-grade NAT
+// and some clouds use for node addresses.
+var sharedAddressSpace = netip.MustParsePrefix("100.64.0.0/10")
+
+// publicIP returns a node address as a public IP address: a unicast
+// address outside the private (RFC 1918), shared (100.64.0.0/10), loopback,
+// link-local and IPv6 unique-local ranges. ok is false for any other
+// address, and for text that is not an IP address.
+func publicIP(s string) (netip.Addr, bool) {
+	a, err := netip.ParseAddr(strings.TrimSpace(s))
+	if err != nil {
+		return netip.Addr{}, false
+	}
+	a = a.Unmap().WithZone("")
+	if !a.IsGlobalUnicast() || a.IsPrivate() || sharedAddressSpace.Contains(a) {
+		return netip.Addr{}, false
+	}
+	return a, true
+}
+
+// ipFamily is one address family of a node's public IP addresses.
+type ipFamily struct {
+	name  string // ipv4 or ipv6 (the ip_family dimension)
+	count int
+}
+
+// publicIPFamilies counts the node's public IP addresses per family, IPv4
+// first; a family the node has none of is left out.
+func (n *nodeInfo) publicIPFamilies() []ipFamily {
+	var v4, v6 int
+	for _, ip := range n.publicIPs {
+		if ip.Is4() {
+			v4++
+		} else {
+			v6++
+		}
+	}
+	var out []ipFamily
+	if v4 > 0 {
+		out = append(out, ipFamily{"ipv4", v4})
+	}
+	if v6 > 0 {
+		out = append(out, ipFamily{"ipv6", v6})
 	}
 	return out
 }

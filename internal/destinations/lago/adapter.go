@@ -193,14 +193,17 @@ func ToEvent(ev *usage.Event) Event {
 func (a *Adapter) SendEvents(ctx context.Context, events []usage.Event) error {
 	lagoEvents := make([]Event, 0, len(events))
 	skus := map[string][]string{} // metric -> distinct SKUs in this batch
+	values := map[string]map[string][]string{}
 	seen := map[[2]string]bool{}
 	for i := range events {
 		if destinations.AcceptsEvent(a, &events[i]) {
-			lagoEvents = append(lagoEvents, ToEvent(&events[i]))
-			if key := [2]string{events[i].Metric, events[i].SKU}; key[1] != "" && !seen[key] {
+			ev := &events[i]
+			lagoEvents = append(lagoEvents, ToEvent(ev))
+			if key := [2]string{ev.Metric, ev.SKU}; key[1] != "" && !seen[key] {
 				seen[key] = true
 				skus[key[0]] = append(skus[key[0]], key[1])
 			}
+			keyValues(values, ev.Metric, func(k string) string { return destinations.FieldValue(ev, k) })
 		}
 	}
 	// Lago's batch endpoint caps at 100 events per call. Transaction IDs are
@@ -222,6 +225,7 @@ func (a *Adapter) SendEvents(ctx context.Context, events []usage.Event) error {
 	// matches filters when it aggregates, so the events just sent are
 	// priced by the filters added here.
 	a.syncSKUs(ctx, skus)
+	_ = a.syncKeyValues(ctx, values, true) // logged; retried with a later batch
 	return nil
 }
 
@@ -259,6 +263,8 @@ func fieldNameFor(code string) string {
 		return "lb_hours"
 	case MetricPrivateNodeHours:
 		return "private_node_hours"
+	case MetricPublicIPHours:
+		return "public_ip_hours"
 	default:
 		return code
 	}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -30,13 +31,24 @@ func (a *Adapter) PricePlan(t usage.Tenant) string {
 }
 
 // PriceDims lists the keys besides "sku" that the metric's billable metric
-// filters on (region, capacity_type, ...), as last read from Lago: charge
-// filters can price each combination of their values differently. The
-// v0.1 property "vcluster" is the tenant_cluster dimension.
+// filters on (region, capacity_type, ...), as last read from Lago, and the
+// keys PRICING_KEYS prices the metric on: charge filters can price each
+// combination of their values differently. The v0.1 property "vcluster" is
+// the tenant_cluster dimension.
 func (a *Adapter) PriceDims(metric string) []string {
 	a.dimsMu.Lock()
-	defer a.dimsMu.Unlock()
-	return a.filterDims[metric]
+	keys := slices.Clone(a.filterDims[metric])
+	a.dimsMu.Unlock()
+	added := false
+	for _, k := range usage.ExtraPricingKeys(metric) {
+		if k != "sku" && !slices.Contains(keys, k) {
+			keys, added = append(keys, k), true
+		}
+	}
+	if added {
+		sort.Strings(keys)
+	}
+	return keys
 }
 
 // noteFilterDims remembers a billable metric's filter keys for PriceDims.
@@ -72,15 +84,24 @@ func dimOfFilterKey(k string) string {
 }
 
 // PrepareSeries adds new SKUs to their billable metric's "sku" filter
-// values. Lago only accepts a charge filter for a value its billable metric
-// lists, so without this nobody could price a held SKU in Lago. It adds no
-// charge filter and no price.
+// values, and the values of the keys PRICING_KEYS prices a metric on to
+// those keys' filters. Lago only accepts a charge filter for a value its
+// billable metric lists, so without this nobody could price a held SKU (or
+// value) in Lago. It adds no charge filter and no price.
 func (a *Adapter) PrepareSeries(ctx context.Context, series []destinations.PriceSeries) error {
 	skus := map[string][]string{}
+	values := map[string]map[string][]string{}
 	for _, s := range series {
-		if !s.Catalog && s.SKU != "" && a.Accepts(s.Metric) {
+		if s.Catalog || !a.Accepts(s.Metric) {
+			continue
+		}
+		if s.SKU != "" {
 			skus[s.Metric] = append(skus[s.Metric], s.SKU)
 		}
+		keyValues(values, s.Metric, func(k string) string { return s.Dims[k] })
+	}
+	if err := a.syncKeyValues(ctx, values, false); err != nil {
+		return err
 	}
 	if len(skus) == 0 {
 		return nil
@@ -190,7 +211,7 @@ func (a *Adapter) coverage(s destinations.PriceSeries, bm *BillableMetric, plan 
 	}
 	def, defFound := pricesSomething(ch.Properties)
 
-	if s.Catalog || s.SKU == "" {
+	if s.Catalog || (s.SKU == "" && destinations.DimsLabel(s.Dims) == "") {
 		priced := def
 		for _, f := range ch.Filters {
 			if p, _ := pricesSomething(f.Properties); p && s.Catalog {
@@ -202,6 +223,9 @@ func (a *Adapter) coverage(s destinations.PriceSeries, bm *BillableMetric, plan 
 		}
 		return destinations.PriceCoverage{Status: destinations.PriceZero, Detail: where + ": priced at 0"}
 	}
+	// A series with a SKU, or with values of other keys a charge filter can
+	// price on (a key PRICING_KEYS adds to a metric without SKUs), is priced
+	// by the charge filter Lago applies to it, else by the charge.
 
 	f, exact := filterFor(ch.Filters, s)
 	inherited := false
@@ -234,10 +258,14 @@ func (a *Adapter) coverage(s destinations.PriceSeries, bm *BillableMetric, plan 
 		if inherited {
 			how = "the charge filter vBilling split out for sku=" + s.SKU + " copied the default price 0"
 		}
+		with := "a charge filter in Lago, or LAGO_PRICE_CARD before the SKU's first event"
+		if s.SKU == "" {
+			with = "a charge filter in Lago"
+		}
 		return destinations.PriceCoverage{
 			Status: destinations.PriceMissing,
 			Detail: fmt.Sprintf("%s: %s, so Lago bills it at 0 while other usage has prices (%s)", where, how, describeFilter(sibling)),
-			Hint:   fmt.Sprintf("price %s in the charge for %s on plan %q (a charge filter in Lago, or LAGO_PRICE_CARD before the SKU's first event)", describeSeries(s), bm.Code, plan.Code),
+			Hint:   fmt.Sprintf("price %s in the charge for %s on plan %q (%s)", describeSeries(s), bm.Code, plan.Code, with),
 		}
 	}
 	return destinations.PriceCoverage{Status: destinations.PriceZero, Detail: fmt.Sprintf("%s: priced at 0", where)}
@@ -327,7 +355,10 @@ func describeFilter(f *ChargeFilter) string {
 
 // describeSeries renders a series' SKU and dimensions.
 func describeSeries(s destinations.PriceSeries) string {
-	parts := []string{"sku=" + s.SKU}
+	var parts []string
+	if s.SKU != "" {
+		parts = append(parts, "sku="+s.SKU)
+	}
 	keys := make([]string, 0, len(s.Dims))
 	for k := range s.Dims {
 		keys = append(keys, k)

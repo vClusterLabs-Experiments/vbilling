@@ -111,7 +111,14 @@ func (st *startupConfig) load(opts startupOptions) error {
 		strings.Join(cfg.Adapters, ","), cfg.Region, cfg.TenantSource, cfg.EnforcementMode, cfg.PriceCheck)
 
 	// The metric catalog, in this order: a later source may not redeclare a
-	// metric an earlier one declared.
+	// metric an earlier one declared. PRICING_KEYS names built-in metrics
+	// only, which Validate checked.
+	if err := declarePricingKeys(cfg); err != nil {
+		return err
+	}
+	if keys, _ := usage.ParsePricingKeys(cfg.PricingKeys); len(keys) > 0 {
+		st.ok("PRICING_KEYS: %s", usage.FormatPricingKeys(keys))
+	}
 	customs, err := usage.ParseCustomMetrics(cfg.CustomMetrics)
 	if err != nil {
 		return fmt.Errorf("CUSTOM_METRICS: %w", err)

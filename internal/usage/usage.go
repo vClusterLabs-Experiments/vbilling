@@ -44,14 +44,17 @@ const (
 // instance-level SKU is made of (vCores, RAM, GPU quantity, a public IP, the
 // node's disk).
 // They describe the node; they are not group keys, so pricing never splits
-// on them unless a billing platform is configured to.
+// on them unless PRICING_KEYS adds them.
 const (
 	DimVCPUs     = "vcpus"      // CPU capacity of the node, in cores
 	DimMemoryGiB = "memory_gib" // memory capacity of the node, in GiB (one decimal)
 	DimGPUCount  = "gpu_count"  // physical GPUs (MIG and time-slicing converted back)
-	DimPublicIP  = "public_ip"  // "true" when the node has an ExternalIP address
+	DimPublicIP  = "public_ip"  // "true" when the node has a public IP address (see vcluster_public_ip_hours)
 	DimDiskGiB   = "disk_gib"   // the node's own disk in GiB (its ephemeral-storage capacity, one decimal), when reported
 )
+
+// DimIPFamily is the address family of a public IP-hour event: ipv4 or ipv6.
+const DimIPFamily = "ip_family"
 
 // Capacity types.
 const (

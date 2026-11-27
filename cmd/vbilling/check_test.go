@@ -207,6 +207,14 @@ func TestCheckConfigStopsWithTheStartupErrorOnEachInvalidInput(t *testing.T) {
 
 		{name: "setting with a value that is not allowed", env: map[string]string{"CPU_MEMORY_BASIS": "limits"},
 			want: `invalid configuration: CPU_MEMORY_BASIS "limits" must be usage, requests or max`},
+		{name: "pricing key a metric's events do not carry", env: map[string]string{"PRICING_KEYS": "vcluster_private_node_hours:public_ip,vcluster_lb_hours:zone"},
+			want: `invalid configuration: PRICING_KEYS: vcluster_lb_hours cannot be priced on "zone": its events do not carry it. It can be priced on region, tenant_class, project`},
+		{name: "pricing keys of a custom metric", env: map[string]string{"PRICING_KEYS": "inference_output_tokens:model", "CUSTOM_METRICS": "inference_output_tokens:tokens"},
+			want: `invalid configuration: PRICING_KEYS: "inference_output_tokens" is not a built-in metric: PRICING_KEYS adds keys to built-in metrics, and custom metrics declare their own group keys (CUSTOM_METRICS, groupKeys in metering.customMetrics). ` +
+				`Built-in metrics: vcluster_gpu_hours, vcluster_cpu_core_hours, vcluster_memory_gb_hours, vcluster_storage_gb_hours, vcluster_storage_overage_gb_hours, vcluster_instance_hours, vcluster_private_node_hours, vcluster_public_ip_hours, vcluster_network_egress_gb, vcluster_lb_hours`},
+		{name: "pricing keys with the stripe adapter", env: map[string]string{"ADAPTERS": "stripe", "STRIPE_API_KEY": "sk_test_x", "PRICING_KEYS": "vcluster_gpu_hours:gpu_type"},
+			want: `invalid configuration: PRICING_KEYS does not work with the stripe adapter: a Stripe meter cannot price on dimensions, and vBilling splits meters by STRIPE_SPLIT_METERS_BY (stripe.splitMetersBy), ` +
+				`the same keys for every metric. Split Stripe meters that way, or remove PRICING_KEYS`},
 		{name: "cross-check of an unknown metric", env: map[string]string{"CROSS_CHECKS": "inference_output_tokens=vllm_output_tokens:2%"},
 			want: `CROSS_CHECKS: cross-check "inference_output_tokens=vllm_output_tokens:2%": unknown metric "inference_output_tokens"`},
 		{name: "enforcement rule with an unknown state", env: map[string]string{"ENFORCEMENT_RULES": "alert:vbtest-bad=frozen"},
@@ -406,6 +414,16 @@ func TestCheckConfigListsTheEscalations(t *testing.T) {
 	r := vbilling(t, map[string]string{"ADAPTERS": "noop", "ENFORCEMENT_ESCALATIONS": "delinquent:72h:suspended, suspended:7d:paused"}, "check-config")
 	if r.code != 0 || !strings.Contains(r.stdout, "ok       ENFORCEMENT_ESCALATIONS: delinquent:72h:suspended, suspended:7d:paused\n") {
 		t.Fatalf("exit %d\n%s%s", r.code, r.stdout, r.stderr)
+	}
+}
+
+// The pricing keys PRICING_KEYS adds are listed with what was checked,
+// sorted, the way start-up applies them.
+func TestCheckConfigListsThePricingKeys(t *testing.T) {
+	r := vbilling(t, map[string]string{"ADAPTERS": "metronome,lago", "METRONOME_API_TOKEN": "token", "LAGO_API_KEY": "key", "API_TOKEN": "api", "INGEST_TOKEN": "ingest",
+		"PRICING_KEYS": "vcluster_private_node_hours:zone|public_ip, vcluster_cpu_core_hours:sku"}, "check-config")
+	if want := "ok       PRICING_KEYS: vcluster_cpu_core_hours:sku,vcluster_private_node_hours:public_ip|zone\n"; r.code != 0 || !strings.Contains(r.stdout, want) {
+		t.Fatalf("exit %d, want %q\n%s%s", r.code, want, r.stdout, r.stderr)
 	}
 }
 

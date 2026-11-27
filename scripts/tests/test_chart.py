@@ -351,6 +351,35 @@ enforcement:
             self.assertIn("schema", str(refused.exception), wrong)
 
 
+class PricingKeysTests(unittest.TestCase):
+    """billing.pricingKeys reaches vBilling as PRICING_KEYS, in the pod and in
+    the configuration check that refuses keys a metric's events do not carry."""
+
+    def test_pricing_keys_render_as_the_setting(self):
+        values = values_file(self, """
+billing:
+  pricingKeys:
+    vcluster_private_node_hours: [public_ip, zone]
+    vcluster_gpu_hours: [gpu_type]
+    vcluster_lb_hours: []
+""")
+        docs = render(*TOKENS, values=[values])
+        # Sorted by metric (a template ranges over a map in key order), keys as
+        # listed, and a metric without keys left out.
+        want = "vcluster_gpu_hours:gpu_type,vcluster_private_node_hours:public_ip|zone"
+        self.assertEqual(env(one(docs, "StatefulSet"))["PRICING_KEYS"]["value"], want)
+        self.assertEqual(env(one(docs, "Job", "vbilling-config-check"))["PRICING_KEYS"]["value"], want)
+
+    def test_without_pricing_keys_the_setting_is_not_set(self):
+        self.assertNotIn("PRICING_KEYS", env(one(render(*TOKENS), "StatefulSet")))
+        self.assertEqual(chartlib.yaml_file(chartlib.CHART / "values.yaml")["billing"]["pricingKeys"], {})
+
+    def test_the_schema_wants_a_list_of_keys_per_metric(self):
+        with self.assertRaises(HelmError) as refused:
+            render(*TOKENS, "--set", "billing.pricingKeys.vcluster_gpu_hours=gpu_type")
+        self.assertIn("schema", str(refused.exception))
+
+
 class PlacementTests(unittest.TestCase):
     """In the validation lab vBilling ran on the control plane
     cluster's only node, a GPU node, with its ledger and its archive on

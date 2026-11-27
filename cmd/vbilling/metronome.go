@@ -89,8 +89,12 @@ list holds that metric, and not vcluster_storage_gb_hours.
 }
 
 // declareCatalog registers the custom metrics vBilling declares from the
-// same settings, in the same order as main.
+// same settings, in the same order as main, and the pricing keys
+// PRICING_KEYS adds to built-in metrics.
 func declareCatalog(cfg *config.Config) error {
+	if err := declarePricingKeys(cfg); err != nil {
+		return err
+	}
 	customs, err := usage.ParseCustomMetrics(cfg.CustomMetrics)
 	if err != nil {
 		return fmt.Errorf("CUSTOM_METRICS: %w", err)
@@ -126,5 +130,18 @@ func declareCatalog(cfg *config.Config) error {
 		return fmt.Errorf("ALLOWANCES_FILE: %w", err)
 	}
 	usage.UseStorageAllowances(len(allowances) > 0)
+	return nil
+}
+
+// declarePricingKeys adds the keys of PRICING_KEYS to the group keys of
+// built-in metrics in the process-wide catalog.
+func declarePricingKeys(cfg *config.Config) error {
+	keys, err := usage.ParsePricingKeys(cfg.PricingKeys)
+	if err == nil {
+		err = usage.SetPricingKeys(keys)
+	}
+	if err != nil {
+		return fmt.Errorf("PRICING_KEYS: %w", err)
+	}
 	return nil
 }

@@ -37,7 +37,12 @@
         "currency": {"type": "string"},
         "collectionDelay": {"type": "string"},
         "planByClass": {"type": "object", "additionalProperties": {"type": "string"}},
-        "priceCheck": {"type": "object", "properties": {"mode": {"type": "string"}}},
+        "pricingKeys": {
+          "description": "More keys to price built-in metrics on (PRICING_KEYS): metric code -> list of keys.",
+          "type": "object",
+          "additionalProperties": {"type": "array", "items": {"type": "string"}}
+        },
+                "priceCheck": {"type": "object", "properties": {"mode": {"type": "string"}}},
         "allowances": {
           "description": "ALLOWANCES_FILE: storage included per node, cluster or volume. vBilling checks the values in the configuration check Job.",
           "type": "array",

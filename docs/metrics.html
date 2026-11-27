@@ -81,6 +81,7 @@
           <tr><td><code>vcluster_gpu_hours</code></td><td>Exact</td><td>Pod and node lifetimes</td></tr>
           <tr><td><code>vcluster_cpu_core_hours</code>, <code>vcluster_memory_gb_hours</code></td><td>Exact with <code>CPU_MEMORY_BASIS=requests</code>; an estimate with <code>usage</code> or <code>max</code></td><td>Pod lifetimes and requests, or node capacity. With <code>usage</code> or <code>max</code>, usage is one metrics-server reading taken when the window is collected, times the window's length: its events carry <code>estimate: true</code>. metrics-server has no history, so a window collected late (after a restart or outage) bills no usage at all with <code>usage</code> (requests with <code>max</code>); vBilling logs those pod-windows and counts them in <code>vbilling_cpu_memory_unmeasured_total</code>. <code>requests</code> is the default.</td></tr>
           <tr><td><code>vcluster_private_node_hours</code></td><td>Exact</td><td>Node lifetimes and health</td></tr>
+          <tr><td><code>vcluster_public_ip_hours</code></td><td>Exact</td><td>Node lifetimes and health, and the nodes' <code>ExternalIP</code> addresses</td></tr>
           <tr><td><code>vcluster_storage_gb_hours</code></td><td>Exact</td><td>Bound PVC lifetimes</td></tr>
           <tr><td><code>vcluster_storage_overage_gb_hours</code> (with storage allowances)</td><td>Exact</td><td>Bound PVC lifetimes, and the lifetimes of the nodes billed whole</td></tr>
           <tr><td><code>vcluster_instance_hours</code></td><td>Exact</td><td>Control plane readiness</td></tr>
@@ -156,8 +157,9 @@
             <tbody>
               <tr><td><code>capacity_type</code></td><td>Capacity type of the node</td></tr>
               <tr><td><code>billing_mode</code></td><td>shared, dedicated_node or private_node</td></tr>
+              <tr><td><code>sku</code></td><td>The SKU of the node the usage ran on, as on its node-hours, when <code>sku</code> is one of the metric's <a href="#pricing-keys">pricing keys</a></td></tr>
+              <tr><td><code>zone</code></td><td>Node zone</td></tr>
               <tr><td><code>namespace</code></td><td>Namespace inside the cluster (with METER_BY_NAMESPACE)</td></tr>
-              <tr><td><code>vcpus</code>, <code>memory_gib</code>, <code>gpu_count</code>, <code>public_ip</code>, <code>disk_gib</code></td><td>Dedicated and private node-hour events: the node's CPU cores, memory in GiB, physical GPUs, whether it has an external IP, and its own disk in GiB (its ephemeral-storage capacity, when the node reports one), so a billing platform can price an instance by its shape. Not group keys</td></tr>
               <tr><td><code>accuracy</code></td><td><code>estimate</code> on events of estimated metrics, sent to Metronome and webhooks</td></tr>
             </tbody>
           </table>
@@ -188,6 +190,8 @@
             <tbody>
               <tr><td><code>capacity_type</code></td><td>Capacity type of the node</td></tr>
               <tr><td><code>billing_mode</code></td><td>shared, dedicated_node or private_node</td></tr>
+              <tr><td><code>sku</code></td><td>As for CPU: the node's SKU, when <code>sku</code> is a pricing key of the metric</td></tr>
+              <tr><td><code>zone</code></td><td>Node zone</td></tr>
             </tbody>
           </table>
         </div>
@@ -215,16 +219,53 @@
           <table class="props-table">
             <thead><tr><th>Key</th><th>Meaning</th></tr></thead>
             <tbody>
-              <tr><td><code>sku</code></td><td>SKU label, instance type, or &lt;n&gt;x&lt;GPU model&gt;</td></tr>
+              <tr><td><code>sku</code></td><td>SKU label, instance type, or &lt;n&gt;x&lt;GPU model&gt; (<code>cpu-node</code> without GPUs)</td></tr>
               <tr><td><code>capacity_type</code></td><td>Capacity type of the node</td></tr>
+              <tr><td><code>billing_mode</code></td><td>dedicated_node or private_node</td></tr>
               <tr><td><code>node</code></td><td>Node name (also resource_id)</td></tr>
               <tr><td><code>instance_type</code></td><td>node.kubernetes.io/instance-type</td></tr>
+              <tr><td><code>zone</code></td><td>Node zone</td></tr>
+              <tr><td><code>vcpus</code>, <code>memory_gib</code>, <code>gpu_count</code>, <code>disk_gib</code></td><td>The node's CPU cores, memory in GiB, physical GPUs and its own disk in GiB (its ephemeral-storage capacity, when the node reports one), so a rate card can price an instance by its shape (<a href="#pricing-keys">pricing keys</a>)</td></tr>
+              <tr><td><code>public_ip</code></td><td><code>true</code> when the node has a public IP address, by the rule of <a href="#public-ip-hours">public IP hours</a></td></tr>
             </tbody>
           </table>
         </div>
       </div>
 
-      <h2 id="storage-gb-hours">5. Storage GiB-Hours</h2>
+      <h2 id="public-ip-hours">5. Public IP Hours</h2>
+      <div class="metric-card">
+        <div class="metric-card-header">
+          <h3><code>vcluster_public_ip_hours</code></h3>
+          <div class="metric-card-badges">
+            <span class="metric-badge private">Dedicated nodes</span>
+          </div>
+        </div>
+        <div class="metric-card-body">
+          <dl class="metric-detail">
+            <dt>Source</dt>
+            <dd>The <code>ExternalIP</code> addresses of the nodes billed whole to a tenant: dedicated nodes and a cluster's own nodes</dd>
+            <dt>Unit</dt>
+            <dd>ip-hours</dd>
+            <dt>Quantity</dt>
+            <dd>public addresses &times; seconds the node's node-hours bill in the window / 3600, one event per node and address family</dd>
+          </dl>
+          <p>A public IP is an <code>ExternalIP</code> address outside the private (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16), shared (100.64.0.0/10), loopback, link-local and IPv6 unique-local (fc00::/7) ranges. A node with two public addresses counts two; an address it lists twice counts once. A node's <code>InternalIP</code> never counts: the cloud controller manager reports a node's public addresses as <code>ExternalIP</code>, and on bare metal you set them the same way.</p>
+          <p>The addresses bill for exactly the time the node's node-hours bill: not before it was created or after it was deleted, not while it is down, and not while its cluster is paused unless <code>PAUSE_KEEP_BILLING</code> keeps nodes. A node shared by several tenants bills no addresses. Load balancer addresses are load balancer hours, never public IP hours.</p>
+          <h4>Dimensions</h4>
+          <table class="props-table">
+            <thead><tr><th>Key</th><th>Meaning</th></tr></thead>
+            <tbody>
+              <tr><td><code>ip_family</code></td><td><code>ipv4</code> or <code>ipv6</code>, to price the two apart (a <a href="#pricing-keys">pricing key</a> you add)</td></tr>
+              <tr><td><code>capacity_type</code></td><td>Capacity type of the node</td></tr>
+              <tr><td><code>billing_mode</code></td><td>dedicated_node or private_node</td></tr>
+              <tr><td><code>node</code></td><td>Node name (also resource_id)</td></tr>
+              <tr><td><code>zone</code></td><td>Node zone</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <h2 id="storage-gb-hours">6. Storage GiB-Hours</h2>
       <div class="metric-card">
         <div class="metric-card-header">
           <h3><code>vcluster_storage_gb_hours</code></h3>
@@ -284,7 +325,7 @@
         </div>
       </div>
 
-      <h2 id="instance-hours">6. Tenant Cluster Hours</h2>
+      <h2 id="instance-hours">7. Tenant Cluster Hours</h2>
       <div class="metric-card">
         <div class="metric-card-header">
           <h3><code>vcluster_instance_hours</code></h3>
@@ -312,7 +353,7 @@
         </div>
       </div>
 
-      <h2 id="lb-hours">7. LoadBalancer Hours</h2>
+      <h2 id="lb-hours">8. LoadBalancer Hours</h2>
       <div class="metric-card">
         <div class="metric-card-header">
           <h3><code>vcluster_lb_hours</code></h3>
@@ -329,11 +370,11 @@
             <dt>Quantity</dt>
             <dd>load balancers &times; seconds / 3600</dd>
           </dl>
-          <p>A load balancer that is still pending (no IP) is not billed. It bills from the second it got its address, where vBilling's watch saw that; one that had its address before vBilling could see it bills from the Service's creation, in the window it first counts in. A deleted load balancer bills until the second it was deleted.</p>
+          <p>A load balancer that is still pending (no IP) is not billed. It bills from the second it got its address, where vBilling's watch saw that; one that had its address before vBilling could see it bills from the Service's creation, in the window it first counts in. A deleted load balancer bills until the second it was deleted. Its address is billed here only, never as <a href="#public-ip-hours">public IP hours</a>.</p>
         </div>
       </div>
 
-      <h2 id="network-egress">8. Network Egress GiB</h2>
+      <h2 id="network-egress">9. Network Egress GiB</h2>
       <div class="metric-card">
         <div class="metric-card-header">
           <h3><code>vcluster_network_egress_gb</code></h3>
@@ -355,7 +396,7 @@
         </div>
       </div>
 
-      <h2 id="gpu-utilization">9. GPU Utilization (informational)</h2>
+      <h2 id="gpu-utilization">10. GPU Utilization (informational)</h2>
       <div class="metric-card">
         <div class="metric-card-header">
           <h3><code>vcluster_gpu_utilization</code></h3>
@@ -383,7 +424,7 @@
         </div>
       </div>
 
-      <h2 id="gpu-downtime">10. GPU Downtime Hours (informational)</h2>
+      <h2 id="gpu-downtime">11. GPU Downtime Hours (informational)</h2>
       <div class="metric-card">
         <div class="metric-card-header">
           <h3><code>vcluster_gpu_downtime_hours</code></h3>
@@ -411,6 +452,37 @@
           </table>
         </div>
       </div>
+
+      <h2 id="pricing-keys">Pricing keys</h2>
+      <p>A metric's pricing keys are the keys a rate card can price it on: its <code>group_keys</code> in <code>GET /api/v1/catalog</code>. Every event of the metric carries every one of them. Metronome requires each on every event, so there an event with no value for a key carries <code>none</code>. <code>PRICING_KEYS</code> (Helm <code>billing.pricingKeys</code>) adds keys to built-in metrics, from the last column. vBilling refuses any other key, at start-up and in <code>vbilling check-config</code>, and the message lists the keys the metric takes. Custom metrics declare their own (<code>groupKeys</code>).</p>
+      <table class="props-table">
+        <thead><tr><th>Metric</th><th>Pricing keys</th><th>Keys PRICING_KEYS can add</th></tr></thead>
+        <tbody>
+          <tr><td><code>vcluster_gpu_hours</code></td><td>region, sku, capacity_type, billing_mode</td><td>gpu_type, gpu_profile, zone, tenant_class, project</td></tr>
+          <tr><td><code>vcluster_cpu_core_hours</code></td><td>region, capacity_type, billing_mode</td><td>sku (the node's SKU), zone, tenant_class, project</td></tr>
+          <tr><td><code>vcluster_memory_gb_hours</code></td><td>region, capacity_type, billing_mode</td><td>sku (the node's SKU), zone, tenant_class, project</td></tr>
+          <tr><td><code>vcluster_private_node_hours</code></td><td>region, sku, capacity_type</td><td>billing_mode, instance_type, vcpus, memory_gib, gpu_count, public_ip, disk_gib, zone, tenant_class, project</td></tr>
+          <tr><td><code>vcluster_public_ip_hours</code></td><td>region</td><td>ip_family, capacity_type, billing_mode, zone, tenant_class, project</td></tr>
+          <tr><td><code>vcluster_storage_gb_hours</code></td><td>region, sku</td><td>tenant_class, project</td></tr>
+          <tr><td><code>vcluster_instance_hours</code></td><td>region, tenant_class</td><td>project</td></tr>
+          <tr><td><code>vcluster_lb_hours</code></td><td>region</td><td>tenant_class, project</td></tr>
+          <tr><td><code>vcluster_network_egress_gb</code></td><td>region</td><td>tenant_class, project</td></tr>
+        </tbody>
+      </table>
+      <p>Keys that name one object (<code>tenant_cluster</code>, <code>node</code>, <code>namespace</code>) are never pricing keys. Metronome gets <code>tenant_cluster</code> as a presentation key for invoice lines per cluster. Informational metrics have no pricing keys.</p>
+      <p>With <code>sku</code> among their pricing keys, CPU core-hours and memory GiB-hours carry the SKU of the node they ran on, the one its node-hours carry: <code>SKU_LABEL</code>, else the instance type, else <code>&lt;n&gt;x&lt;GPU model&gt;</code> or <code>cpu-node</code>. That holds for whole nodes and for pods on shared nodes; a pod whose node is gone carries none. Without it they carry no SKU, as before, so meters and charge filters split per SKU see no change.</p>
+      <div class="code-block"><code>billing:
+  pricingKeys:
+    vcluster_private_node_hours: [public_ip]   <span class="comment"># an instance profile with or without a public IP</span>
+    vcluster_gpu_hours: [gpu_type]             <span class="comment"># per profile (sku) and per GPU model</span>
+    vcluster_cpu_core_hours: [sku]             <span class="comment"># per node SKU inside one cluster</span>
+    vcluster_public_ip_hours: [ip_family]      <span class="comment"># IPv4 and IPv6 priced apart</span></code></div>
+      <p>The price check reads each combination of a metric's pricing keys as its own series, one row of <code>GET /api/v1/pricing</code>: a profile with a public IP priced at 5 and the same profile without one priced at 0 are two rows, priced and zero.</p>
+      <ul>
+        <li><strong>Metronome:</strong> a metric's billable metric groups on its pricing keys, named for the keys added (<code>Dedicated Node Hours [vcluster_private_node_hours] by public_ip</code>). Metronome cannot change a billable metric's group keys, so a new key set is a new billable metric: see <a href="metronome.html#pricing-keys">Changing pricing keys</a>.</li>
+        <li><strong>Lago:</strong> vBilling adds the values usage carries to the billable metric's filters, as it does for SKUs, so a charge filter can price them. It creates no charge filter for them.</li>
+        <li><strong>Stripe:</strong> not supported. Stripe meters cannot price on dimensions; split meters with <code>STRIPE_SPLIT_METERS_BY</code>, which applies to every metric.</li>
+      </ul>
 
       <h2 id="custom-metrics">Custom metrics</h2>
       <p>Declare operator metrics as a list in <code>metering.customMetrics</code>. The chart passes it as <code>CUSTOM_METRICS_FILE</code>:</p>

@@ -111,6 +111,32 @@ enforcement:
         <li>An endpoint whose engine runs in the customer's own cluster can bill tokens too, with a second count from the engine: see the cross-check under <a href="usage-sources.html#cross-checks">Usage Sources</a>.</li>
       </ul>
 
+      <h3 id="instance-profiles">Instances per profile, public IPs and storage</h3>
+      <p>A provider that rents whole nodes often prices them like a cloud's instances: a rate per instance profile, a rate per public IP address, and storage per GiB. Label each node with its profile and point <code>metering.skuLabel</code> at the label. A whole node's node-hours then carry the profile as <code>sku</code>, and <code>vcluster_public_ip_hours</code> counts the node's public addresses for the same time (see <a href="metrics.html#public-ip-hours">Public IP Hours</a>).</p>
+      <div class="code-block"><code>metering:
+  skuLabel: vbilling.vcluster.com/sku   <span class="comment"># the node's profile: gpu-h100-8, cpu-64, ...</span>
+adapters: [metronome]</code></div>
+      <p>On Metronome, one rate card holds the products below, each with <code>presentation_group_key: [tenant_cluster]</code> for invoice lines per cluster:</p>
+      <div class="hmw-table-wrap">
+        <table class="props-table">
+          <thead><tr><th>Product</th><th>Billable metric</th><th>Pricing group key</th><th>Rates</th></tr></thead>
+          <tbody>
+            <tr><td>Instance hours</td><td><code>vcluster_private_node_hours</code></td><td><code>region, sku, capacity_type</code></td><td>One per profile, per hour</td></tr>
+            <tr><td>Public IP</td><td><code>vcluster_public_ip_hours</code></td><td><code>region</code></td><td>Per address, per hour</td></tr>
+            <tr><td>Storage</td><td><code>vcluster_storage_gb_hours</code></td><td><code>region, sku</code> (the storage class)</td><td>Per GiB-hour</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <ul>
+        <li>The same nodes also bill GPU, CPU and memory hours, with <code>billing_mode</code> <code>dedicated_node</code> or <code>private_node</code>. Rate them at 0, so a node is not charged twice: the price check reports a rate of 0 as <code>zero</code>, not as a gap.</li>
+        <li>A profile whose price includes its public IP: add <code>public_ip</code> to the pricing keys of node-hours and rate each profile with and without one, on a product priced on <code>region, sku, capacity_type, public_ip</code>. Each combination is its own row in the price check, a rate of 0 included. On Metronome that is a new billable metric: see <a href="metronome.html#pricing-keys">Changing pricing keys</a>.
+          <div class="code-block"><code>billing:
+  pricingKeys:
+    vcluster_private_node_hours: [public_ip]</code></div></li>
+        <li>CPU and memory per profile, where several profiles share a cluster: add <code>sku</code> to their pricing keys, and their hours carry the SKU of the node they ran on.</li>
+        <li>On Stripe the price card prices the same metrics, without pricing keys: <code>vcluster_private_node_hours: {sku: {gpu-h100-8: "12.40"}}</code>, <code>vcluster_public_ip_hours: {amount: "0.005"}</code> and <code>vcluster_storage_gb_hours: {sku: {fast-nvme: "0.0002"}}</code>.</li>
+      </ul>
+
       <h2 id="serverless">Serverless inference</h2>
       <p>The provider runs shared models; customers call them through an AI gateway and pay per token. The gateway records every request, vBilling bills each request once (pushed records and the gateway's own log, read back, deduplicate), and a customer that is suspended or paused is blocked at the gateway, because it has no cluster to stop.</p>
       <div class="code-block"><code>records:

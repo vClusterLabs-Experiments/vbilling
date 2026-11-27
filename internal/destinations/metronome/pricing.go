@@ -504,12 +504,47 @@ func (a *Adapter) CheckPrices(ctx context.Context, series []destinations.PriceSe
 	for i, s := range series {
 		cov := a.coverage(v, s, targets[i])
 		cov.Series = s
-		if !s.Catalog {
-			cov.Note = v.notes[a.ratedPlan(v, s)]
+		var notes []string
+		if n := a.keysNote(v, s); n != "" {
+			notes = append(notes, n)
 		}
+		if n := v.notes[a.ratedPlan(v, s)]; n != "" && !s.Catalog {
+			notes = append(notes, n)
+		}
+		cov.Note = strings.Join(notes, " ")
 		out = append(out, cov)
 	}
 	return out, nil
+}
+
+// keysNote says that the billable metrics that count a series' usage do not
+// group on some of the keys PRICING_KEYS prices its metric on, so no rate
+// can depend on them: the series is priced (or not) as if those keys were
+// not there. "" when they do, and when no billable metric counts the usage.
+func (a *Adapter) keysNote(v *pricingView, s destinations.PriceSeries) string {
+	def, ok := usage.Lookup(s.Metric)
+	if !ok || len(usage.ExtraPricingKeys(s.Metric)) == 0 {
+		return ""
+	}
+	ids, miss := a.billableMetrics(v, s, def)
+	if miss != nil {
+		return ""
+	}
+	var counting []BillableMetric
+	var names []string
+	for _, m := range v.byType[s.Metric] {
+		if slices.Contains(ids, m.ID) {
+			counting = append(counting, m)
+			names = append(names, strconv.Quote(m.Name))
+		}
+	}
+	keys := ungroupedKeys(counting, def)
+	if len(counting) == 0 || len(keys) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("PRICING_KEYS prices %s on %s, but billable metric %s does not group on it, so no rate can depend on it: "+
+		"add billable metric %q (vbilling metronome billable-metrics prints it) and move the rates to usage products on it",
+		s.Metric, strings.Join(keys, ", "), strings.Join(names, ", "), metricName(def))
 }
 
 // ratedPlan is the plan a series' usage is rated on: its own, or for a
