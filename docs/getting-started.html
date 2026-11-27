@@ -194,6 +194,12 @@ API listening on :8080
         <li><strong>Pauses and suspensions.</strong> A hold lifted while its pause is still in progress ends the pause. A pause lowered to a suspension first restores the cluster's workloads, for at most 2 minutes after its API answers again, and then blocks new pods. A cluster whose API refuses vBilling is stopped at once and reported as <code>enforcement-access/&lt;cluster ID&gt;</code>, and a paused cluster whose stop could not be verified is the failing source <code>pause/&lt;cluster ID&gt;</code>, so the shipped alert on failing sources fires for both.</li>
         <li><strong>Webhooks and repairs are counted.</strong> <code>vbilling_webhooks_total{source,result}</code> and the source <code>billing-unlock/&lt;tenant&gt;</code> show a payment that did not unlock its tenant, <code>vbilling_enforcement_repairs_total{kind}</code> counts a policy vBilling had to put back, and <code>vbilling_tenant_billing_state</code> has a series for every known tenant.</li>
         <li><strong>Start-up.</strong> Everything is checked before vBilling takes the Lease, and the archive directory is created at start: an archive volume that is not mounted or not writable fails at once instead of at the first compaction.</li>
+        <li><strong>Backfill reaches 24 hours.</strong> Windows missed while vBilling was down are metered up to 24 hours back (6 before), in batches of 6 hours, so a long backfill needs no more memory than before. An object deleted while vBilling was down is not in them.</li>
+        <li><strong>Customer names follow tenants.</strong> With <code>METRONOME_PROVISION=true</code>, a customer vBilling created is renamed when its tenant's display name changes. Customers it found by alias or was given, and customers created before v0.3.3, keep their names.</li>
+      </ul>
+      <p><strong>New, off until you set them:</strong></p>
+      <ul>
+        <li><strong>Grace periods.</strong> <code>ENFORCEMENT_ESCALATIONS</code> (<code>enforcement.escalations</code>) raises a billing hold after a set time, for example delinquent to suspended after 72 hours and suspended to paused 7 days later, and <code>GET /api/v1/billing-states</code> shows each tenant's next step and when. See <a href="private-nodes.html#escalations">Grace periods</a>.</li>
       </ul>
 
       <h2 id="upgrading-v032">Upgrading to v0.3.2</h2>

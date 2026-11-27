@@ -4,8 +4,10 @@
 # Builds a kind control plane cluster with one vCluster, runs a workload with
 # a volume inside it, installs vBilling from this repository's Helm chart in
 # enforce mode, then:
-#   - pauses the tenant through the API and checks the control plane is
-#     stopped and the synced workloads are gone;
+#   - makes the tenant delinquent through the API and lets the escalation
+#     rules (ENFORCEMENT_ESCALATIONS) suspend it after a minute and pause it a
+#     minute later, with no further signal; checks the next escalation is
+#     shown, the control plane is stopped and the synced workloads are gone;
 #   - checks the cluster cannot be reached while paused, and that connecting
 #     with `vcluster connect` does not resume it;
 #   - checks billing: no compute or control plane hours for paused time (to
@@ -98,7 +100,12 @@ image: {repository: vbilling, tag: e2e-pause, pullPolicy: Never}
 adapters: [noop]
 region: e2e
 metering: {cpuMemoryBasis: requests}
-enforcement: {mode: enforce, admissionPolicy: {enabled: true}}
+enforcement:
+  mode: enforce
+  admissionPolicy: {enabled: true}
+  escalations:
+    - {from: delinquent, after: 1m, to: suspended}
+    - {from: suspended, after: 1m, to: paused}
 persistence: {enabled: true, size: 1Gi}
 api: {token: $TOKEN}
 EOF
@@ -108,9 +115,22 @@ check "vBilling is ready" "wait_for 120 ready"
 BEFORE=$(minute 60)
 check "a full window is metered before the pause" "wait_for 150 'window_done $(minute 120)'"
 
-step "Pause"
-put /api/v1/billing-states/acme '{"state":"paused","hold":"billing","reason":"prepaid balance reached zero"}' >/dev/null
-check "the pause completes" "wait_for 120 '[ \"\$(phase)\" = paused ]'"
+step "Grace period, then pause"
+# The tenant's balance reaches zero: delinquent. The escalation rules raise
+# the billing hold to suspended after a minute, and to paused a minute after
+# that, with no further signal.
+bstate() { api /api/v1/billing-states | jq -r ".states[] | select(.tenant==\"acme\") | $1"; }
+secs() { python3 -I -c 'import sys,datetime,re; p=lambda s: datetime.datetime.fromisoformat(re.sub(r"(\.\d{6})\d+", r"\1", s).replace("Z","+00:00")); print(round((p(sys.argv[2])-p(sys.argv[1])).total_seconds()))' "$1" "$2"; }
+put /api/v1/billing-states/acme '{"state":"delinquent","hold":"billing","reason":"prepaid balance reached zero"}' >/dev/null
+check "a delinquent tenant shows its next escalation: suspended, a minute after it became delinquent" \
+  "[ \"\$(bstate .escalation.to)\" = suspended ] && [ \"\$(secs \"\$(bstate .since)\" \"\$(bstate .escalation.at)\")\" = 60 ]"
+check "nothing is stopped while it is delinquent" "[ \"\$(replicas)\" = 1 ] && [ \"\$(running)\" -ge 1 ]"
+check "after the grace it is suspended by the rule, with no new signal" \
+  "wait_for 90 '[ \"\$(bstate .state)\" = suspended ]' && bstate .escalated_by | grep -q 'delinquent:1m:suspended'"
+check "the suspended tenant shows its next escalation: paused" "[ \"\$(bstate .escalation.to)\" = paused ]"
+check "a minute later it is paused, and the pause completes" "wait_for 150 '[ \"\$(phase)\" = paused ]'"
+check "the escalation is counted" \
+  "api /metrics | grep -q 'vbilling_enforcement_escalations_total{from=\"delinquent\",to=\"suspended\"} 1' && api /metrics | grep -q 'vbilling_enforcement_escalations_total{from=\"suspended\",to=\"paused\"} 1'"
 PAUSED_AT=$(ann vbilling.vcluster.com/paused-at)
 # Billing stops when vBilling has verified the stop: the pause span's start.
 STOPPED_AT=$(api /api/v1/billing-states | jq -r '.pause_spans["vcluster-vc-team-a-team-a"][0].from')
@@ -170,6 +190,7 @@ put /api/v1/billing-states/acme '{"state":"active","hold":"billing","reason":"to
 check "the control plane is back" "wait_for 60 '[ \"\$(replicas)\" = 1 ] && [ -z \"\$(ann vbilling.vcluster.com/paused-by)\" ]'"
 check "the workload runs again" "wait_for 240 '[ \"\$(running)\" -ge 1 ]'"
 check "the tenant reaches its cluster again" "wait_for 120 'vc kubectl get deploy trainer >/dev/null 2>&1'"
+check "the paid tenant has no escalation pending" "[ -z \"\$(bstate '.escalation // empty')\" ] && [ \"\$(bstate .state)\" = active ]"
 check "pause spans are recorded and closed" \
   "api /api/v1/billing-states | jq -e '[.pause_spans[\"vcluster-vc-team-a-team-a\"][] | select(.to == null)] | length == 0' >/dev/null"
 api /api/v1/billing-states | jq -c '.pause_spans'

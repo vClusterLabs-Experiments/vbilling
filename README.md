@@ -532,6 +532,12 @@ v0.3.3 makes usage read from Prometheus exact at its edges, shows prices per ser
 - **Pauses and suspensions.** A hold lifted while its pause is still in progress ends the pause. A pause lowered to a suspension first restores the cluster's workloads, for at most 2 minutes after its API answers again, and then blocks new pods. A cluster whose API refuses vBilling is stopped at once and reported as `enforcement-access/<cluster ID>`, and a paused cluster whose stop could not be verified is the failing source `pause/<cluster ID>`, so the shipped alert on failing sources fires for both.
 - **Webhooks and repairs are counted.** `vbilling_webhooks_total{source,result}` and the source `billing-unlock/<tenant>` show a payment that did not unlock its tenant, `vbilling_enforcement_repairs_total{kind}` counts a policy vBilling had to put back, and `vbilling_tenant_billing_state` has a series for every known tenant.
 - **Start-up.** Everything is checked before vBilling takes the Lease, and the archive directory is created at start: an archive volume that is not mounted or not writable fails at once instead of at the first compaction.
+- **Backfill reaches 24 hours.** Windows missed while vBilling was down are metered up to 24 hours back (6 before), in batches of 6 hours, so a long backfill needs no more memory than before. An object deleted while vBilling was down is not in them.
+- **Customer names follow tenants.** With `METRONOME_PROVISION=true`, a customer vBilling created is renamed when its tenant's display name changes. Customers it found by alias or was given, and customers created before v0.3.3, keep their names.
+
+**New, off until you set them:**
+
+- **Grace periods.** `ENFORCEMENT_ESCALATIONS` (`enforcement.escalations`) raises a billing hold after a set time, for example delinquent to suspended after 72 hours and suspended to paused 7 days later, and `GET /api/v1/billing-states` shows each tenant's next step and when. See [Grace periods](https://vclusterlabs-experiments.github.io/vbilling/private-nodes.html#escalations).
 
 ## Upgrading to v0.3.2
 
