@@ -69,6 +69,29 @@ func (r *Registry) Get(name string, labels map[string]string) float64 {
 	return 0
 }
 
+// Delete removes one series, so a gauge about something that is gone (an
+// offboarded tenant) stops being exported instead of staying at its last
+// value.
+func (r *Registry) Delete(name string, labels map[string]string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if f, ok := r.families[name]; ok {
+		delete(f.series, renderLabels(labels))
+	}
+}
+
+// Has reports whether a series exists (tests).
+func (r *Registry) Has(name string, labels map[string]string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	f, ok := r.families[name]
+	if !ok {
+		return false
+	}
+	_, ok = f.series[renderLabels(labels)]
+	return ok
+}
+
 // WriteText writes the Prometheus text exposition format.
 func (r *Registry) WriteText(w io.Writer) error {
 	r.mu.Lock()

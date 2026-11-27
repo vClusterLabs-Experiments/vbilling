@@ -1,6 +1,6 @@
 // Package webhook streams usage to any HTTP endpoint as CloudEvents 1.0
 // batches, signed with HMAC-SHA256. Use it to feed a data platform, a
-// Kafka/HTTP bridge, or a homegrown rating engine alongside a billing backend.
+// Kafka/HTTP bridge, or a homegrown rating engine alongside a billing platform.
 package webhook
 
 import (
@@ -21,6 +21,7 @@ import (
 	"github.com/vclusterlabs-experiments/vbilling/internal/config"
 	"github.com/vclusterlabs-experiments/vbilling/internal/destinations"
 	"github.com/vclusterlabs-experiments/vbilling/internal/usage"
+	"github.com/vclusterlabs-experiments/vbilling/internal/version"
 )
 
 // CloudEvent types emitted.
@@ -147,7 +148,7 @@ func (a *Adapter) post(ctx context.Context, batch []CloudEvent) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/cloudevents-batch+json")
-	req.Header.Set("User-Agent", "vbilling/0.3.1")
+	req.Header.Set("User-Agent", version.UserAgent())
 	for k, v := range a.headers {
 		req.Header.Set(k, v)
 	}

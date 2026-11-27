@@ -1,28 +1,11 @@
-{{- $custom := and .Values.metering.customMetrics (not (kindIs "string" .Values.metering.customMetrics)) -}}
-{{- $stripeCard := and (has "stripe" (include "vbilling.adapters" . | splitList ",")) .Values.stripe.priceCard -}}
-{{- if or .Values.records.formats $custom .Values.records.pull $stripeCard }}
+{{- if include "vbilling.hasFiles" . }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ include "vbilling.fullname" . }}-files
+  name: {{ include "vbilling.configMapName" (dict "root" . "name" "files") }}
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "vbilling.labels" . | nindent 4 }}
 data:
-  {{- if $custom }}
-  custom-metrics.yaml: |
-    {{- toYaml .Values.metering.customMetrics | nindent 4 }}
-  {{- end }}
-  {{- if .Values.records.formats }}
-  records-formats.yaml: |
-    {{- toYaml .Values.records.formats | nindent 4 }}
-  {{- end }}
-  {{- if .Values.records.pull }}
-  records-pull.yaml: |
-    {{- toYaml .Values.records.pull | nindent 4 }}
-  {{- end }}
-  {{- if $stripeCard }}
-  stripe-price-card.yaml: |
-    {{- toYaml .Values.stripe.priceCard | nindent 4 }}
-  {{- end }}
+  {{- include "vbilling.filesData" . | trimPrefix "\n" | nindent 2 }}
 {{- end }}

@@ -167,6 +167,13 @@ th .est { color: var(--warning); }
     <div class="scroll"><table id="sources"><thead><tr><th>Source</th><th>Status</th><th>Details</th><th>Last success</th></tr></thead><tbody></tbody></table></div>
   </section>
 
+  <section class="card">
+    <h2>Price coverage</h2>
+    <p class="desc">What each billing platform prices of the usage vBilling sends it, one row per series: a plan, a metric, a SKU and the values of the other keys the platform prices on. Every series has its own status; the worst come first. <span id="pricing-note"></span></p>
+    <div id="pricing-warnings"></div>
+    <div class="scroll"><table id="pricing"><thead><tr><th>Destination</th><th>Series</th><th>Plan</th><th>Status</th><th>Details</th><th class="num">Held</th></tr></thead><tbody></tbody></table></div>
+  </section>
+
   <section class="grid2">
     <div class="card">
       <h2>Destinations</h2>
@@ -175,8 +182,8 @@ th .est { color: var(--warning); }
     </div>
     <div class="card">
       <h2>Billing state</h2>
-      <p class="desc">From Stripe and Metronome webhooks. <span id="mode"></span></p>
-      <div class="scroll"><table id="states"><thead><tr><th>Tenant</th><th>State</th><th>Reason</th><th>Since</th></tr></thead><tbody></tbody></table></div>
+      <p class="desc">From Stripe and Metronome webhooks, the API and escalations. Next is the state an escalation raises the tenant to, and when. <span id="mode"></span></p>
+      <div class="scroll"><table id="states"><thead><tr><th>Tenant</th><th>State</th><th>Reason</th><th>Since</th><th>Next</th></tr></thead><tbody></tbody></table></div>
     </div>
   </section>
 </main>
@@ -261,6 +268,7 @@ function qs(extra) {
 }
 const fmt = (n, d = 2) => n >= 1000 ? n.toLocaleString(undefined, { maximumFractionDigits: 0 }) : n.toLocaleString(undefined, { maximumFractionDigits: d });
 const ago = (t) => { if (!t) return "never"; const s = (Date.now() - new Date(t)) / 1000; return s < 90 ? Math.round(s) + "s ago" : s < 5400 ? Math.round(s / 60) + "m ago" : Math.round(s / 3600) + "h ago"; };
+const until = (t) => { const s = (new Date(t) - Date.now()) / 1000; return s <= 0 ? "now" : s < 5400 ? "in " + Math.max(1, Math.round(s / 60)) + "m" : s < 172800 ? "in " + Math.round(s / 3600) + "h" : "in " + Math.round(s / 86400) + "d"; };
 
 // Status icons, as SVG element lists.
 const ICONS = {
@@ -473,18 +481,53 @@ async function loadUsage() {
   if ($("#tenant").value) p.set("tenant", $("#tenant").value);
   columns($("#hour-chart"), (await json("/api/v1/usage?" + p)).rows);
 }
-const SOURCE_LEVEL = { ok: "good", empty: "warning", diverged: "serious", unpriced: "serious", failing: "critical" };
+const SOURCE_LEVEL = { ok: "good", empty: "warning", unchecked: "warning", diverged: "serious", unpriced: "serious", failing: "critical" };
+// Price coverage: one row per series of GET /api/v1/pricing, with the other
+// pricing keys of the series (dims) next to its metric and SKU.
+const PRICE_LEVEL = { priced: "good", zero: "warning", unknown: "serious", unpriced: "critical" };
+const PRICE_RANK = { unpriced: 0, unknown: 1, zero: 2, priced: 3 };
+const PRICING_ROWS = 50;
+const dimsText = (dims) => Object.keys(dims || {}).sort().filter((k) => dims[k] !== "").map((k) => k + "=" + dims[k]).join(", ");
 async function loadPricing() {
   const p = await json("/api/v1/pricing").catch(() => null);
+  const tbody = $("#pricing tbody");
+  $("#pricing-note").textContent = "";
+  $("#pricing-warnings").replaceChildren();
   if (!p || p.mode === "off" || !(p.destinations || []).length) {
+    const why = p && p.mode === "off" ? (p.note || "PRICE_CHECK=off: nothing is checked.") : "No billing platform to check.";
     $("#t-price").textContent = "-";
+    $("#t-price").title = why;
     $("#t-price-sub").textContent = p && p.mode === "off" ? "PRICE_CHECK=off" : "no billing platform to check";
+    tbody.replaceChildren(emptyRow(6, why));
     return;
   }
+  const all = p.destinations.flatMap((d) => (d.series || []).map((s) => ({ dest: d.destination, s })));
+  const unchecked = all.filter((x) => x.s.status === "unknown" && !x.s.no_usage_yet).length;
   const gaps = p.unpriced || 0, held = p.held_events || 0;
-  $("#t-price").replaceChildren(gaps ? badge("serious", gaps + " unpriced") : badge("good", "All priced"));
+  $("#t-price").replaceChildren(gaps ? badge("serious", gaps + " unpriced") : unchecked ? badge("serious", unchecked + " not checked") : badge("good", "All priced"));
   $("#t-price-sub").textContent = held ? fmt(held, 0) + " events held" : "PRICE_CHECK=" + p.mode;
-  $("#t-price").title = gaps ? "See GET /api/v1/pricing and the pricing sources below" : "";
+  $("#t-price").title = gaps || unchecked ? "See the price coverage table below and GET /api/v1/pricing" : "";
+  $("#pricing-note").textContent = "PRICE_CHECK=" + p.mode + ", checked every " + p.interval + ".";
+  $("#pricing-warnings").replaceChildren(...p.destinations.flatMap((d) => (d.warnings || []).map((w) =>
+    el("p", { class: "desc" }, badge("warning", d.destination), " ", w))));
+  all.sort((a, b) => own(PRICE_RANK, a.s.status, 1) - own(PRICE_RANK, b.s.status, 1));
+  const rows = all.slice(0, PRICING_ROWS).map(({ dest, s }) => {
+    const dims = dimsText(s.dims);
+    const detail = [s.detail, s.hint ? "Hint: " + s.hint : "", s.note ? "Note: " + s.note : "",
+      s.released_unpriced_events ? fmt(s.released_unpriced_events, 0) + " held events were released without a price" : ""]
+      .filter(Boolean).flatMap((line, i) => (i ? [el("br"), line] : [line]));
+    return el("tr", null,
+      el("td", null, el("code", null, dest)),
+      el("td", null, el("code", null, s.metric), s.sku ? " " + s.sku : "",
+        dims ? el("div", { class: "desc mono tight" }, dims) : null,
+        s.no_usage_yet ? el("div", { class: "desc tight" }, "no usage yet") : null),
+      el("td", null, s.plan ? el("code", null, s.plan) : "-"),
+      el("td", null, badge(own(PRICE_LEVEL, s.status, "warning"), s.status + (s.uncounted ? " (not counted)" : ""))),
+      el("td", null, detail),
+      el("td", { class: "num" }, s.held_events ? fmt(s.held_events, 0) : "-"));
+  });
+  if (all.length > PRICING_ROWS) rows.push(emptyRow(6, "... and " + (all.length - PRICING_ROWS) + " more series, see GET /api/v1/pricing"));
+  tbody.replaceChildren(...(rows.length ? rows : [emptyRow(6, "No series checked yet.")]));
 }
 async function loadSources() {
   const s = await json("/api/v1/sources").catch(() => null);
@@ -512,8 +555,10 @@ async function loadStates() {
     el("td", null, tenantCell(x.tenant)),
     el("td", null, badge(own(STATE_LEVEL, x.state, "warning"), x.state)),
     el("td", null, x.reason),
-    el("td", null, ago(x.since))));
-  $("#states tbody").replaceChildren(...(rows.length ? rows : [emptyRow(4, "All tenants in good standing.")]));
+    el("td", null, ago(x.since)),
+    el("td", null, x.escalation ? withTip(el("span", null, x.escalation.to + " " + until(x.escalation.at)),
+      "Escalation " + x.escalation.rule, "Due " + new Date(x.escalation.at).toISOString().replace(/\.\d+Z$/, "Z")) : "")));
+  $("#states tbody").replaceChildren(...(rows.length ? rows : [emptyRow(5, "All tenants in good standing.")]));
 }
 async function refresh() {
   try {

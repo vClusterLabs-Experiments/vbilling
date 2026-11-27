@@ -3,12 +3,20 @@
 // Each destination gets its own goroutine and its own cursor into the
 // spool, so a backend that is down or slow only delays itself. Delivery is
 // at-least-once; event IDs are deterministic, so backends deduplicate.
+//
+// Within a destination, each tenant is on its own too: a tenant the
+// destination cannot set up (EnsureTenant fails) has its events parked and
+// retried on its own, while every other tenant's events are delivered and
+// the cursor moves on (provision.go).
+//
+// An operator controls a destination's delivery with two explicit
+// mechanisms (valve.go): a pause, and a start decision for a destination
+// that was removed from ADAPTERS and is configured again with a backlog.
 package pipeline
 
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log"
 	"math/rand"
 	"sort"
@@ -16,6 +24,7 @@ import (
 	"time"
 
 	"github.com/vclusterlabs-experiments/vbilling/internal/destinations"
+	"github.com/vclusterlabs-experiments/vbilling/internal/health"
 	"github.com/vclusterlabs-experiments/vbilling/internal/spool"
 	"github.com/vclusterlabs-experiments/vbilling/internal/telemetry"
 	"github.com/vclusterlabs-experiments/vbilling/internal/usage"
@@ -34,16 +43,23 @@ type Options struct {
 	// Tenants, when set, is used to create each tenant in a destination
 	// before its first event reaches it.
 	Tenants *TenantRegistry
-	// Held, when set, parks events the Gate holds (unpriced or uncounted) and
-	// releases them in order once the Gate allows. Without a Gate, anything
-	// left held (from an earlier run in hold mode) is released at once.
+	// Held, when set, parks events that must wait: those the Gate holds
+	// (unpriced or uncounted), released in order once the Gate allows, and
+	// those of a tenant the destination could not set up, released in order
+	// once it is. Without a Gate, anything left held (from an earlier run in
+	// hold mode) is released at once.
 	Held *HeldStore
 	Gate Gate
 	// MaxHold bounds how long usage is held: once a held event's window
 	// started longer ago than this, it is released unpriced (with every
 	// older held event of its series), before its invoice period is final.
-	// It is at most MaxUnpricedHold. Zero holds without a limit.
+	// An event parked for its tenant this long is dead-lettered. It is at
+	// most MaxUnpricedHold. Zero holds without a limit.
 	MaxHold time.Duration
+	// Health, when set, reports the destinations that wait for an operator
+	// (paused, or awaiting a start decision) and the tenants a destination
+	// could not set up.
+	Health *health.Registry
 }
 
 func (o *Options) defaults() {
@@ -61,9 +77,43 @@ func (o *Options) defaults() {
 	}
 }
 
+// Delivery states of a destination.
+const (
+	// StateDelivering: the destination receives ledger records as they are
+	// committed (or retries, when it is down).
+	StateDelivering = "delivering"
+	// StatePaused: an operator paused it. Nothing is delivered and no held
+	// event is released; its cursor stays where it is.
+	StatePaused = "paused"
+	// StateAwaitingStart: it was removed from ADAPTERS, is configured again
+	// and has a backlog. Nothing is delivered until an operator decides
+	// where it starts.
+	StateAwaitingStart = "awaiting_start"
+	// StateDetached: it has a cursor but is not configured.
+	StateDetached = "detached"
+)
+
+var deliveryStates = []string{StateDelivering, StatePaused, StateAwaitingStart, StateDetached}
+
+// stateOf is the delivery state of a configured destination with these marks.
+func stateOf(marks spool.DestinationState) string {
+	switch {
+	case marks.Detached != nil && marks.Detached.AwaitingStart:
+		return StateAwaitingStart
+	case marks.Paused != nil:
+		return StatePaused
+	}
+	return StateDelivering
+}
+
 // Status is a destination's delivery state.
 type Status struct {
-	Name                string    `json:"name"`
+	Name string `json:"name"`
+	// State is delivering, paused, awaiting_start or, for a destination that
+	// has a cursor but is not configured, detached.
+	State string `json:"state"`
+	// Ready: bootstrapped and delivering (never while paused, awaiting its
+	// start or detached).
 	Ready               bool      `json:"ready"`
 	Cursor              uint64    `json:"cursor"`
 	Committed           uint64    `json:"committed"`
@@ -82,6 +132,23 @@ type Status struct {
 	Released uint64 `json:"released_events,omitempty"`
 	// ReleasedUnpriced counts held events released after MaxHold without a price.
 	ReleasedUnpriced uint64 `json:"released_unpriced_events,omitempty"`
+	// Parked events wait for their tenant to be set up at the destination;
+	// they are not counted in Held. BlockedTenants is how many tenants the
+	// destination could not set up.
+	Parked         uint64 `json:"parked_events"`
+	BlockedTenants int    `json:"blocked_tenants"`
+	// Paused says since when and why an operator paused the destination.
+	Paused *spool.DestinationPause `json:"paused,omitempty"`
+	// Start is where the destination started: the ledger sequence its cursor
+	// was created at, or was last positioned at by an operator. Nil for a
+	// destination an earlier version created (it started "at the beginning").
+	Start *spool.DestinationStart `json:"start,omitempty"`
+	// Detached says since when the destination is (or, awaiting its start,
+	// was) not configured.
+	Detached *spool.DestinationDetach `json:"detached,omitempty"`
+	// Backlog is what a detached destination, or one awaiting its start, has
+	// not received: what a start decision is about.
+	Backlog *Backlog `json:"backlog,omitempty"`
 }
 
 // Dispatcher fans the ledger out to destinations.
@@ -91,21 +158,38 @@ type Dispatcher struct {
 	opts  Options
 	tel   *telemetry.Registry
 
-	mu      sync.Mutex
-	status  map[string]*Status
-	shipped shippedLog
+	mu       sync.Mutex
+	status   map[string]*Status
+	shipped  shippedLog
+	blocks   map[string]map[string]*tenantBlock // destination -> tenant it could not set up
+	accepted map[string]time.Time               // destination -> when it last accepted an event or a tenant
+	pace     map[string]time.Time               // destination -> no provisioning retry before
+	wake     map[string]chan struct{}           // destination -> an operator changed its state
+	waiting  map[string]waitReport              // destination -> what the loop last reported while not delivering
+	looping  map[string]bool                    // destination -> its loop runs
+
+	provMu map[string]*sync.Mutex // destination -> one EnsureTenant at a time
+	opMu   sync.Mutex             // one operator action at a time (valve.go)
 }
 
-// New builds a dispatcher. tel may be nil.
+// New builds a dispatcher. tel may be nil. It marks the destinations that
+// have a cursor but are not in dests as detached, and makes a detached
+// destination that is in dests again wait for a start decision if it has a
+// backlog (see attach).
 func New(s *spool.Spool, dests []destinations.Destination, opts Options, tel *telemetry.Registry) *Dispatcher {
 	opts.defaults()
 	if tel == nil {
 		tel = telemetry.New()
 	}
-	d := &Dispatcher{spool: s, dests: dests, opts: opts, tel: tel, status: map[string]*Status{}}
+	d := &Dispatcher{spool: s, dests: dests, opts: opts, tel: tel, status: map[string]*Status{},
+		blocks: map[string]map[string]*tenantBlock{}, accepted: map[string]time.Time{}, pace: map[string]time.Time{},
+		wake: map[string]chan struct{}{}, waiting: map[string]waitReport{}, looping: map[string]bool{}, provMu: map[string]*sync.Mutex{}}
 	for _, dest := range dests {
 		d.status[dest.Name()] = &Status{Name: dest.Name()}
+		d.wake[dest.Name()] = make(chan struct{}, 1)
+		d.provMu[dest.Name()] = &sync.Mutex{}
 	}
+	d.attach()
 	return d
 }
 
@@ -122,22 +206,50 @@ func (d *Dispatcher) Run(ctx context.Context) {
 	wg.Wait()
 }
 
-// Statuses returns a snapshot sorted by name.
+// Statuses returns a snapshot of the configured destinations sorted by name
+// (see Detached for the others).
 func (d *Dispatcher) Statuses() []Status {
-	committed := d.spool.Committed()
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	out := make([]Status, 0, len(d.status))
 	for _, st := range d.status {
-		s := *st
-		s.Committed = committed
-		if committed > s.Cursor {
-			s.LagRecords = committed - s.Cursor
-		}
-		out = append(out, s)
+		out = append(out, *st)
+	}
+	d.mu.Unlock()
+	committed := d.spool.Committed()
+	for i := range out {
+		d.fill(&out[i], committed, true)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
+}
+
+// fill completes a status with what the ledger and the held store say now.
+func (d *Dispatcher) fill(s *Status, committed uint64, configured bool) {
+	marks := d.spool.DestinationState(s.Name)
+	if cur, ok := d.spool.CursorOf(s.Name); ok {
+		s.Cursor = cur
+	}
+	s.Committed = committed
+	if committed > s.Cursor {
+		s.LagRecords = committed - s.Cursor
+	}
+	s.State = StateDetached
+	if configured {
+		s.State = stateOf(marks)
+	}
+	if s.State != StateDelivering {
+		s.Ready = false // bootstrapped or not, it receives nothing
+	}
+	s.Paused, s.Start, s.Detached = marks.Paused, marks.Start, marks.Detached
+	if d.opts.Held != nil {
+		s.Held = uint64(d.opts.Held.Count(s.Name))
+		s.Parked = uint64(d.opts.Held.ParkedCount(s.Name))
+	}
+	s.BlockedTenants = d.blockedTenants(s.Name)
+	if s.State == StateAwaitingStart || s.State == StateDetached {
+		b := d.backlog(s.Name, s.Cursor, committed, marks)
+		s.Backlog = &b
+	}
 }
 
 // Destinations returns the configured destinations.
@@ -152,136 +264,213 @@ func (d *Dispatcher) update(name string, fn func(*Status)) {
 	fn(d.status[name])
 }
 
+func (d *Dispatcher) destination(name string) destinations.Destination {
+	for _, dest := range d.dests {
+		if dest.Name() == name {
+			return dest
+		}
+	}
+	return nil
+}
+
+// kick wakes a destination's loop: an operator changed its state or cursor.
+func (d *Dispatcher) kick(name string) {
+	if ch := d.wake[name]; ch != nil {
+		select {
+		case ch <- struct{}{}:
+		default: // a wake-up is pending already
+		}
+	}
+}
+
 func (d *Dispatcher) loop(ctx context.Context, dest destinations.Destination) {
 	name := dest.Name()
 	labels := map[string]string{"destination": name}
-	cursor := d.spool.Cursor(name)
-	d.update(name, func(s *Status) { s.Cursor = cursor })
-	var backoff time.Duration
-
-	if d.opts.Bootstrap != nil {
-		for ctx.Err() == nil {
-			err := d.opts.Bootstrap(ctx, dest)
-			if err == nil {
-				break
-			}
-			log.Printf("[pipeline] %s: bootstrap failed (delivery paused, will retry): %v", name, err)
-			d.update(name, func(s *Status) { s.LastError, s.LastErrorAt = "bootstrap: "+err.Error(), time.Now().UTC() })
-			backoff = d.sleepBackoff(ctx, backoff)
+	d.mu.Lock()
+	d.looping[name] = true
+	d.mu.Unlock()
+	defer func() {
+		d.mu.Lock()
+		d.looping[name] = false
+		d.mu.Unlock()
+	}()
+	var (
+		backoff time.Duration
+		ready   bool
+		cursor  uint64
+		started bool
+	)
+	// retry records a failed attempt and waits before the next one.
+	retry := func(err error, counted bool) {
+		log.Printf("[pipeline] %s: %v (will retry)", name, err)
+		if counted {
+			d.tel.Add("vbilling_delivery_failures_total", "Failed delivery attempts.", labels, 1)
 		}
-		backoff = 0
-	}
-	d.update(name, func(s *Status) { s.Ready = true })
-	if d.opts.Held != nil {
-		d.publishHeld(name)
+		d.update(name, func(s *Status) {
+			s.LastError, s.LastErrorAt = err.Error(), time.Now().UTC()
+			if counted {
+				s.ConsecutiveFailures++
+			}
+		})
+		backoff = d.sleepBackoff(ctx, name, backoff)
 	}
 
 	for ctx.Err() == nil {
-		if d.opts.Held != nil {
-			// Held events whose series is priced now go first, in order.
-			if err := d.release(ctx, dest); err != nil {
-				if ctx.Err() != nil {
-					return
+		// The cursor, its generation and the marks as of one moment: a pause
+		// or a positioning that completed before this is never missed, and
+		// one that happens after it cannot be undone by this pass (AckAt).
+		cur, gen, marks := d.spool.Delivery(name)
+		if started && cur < cursor {
+			d.shipped.reset(name) // an operator's rewind: a replay sends released events again too
+		}
+		cursor, started = cur, true
+		d.update(name, func(s *Status) { s.Cursor = cursor })
+
+		if state := stateOf(marks); state != StateDelivering {
+			// Paused, or awaiting a start decision: nothing is read from the
+			// ledger, released from the held store or asked of the
+			// destination until an operator says so.
+			d.wait(ctx, dest, state, marks, cursor)
+			continue
+		}
+		d.delivering(dest)
+
+		if !ready {
+			if d.opts.Bootstrap != nil {
+				if err := d.opts.Bootstrap(ctx, dest); err != nil {
+					if ctx.Err() != nil {
+						return
+					}
+					log.Printf("[pipeline] %s: bootstrap failed (delivery paused, will retry): %v", name, err)
+					d.update(name, func(s *Status) { s.LastError, s.LastErrorAt = "bootstrap: "+err.Error(), time.Now().UTC() })
+					backoff = d.sleepBackoff(ctx, name, backoff)
+					continue
 				}
-				log.Printf("[pipeline] %s: %v (will retry)", name, err)
-				d.tel.Add("vbilling_delivery_failures_total", "Failed delivery attempts.", labels, 1)
-				d.update(name, func(s *Status) {
-					s.LastError = err.Error()
-					s.LastErrorAt = time.Now().UTC()
-					s.ConsecutiveFailures++
-				})
-				backoff = d.sleepBackoff(ctx, backoff)
-				continue
+				backoff = 0
+			}
+			ready = true
+			d.update(name, func(s *Status) { s.Ready = true })
+			if d.opts.Held != nil {
+				d.publishHeld(name)
 			}
 		}
-		// Re-read so an operator rewind takes effect.
-		cur := d.spool.Cursor(name)
-		if cur < cursor {
-			d.shipped.reset(name) // a replay sends released events again too
+
+		// Tenants first: parked events of tenants that are set up now ship,
+		// in ledger order, and one tenant that is not gets its next
+		// provisioning attempt. Then held events whose series may ship now.
+		err := d.tendTenants(ctx, dest)
+		if err == nil && d.opts.Held != nil {
+			err = d.release(ctx, dest)
 		}
-		cursor = cur
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			retry(err, true)
+			continue
+		}
+
 		changed := d.spool.Changed() // taken before Read so no append is missed
 		recs, err := d.spool.Read(cursor, d.opts.BatchSize)
 		if err != nil {
 			log.Printf("[pipeline] %s: read spool: %v", name, err)
-			backoff = d.sleepBackoff(ctx, backoff)
+			backoff = d.sleepBackoff(ctx, name, backoff)
 			continue
 		}
 		if len(recs) == 0 {
 			d.tel.Set("vbilling_destination_lag_seconds", "Age of the oldest event not yet delivered.", labels, 0)
+			idle := time.NewTimer(d.idleFor(name))
 			select {
 			case <-ctx.Done():
-				return
 			case <-changed:
 			case <-d.gateChanged(name):
-			case <-time.After(d.opts.IdlePoll):
+			case <-d.wake[name]:
+			case <-idle.C:
 			}
+			idle.Stop()
 			continue
 		}
+		if first := recs[0].Seq; first > cursor+1 {
+			// Only a destination that was not a consumer of the ledger (it
+			// was detached) can find records gone: say so, never skip silently.
+			log.Printf("[pipeline] WARNING: %s: ledger records %d to %d were compacted away before it read them (it was not configured when "+
+				"retention removed them); they are not delivered. With ARCHIVE_DIR set they are in the archive", name, cursor+1, first-1)
+		}
 
-		var events []usage.Event
-		var seqs []uint64
+		var items []item
 		var skipped uint64
 		for _, r := range recs {
 			if r.Type != spool.TypeEvent || r.Event == nil {
 				continue
 			}
-			if !destinations.Accepts(dest, r.Event.Metric) {
+			if !destinations.AcceptsEvent(dest, r.Event) {
 				skipped++
 				continue
 			}
-			events = append(events, *r.Event)
-			seqs = append(seqs, r.Seq)
+			items = append(items, item{seq: r.Seq, ev: *r.Event})
 		}
-		if len(events) > 0 && d.opts.Held != nil {
-			if events, err = d.park(ctx, dest, events, seqs); err != nil {
+		if len(items) > 0 && d.opts.Held != nil {
+			if items, err = d.park(ctx, dest, items); err != nil {
 				if ctx.Err() != nil {
 					return
 				}
-				log.Printf("[pipeline] %s: %v (will retry)", name, err)
-				d.update(name, func(s *Status) { s.LastError, s.LastErrorAt = err.Error(), time.Now().UTC() })
-				backoff = d.sleepBackoff(ctx, backoff)
+				retry(err, false)
 				continue
 			}
 		}
-		if len(events) > 0 {
-			oldest := events[0].RecordedAt
+		var sent []usage.Event
+		if len(items) > 0 {
+			oldest := items[0].ev.RecordedAt
 			d.update(name, func(s *Status) { s.OldestPending = oldest })
 			d.tel.Set("vbilling_destination_lag_seconds", "Age of the oldest event not yet delivered.", labels, time.Since(oldest).Seconds())
 
-			dead, err := d.deliver(ctx, dest, events)
+			out, err := d.dispatch(ctx, dest, items)
 			if err != nil {
 				if ctx.Err() != nil {
 					return
 				}
-				log.Printf("[pipeline] %s: delivery failed (will retry): %v", name, err)
-				d.tel.Add("vbilling_delivery_failures_total", "Failed delivery attempts.", labels, 1)
-				d.update(name, func(s *Status) {
-					s.LastError = err.Error()
-					s.LastErrorAt = time.Now().UTC()
-					s.ConsecutiveFailures++
-				})
-				backoff = d.sleepBackoff(ctx, backoff)
+				var waits *tenantWaitError
+				if errors.As(err, &waits) {
+					retry(err, false) // nowhere to park: the batch waits for the tenant, as it always did
+				} else {
+					log.Printf("[pipeline] %s: delivery failed (will retry): %v", name, err)
+					d.tel.Add("vbilling_delivery_failures_total", "Failed delivery attempts.", labels, 1)
+					d.update(name, func(s *Status) {
+						s.LastError = err.Error()
+						s.LastErrorAt = time.Now().UTC()
+						s.ConsecutiveFailures++
+					})
+					backoff = d.sleepBackoff(ctx, name, backoff)
+				}
 				continue
 			}
-			delivered := uint64(len(events) - dead)
-			d.tel.Add("vbilling_events_delivered_total", "Events accepted by a destination.", labels, float64(delivered))
-			if dead > 0 {
-				d.tel.Add("vbilling_events_dead_lettered_total", "Events a destination permanently rejected.", labels, float64(dead))
+			sent = out.sent
+			d.tel.Add("vbilling_events_delivered_total", "Events accepted by a destination.", labels, float64(out.delivered))
+			if out.dead > 0 {
+				d.tel.Add("vbilling_events_dead_lettered_total", "Events a destination permanently rejected.", labels, float64(out.dead))
 			}
 			d.update(name, func(s *Status) {
-				s.Delivered += delivered
-				s.DeadLettered += uint64(dead)
+				s.Delivered += uint64(out.delivered)
+				s.DeadLettered += uint64(out.dead)
+				s.Skipped += uint64(out.already)
 			})
 		}
 
 		last := recs[len(recs)-1].Seq
-		if err := d.spool.Ack(name, last); err != nil {
+		mine, err := d.spool.AckAt(name, last, gen)
+		if err != nil {
 			log.Printf("[pipeline] %s: ack %d: %v", name, last, err)
-			backoff = d.sleepBackoff(ctx, backoff)
+			backoff = d.sleepBackoff(ctx, name, backoff)
 			continue
 		}
-		d.checkpointDelivery(dest, events)
+		if !mine {
+			// An operator positioned the cursor while this batch was on its
+			// way: the next pass reads from where they put it.
+			log.Printf("[pipeline] %s: its cursor was positioned while records %d to %d were being delivered; continuing from the new position",
+				name, recs[0].Seq, last)
+			continue
+		}
+		d.checkpointDelivery(dest, sent)
 		cursor = last
 		backoff = 0
 		d.update(name, func(s *Status) {
@@ -298,6 +487,9 @@ func (d *Dispatcher) loop(ctx context.Context, dest destinations.Destination) {
 // Forget confirmations only after the corresponding outbox cursor or held
 // release is durable. A cleanup failure can safely retain extra receipts.
 func (d *Dispatcher) checkpointDelivery(dest destinations.Destination, events []usage.Event) {
+	if len(events) == 0 {
+		return
+	}
 	if checkpoint, ok := dest.(destinations.DeliveryCheckpointer); ok {
 		if err := checkpoint.CheckpointDelivery(events); err != nil {
 			log.Printf("[pipeline] %s: outbox result is durable but delivery receipt cleanup failed: %v", dest.Name(), err)
@@ -305,93 +497,61 @@ func (d *Dispatcher) checkpointDelivery(dest destinations.Destination, events []
 	}
 }
 
-// ensureTenants creates any tenant in the batch that this destination has
-// not seen yet. Permanent failures are logged and delivery continues (the
-// events may then be dead-lettered); anything else is retried.
-func (d *Dispatcher) ensureTenants(ctx context.Context, dest destinations.Destination, events []usage.Event) error {
-	if d.opts.Tenants == nil {
-		return nil
-	}
-	// Each tenant's earliest window in the batch: a billing period that starts
-	// when the customer is subscribed must start early enough to count it.
-	first := map[string]time.Time{}
-	var order []string
-	for _, e := range events {
-		at, seen := first[e.Tenant]
-		if !seen {
-			order = append(order, e.Tenant)
-		}
-		if !seen || e.WindowStart.Before(at) {
-			first[e.Tenant] = e.WindowStart
-		}
-	}
-	for _, id := range order {
-		t, _ := d.opts.Tenants.Get(id)
-		if !d.opts.Tenants.NeedsEnsure(dest.Name(), t) {
-			continue
-		}
-		if err := dest.EnsureTenant(destinations.WithUsageStart(ctx, first[id]), t); err != nil {
-			if destinations.IsPermanent(err) {
-				log.Printf("[pipeline] %s: tenant %s rejected: %v", dest.Name(), t.ID, err)
-				continue
-			}
-			return fmt.Errorf("ensure tenant %s: %w", t.ID, err)
-		}
-		d.opts.Tenants.MarkEnsured(dest.Name(), t)
-	}
-	return nil
-}
-
-// deliver sends events, bisecting on permanent errors to isolate the events
-// the backend rejects. Isolated events are dead-lettered; it returns how many.
-func (d *Dispatcher) deliver(ctx context.Context, dest destinations.Destination, events []usage.Event) (int, error) {
-	if err := d.ensureTenants(ctx, dest, events); err != nil {
-		return 0, err
+// send delivers events and returns the ones the destination refuses for
+// good, each with its reason. A batch it refuses as a whole is bisected to
+// isolate them. Any other error means nothing is known to be refused: the
+// caller retries the whole batch (destinations deduplicate on event IDs).
+func (d *Dispatcher) send(ctx context.Context, dest destinations.Destination, events []usage.Event) (map[string]string, error) {
+	if len(events) == 0 {
+		return nil, nil
 	}
 	err := dest.SendEvents(ctx, events)
 	if err == nil {
-		return 0, nil
+		return nil, nil
 	}
 	var partial *destinations.PartialError
 	if errors.As(err, &partial) {
-		dead := 0
+		refused := map[string]string{}
 		for _, ev := range events {
-			reason, rejected := partial.Rejected[ev.ID]
-			if !rejected {
-				continue
+			if reason, ok := partial.Rejected[ev.ID]; ok {
+				refused[ev.ID] = reason
 			}
-			log.Printf("[pipeline] %s: dead-lettering event %s (%s/%s): %s", dest.Name(), ev.ID, ev.Tenant, ev.Metric, reason)
-			if derr := d.spool.AddDeadLetter(dest.Name(), ev, reason); derr != nil {
-				return 0, derr
-			}
-			dead++
 		}
-		return dead, nil
+		return refused, nil
 	}
 	if !destinations.IsPermanent(err) {
-		return 0, err
+		return nil, err
 	}
 	if len(events) == 1 {
-		log.Printf("[pipeline] %s: dead-lettering event %s (%s/%s): %v",
-			dest.Name(), events[0].ID, events[0].Tenant, events[0].Metric, err)
-		if derr := d.spool.AddDeadLetter(dest.Name(), events[0], err.Error()); derr != nil {
-			return 0, derr
-		}
-		return 1, nil
+		return map[string]string{events[0].ID: err.Error()}, nil
 	}
 	mid := len(events) / 2
-	a, err := d.deliver(ctx, dest, events[:mid])
+	a, err := d.send(ctx, dest, events[:mid])
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	b, err := d.deliver(ctx, dest, events[mid:])
+	b, err := d.send(ctx, dest, events[mid:])
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	return a + b, nil
+	if a == nil {
+		return b, nil
+	}
+	for id, reason := range b {
+		a[id] = reason
+	}
+	return a, nil
 }
 
-func (d *Dispatcher) sleepBackoff(ctx context.Context, prev time.Duration) time.Duration {
+// deadLetter parks an event a destination refused for operator review.
+func (d *Dispatcher) deadLetter(dest string, ev usage.Event, reason string) error {
+	log.Printf("[pipeline] %s: dead-lettering event %s (%s/%s): %s", dest, ev.ID, ev.Tenant, ev.Metric, reason)
+	return d.spool.AddDeadLetter(dest, ev, reason)
+}
+
+// sleepBackoff waits before a retry, or until an operator changes the
+// destination's state (a pause must not wait out a five minute backoff).
+func (d *Dispatcher) sleepBackoff(ctx context.Context, name string, prev time.Duration) time.Duration {
 	next := prev * 2
 	if next < d.opts.MinBackoff {
 		next = d.opts.MinBackoff
@@ -400,9 +560,12 @@ func (d *Dispatcher) sleepBackoff(ctx context.Context, prev time.Duration) time.
 		next = d.opts.MaxBackoff
 	}
 	jitter := time.Duration(rand.Int63n(int64(next)/5 + 1))
+	t := time.NewTimer(next + jitter)
+	defer t.Stop()
 	select {
 	case <-ctx.Done():
-	case <-time.After(next + jitter):
+	case <-d.wake[name]:
+	case <-t.C:
 	}
 	return next
 }

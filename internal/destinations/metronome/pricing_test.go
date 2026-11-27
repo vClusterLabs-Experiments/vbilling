@@ -429,12 +429,21 @@ func TestPriceCheckUsesStoredBillableMetricID(t *testing.T) {
 }
 
 func TestPricePlanAndDims(t *testing.T) {
+	// With provisioning too, a tenant's contract decides where its usage is
+	// rated, once a check read it: neither METRONOME_RATE_CARD nor the
+	// tenant's plan names the rate card a contract is on. Billable metrics
+	// without usage are checked under METRONOME_RATE_CARD.
 	a := New(nil, &config.Config{MetronomeRateCard: "default-rc", MetronomeProvision: true}, kv.Memory(), nil)
-	if p := a.PricePlan(usage.Tenant{ID: "t"}); p != "default-rc" {
-		t.Errorf("plan %q", p)
+	for _, tn := range []usage.Tenant{{ID: "t"}, {ID: "t", Plan: "enterprise"}} {
+		if p := a.PricePlan(tn); p != aliasPlan+"t" {
+			t.Errorf("provisioning plan %q before a check read the tenant's contract, want %q", p, aliasPlan+"t")
+		}
 	}
-	if p := a.PricePlan(usage.Tenant{ID: "t", Plan: "enterprise"}); p != "enterprise" {
-		t.Errorf("plan %q", p)
+	if p := a.PricePlan(usage.Tenant{}); p != "default-rc" {
+		t.Errorf("provisioning plan of no tenant %q, want METRONOME_RATE_CARD", p)
+	}
+	if !a.ChecksCatalog("default-rc") || !a.ChecksCatalog(uuidFor("card")) || a.ChecksCatalog(aliasPlan+"t") {
+		t.Error("billable metrics without usage are checked under rate cards, not under a tenant whose contract was not read")
 	}
 	// Without provisioning neither the rate card setting nor the tenant's
 	// plan decides: the tenant's own customer's contracts do, once read.

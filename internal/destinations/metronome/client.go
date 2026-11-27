@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/vclusterlabs-experiments/vbilling/internal/destinations"
+	"github.com/vclusterlabs-experiments/vbilling/internal/version"
 )
 
 // Client is a minimal Metronome REST client.
@@ -87,7 +88,7 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
-	req.Header.Set("User-Agent", "vbilling/0.3.1")
+	req.Header.Set("User-Agent", version.UserAgent())
 	if in != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -168,6 +169,15 @@ func (c *Client) CreateCustomer(ctx context.Context, req CreateCustomerRequest) 
 		return nil, err
 	}
 	return &resp.Data, nil
+}
+
+// SetCustomerName renames a customer (POST /v1/customers/{id}/setName).
+// Metronome truncates a name longer than 160 characters.
+func (c *Client) SetCustomerName(ctx context.Context, id, name string) error {
+	req := struct {
+		Name string `json:"name"`
+	}{Name: name}
+	return c.do(ctx, http.MethodPost, "/v1/customers/"+url.PathEscape(id)+"/setName", nil, req, nil)
 }
 
 // FindCustomerByAlias returns the active customer that holds an ingest

@@ -66,7 +66,16 @@ func TestFormatsRefuseReservedDimensions(t *testing.T) {
 	if err := os.WriteFile(path, []byte("kong:\n  id: request.id\n  time: started_at\n  tenant: consumer.id\n  usage: {tokens_in: tokens}\n  dimensions: {value: route.name}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LoadFormats(path, false); err == nil || !strings.Contains(err.Error(), "value") {
+	_, err := LoadFormats(path, false)
+	if err == nil || !strings.Contains(err.Error(), "value") {
 		t.Fatalf("a dimension named value: %v", err)
+	}
+	// The refusal lists every reserved name, metering_source included
+	// (the lists in the docs and in this message left it out).
+	for _, name := range []string{"value", "unit", "sku", "region", "project", "resource_id", "source", "window_start", "window_end", "schema_version",
+		"accuracy", "estimate", "metering_source"} {
+		if !usage.ReservedDimension(name) || !strings.Contains(err.Error(), name) {
+			t.Errorf("%s: reserved %v, named in the refusal %v", name, usage.ReservedDimension(name), strings.Contains(err.Error(), name))
+		}
 	}
 }

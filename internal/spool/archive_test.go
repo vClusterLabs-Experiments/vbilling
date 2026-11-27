@@ -101,41 +101,16 @@ func copyDir(t *testing.T, src string) string {
 	return dst
 }
 
-// restoreDir makes dst hold exactly the files of src.
+// restoreDir makes dst hold exactly the files of src, directories included.
 func restoreDir(t *testing.T, src, dst string) {
 	t.Helper()
 	old, _ := os.ReadDir(dst)
 	for _, e := range old {
-		os.Remove(filepath.Join(dst, e.Name()))
+		os.RemoveAll(filepath.Join(dst, e.Name()))
 	}
-	entries, err := os.ReadDir(src)
-	if err != nil {
+	if err := os.CopyFS(dst, os.DirFS(src)); err != nil {
 		t.Fatal(err)
 	}
-	for _, e := range entries {
-		b, err := os.ReadFile(filepath.Join(src, e.Name()))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(dst, e.Name()), b, 0o640); err != nil {
-			t.Fatal(err)
-		}
-	}
-}
-
-func fileSums(t *testing.T, dir, pattern string) map[string]string {
-	t.Helper()
-	out := map[string]string{}
-	matches, _ := filepath.Glob(filepath.Join(dir, pattern))
-	for _, m := range matches {
-		b, err := os.ReadFile(m)
-		if err != nil {
-			t.Fatal(err)
-		}
-		sum := sha256.Sum256(b)
-		out[filepath.Base(m)] = hex.EncodeToString(sum[:])
-	}
-	return out
 }
 
 func mustRead(t *testing.T, path string) []byte {
@@ -179,7 +154,7 @@ func TestCompactArchivesBeforeDeleting(t *testing.T) {
 	if n, err := s.Compact([]string{consumer}); n != 0 || err != nil {
 		t.Fatalf("compacted %d (err %v) before the destination consumed anything", n, err)
 	}
-	if _, err := os.Stat(filepath.Join(arch, ArchiveIndexFile)); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(arch, ArchiveIndexDir)); !os.IsNotExist(err) {
 		t.Fatal("archived segments that were not going to be deleted")
 	}
 	s.Ack(consumer, 9)
@@ -197,8 +172,9 @@ func TestCompactArchivesBeforeDeleting(t *testing.T) {
 		first := uint64(3*i + 1)
 		appended := t0.Add(time.Duration(i+1) * time.Minute)
 		if e.Name != segName(first) || e.First != first || e.Last != first+2 || e.Prev != prev || len(e.LastHash) != 64 ||
-			!e.FirstAt.Equal(appended) || !e.LastAt.Equal(appended) || !e.ArchivedAt.Equal(c.Now()) {
-			t.Fatalf("entry %d: %+v", i, e)
+			!e.FirstAt.Equal(appended) || !e.LastAt.Equal(appended) || !e.ArchivedAt.Equal(c.Now()) ||
+			e.File() != e.Name+".gz" || e.source() != ArchiveIndexDir+"/"+strings.TrimSuffix(e.Name, ".log")+".json" {
+			t.Fatalf("entry %d: %+v (from %s)", i, e, e.source())
 		}
 		gz := mustRead(t, filepath.Join(arch, e.File()))
 		sum := sha256.Sum256(gz)
@@ -218,9 +194,10 @@ func TestCompactArchivesBeforeDeleting(t *testing.T) {
 		}
 		prev = e.LastHash
 	}
-	// archive.jsonl lines carry exactly the documented fields.
+	// Each segment has an index file of its own, with exactly the documented
+	// fields, and nothing else is written: no archive.jsonl, no temporary file.
 	var line map[string]any
-	if err := json.Unmarshal(bytes.SplitN(mustRead(t, filepath.Join(arch, ArchiveIndexFile)), []byte("\n"), 2)[0], &line); err != nil {
+	if err := json.Unmarshal(mustRead(t, filepath.Join(arch, ArchiveIndexDir, "seg-00000000000000000001.json")), &line); err != nil {
 		t.Fatal(err)
 	}
 	var keys []string
@@ -228,11 +205,12 @@ func TestCompactArchivesBeforeDeleting(t *testing.T) {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	if got := strings.Join(keys, " "); got != "archived_at first first_at gz_bytes gz_sha256 last last_at last_hash name prev" {
-		t.Fatalf("archive.jsonl fields: %s", got)
+	if got := strings.Join(keys, " "); got != "archived_at file first first_at gz_bytes gz_sha256 last last_at last_hash name prev" {
+		t.Fatalf("index entry fields: %s", got)
 	}
-	if matches, _ := filepath.Glob(filepath.Join(arch, "*.tmp")); len(matches) > 0 {
-		t.Fatalf("temporary files left behind: %v", matches)
+	if got := archiveFiles(t, arch); strings.Join(got, " ") != "index/seg-00000000000000000001.json index/seg-00000000000000000004.json index/seg-00000000000000000007.json "+
+		"seg-00000000000000000001.log.gz seg-00000000000000000004.log.gz seg-00000000000000000007.log.gz" {
+		t.Fatalf("archive files: %v", got)
 	}
 
 	// The anchor moved to the last archived hash, on disk too.
@@ -300,8 +278,8 @@ func TestCompactArchiveRetriesAndIsIdempotent(t *testing.T) {
 		t.Fatalf("retry removed %d, err %v", n, err)
 	}
 	s.Close()
-	index := mustRead(t, filepath.Join(arch, ArchiveIndexFile))
-	gzSums := fileSums(t, arch, "*.gz")
+	archived := copyDir(t, arch)
+	sums := treeSums(t, arch)
 
 	// A crash after archiving, before deleting: the ledger still holds the
 	// archived segments. Compaction deletes them without archiving twice.
@@ -311,39 +289,66 @@ func TestCompactArchiveRetriesAndIsIdempotent(t *testing.T) {
 		t.Fatalf("compaction after a crash removed %d, err %v", n, err)
 	}
 	s.Close()
-	if !bytes.Equal(mustRead(t, filepath.Join(arch, ArchiveIndexFile)), index) {
-		t.Fatal("archive.jsonl changed when compaction repeated after a crash")
+	if !reflect.DeepEqual(treeSums(t, arch), sums) {
+		t.Fatal("the archive changed when compaction repeated after a crash")
 	}
-	if !reflect.DeepEqual(fileSums(t, arch, "*.gz"), gzSums) {
-		t.Fatal("archived files changed when compaction repeated after a crash")
-	}
-	if rep := VerifyChain(dir, arch); !rep.OK || rep.Records != 18 {
+	if rep := VerifyChain(dir, arch); !rep.OK || rep.Records != 18 || len(rep.Warnings) > 0 {
 		t.Fatalf("verify after the repeated compaction: %+v", rep)
 	}
 
-	// A crash after renaming the last .gz into place, with its index line
-	// torn halfway: the file is replaced by the same bytes, and the new entry
-	// starts on its own line.
-	restoreDir(t, before, dir)
-	lines := strings.SplitAfter(string(index), "\n")
-	torn := lines[0] + lines[1] + lines[2][:40]
-	if err := os.WriteFile(filepath.Join(arch, ArchiveIndexFile), []byte(torn), 0o640); err != nil {
-		t.Fatal(err)
-	}
-	s = open(t, dir, c, archiveOpts(arch))
-	if n, err := s.Compact([]string{consumer}); n != 3 || err != nil {
-		t.Fatalf("compaction after a torn index line removed %d, err %v", n, err)
-	}
-	s.Close()
-	entries, skipped, err := ReadArchive(arch)
-	if err != nil || len(entries) != 3 || len(skipped) != 1 {
-		t.Fatalf("index after a torn line: %d entries, skipped %v, err %v", len(entries), skipped, err)
-	}
-	if !reflect.DeepEqual(fileSums(t, arch, "*.gz"), gzSums) {
-		t.Fatal("re-archiving the same segment did not produce the same file")
-	}
-	if rep := VerifyChain(dir, arch); !rep.OK || rep.Records != 18 || len(rep.Warnings) != 1 {
-		t.Fatalf("verify with a torn index line: %+v", rep)
+	// A crash in the middle of writing the last segment's data file, or its
+	// index entry, leaves a partial file in no index entry. Readers ignore it,
+	// compaction leaves it as it is and writes the segment again under the
+	// next names no file has.
+	seg7, entry7 := segName(7)+".gz", ArchiveIndexDir+"/seg-00000000000000000007.json"
+	for name, tc := range map[string]struct {
+		crash       func(t *testing.T, a string)
+		data, index string // where the segment is archived afterwards
+		warnings    int
+	}{
+		"while writing the data file": {func(t *testing.T, a string) {
+			os.Remove(filepath.Join(a, entry7))
+			gz := mustRead(t, filepath.Join(a, seg7))
+			os.WriteFile(filepath.Join(a, seg7), gz[:len(gz)/2], 0o640)
+		}, "seg-00000000000000000007-2.log.gz", entry7, 1},
+		"while writing the index entry": {func(t *testing.T, a string) {
+			b := mustRead(t, filepath.Join(a, entry7))
+			os.WriteFile(filepath.Join(a, entry7), b[:len(b)/2], 0o640)
+		}, "seg-00000000000000000007-2.log.gz", ArchiveIndexDir + "/seg-00000000000000000007-2.json", 2},
+	} {
+		t.Run(name, func(t *testing.T) {
+			a := filepath.Join(t.TempDir(), "archive")
+			restoreDir(t, archived, a)
+			tc.crash(t, a)
+			left := treeSums(t, a)
+			ledger := copyDir(t, before)
+			if rep := VerifyChain(ledger, a); !rep.OK || rep.Records != 18 || rep.ArchivedSegments != 2 || len(rep.Warnings) != tc.warnings {
+				t.Fatalf("verify with the partial copy: %+v", rep)
+			}
+			s := open(t, ledger, c, archiveOpts(a))
+			if n, err := s.Compact([]string{consumer}); n != 3 || err != nil {
+				t.Fatalf("compaction after the crash removed %d, err %v", n, err)
+			}
+			s.Close()
+			now := treeSums(t, a)
+			for f, sum := range left {
+				if now[f] != sum {
+					t.Fatalf("%s was changed or removed", f)
+				}
+			}
+			e := archiveEntry(t, a, segName(7))
+			if e.File() != tc.data || e.source() != tc.index || now[tc.data] != sums[seg7] {
+				t.Fatalf("seg 7 archived as %s in %s, want the same bytes as before as %s in %s", e.File(), e.source(), tc.data, tc.index)
+			}
+			rep := VerifyChain(ledger, a)
+			if !rep.OK || rep.Records != 18 || rep.ArchivedSegments != 3 || len(rep.Warnings) != tc.warnings {
+				t.Fatalf("verify after the crash: %+v", rep)
+			}
+			n := 0
+			if _, err := ScanLedger(ledger, a, t0, t0.Add(time.Hour), func(*usage.Event) error { n++; return nil }); err != nil || n != 12 {
+				t.Fatalf("export after the crash: %d events (err %v), want 12", n, err)
+			}
+		})
 	}
 }
 
@@ -400,8 +405,7 @@ func TestArchivingCompactionAlongsideAppends(t *testing.T) {
 
 func TestArchiveRefusesAnotherLedgersSegments(t *testing.T) {
 	_, arch := compactedLedger(t)
-	index := mustRead(t, filepath.Join(arch, ArchiveIndexFile))
-	gzSums := fileSums(t, arch, "*.gz")
+	sums := treeSums(t, arch)
 
 	// A second ledger in the same archive (say its volume was recreated)
 	// numbers segments from 1 again: its seg-1 must not replace the first's.
@@ -419,7 +423,7 @@ func TestArchiveRefusesAnotherLedgersSegments(t *testing.T) {
 	if s.FirstSeq() != 1 {
 		t.Fatal("segments deleted although they were not archived")
 	}
-	if !bytes.Equal(mustRead(t, filepath.Join(arch, ArchiveIndexFile)), index) || !reflect.DeepEqual(fileSums(t, arch, "*.gz"), gzSums) {
+	if !reflect.DeepEqual(treeSums(t, arch), sums) {
 		t.Fatal("the other ledger's archive was modified")
 	}
 }
@@ -477,28 +481,112 @@ func relink(t *testing.T, lines []string, prev string, edit func(*Record)) ([]st
 	return out, prev
 }
 
-// rewriteIndex rewrites archive.jsonl; edit returns false to drop an entry.
+// rewriteIndex rewrites the index of an archive as a forger would, in the
+// format the archive has: its index files, or archive.jsonl. edit returns
+// false to drop an entry.
 func rewriteIndex(t *testing.T, arch string, edit func(*ArchiveEntry) bool) {
 	t.Helper()
 	entries, _, err := ReadArchive(arch)
 	if err != nil {
 		t.Fatal(err)
 	}
+	legacy := false
+	if _, err := os.Stat(filepath.Join(arch, ArchiveIndexFile)); err == nil {
+		legacy = true
+	}
 	var buf bytes.Buffer
 	for i := range entries {
+		path := filepath.Join(arch, filepath.FromSlash(entries[i].source()))
 		if !edit(&entries[i]) {
+			if !legacy {
+				os.Remove(path)
+			}
 			continue
 		}
 		b, _ := json.Marshal(entries[i])
+		if !legacy {
+			if err := os.WriteFile(path, append(b, '\n'), 0o640); err != nil {
+				t.Fatal(err)
+			}
+		}
 		buf.Write(append(b, '\n'))
+	}
+	if legacy {
+		if err := os.WriteFile(filepath.Join(arch, ArchiveIndexFile), buf.Bytes(), 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// asLegacy turns an archive into what v0.3.2 and earlier wrote: one
+// archive.jsonl, and data files named after their segment.
+func asLegacy(t *testing.T, arch string) {
+	t.Helper()
+	entries, skipped, err := ReadArchive(arch)
+	if err != nil || len(skipped) > 0 {
+		t.Fatalf("read the archive to convert: %v %v", skipped, err)
+	}
+	var buf bytes.Buffer
+	for _, e := range entries {
+		if e.File() != e.Name+".gz" {
+			if err := os.Rename(filepath.Join(arch, e.File()), filepath.Join(arch, e.Name+".gz")); err != nil {
+				t.Fatal(err)
+			}
+		}
+		e.GzFile = ""
+		b, _ := json.Marshal(e)
+		buf.Write(append(b, '\n'))
+	}
+	if err := os.RemoveAll(filepath.Join(arch, ArchiveIndexDir)); err != nil {
+		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(arch, ArchiveIndexFile), buf.Bytes(), 0o640); err != nil {
 		t.Fatal(err)
 	}
 }
 
+// archiveFiles lists every file under arch, relative, with slashes, sorted.
+func archiveFiles(t *testing.T, arch string) []string {
+	t.Helper()
+	var out []string
+	err := filepath.WalkDir(arch, func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		rel, err := filepath.Rel(arch, p)
+		out = append(out, filepath.ToSlash(rel))
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// treeSums is the sha256 of every file under dir, by its relative path.
+func treeSums(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	for _, rel := range archiveFiles(t, dir) {
+		sum := sha256.Sum256(mustRead(t, filepath.Join(dir, filepath.FromSlash(rel))))
+		out[rel] = hex.EncodeToString(sum[:])
+	}
+	return out
+}
+
 func TestVerifyChainDetectsArchiveTampering(t *testing.T) {
 	dir, arch := compactedLedger(t)
+	legacy := copyDir(t, arch)
+	asLegacy(t, legacy)
+	for format, base := range map[string]string{"index files": arch, "archive.jsonl": legacy} {
+		t.Run(format, func(t *testing.T) { detectsTampering(t, dir, base) })
+	}
+}
+
+// detectsTampering tampers with copies of the archive in arch, which holds
+// seq 1-9 of the ledger in dir, and expects verification to fail.
+func detectsTampering(t *testing.T, dir, arch string) {
 	seg4, seg7 := segName(4), segName(7)
 	inflate := func(r *Record) {
 		if r.Seq == 5 {
@@ -801,13 +889,12 @@ func BenchmarkArchiveSegment(b *testing.B) {
 		b.Fatal(err)
 	}
 	arch := b.TempDir()
-	path := filepath.Join(arch, sg.Name+".gz")
 
 	b.Run("archive", func(b *testing.B) {
 		var e ArchiveEntry
 		b.SetBytes(sg.Size)
 		for i := 0; i < b.N; i++ {
-			if e, err = s.writeArchiveFile(&sg, path); err != nil {
+			if _, e, err = s.gzipSegment(&sg); err != nil {
 				b.Fatal(err)
 			}
 		}
@@ -833,12 +920,18 @@ func BenchmarkArchiveSegment(b *testing.B) {
 		})
 	}
 	b.Run("verify", func(b *testing.B) {
-		e, err := s.writeArchiveFile(&sg, path)
+		gz, e, err := s.gzipSegment(&sg)
 		if err != nil {
 			b.Fatal(err)
 		}
-		os.Remove(filepath.Join(arch, ArchiveIndexFile))
-		if err := appendArchiveIndex(arch, emptyArchiveIndex(), e, true); err != nil {
+		if e.GzFile, err = writeArchiveCopy(arch, sg.First, archiveDataExt, gz, true); err != nil {
+			b.Fatal(err)
+		}
+		entry, _ := json.Marshal(e)
+		if err := os.MkdirAll(filepath.Join(arch, ArchiveIndexDir), 0o750); err != nil {
+			b.Fatal(err)
+		}
+		if _, err := writeArchiveCopy(filepath.Join(arch, ArchiveIndexDir), sg.First, archiveIndexExt, entry, true); err != nil {
 			b.Fatal(err)
 		}
 		b.SetBytes(sg.Size)

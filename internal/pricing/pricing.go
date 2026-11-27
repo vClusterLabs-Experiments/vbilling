@@ -6,15 +6,18 @@
 // Finance adds its rate (a "rate miss") silently undercounts invoices, and
 // prepaid balances and spend alerts never see it. vBilling keeps no price list
 // of its own. It asks each billing adapter, read-only, whether the platform
-// prices every billable metric in the catalog and every series (metric, SKU
-// and other priced dimensions) seen in the ledger recently, reports gaps in
-// GET /api/v1/pricing, the source health registry and /metrics, and with
-// PRICE_CHECK=hold keeps the events of an unpriced series out of that
+// prices every billable metric in the catalog and every series (plan, metric,
+// SKU and the values of the other keys the platform can price on) seen in
+// the ledger recently. Each series has its own status: GET /api/v1/pricing
+// lists one row per series, and the counts there and in /metrics count
+// series. Gaps also show in the source health registry, and with
+// PRICE_CHECK=hold the events of an unpriced series stay out of that
 // destination until the price exists (see pipeline.HeldStore).
 package pricing
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sort"
@@ -108,6 +111,11 @@ type destState struct {
 	uc   UncountedReporter // nil: the platform counts whatever it receives
 
 	checkMu sync.Mutex // one check of a destination at a time
+	// pubMu is held from the moment a check's answers are recorded until
+	// health and telemetry show them, and while a report is built, so a
+	// report never shows a status the metrics and the sources do not show
+	// yet. Delivery (the gate's decisions) never waits for it.
+	pubMu sync.Mutex
 
 	// guarded by Service.mu
 	series      map[string]*seriesState
@@ -116,7 +124,7 @@ type destState struct {
 	lastSuccess time.Time
 	lastErr     string
 	retryAt     time.Time
-	gapSources  map[string]bool // health sources reported unpriced
+	gapSources  map[string]bool // health sources reported unpriced, or impossible to check
 }
 
 type seriesState struct {
@@ -125,7 +133,9 @@ type seriesState struct {
 	status    string // "" until a check answered for it
 	detail    string
 	hint      string
+	note      string
 	uncounted bool // the last answer says the platform would not count the series' usage at all (UncountedReporter)
+	wholeNode bool // some of its usage is the GPU, CPU or memory capacity of a whole node (see doubleCharges)
 	checkedAt time.Time
 	attempted bool // a check ran (or failed) since the series appeared
 	// releasedUnpriced counts held events released without a price after
@@ -200,6 +210,9 @@ func (s *Service) observeLocked(ds *destState, ev *usage.Event, seen time.Time) 
 	if seen.After(st.lastSeen) {
 		st.lastSeen = seen
 	}
+	if !st.wholeNode && wholeNodeUsage(ev) {
+		st.wholeNode = true
+	}
 	if st.tenants != nil && !st.tenants[ev.Tenant] {
 		if len(st.tenants) < maxTenantsPerSeries {
 			st.tenants[ev.Tenant] = true
@@ -233,6 +246,7 @@ func (s *Service) rekeyLocked(ds *destState) {
 				ds.series[mk] = dst
 			}
 			dst.releasedUnpriced += st.releasedUnpriced
+			dst.wholeNode = dst.wholeNode || st.wholeNode
 			if st.releasedAt.After(dst.releasedAt) {
 				dst.releasedAt = st.releasedAt
 			}
@@ -451,7 +465,11 @@ func (s *Service) snapshotLocked(ds *destState) []destinations.PriceSeries {
 		plans[ds.pc.PricePlan(t)] = true
 	}
 	want := map[string]bool{}
+	scope, _ := ds.pc.(destinations.CatalogScoper)
 	for plan := range plans {
+		if scope != nil && !scope.ChecksCatalog(plan) {
+			continue // no price list to check the catalog against
+		}
 		for _, def := range usage.Billable() {
 			if !priced(ds, def.Code) || seen[[2]string{plan, def.Code}] {
 				continue
@@ -504,6 +522,11 @@ func (s *Service) check(ctx context.Context, ds *destState) {
 	covs, err := ds.pc.CheckPrices(cctx, list)
 	now := s.now().UTC()
 	labels := map[string]string{"destination": ds.name}
+
+	// From here until health and telemetry show this check, no report is
+	// built (see destState.pubMu).
+	ds.pubMu.Lock()
+	defer ds.pubMu.Unlock()
 	s.tel.Add("vbilling_price_checks_total", "Price coverage checks of a billing platform.", labels, 1)
 
 	s.mu.Lock()
@@ -527,12 +550,7 @@ func (s *Service) check(ctx context.Context, ds *destState) {
 	}
 	ds.lastErr, ds.lastSuccess, ds.retryAt = "", now, time.Time{}
 	var released, newlyPriced bool
-	type transition struct {
-		ser          destinations.PriceSeries
-		from, to     string
-		detail, hint string
-	}
-	var moves []transition
+	var moves []string
 	for _, c := range covs {
 		st := ds.series[c.Series.Key()]
 		if st == nil {
@@ -540,10 +558,13 @@ func (s *Service) check(ctx context.Context, ds *destState) {
 		}
 		prev := st.status
 		wasReleasable := s.releasable(ds, st)
-		st.status, st.detail, st.hint, st.checkedAt = c.Status, c.Detail, c.Hint, now
+		st.status, st.detail, st.hint, st.note, st.checkedAt = c.Status, c.Detail, c.Hint, c.Note, now
 		st.uncounted = ds.uc != nil && c.Status == destinations.PriceMissing && ds.uc.Uncounted(c)
 		if prev != c.Status {
-			moves = append(moves, transition{c.Series, prev, c.Status, c.Detail, c.Hint})
+			// Every change of a series' status is logged once, here.
+			if what := transition(prev, c); what != "" {
+				moves = append(moves, fmt.Sprintf("[pricing] %s: %s%s %s", ds.name, destinations.DescribeSeries(c.Series), planSuffix(c.Series.Plan), what))
+			}
 		}
 		if !c.Series.Catalog && !wasReleasable && s.releasable(ds, st) {
 			released = true // held events of the series may ship now
@@ -558,25 +579,48 @@ func (s *Service) check(ctx context.Context, ds *destState) {
 	}
 	s.mu.Unlock()
 
-	for _, m := range moves {
-		if m.ser.Catalog && m.from == "" && m.to != destinations.PriceMissing {
-			continue
-		}
-		switch {
-		case m.to == destinations.PriceMissing:
-			log.Printf("[pricing] %s: %s%s is unpriced: %s (hint: %s)", ds.name, destinations.DescribeSeries(m.ser), planSuffix(m.ser.Plan), m.detail, m.hint)
-		case m.from == destinations.PriceMissing:
-			log.Printf("[pricing] %s: %s%s is %s now: %s", ds.name, destinations.DescribeSeries(m.ser), planSuffix(m.ser.Plan), m.to, m.detail)
-		case m.to == destinations.PriceUnknown && m.from == "":
-			log.Printf("[pricing] %s: %s%s cannot be checked: %s", ds.name, destinations.DescribeSeries(m.ser), planSuffix(m.ser.Plan), m.detail)
-		}
+	for _, line := range moves {
+		log.Print(line)
 	}
 	if newlyPriced {
 		if r, ok := ds.dest.(destinations.TenantRefresher); ok && r.RefreshTenantsOnPriceChange() {
 			s.tenants.Reensure(ds.name)
 		}
 	}
-	s.report(ds)
+	s.publish(ds)
+}
+
+// transition says what a series' new status means for the log, "" when the
+// log has nothing to add: the first answer for a series that is priced, or
+// for a billable metric without usage that is not unpriced.
+func transition(from string, c destinations.PriceCoverage) string {
+	first := from == ""
+	if first && c.Series.Catalog && c.Status != destinations.PriceMissing {
+		return ""
+	}
+	switch c.Status {
+	case destinations.PriceMissing:
+		if c.Hint == "" {
+			return "is unpriced: " + c.Detail
+		}
+		return fmt.Sprintf("is unpriced: %s (hint: %s)", c.Detail, c.Hint)
+	case destinations.PriceZero:
+		if first {
+			return "is priced at 0: " + c.Detail
+		}
+		return "is priced at 0 now: " + c.Detail
+	case destinations.PriceCovered:
+		if first {
+			return ""
+		}
+		return "is priced now: " + c.Detail
+	case destinations.PriceUnknown:
+		if first {
+			return "cannot be checked: " + c.Detail
+		}
+		return "cannot be checked any more: " + c.Detail
+	}
+	return ""
 }
 
 func planSuffix(plan string) string {
@@ -586,14 +630,29 @@ func planSuffix(plan string) string {
 	return " (plan " + plan + ")"
 }
 
-// report publishes a destination's coverage to health and telemetry.
+// report publishes a destination's coverage outside a check.
 func (s *Service) report(ds *destState) {
+	ds.pubMu.Lock()
+	defer ds.pubMu.Unlock()
+	s.publish(ds)
+}
+
+// sourceName is the health source of one series: its row in
+// GET /api/v1/sources?kind=pricing.
+func sourceName(dest string, r Row) string {
+	return health.Name("pricing", dest, r.Plan, r.Metric, r.SKU, destinations.DimsLabel(r.Dims))
+}
+
+// publish shows a destination's coverage in health and telemetry: one source
+// per series that is unpriced, or that has usage and cannot be checked.
+// ds.pubMu held.
+func (s *Service) publish(ds *destState) {
 	rep := s.destReport(ds)
 	labels := map[string]string{"destination": ds.name}
-	s.tel.Set("vbilling_unpriced_series", "Series (metric, SKU, plan) a billing platform has no price for: it would bill their usage at $0.", labels, float64(rep.Unpriced))
+	s.tel.Set("vbilling_unpriced_series", "Series (plan, metric, SKU and the values of the other pricing keys) a billing platform has no price for: it would bill their usage at $0.", labels, float64(rep.Unpriced))
 	for st, n := range map[string]int{destinations.PriceCovered: rep.Priced, destinations.PriceMissing: rep.Unpriced,
 		destinations.PriceZero: rep.Zero, destinations.PriceUnknown: rep.Unknown} {
-		s.tel.Set("vbilling_price_series", "Series by price coverage status (see GET /api/v1/pricing).",
+		s.tel.Set("vbilling_price_series", "Series by price coverage status, each series counted once (see GET /api/v1/pricing).",
 			map[string]string{"destination": ds.name, "status": st}, float64(n))
 	}
 	if !rep.LastSuccess.IsZero() {
@@ -602,14 +661,29 @@ func (s *Service) report(ds *destState) {
 	if s.health == nil {
 		return
 	}
-	var gaps []string
+	var gaps, undecided []string
 	expired := 0
 	now := map[string]bool{}
 	for _, r := range rep.Series {
+		label := destinations.DescribeSeries(destinations.PriceSeries{Metric: r.Metric, SKU: r.SKU, Dims: r.Dims, Catalog: r.NoUsageYet})
+		if r.Status == destinations.PriceUnknown && !r.NoUsageYet && !r.CheckedAt.IsZero() {
+			// A check answered that it cannot decide, and the series has
+			// usage: that usage is delivered in every mode, so say so loudly.
+			name := sourceName(ds.name, r)
+			now[name] = true
+			undecided = append(undecided, label)
+			hint := r.Hint
+			if hint == "" {
+				hint = "check in " + ds.name + " that this usage has a price"
+			}
+			s.health.Set(name, "pricing", ds.name, health.Unchecked,
+				fmt.Sprintf("the price check cannot decide whether %s prices this usage, which is delivered in every PRICE_CHECK mode: %s", ds.name, r.Detail), hint)
+			continue
+		}
 		if r.Status != destinations.PriceMissing {
 			continue
 		}
-		name := health.Name("pricing", ds.name, r.Plan, r.Metric, r.SKU)
+		name := sourceName(ds.name, r)
 		msg := r.Detail
 		if r.HeldEvents > 0 {
 			msg += fmt.Sprintf(" (%d event(s) held since %s)", r.HeldEvents, r.HeldSince.Format(time.RFC3339))
@@ -618,7 +692,7 @@ func (s *Service) report(ds *destState) {
 			}
 		}
 		now[name] = true
-		gaps = append(gaps, r.Metric+skuSuffix(r.SKU))
+		gaps = append(gaps, label)
 		if r.ReleasedUnpriced > 0 && r.Uncounted {
 			expired++
 			s.health.Fail(name, "pricing", ds.name,
@@ -651,9 +725,16 @@ func (s *Service) report(ds *destState) {
 		s.health.OK(name, "pricing", ds.name, 1)
 	}
 	summary := health.Name("pricing", ds.name)
+	also := ""
+	if len(undecided) > 0 {
+		also = fmt.Sprintf("%d series with usage cannot be checked: %s", len(undecided), strings.Join(first(undecided, 5), ", "))
+	}
 	if expired > 0 {
-		s.health.Fail(summary, "pricing", ds.name,
-			fmt.Errorf("%d unpriced series, %d with usage released without a price after the longest hold: %s", len(gaps), expired, strings.Join(first(gaps, 5), ", ")),
+		msg := fmt.Sprintf("%d unpriced series, %d with usage released without a price after the longest hold: %s", len(gaps), expired, strings.Join(first(gaps, 5), ", "))
+		if also != "" {
+			msg += "; " + also
+		}
+		s.health.Fail(summary, "pricing", ds.name, errors.New(msg),
 			"Finance must add the missing prices in "+ds.name+" so it re-rates the released usage; see GET /api/v1/pricing")
 		return
 	}
@@ -662,18 +743,19 @@ func (s *Service) report(ds *destState) {
 		if rep.HeldEvents > 0 {
 			msg += fmt.Sprintf("; %d event(s) held", rep.HeldEvents)
 		}
+		if also != "" {
+			msg += "; " + also
+		}
 		s.health.Set(summary, "pricing", ds.name, health.Unpriced, msg,
-			"Finance adds the missing product, rate, price or charge in "+ds.name+"; see GET /api/v1/pricing")
+			"add what each series' hint names in "+ds.name+" (a missing product, rate, price or charge, or a tenant's customer or contract); see GET /api/v1/pricing")
+		return
+	}
+	if also != "" {
+		s.health.Set(summary, "pricing", ds.name, health.Unchecked, also+": their usage is delivered in every PRICE_CHECK mode, priced or not",
+			"see GET /api/v1/pricing?status=unknown, and check in "+ds.name+" that this usage has a price")
 		return
 	}
 	s.health.OK(summary, "pricing", ds.name, len(rep.Series))
-}
-
-func skuSuffix(sku string) string {
-	if sku == "" {
-		return ""
-	}
-	return " sku=" + sku
 }
 
 func first(l []string, n int) []string {

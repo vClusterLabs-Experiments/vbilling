@@ -1,9 +1,10 @@
 {{- if gt (int .Values.replicaCount) 1 -}}
 {{- fail (printf "replicaCount is %v: this chart supports one active instance with its durable ledger. Per-replica volumes cannot provide shared-ledger failover: a replacement needs the previous writer's accepted records, source identity and delivery state. Set replicaCount to 1; shared-ledger HA is tracked in issue #17." .Values.replicaCount) -}}
 {{- end -}}
-{{- $adapters := include "vbilling.adapters" . | splitList "," -}}
-{{- $files := or .Values.records.formats .Values.records.pull (and .Values.metering.customMetrics (not (kindIs "string" .Values.metering.customMetrics))) (and (has "stripe" $adapters) .Values.stripe.priceCard) -}}
-{{- $lagoPriceCard := and (has "lago" $adapters) (or .Values.lago.priceCard .Values.lago.priceCardConfigMap) -}}
+{{- $placeholders := regexFindAll "REPLACE_WITH_[A-Z0-9_]+" (toYaml .Values) -1 | uniq -}}
+{{- if $placeholders -}}
+{{- fail (printf "the values still hold a placeholder: %s. Replace every REPLACE_WITH_ value with the one of your installation (deploy/helm/production-values.yaml marks what an installation has to name): a placeholder as region or cluster name would be billed as written, and one as storage class leaves the pod without its volume." (join ", " $placeholders)) -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -28,6 +29,10 @@ spec:
         checksum/lago-price-card: {{ toYaml .Values.lago.priceCard | sha256sum }}
     spec:
       serviceAccountName: {{ include "vbilling.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- with .Values.podSecurityContext }}
       securityContext:
         {{- toYaml . | nindent 8 }}
@@ -37,10 +42,7 @@ spec:
           image: {{ include "vbilling.image" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              drop: [ALL]
+            {{- include "vbilling.containerSecurityContext" . | nindent 12 }}
           ports:
             - name: http
               containerPort: {{ .Values.api.port }}
@@ -50,208 +52,9 @@ spec:
           livenessProbe:
             httpGet: {path: /healthz, port: http}
             periodSeconds: 20
+          {{- /* The configuration check Job renders the same environment and mounts (config-check.yaml). */}}
           env:
-            - name: ADAPTERS
-              value: {{ include "vbilling.adapters" . | quote }}
-            - name: REGION
-              value: {{ .Values.region | quote }}
-            - name: CLUSTER_NAME
-              value: {{ .Values.clusterName | quote }}
-            - name: TENANT_SOURCE
-              value: {{ .Values.tenantSource | quote }}
-            - name: DATA_DIR
-              value: /var/lib/vbilling
-            {{- if .Values.persistence.archive.enabled }}
-            - name: POD_NAME
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.name
-            - name: ARCHIVE_DIR
-              value: {{ printf "%s/$(POD_NAME)" (trimSuffix "/" .Values.persistence.archive.mountPath) | quote }}
-            {{- end }}
-            - name: LISTEN_ADDR
-              value: ":{{ .Values.api.port }}"
-            - name: DEFAULT_PLAN_CODE
-              value: {{ .Values.billing.defaultPlanCode | quote }}
-            - name: BILLING_CURRENCY
-              value: {{ .Values.billing.currency | quote }}
-            - name: PRICE_CHECK
-              value: {{ (.Values.billing.priceCheck).mode | default "warn" | quote }}
-            - name: COLLECTION_DELAY
-              value: {{ .Values.billing.collectionDelay | default "5s" | quote }}
-            - name: CPU_MEMORY_BASIS
-              value: {{ .Values.metering.cpuMemoryBasis | quote }}
-            - name: METER_CONTROL_PLANE
-              value: {{ .Values.metering.meterControlPlane | quote }}
-            - name: METER_BY_NAMESPACE
-              value: {{ .Values.metering.meterByNamespace | quote }}
-            - name: GPU_RESOURCES
-              value: {{ join "," .Values.metering.gpuResources | default "none" | quote }}
-            - name: SKU_LABEL
-              value: {{ .Values.metering.skuLabel | quote }}
-            - name: CAPACITY_TYPE_LABEL
-              value: {{ .Values.metering.capacityTypeLabel | quote }}
-            - name: UNHEALTHY_NODE_TAINTS
-              value: {{ join "," .Values.metering.unhealthyNodeTaints | default "none" | quote }}
-            - name: VCLUSTER_NODE_LABEL
-              value: {{ .Values.metering.dedicatedNodeLabel | quote }}
-            {{- if kindIs "string" .Values.metering.customMetrics }}
-            - name: CUSTOM_METRICS
-              value: {{ .Values.metering.customMetrics | quote }}
-            {{- else if .Values.metering.customMetrics }}
-            - name: CUSTOM_METRICS_FILE
-              value: /etc/vbilling/files/custom-metrics.yaml
-            {{- end }}
-            {{- if .Values.billing.planByClass }}
-            - name: PLAN_BY_CLASS
-              value: {{ $p := list }}{{ range $k, $v := .Values.billing.planByClass }}{{ $p = append $p (printf "%s=%s" $k $v) }}{{ end }}{{ join "," $p | quote }}
-            {{- end }}
-            {{- if .Values.crossChecks }}
-            - name: CROSS_CHECKS
-              value: {{ $c := list }}{{ range .Values.crossChecks }}{{ $c = append $c (printf "%s=%s:%v%%" .primary .secondary (.tolerancePercent | default 1)) }}{{ end }}{{ join "," $c | quote }}
-            {{- end }}
-            - name: RECORDS_UNKNOWN_TENANTS
-              value: {{ .Values.records.unknownTenants | quote }}
-            - name: RECORDS_LITELLM
-              value: {{ .Values.records.litellm | quote }}
-            {{- with .Values.records.pullLiteLLM }}
-            {{- if .url }}
-            - name: LITELLM_URL
-              value: {{ .url | quote }}
-            - name: LITELLM_CLIENT
-              value: {{ .client | default "litellm" | quote }}
-            {{- with .tenant }}
-            - name: LITELLM_TENANT
-              value: {{ . | quote }}
-            {{- end }}
-            {{- include "vbilling.secretEnv" (dict "env" "LITELLM_API_KEY" "existing" .existingSecret "key" "litellm-key" "inline" .key "chartKey" "litellm-key" "root" $) | nindent 12 }}
-            {{- end }}
-            {{- end }}
-            {{- if .Values.records.formats }}
-            - name: RECORDS_MAPPINGS_FILE
-              value: /etc/vbilling/files/records-formats.yaml
-            {{- end }}
-            {{- if .Values.records.pull }}
-            - name: RECORDS_PULL_FILE
-              value: /etc/vbilling/files/records-pull.yaml
-            {{- end }}
-            {{- range .Values.records.pullEnv }}
-            {{- if not (hasPrefix "RECORDS_PULL_" .name) }}
-            {{- fail (printf "records.pullEnv: %s must start with RECORDS_PULL_" .name) }}
-            {{- end }}
-            - name: {{ .name }}
-              valueFrom:
-                secretKeyRef: {name: {{ .secret | quote }}, key: {{ .key | quote }}}
-            {{- end }}
-            - name: PRIVATE_NODE_BILLING
-              value: {{ .Values.tenantAPI.privateNodeBilling | quote }}
-            {{- if .Values.tenantAPI.externalClustersSecret }}
-            - name: TENANT_CLUSTERS_FILE
-              value: /etc/vbilling/tenants/clusters.yaml
-            {{- end }}
-            - name: PLATFORM_CLUSTER
-              value: {{ .Values.platform.cluster | quote }}
-            {{- if eq .Values.tenantSource "platform" }}
-            - name: PLATFORM_URL
-              value: {{ required "platform.url is required when tenantSource is platform" .Values.platform.url | quote }}
-            - name: PLATFORM_INSECURE
-              value: {{ .Values.platform.insecure | quote }}
-            {{- if .Values.platform.caSecret }}
-            - name: PLATFORM_CA_FILE
-              value: /etc/vbilling/platform-ca/ca.crt
-            {{- end }}
-            {{- include "vbilling.secretEnv" (dict "env" "PLATFORM_ACCESS_KEY" "existing" .Values.platform.existingSecret "key" "access-key" "inline" .Values.platform.accessKey "chartKey" "platform-access-key" "root" .) | nindent 12 }}
-            {{- end }}
-            - name: WATCH_NAMESPACES
-              value: {{ join "," .Values.watchNamespaces | quote }}
-            - name: ENFORCEMENT_MODE
-              value: {{ .Values.enforcement.mode | quote }}
-            - name: ENFORCEMENT_RULES
-              value: {{ .Values.enforcement.rules | quote }}
-            - name: ENFORCEMENT_IN_CLUSTER
-              value: {{ .Values.enforcement.inCluster | quote }}
-            - name: ENFORCEMENT_LITELLM
-              value: {{ ((.Values.enforcement).gateway).litellm | default false | quote }}
-            - name: PAUSE_KEEP_BILLING
-              value: {{ .Values.enforcement.pause.keepBilling | quote }}
-            {{- with .Values.enforcement.pause.keepNamespaces }}
-            - name: PAUSE_KEEP_NAMESPACES
-              value: {{ . | quote }}
-            {{- end }}
-            {{- if .Values.prometheus.url }}
-            - name: PROMETHEUS_URL
-              value: {{ .Values.prometheus.url | quote }}
-            - name: EGRESS_QUERY
-              value: {{ .Values.prometheus.egressQuery | quote }}
-            - name: GPU_UTIL_QUERY
-              value: {{ .Values.prometheus.gpuUtilQuery | quote }}
-            - name: GPU_COUNT_QUERY
-              value: {{ .Values.prometheus.gpuCountQuery | quote }}
-            - name: PROMETHEUS_PRESET
-              value: {{ .Values.prometheus.preset | quote }}
-            {{- if .Values.prometheus.bearerTokenFile }}
-            - name: PROMETHEUS_BEARER_TOKEN_FILE
-              value: {{ .Values.prometheus.bearerTokenFile | quote }}
-            {{- end }}
-            {{- include "vbilling.secretEnv" (dict "env" "PROMETHEUS_HEADERS" "existing" .Values.prometheus.existingSecret "key" "headers" "inline" .Values.prometheus.headers "chartKey" "prometheus-headers" "root" .) | nindent 12 }}
-            {{- end }}
-            {{- if .Values.prometheus.metrics }}
-            - name: PROMETHEUS_METRICS_FILE
-              value: /etc/vbilling/prometheus/metrics.yaml
-            {{- end }}
-            - name: PROMETHEUS_SOURCE_LABEL
-              value: {{ .Values.prometheus.sourceLabel | quote }}
-            {{- /* The chart's Secret always holds api-token (given or generated) unless api.existingSecret is set. */}}
-            {{- include "vbilling.secretEnv" (dict "env" "API_TOKEN" "existing" .Values.api.existingSecret "key" "api-token" "inline" true "chartKey" "api-token" "root" .) | nindent 12 }}
-            {{- include "vbilling.secretEnv" (dict "env" "INGEST_TOKEN" "existing" .Values.api.existingSecret "key" "ingest-token" "inline" .Values.api.ingestToken "chartKey" "ingest-token" "root" .) | nindent 12 }}
-            {{- include "vbilling.secretEnv" (dict "env" "INGEST_TOKENS" "existing" .Values.api.existingSecret "key" "ingest-tokens" "inline" .Values.api.tenantIngestTokens "chartKey" "ingest-tokens" "root" .) | nindent 12 }}
-            {{- if has "lago" $adapters }}
-            - name: LAGO_API_URL
-              value: {{ .Values.lago.apiURL | quote }}
-            {{- if $lagoPriceCard }}
-            - name: LAGO_PRICE_CARD
-              value: /etc/vbilling/lago/price-card.yaml
-            {{- end }}
-            {{- with .Values.lago.managedPlans }}
-            - name: LAGO_MANAGED_PLANS
-              value: {{ join "," . | quote }}
-            {{- end }}
-            {{- include "vbilling.secretEnv" (dict "env" "LAGO_API_KEY" "existing" .Values.lago.existingSecret "key" "api-key" "inline" .Values.lago.apiKey "chartKey" "lago-api-key" "root" .) | nindent 12 }}
-            {{- end }}
-            {{- $metronomeProvision := and (has "metronome" $adapters) (or .Values.metronome.provision .Values.metronome.stripeLink) }}
-            {{- if or (has "stripe" $adapters) (and $metronomeProvision (or .Values.stripe.apiKey .Values.stripe.existingSecret)) }}
-            - name: STRIPE_API_BASE
-              value: {{ .Values.stripe.apiBase | quote }}
-            - name: STRIPE_SPLIT_METERS_BY
-              value: {{ join "," .Values.stripe.splitMetersBy | default "none" | quote }}
-            - name: STRIPE_AUTO_SUBSCRIBE
-              value: {{ .Values.stripe.autoSubscribe | quote }}
-            {{- if .Values.stripe.priceCard }}
-            - name: STRIPE_PRICE_CARD
-              value: /etc/vbilling/files/stripe-price-card.yaml
-            {{- end }}
-            {{- include "vbilling.secretEnv" (dict "env" "STRIPE_API_KEY" "existing" .Values.stripe.existingSecret "key" "api-key" "inline" .Values.stripe.apiKey "chartKey" "stripe-api-key" "root" .) | nindent 12 }}
-            {{- end }}
-            {{- include "vbilling.secretEnv" (dict "env" "STRIPE_WEBHOOK_SECRET" "existing" .Values.stripe.existingSecret "key" "webhook-secret" "inline" .Values.stripe.webhookSecret "chartKey" "stripe-webhook-secret" "root" .) | nindent 12 }}
-            {{- if has "metronome" $adapters }}
-            - name: METRONOME_API_BASE
-              value: {{ .Values.metronome.apiBase | quote }}
-            - name: METRONOME_PROVISION
-              value: {{ or .Values.metronome.provision .Values.metronome.stripeLink | quote }}
-            - name: METRONOME_RATE_CARD
-              value: {{ .Values.metronome.rateCard | quote }}
-            {{- include "vbilling.secretEnv" (dict "env" "METRONOME_API_TOKEN" "existing" .Values.metronome.existingSecret "key" "api-token" "inline" .Values.metronome.apiToken "chartKey" "metronome-api-token" "root" .) | nindent 12 }}
-            {{- end }}
-            {{- include "vbilling.secretEnv" (dict "env" "METRONOME_WEBHOOK_SECRET" "existing" .Values.metronome.existingSecret "key" "webhook-secret" "inline" .Values.metronome.webhookSecret "chartKey" "metronome-webhook-secret" "root" .) | nindent 12 }}
-            {{- if has "webhook" $adapters }}
-            - name: WEBHOOK_URL
-              value: {{ .Values.webhook.url | quote }}
-            {{- if .Values.webhook.headers }}
-            - name: WEBHOOK_HEADERS
-              value: {{ $h := list }}{{ range $k, $v := .Values.webhook.headers }}{{ $h = append $h (printf "%s=%s" $k $v) }}{{ end }}{{ join "," $h | quote }}
-            {{- end }}
-            {{- include "vbilling.secretEnv" (dict "env" "WEBHOOK_SECRET" "existing" .Values.webhook.existingSecret "key" "secret" "inline" .Values.webhook.secret "chartKey" "webhook-secret" "root" .) | nindent 12 }}
-            {{- end }}
+            {{- include "vbilling.env" (dict "root" . "check" false) | nindent 12 }}
           volumeMounts:
             - name: data
               mountPath: /var/lib/vbilling
@@ -259,35 +62,18 @@ spec:
             - name: archive
               mountPath: {{ .Values.persistence.archive.mountPath }}
             {{- end }}
-            {{- if .Values.tenantAPI.externalClustersSecret }}
-            - name: tenant-clusters
-              mountPath: /etc/vbilling/tenants
-              readOnly: true
+            {{- if (.Values.persistence.mirror).enabled }}
+            - name: mirror
+              mountPath: {{ include "vbilling.mirrorMountPath" . }}
             {{- end }}
-            {{- if .Values.platform.caSecret }}
-            - name: platform-ca
-              mountPath: /etc/vbilling/platform-ca
-              readOnly: true
-            {{- end }}
-            {{- if .Values.prometheus.metrics }}
-            - name: prometheus-metrics
-              mountPath: /etc/vbilling/prometheus
-              readOnly: true
-            {{- end }}
-            {{- if $files }}
-            - name: files
-              mountPath: /etc/vbilling/files
-              readOnly: true
-            {{- end }}
-            {{- if $lagoPriceCard }}
-            - name: lago-price-card
-              mountPath: /etc/vbilling/lago
-              readOnly: true
+            {{- with include "vbilling.configVolumeMounts" (dict "root" . "check" false) | trimPrefix "\n" }}
+            {{- . | nindent 12 }}
             {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
       {{- $archiveClaim := and .Values.persistence.archive.enabled .Values.persistence.archive.existingClaim }}
-      {{- if or (not .Values.persistence.enabled) .Values.tenantAPI.externalClustersSecret .Values.platform.caSecret .Values.prometheus.metrics $files $lagoPriceCard $archiveClaim }}
+      {{- $configVolumes := include "vbilling.configVolumes" (dict "root" . "check" false) | trimPrefix "\n" }}
+      {{- if or (not .Values.persistence.enabled) $archiveClaim $configVolumes }}
       volumes:
         {{- if not .Values.persistence.enabled }}
         - name: data
@@ -298,47 +84,16 @@ spec:
           persistentVolumeClaim:
             claimName: {{ .Values.persistence.archive.existingClaim }}
         {{- end }}
-        {{- if .Values.tenantAPI.externalClustersSecret }}
-        - name: tenant-clusters
-          secret:
-            secretName: {{ .Values.tenantAPI.externalClustersSecret }}
-        {{- end }}
-        {{- if .Values.platform.caSecret }}
-        - name: platform-ca
-          secret:
-            secretName: {{ .Values.platform.caSecret }}
-            items: [{key: ca.crt, path: ca.crt}]
-        {{- end }}
-        {{- if .Values.prometheus.metrics }}
-        - name: prometheus-metrics
-          configMap:
-            name: {{ include "vbilling.fullname" . }}-prometheus-metrics
-        {{- end }}
-        {{- if $files }}
-        - name: files
-          configMap:
-            name: {{ include "vbilling.fullname" . }}-files
-        {{- end }}
-        {{- if $lagoPriceCard }}
-        - name: lago-price-card
-          configMap:
-            name: {{ .Values.lago.priceCardConfigMap | default (printf "%s-lago-price-card" (include "vbilling.fullname" .)) }}
+        {{- with $configVolumes }}
+        {{- . | nindent 8 }}
         {{- end }}
       {{- end }}
-      {{- with .Values.nodeSelector }}
-      nodeSelector:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
-      {{- with .Values.tolerations }}
-      tolerations:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
-      {{- with .Values.affinity }}
-      affinity:
-        {{- toYaml . | nindent 8 }}
+      {{- with include "vbilling.scheduling" . | trimPrefix "\n" }}
+      {{- . | nindent 6 }}
       {{- end }}
   {{- $archiveTemplate := and .Values.persistence.archive.enabled (not .Values.persistence.archive.existingClaim) }}
-  {{- if or .Values.persistence.enabled $archiveTemplate }}
+  {{- $mirrorTemplate := (.Values.persistence.mirror).enabled }}
+  {{- if or .Values.persistence.enabled $archiveTemplate $mirrorTemplate }}
   volumeClaimTemplates:
     {{- if .Values.persistence.enabled }}
     - metadata:
@@ -363,5 +118,17 @@ spec:
         resources:
           requests:
             storage: {{ .Values.persistence.archive.size }}
+    {{- end }}
+    {{- if $mirrorTemplate }}
+    - metadata:
+        name: mirror
+      spec:
+        accessModes: {{ (.Values.persistence.mirror).accessModes | default (list "ReadWriteOnce") | toJson }}
+        {{- with (.Values.persistence.mirror).storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ (.Values.persistence.mirror).size | default "10Gi" }}
     {{- end }}
   {{- end }}

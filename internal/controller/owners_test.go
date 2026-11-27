@@ -101,7 +101,7 @@ func TestOwnerResolutionKeepsPauses(t *testing.T) {
 	cl.ApplyPlatform(discovery.PlatformBinding{Instance: "p", InstanceUID: "uid-p", Project: "acme-train", Tenant: "acme"})
 	cl.Paused = true
 	spans := []pause.Span{{From: h.now.Add(-time.Minute), By: "vbilling"}}
-	out, _ := h.c.targetsFor([]metrics.Target{{Cluster: cl, Tenant: "tenant-acme", Paused: spans}}, h.now)
+	out, _ := h.c.targetsFor([]metrics.Target{{Cluster: cl, Tenant: "tenant-acme", Paused: spans}}, metrics.Window{Start: h.now.Add(-time.Minute), End: h.now})
 	if len(out) != 1 || len(out[0].Paused) != 1 || !out[0].Cluster.Paused {
 		t.Fatalf("owner resolution dropped the pause: %+v", out)
 	}

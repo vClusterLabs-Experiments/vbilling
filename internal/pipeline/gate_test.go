@@ -349,9 +349,12 @@ func TestReleaseRetriesAndDeadLetters(t *testing.T) {
 			t.Fatalf("%s delivered %d times", e.ID, dest.got[e.ID])
 		}
 	}
-	if st := r.d.Statuses()[0]; st.DeadLettered != 1 || st.Released != 6 {
-		t.Fatalf("status %+v", st)
-	}
+	// The held store is drained just before the dispatcher counts the batch
+	// in its status: wait for the status instead of reading it at once.
+	waitFor(t, "the dispatcher's status caught up", func() bool {
+		st := r.d.Statuses()[0]
+		return st.DeadLettered == 1 && st.Released == 6
+	})
 }
 
 // A batch whose priced part fails to deliver is read again; if its held part

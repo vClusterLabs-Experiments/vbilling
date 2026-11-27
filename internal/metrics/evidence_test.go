@@ -40,7 +40,8 @@ func TestOneSampleCountsFromItsProcessStartOnlyAtItsFirstScrape(t *testing.T) {
 		}
 		s := one(tc.after)
 		s.Labels = map[string]string{"job": "gateway", "instance": "10.0.0.7:4000"}
-		if got := ev.startedSince(s, ws.Add(time.Minute), time.Minute); got != tc.want {
+		ev.window = time.Minute
+		if _, got := ev.countsFromZero(s, ws.Add(time.Minute), true); got != tc.want {
 			t.Errorf("%s: counted from zero %t, want %t", tc.name, got, tc.want)
 		}
 	}

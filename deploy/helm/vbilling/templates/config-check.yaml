@@ -1,0 +1,139 @@
+{{- if .Values.configCheck.enabled }}
+{{- /*
+Configuration check: before an install or an upgrade touches anything, a Job
+runs `vbilling check-config` with the NEW settings and files. vBilling runs
+as one pod, so a configuration it refuses at start-up means nothing meters
+until someone reverts it. Checked here first, the mistake fails the install
+or upgrade and the running pod keeps metering.
+
+The Job gets the environment and the file mounts of the StatefulSet from the
+same templates (vbilling.env, vbilling.configVolumeMounts). The release's
+own ConfigMaps do not exist or hold the old files when hooks run, so the
+check reads copies of them that are hooks too, created before the Job
+(weight -5 before 0) and removed with it once it has succeeded.
+*/}}
+{{- $labels := include "vbilling.labels" . }}
+{{- if .Values.prometheus.metrics }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "vbilling.configMapName" (dict "root" . "name" "prometheus-metrics" "check" true) }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- $labels | nindent 4 }}
+    app.kubernetes.io/component: config-check
+  annotations:
+    {{- include "vbilling.configCheckHook" (dict "weight" "-5") | nindent 4 }}
+data:
+  metrics.yaml: |
+    {{- toYaml .Values.prometheus.metrics | nindent 4 }}
+---
+{{- end }}
+{{- if include "vbilling.hasFiles" . }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "vbilling.configMapName" (dict "root" . "name" "files" "check" true) }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- $labels | nindent 4 }}
+    app.kubernetes.io/component: config-check
+  annotations:
+    {{- include "vbilling.configCheckHook" (dict "weight" "-5") | nindent 4 }}
+data:
+  {{- include "vbilling.filesData" . | trimPrefix "\n" | nindent 2 }}
+---
+{{- end }}
+{{- if include "vbilling.lagoPriceCard" (dict "root" . "check" true) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "vbilling.configMapName" (dict "root" . "name" "lago-price-card" "check" true) }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- $labels | nindent 4 }}
+    app.kubernetes.io/component: config-check
+  annotations:
+    {{- include "vbilling.configCheckHook" (dict "weight" "-5") | nindent 4 }}
+data:
+  price-card.yaml: |
+    {{- toYaml .Values.lago.priceCard | nindent 4 }}
+---
+{{- end }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "vbilling.configCheckName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- $labels | nindent 4 }}
+    app.kubernetes.io/component: config-check
+  annotations:
+    {{- include "vbilling.configCheckHook" (dict "weight" "0") | nindent 4 }}
+    # Helm prints the Job's output when the check fails.
+    helm.sh/hook-output-log-policy: hook-failed
+spec:
+  # One attempt: the answer does not change on a retry.
+  backoffLimit: 0
+  activeDeadlineSeconds: {{ .Values.configCheck.activeDeadlineSeconds }}
+  # A failed check is kept for its log, replaced by the next run, and removed
+  # after a day at the latest.
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        # Not the selector labels: the Service and the StatefulSet must never
+        # count this pod as vBilling.
+        app.kubernetes.io/name: {{ include "vbilling.name" . }}-config-check
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: config-check
+      annotations:
+        # The check contacts nothing: a service mesh sidecar would only keep
+        # the Job from completing.
+        sidecar.istio.io/inject: "false"
+        linkerd.io/inject: disabled
+    spec:
+      restartPolicy: Never
+      # No Kubernetes API access. The release's ServiceAccount does not exist
+      # before the first install, so the namespace's default one is named,
+      # without its token.
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: config-check
+          image: {{ include "vbilling.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # Credentials the chart's own Secret will hold are not there yet:
+          # a missing one is a warning here, and the pod itself insists on it.
+          args: ["check-config", "--allow-missing-secrets"]
+          securityContext:
+            {{- include "vbilling.containerSecurityContext" . | nindent 12 }}
+          env:
+            {{- include "vbilling.env" (dict "root" . "check" true) | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            {{- with include "vbilling.configVolumeMounts" (dict "root" . "check" true) | trimPrefix "\n" }}
+            {{- . | nindent 12 }}
+            {{- end }}
+          resources:
+            {{- toYaml (.Values.configCheck.resources | default .Values.resources) | nindent 12 }}
+      volumes:
+        # Scratch space of the check (the root filesystem is read-only). The
+        # data and archive volumes are never mounted here.
+        - name: tmp
+          emptyDir: {}
+        {{- with include "vbilling.configVolumes" (dict "root" . "check" true) | trimPrefix "\n" }}
+        {{- . | nindent 8 }}
+        {{- end }}
+      {{- with include "vbilling.scheduling" . | trimPrefix "\n" }}
+      {{- . | nindent 6 }}
+      {{- end }}
+{{- end }}

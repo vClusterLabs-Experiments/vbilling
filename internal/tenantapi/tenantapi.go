@@ -203,6 +203,9 @@ func (m *Manager) Conn(ctx context.Context, cl discovery.TenantCluster) (*metric
 	g := metrics.NewGraveyard(m.opts.Retention, m.opts.Now)
 	wctx, cancel := context.WithCancel(m.ctx)
 	go g.Watch(wctx, kube, "", m.opts.WatchPods, true)
+	// Volumes and load balancers deleted, bound, resized or addressed
+	// between two reads of the cluster's inventory.
+	go g.WatchCapacity(wctx, kube, "")
 	conn := &metrics.TenantConn{Kube: kube, Metrics: mc, Dynamic: dyn, Graveyard: g, External: cl.External}
 	m.entries[key] = &entry{conn: conn, version: version, cancel: cancel}
 	log.Printf("[tenantapi] %s: metering through the tenant cluster's API at %s", key, cfg.Host)

@@ -149,6 +149,70 @@ func TestArchiveNeedsItsOwnVolume(t *testing.T) {
 	}
 }
 
+// LEDGER_MIRROR: the live copy of the data directory on the archive volume
+// is decided at start-up (auto), kept wherever the archive is (on) or not
+// kept (off). A typo is refused, and so is "on" with nowhere to keep it.
+func TestLedgerMirrorSetting(t *testing.T) {
+	if c := Load(); c.LedgerMirror != "auto" || c.Validate() != nil {
+		t.Fatalf("default: %q, %v", c.LedgerMirror, c.Validate())
+	}
+	for _, mode := range []string{"auto", "off"} {
+		t.Setenv("LEDGER_MIRROR", mode)
+		if c := Load(); c.LedgerMirror != mode || c.Validate() != nil {
+			t.Fatalf("%s without an archive: %q, %v", mode, c.LedgerMirror, c.Validate())
+		}
+	}
+	t.Setenv("LEDGER_MIRROR", "on")
+	if err := Load().Validate(); err == nil || !strings.Contains(err.Error(), "LEDGER_MIRROR=on needs ARCHIVE_DIR or LEDGER_MIRROR_DIR") {
+		t.Fatalf("on without an archive: %v", err)
+	}
+	t.Setenv("ARCHIVE_DIR", "/archive")
+	if err := Load().Validate(); err != nil {
+		t.Fatalf("on with an archive: %v", err)
+	}
+	t.Setenv("LEDGER_MIRROR", "yes")
+	if err := Load().Validate(); err == nil || !strings.Contains(err.Error(), `LEDGER_MIRROR "yes" must be auto, on or off`) {
+		t.Fatalf("a typo: %v", err)
+	}
+}
+
+// LEDGER_MIRROR_DIR: the mirror on a volume of its own, also without an
+// archive. It may not hold the data or the archive directory: the mirror
+// would copy the ledger onto itself, or move the archive when set aside.
+func TestLedgerMirrorDirSetting(t *testing.T) {
+	t.Setenv("DATA_DIR", "/var/lib/vbilling")
+	if c := Load(); c.LedgerMirrorDir != "" {
+		t.Fatalf("default: %q", c.LedgerMirrorDir)
+	}
+	t.Setenv("LEDGER_MIRROR_DIR", "/var/lib/vbilling-mirror/vbilling-0")
+	for _, mode := range []string{"auto", "on", "off"} {
+		t.Setenv("LEDGER_MIRROR", mode)
+		if c := Load(); c.LedgerMirrorDir != "/var/lib/vbilling-mirror/vbilling-0" || c.Validate() != nil {
+			t.Fatalf("%s with LEDGER_MIRROR_DIR and no archive: %q, %v", mode, c.LedgerMirrorDir, c.Validate())
+		}
+	}
+	t.Setenv("ARCHIVE_DIR", "/var/lib/vbilling-archive/vbilling-0")
+	if err := Load().Validate(); err != nil {
+		t.Fatalf("with an archive elsewhere: %v", err)
+	}
+	for dir, want := range map[string]string{
+		"/var/lib/vbilling":                    "holds DATA_DIR /var/lib/vbilling",
+		"/var/lib":                             "holds DATA_DIR",
+		"/var/lib/vbilling-archive/vbilling-0": "holds ARCHIVE_DIR",
+		"/var/lib/vbilling-archive":            "holds ARCHIVE_DIR",
+	} {
+		t.Setenv("LEDGER_MIRROR_DIR", dir)
+		if err := Load().Validate(); err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("LEDGER_MIRROR_DIR=%s: %v, want %q", dir, err, want)
+		}
+	}
+	// Inside the archive directory, like ARCHIVE_DIR/mirror, it is allowed.
+	t.Setenv("LEDGER_MIRROR_DIR", "/var/lib/vbilling-archive/vbilling-0/mirror-2")
+	if err := Load().Validate(); err != nil {
+		t.Fatalf("inside the archive directory: %v", err)
+	}
+}
+
 // LiteLLM's pull can be pinned to a tenant and given the push's client name,
 // so pulled copies of pushed requests get the same IDs.
 func TestLiteLLMPinSettings(t *testing.T) {

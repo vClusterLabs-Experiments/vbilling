@@ -308,7 +308,7 @@ func (p *Puller) pull(ctx context.Context) (PullResult, error) {
 			res.From = t.Add(-lookback)
 		}
 	}
-	if oldest := now.Add(-p.in.opts.MaxAge).Add(time.Minute); res.From.Before(oldest) {
+	if oldest := now.Add(-p.in.maxAge()).Add(time.Minute); res.From.Before(oldest) {
 		res.From = oldest
 	}
 	res.Result.Format = p.spec.Format

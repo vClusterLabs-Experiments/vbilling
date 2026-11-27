@@ -111,6 +111,32 @@ enforcement:
         <li>An endpoint whose engine runs in the customer's own cluster can bill tokens too, with a second count from the engine: see the cross-check under <a href="usage-sources.html#cross-checks">Usage Sources</a>.</li>
       </ul>
 
+      <h3 id="instance-profiles">Instances per profile, public IPs and storage</h3>
+      <p>A provider that rents whole nodes often prices them like a cloud's instances: a rate per instance profile, a rate per public IP address, and storage per GiB. Label each node with its profile and point <code>metering.skuLabel</code> at the label. A whole node's node-hours then carry the profile as <code>sku</code>, and <code>vcluster_public_ip_hours</code> counts the node's public addresses for the same time (see <a href="metrics.html#public-ip-hours">Public IP Hours</a>).</p>
+      <div class="code-block"><code>metering:
+  skuLabel: vbilling.vcluster.com/sku   <span class="comment"># the node's profile: gpu-h100-8, cpu-64, ...</span>
+adapters: [metronome]</code></div>
+      <p>On Metronome, one rate card holds the products below, each with <code>presentation_group_key: [tenant_cluster]</code> for invoice lines per cluster:</p>
+      <div class="hmw-table-wrap">
+        <table class="props-table">
+          <thead><tr><th>Product</th><th>Billable metric</th><th>Pricing group key</th><th>Rates</th></tr></thead>
+          <tbody>
+            <tr><td>Instance hours</td><td><code>vcluster_private_node_hours</code></td><td><code>region, sku, capacity_type</code></td><td>One per profile, per hour</td></tr>
+            <tr><td>Public IP</td><td><code>vcluster_public_ip_hours</code></td><td><code>region</code></td><td>Per address, per hour</td></tr>
+            <tr><td>Storage</td><td><code>vcluster_storage_gb_hours</code></td><td><code>region, sku</code> (the storage class)</td><td>Per GiB-hour</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <ul>
+        <li>The same nodes also bill GPU, CPU and memory hours, with <code>billing_mode</code> <code>dedicated_node</code> or <code>private_node</code>. Rate them at 0, so a node is not charged twice: the price check reports a rate of 0 as <code>zero</code>, not as a gap.</li>
+        <li>A profile whose price includes its public IP: add <code>public_ip</code> to the pricing keys of node-hours and rate each profile with and without one, on a product priced on <code>region, sku, capacity_type, public_ip</code>. Each combination is its own row in the price check, a rate of 0 included. On Metronome that is a new billable metric: see <a href="metronome.html#pricing-keys">Changing pricing keys</a>.
+          <div class="code-block"><code>billing:
+  pricingKeys:
+    vcluster_private_node_hours: [public_ip]</code></div></li>
+        <li>CPU and memory per profile, where several profiles share a cluster: add <code>sku</code> to their pricing keys, and their hours carry the SKU of the node they ran on.</li>
+        <li>On Stripe the price card prices the same metrics, without pricing keys: <code>vcluster_private_node_hours: {sku: {gpu-h100-8: "12.40"}}</code>, <code>vcluster_public_ip_hours: {amount: "0.005"}</code> and <code>vcluster_storage_gb_hours: {sku: {fast-nvme: "0.0002"}}</code>.</li>
+      </ul>
+
       <h2 id="serverless">Serverless inference</h2>
       <p>The provider runs shared models; customers call them through an AI gateway and pay per token. The gateway records every request, vBilling bills each request once (pushed records and the gateway's own log, read back, deduplicate), and a customer that is suspended or paused is blocked at the gateway, because it has no cluster to stop.</p>
       <div class="code-block"><code>records:
@@ -159,6 +185,46 @@ enforcement:
         <li>vBilling has no budgets yet: alert on usage from your data platform or from Lago.</li>
       </ul>
 
+      <h2 id="allowances">Included storage</h2>
+      <p>A price often includes storage: 32 GiB with every instance, 100 GiB with every cluster, or the first 20 GiB of each volume. A billing platform cannot apply that by itself. Free units, a free first tier in Stripe or free units in Metronome and Lago, apply to a customer's total for a product, not to each node, cluster or volume.</p>
+      <p>vBilling applies the allowance where it is defined. It uses the same lifetimes it meters storage from: the second each volume was bound, each capacity it had after a resize, the second it was deleted, and every second each node was billed. What is above the allowance at each instant is billed as <code>vcluster_storage_overage_gb_hours</code>:</p>
+      <div class="code-block"><code>billing:
+  allowances:
+    - metric: vcluster_storage_gb_hours   <span class="comment"># the only metric that takes one</span>
+      included: 32                        <span class="comment"># GiB</span>
+      per: node                           <span class="comment"># node, cluster or volume</span></code></div>
+      <div class="hmw-table-wrap">
+        <table class="props-table">
+          <thead><tr><th><code>per</code></th><th>Included at each instant</th><th>Billed above it</th></tr></thead>
+          <tbody>
+            <tr><td><code>node</code></td><td><code>included</code> times the cluster's own nodes at that instant: its dedicated or private nodes, the nodes that bill <code>vcluster_private_node_hours</code></td><td>The cluster's bound capacity minus that, never below 0</td></tr>
+            <tr><td><code>cluster</code></td><td><code>included</code>, once per cluster</td><td>The cluster's bound capacity minus <code>included</code>, never below 0</td></tr>
+            <tr><td><code>volume</code></td><td>The first <code>included</code> GiB of each volume</td><td>Each volume's capacity minus <code>included</code>, never below 0</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <h3 id="allowance-example">Worked example</h3>
+      <p>Two instances, each with a 20 GiB volume, for 10 hours, at $0.01 per GiB-hour above the allowance:</p>
+      <div class="hmw-table-wrap">
+        <table class="props-table">
+          <thead><tr><th>Allowance</th><th>At each instant</th><th>Above it</th><th>Billed</th></tr></thead>
+          <tbody>
+            <tr><td>32 GiB per node, one node per instance</td><td>2 nodes include 64 GiB; 40 GiB is held</td><td>0 GiB-hours</td><td>$0.00</td></tr>
+            <tr><td>32 GiB per cluster, both volumes in one cluster</td><td>32 GiB included; 40 GiB is held</td><td>8 GiB for 10 hours: 80 GiB-hours</td><td>$0.80</td></tr>
+            <tr><td>A free tier of 320 GiB-hours (32 GiB for 10 hours) in the billing platform</td><td>Applied once, to the total of 400 GiB-hours</td><td>80 GiB-hours</td><td>$0.80, although each instance stayed within its 32 GiB</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <ul>
+        <li><strong>Nodes.</strong> A node counts from when it joins to when it leaves, also while it is not ready or its cluster is paused: the tenant still holds it, so a hardware failure or a pause does not raise its storage bill. A cluster without nodes of its own, on shared nodes, includes nothing per node. With <code>PRIVATE_NODE_BILLING=usage</code> a cluster's own nodes are not billed whole, so only dedicated nodes include storage; <code>vbilling check-config</code> warns about that combination.</li>
+        <li><strong>Storage classes.</strong> Without <code>storageClasses</code>, every storage class has an allowance of its own. With it, the listed classes share one allowance, the first listed taking from it first, and a class no entry lists has none. A class may be in one entry only, and one entry at most leaves <code>storageClasses</code> out: it covers every class no other entry lists. A claim without a storage class is metered under the class <code>default</code>.</li>
+        <li><strong>Billing.</strong> With any allowance, every storage class is billed through <code>vcluster_storage_overage_gb_hours</code>, and a class without an allowance is all overage. Price that metric per <code>sku</code> (the storage class), as you priced storage. The billing adapters create its meter, billable metric or charge as they do for the others. <code>vcluster_storage_gb_hours</code> stays in the ledger, the exports and the webhook feed as an informational record of the whole capacity. Billing platforms do not get it, and the price check does not hold it.</li>
+        <li><strong>Audit.</strong> Each overage event carries <code>included_gib</code>, <code>allowance_per</code> and <code>gross_gib_hours</code>: the storage of the same cluster, class and window. Shared allowances add <code>allowance_storage_classes</code>. Each storage event carries <code>overage_gib_hours</code>, which is 0 when the allowance covered all of it. An overage of 0 sends no event, as for every billed metric.</li>
+        <li><strong>Control plane.</strong> The cluster's own control plane volume, billed only with <code>METER_CONTROL_PLANE=true</code>, is not the tenant's storage. No allowance covers it.</li>
+        <li><strong>Paused clusters.</strong> Their volumes keep billing by default (<code>PAUSE_KEEP_BILLING</code>) and their nodes do not. An allowance per node then includes nothing; one per cluster or per volume still applies.</li>
+        <li><strong>Switching.</strong> Allowances can be turned on or off at any time. Each window is billed the way it was metered: storage metered under an allowance carries <code>overage_gib_hours</code> and is billed through its overage event, storage metered without one is billed in full, and overage events are billed after allowances are turned off too. So a window metered before the switch and delivered after it is neither dropped nor billed twice. Give the billing platform a rate for <code>vcluster_storage_overage_gb_hours</code> before you turn allowances on, and keep the rates of both metrics until the windows metered before the switch are delivered.</li>
+      </ul>
+
       <h2 id="commercial">Commitments, prepaid credit and discounts</h2>
       <p>These live in the billing platform; vBilling meters, and acts on the platform's alerts.</p>
       <div class="hmw-table-wrap">
@@ -167,7 +233,8 @@ enforcement:
           <tbody>
             <tr><td>Prepaid credit that stops the customer when it runs out</td><td>Metronome contracts with prepaid commits. Its commit balance alert becomes a billing state: <code>enforcement.rules: "alerts.low_remaining_commit_balance_reached=paused"</code> pauses clusters and blocks gateway teams (see <a href="metronome.html#prepaid-loop">the prepaid wallet loop</a>).</td></tr>
             <tr><td>Committed spend, reserved capacity, volume tiers</td><td>Metronome rate cards and contracts, Stripe tiered prices, Lago graduated charges.</td></tr>
-            <tr><td>Included allowances (for example, the first 32 GiB of storage)</td><td>Metronome or Lago free units, or a Stripe tiered price with a free first tier.</td></tr>
+            <tr><td>Storage included per node, cluster or volume (for example, 32 GiB with every instance)</td><td>vBilling, with <code>billing.allowances</code>: see <a href="#allowances">Included storage</a>. A free tier in the billing platform applies to the customer's total, not to each node.</td></tr>
+            <tr><td>Other included allowances (for example, the first million tokens a month)</td><td>Metronome or Lago free units, or a Stripe tiered price with a free first tier.</td></tr>
             <tr><td>Payment, tax, dunning</td><td>Stripe, directly or linked from Metronome. Failed payments become billing states through the webhooks.</td></tr>
           </tbody>
         </table>

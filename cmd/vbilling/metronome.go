@@ -63,7 +63,9 @@ METRONOME_PROVISION=true vBilling creates the same billable metrics itself.
 
 Custom metrics are included when the settings that declare them are set
 (CUSTOM_METRICS, CUSTOM_METRICS_FILE, PROMETHEUS_METRICS_FILE,
-RECORDS_MAPPINGS_FILE, RECORDS_LITELLM), as they are in vBilling's pod.
+RECORDS_MAPPINGS_FILE, RECORDS_LITELLM), as they are in vBilling's pod. With
+ALLOWANCES_FILE, storage is billed as vcluster_storage_overage_gb_hours: the
+list holds that metric, and not vcluster_storage_gb_hours.
 `)
 	}
 	if code, done := parseFlags(fs, args, stderr); done {
@@ -87,8 +89,12 @@ RECORDS_MAPPINGS_FILE, RECORDS_LITELLM), as they are in vBilling's pod.
 }
 
 // declareCatalog registers the custom metrics vBilling declares from the
-// same settings, in the same order as main.
+// same settings, in the same order as main, and the pricing keys
+// PRICING_KEYS adds to built-in metrics.
 func declareCatalog(cfg *config.Config) error {
+	if err := declarePricingKeys(cfg); err != nil {
+		return err
+	}
 	customs, err := usage.ParseCustomMetrics(cfg.CustomMetrics)
 	if err != nil {
 		return fmt.Errorf("CUSTOM_METRICS: %w", err)
@@ -118,6 +124,24 @@ func declareCatalog(cfg *config.Config) error {
 	}
 	if _, err := metrics.LoadPromMetrics(cfg.PrometheusMetrics); err != nil {
 		return fmt.Errorf("PROMETHEUS_METRICS_FILE: %w", err)
+	}
+	allowances, err := metrics.LoadAllowances(cfg.AllowancesFile)
+	if err != nil {
+		return fmt.Errorf("ALLOWANCES_FILE: %w", err)
+	}
+	usage.UseStorageAllowances(len(allowances) > 0)
+	return nil
+}
+
+// declarePricingKeys adds the keys of PRICING_KEYS to the group keys of
+// built-in metrics in the process-wide catalog.
+func declarePricingKeys(cfg *config.Config) error {
+	keys, err := usage.ParsePricingKeys(cfg.PricingKeys)
+	if err == nil {
+		err = usage.SetPricingKeys(keys)
+	}
+	if err != nil {
+		return fmt.Errorf("PRICING_KEYS: %w", err)
 	}
 	return nil
 }

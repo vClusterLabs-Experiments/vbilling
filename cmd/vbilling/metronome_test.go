@@ -61,3 +61,52 @@ func TestMetronomeBillableMetrics(t *testing.T) {
 		t.Errorf("unknown command: exit %d", code)
 	}
 }
+
+// With PRICING_KEYS the printed billable metrics group on the extra keys
+// and require them, under names that say so: what Finance adds before the
+// change (a billable metric's group keys cannot be changed). Keys a
+// metric's events do not carry are refused.
+func TestMetronomeBillableMetricsWithPricingKeys(t *testing.T) {
+	t.Cleanup(func() { usage.SetPricingKeys(nil) })
+	t.Setenv("PRICING_KEYS", "vcluster_private_node_hours:public_ip|zone,vcluster_public_ip_hours:ip_family")
+	var out, errb bytes.Buffer
+	if code := metronomeMain([]string{"billable-metrics"}, &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	var defs []map[string]any
+	if err := json.Unmarshal(out.Bytes(), &defs); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]struct{ name, keys string }{
+		usage.MetricPrivateNodeHours: {"Dedicated Node Hours [vcluster_private_node_hours] by public_ip, zone", `[["region","sku","capacity_type","public_ip","zone","tenant_cluster"]]`},
+		usage.MetricPublicIPHours:    {"Public IP Hours [vcluster_public_ip_hours] by ip_family", `[["region","ip_family","tenant_cluster"]]`},
+		usage.MetricGPUHours:         {"GPU Hours [vcluster_gpu_hours]", `[["region","sku","capacity_type","billing_mode","tenant_cluster"]]`},
+	}
+	for _, d := range defs {
+		code := d["event_type_filter"].(map[string]any)["in_values"].([]any)[0].(string)
+		w, ok := want[code]
+		if !ok {
+			continue
+		}
+		delete(want, code)
+		keys, _ := json.Marshal(d["group_keys"])
+		filters, _ := json.Marshal(d["property_filters"])
+		if d["name"] != w.name || string(keys) != w.keys {
+			t.Errorf("%s: %v %s, want %q %s", code, d["name"], keys, w.name, w.keys)
+		}
+		if strings.Contains(w.keys, "zone") && !strings.Contains(string(filters), `{"exists":true,"name":"zone"}`) {
+			t.Errorf("%s does not require zone: %s", code, filters)
+		}
+	}
+	if len(want) != 0 {
+		t.Errorf("not printed: %v", want)
+	}
+
+	t.Setenv("PRICING_KEYS", "vcluster_lb_hours:zone")
+	out.Reset()
+	errb.Reset()
+	if code := metronomeMain([]string{"billable-metrics"}, &out, &errb); code != 1 ||
+		!strings.Contains(errb.String(), `PRICING_KEYS: vcluster_lb_hours cannot be priced on "zone"`) || out.Len() != 0 {
+		t.Errorf("exit %d\nstdout: %s\nstderr: %s", code, out.String(), errb.String())
+	}
+}

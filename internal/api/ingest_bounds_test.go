@@ -10,8 +10,57 @@ import (
 	"time"
 
 	"github.com/vclusterlabs-experiments/vbilling/internal/config"
-	"github.com/vclusterlabs-experiments/vbilling/internal/usage"
+	"github.com/vclusterlabs-experiments/vbilling/internal/destinations"
+	"github.com/vclusterlabs-experiments/vbilling/internal/destinations/metronome"
+	"github.com/vclusterlabs-experiments/vbilling/internal/kv"
 )
+
+// Ingest refuses usage older than the oldest a configured
+// destination accepts, and names the destination and its limit: the
+// Metronome adapter dead-letters anything older than 34 days minus an
+// hour, so usage of that last hour is no longer acknowledged first.
+func TestIngestRefusesUsageADestinationWouldDeadLetter(t *testing.T) {
+	m := metronome.New(nil, &config.Config{}, kv.Memory(), nil)
+	limit := m.OldestUsage()
+	if limit >= ingestMaxAge || limit < ingestMaxAge-2*time.Hour {
+		t.Fatalf("test setup: the Metronome adapter accepts usage up to %s old", limit)
+	}
+	e := setupPush(t, pushOptions{dests: []destinations.Destination{&noticeDest{name: "sink"}, m}})
+	a := e.events(t, "ingest-secret",
+		pushedEvent{id: "kept", tenant: "acme", at: now.Add(-limit).Add(time.Minute)},
+		pushedEvent{id: "lost", tenant: "acme", at: now.Add(-limit).Add(-time.Minute)})
+	reason, text := a.rejection(0)
+	if a.code != http.StatusOK || a.accepted() != 1 || fmt.Sprint(a.out["ids"]) != "[kept]" {
+		t.Fatalf("usage within Metronome's limit: %v, want it accepted and the older event refused", a)
+	}
+	if reason != "too_old" || text != "window_start is older than 33 days 23 hours, the oldest usage destination metronome accepts" {
+		t.Fatalf("usage Metronome would dead-letter was refused with %q (%s)", text, reason)
+	}
+	// Without such a destination the limit stays 34 days.
+	plain := setupPush(t, pushOptions{})
+	a = plain.events(t, "ingest-secret",
+		pushedEvent{id: "kept", tenant: "acme", at: now.Add(-ingestMaxAge).Add(time.Minute)},
+		pushedEvent{id: "lost", tenant: "acme", at: now.Add(-ingestMaxAge).Add(-time.Minute)})
+	if _, text := a.rejection(0); a.accepted() != 1 || text != "window_start is older than 34 days" {
+		t.Fatalf("without a destination limit: %v", a)
+	}
+}
+
+// The tightest limit among the destinations bounds both push paths.
+func TestBothPushPathsHonourTheTightestDestinationLimit(t *testing.T) {
+	loose := limitedDest{&noticeDest{name: "loosebill", oldest: 48 * time.Hour}}
+	strict := limitedDest{&noticeDest{name: "strictbill", oldest: 90 * time.Minute}}
+	e := setupPush(t, pushOptions{dests: []destinations.Destination{loose, strict, &noticeDest{name: "sink"}}})
+	ev := e.events(t, "ingest-secret", pushedEvent{id: "kept", tenant: "acme", at: now.Add(-time.Hour)}, pushedEvent{id: "lost", tenant: "acme", at: now.Add(-2 * time.Hour)})
+	rec := e.recs(t, "ingest-secret", pushedRecord{id: "kept", tenant: "acme", at: now.Add(-time.Hour)}, pushedRecord{id: "lost", tenant: "acme", at: now.Add(-2 * time.Hour)})
+	for path, a := range map[string]pushAnswer{"events": ev, "records": rec} {
+		reason, text := a.rejection(0)
+		if a.code != http.StatusOK || a.accepted() != 1 || reason != "too_old" || !strings.Contains(text, "1h30m0s") ||
+			!strings.Contains(text, "the oldest usage destination strictbill accepts") {
+			t.Errorf("%s: %v, want the usage older than strictbill's 90 minutes refused, naming it", path, a)
+		}
+	}
+}
 
 // X-VBilling-Client is a short plain name; anything else is refused before
 // the body is read.
@@ -50,7 +99,7 @@ func TestIngestClientNamesPerTokenAreCapped(t *testing.T) {
 		}
 	}
 	post := func(token, client string, i int) int {
-		body, _ := json.Marshal([]map[string]any{{"id": fmt.Sprintf("ev-%s-%d", client, i), "tenant": "acme", "metric": usage.MetricGPUHours, "quantity": 0.1,
+		body, _ := json.Marshal([]map[string]any{{"id": fmt.Sprintf("ev-%s-%d", client, i), "tenant": "acme", "metric": pushedMetric, "quantity": 0.1,
 			"window_start": now.Add(-5 * time.Minute), "window_end": now.Add(-4 * time.Minute)}})
 		return postWithClient(t, e.srv.URL+"/api/v1/events", token, client, body)
 	}
@@ -86,7 +135,8 @@ func TestIngestClientNamesPerTokenAreCapped(t *testing.T) {
 }
 
 // Records sent under a client name that never had a request accepted add
-// no health source and no metric series.
+// no health source and no metric series of that name: they are counted
+// under one fixed client label instead, so every refusal still counts.
 func TestRecordsClientsAppearOnlyOnceAccepted(t *testing.T) {
 	e := setupRecords(t)
 	at := now.Add(-2 * time.Minute).Format(time.RFC3339)
@@ -112,7 +162,18 @@ func TestRecordsClientsAppearOnlyOnceAccepted(t *testing.T) {
 	}
 	var tel bytes.Buffer
 	e.server.tel.WriteText(&tel)
-	if n := strings.Count(tel.String(), "\nvbilling_records_received_total{"); n != 1 || !strings.Contains(tel.String(), `vbilling_records_rejected_total{client="edge-gw"} 1`) {
-		t.Fatalf("%d received series; want one, for edge-gw, which counts its refused record:\n%s", n, tel.String())
+	for _, want := range []string{
+		`vbilling_records_received_total{client="_unaccepted"} 50`,
+		`vbilling_records_rejected_total{client="_unaccepted",reason="unknown_metric"} 50`,
+		`vbilling_records_received_total{client="edge-gw"} 2`,
+		`vbilling_records_accepted_total{client="edge-gw"} 1`,
+		`vbilling_records_rejected_total{client="edge-gw",reason="unknown_metric"} 1`,
+	} {
+		if !strings.Contains(tel.String(), "\n"+want+"\n") {
+			t.Errorf("missing %s", want)
+		}
+	}
+	if n := strings.Count(tel.String(), "\nvbilling_records_received_total{"); n != 2 || strings.Contains(tel.String(), "junk-") {
+		t.Fatalf("%d received series; want one for the clients never accepted and one for edge-gw, none named after a made-up client:\n%s", n, tel.String())
 	}
 }

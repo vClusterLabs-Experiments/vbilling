@@ -51,10 +51,12 @@ func (s *Service) gated(ds *destState) bool {
 }
 
 // holds reports whether new events of a series must wait. In hold mode:
-// their platform has no price for it, or no check has answered for it yet.
-// A series a check could not decide (unknown, e.g. no rate card configured)
-// is not held: the check cannot tell when to release it. In warn mode: only
-// while the platform would not count its usage at all. s.mu held.
+// nothing at their platform rates it (no price, or no customer or contract to
+// rate it under), or no check has answered for it yet. A series a check
+// could not decide (unknown) is not held, because the check could never tell
+// when to release it: its usage is delivered, and its source in
+// GET /api/v1/sources fails, so that is never silent (see publish). In warn
+// mode: only while the platform would not count its usage at all. s.mu held.
 func (s *Service) holds(st *seriesState) bool {
 	if s.opts.Mode == ModeHold {
 		return st == nil || st.status == "" || st.status == destinations.PriceMissing
@@ -130,17 +132,66 @@ func (g gate) Decide(ctx context.Context, dest string, events []usage.Event) []p
 	}
 
 	out := make([]pipeline.Decision, len(events))
+	kick := false
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	behind := s.heldBeforeLocked(ds)
 	for i, key := range keys {
 		if key == "" {
 			continue
 		}
 		st := ds.series[key]
-		out[i] = pipeline.Decision{Series: key, Hold: s.holds(st)}
-		if out[i].Hold {
-			out[i].Reason = reason(st, ds.lastErr)
+		if st == nil {
+			// A check moved the event's tenant to the series of the plan it
+			// read for it while this decision waited (rekeyLocked), and
+			// dropped the series the event was in: decide by the series the
+			// event is in now.
+			var isNew bool
+			key, isNew = s.observeLocked(ds, &events[i], now)
+			st, kick = ds.series[key], kick || isNew
 		}
+		out[i] = pipeline.Decision{Series: key, Hold: s.holds(st)}
+		switch {
+		case out[i].Hold:
+			out[i].Reason = reason(st, ds.lastErr)
+		case behind[key]:
+			out[i].Hold = true
+			out[i].Reason = "queued behind usage of the same series that was held before its tenant's plan changed"
+		}
+	}
+	s.mu.Unlock()
+	if kick {
+		s.Kick(dest)
+	}
+	return out
+}
+
+// heldBeforeLocked returns the series that have usage held under another
+// key: the key of a series the service dropped because its tenant's plan
+// changed after the events were held (at Metronome the plan is the rate card
+// of the tenant's contract, which a check reads: usage held for a tenant
+// without a customer moves to the rate card's series once it has one). Such
+// held usage is released when its current series may ship (Releasable), and
+// newer events of that series wait behind it, so the series still ships in
+// ledger order. Usage held under the key of a series that still exists is
+// judged by that series alone, and nothing queues behind it here. s.mu held.
+func (s *Service) heldBeforeLocked(ds *destState) map[string]bool {
+	if s.held == nil {
+		return nil
+	}
+	var out map[string]bool
+	for _, h := range s.held.Series(ds.name) {
+		if ds.series[h.Series] != nil {
+			continue
+		}
+		t, _ := s.tenants.Get(h.Sample.Tenant)
+		key := destinations.SeriesOf(ds.pc, ds.pc.PricePlan(t), &h.Sample).Key()
+		if key == h.Series {
+			continue // not seen since a restart: the dispatcher queues behind it by its key
+		}
+		if out == nil {
+			out = map[string]bool{}
+		}
+		out[key] = true
 	}
 	return out
 }

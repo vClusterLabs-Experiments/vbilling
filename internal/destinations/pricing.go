@@ -19,8 +19,11 @@ const (
 	// PriceZero: a price exists and is 0. That can be intentional (a free
 	// tier, an internal tenant), so it is information, not a gap.
 	PriceZero = "zero"
-	// PriceUnknown: the check cannot tell (for example no rate card is
-	// configured, so vBilling does not know which one prices the usage).
+	// PriceUnknown: the check cannot decide (for example the platform prices
+	// the usage on a property vBilling does not track per series). Usage of
+	// an unknown series is delivered in every PRICE_CHECK mode, so an answer
+	// is unknown only when nothing can be concluded: when nothing rates the
+	// usage (no customer, no contract, no rate), the answer is PriceMissing.
 	PriceUnknown = "unknown"
 )
 
@@ -72,8 +75,14 @@ type PriceCoverage struct {
 	// Detail says what the check found (the product and rate, the Stripe
 	// price, the Lago charge or filter) or what is missing.
 	Detail string `json:"detail,omitempty"`
-	// Hint names what Finance has to create when Status is unpriced.
+	// Hint names what to create when Status is unpriced (a rate, a price, a
+	// charge, a customer, a contract), and what would let vBilling check the
+	// series when it is unknown.
 	Hint string `json:"hint,omitempty"`
+	// Note says something the operator should know about where the series is
+	// rated, whatever its status (for example that a rate card alias now
+	// points to another rate card than the tenant's contract is on).
+	Note string `json:"note,omitempty"`
 }
 
 // PriceChecker is implemented by billing adapters that can tell whether the
@@ -89,6 +98,14 @@ type PriceChecker interface {
 	// CheckPrices reports coverage for each series, in any order. An error
 	// means the platform could not be read; nothing is concluded from it.
 	CheckPrices(ctx context.Context, series []PriceSeries) ([]PriceCoverage, error)
+}
+
+// CatalogScoper is implemented by price checkers for which some plans have
+// no price list to check the catalog against (Metronome: a tenant with no
+// customer or contract has no rate card). The billable metrics without usage
+// are checked only under the plans it accepts.
+type CatalogScoper interface {
+	ChecksCatalog(plan string) bool
 }
 
 // SeriesPreparer is implemented by adapters that create what a new series
@@ -154,6 +171,24 @@ func (s PriceSeries) EventFor() usage.Event {
 		}
 	}
 	return e
+}
+
+// DimsLabel renders the values of a series' other pricing keys, sorted by
+// key: "capacity_type=on-demand,region=us-east". Keys the usage carries no
+// value for are left out.
+func DimsLabel(dims map[string]string) string {
+	keys := make([]string, 0, len(dims))
+	for k, v := range dims {
+		if v != "" {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	parts := make([]string, len(keys))
+	for i, k := range keys {
+		parts[i] = k + "=" + dims[k]
+	}
+	return strings.Join(parts, ",")
 }
 
 // DescribeSeries renders a series for messages: "vcluster_gpu_hours

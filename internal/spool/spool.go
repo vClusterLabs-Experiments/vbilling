@@ -9,7 +9,7 @@
 // Every record is hash-chained to the previous one (sha256 over the record's
 // JSON, which embeds the previous hash), so the ledger is tamper-evident and
 // can be verified end to end. Each destination reads the ledger through its
-// own cursor, which is what lets one slow or failing billing backend lag
+// own cursor, which is what lets one slow or failing billing platform lag
 // without blocking the others.
 //
 // Line format: "<sha256 hex>\t<record json>\n".
@@ -76,7 +76,8 @@ type Options struct {
 	// has consumed them. Zero keeps data forever.
 	Retention time.Duration
 	// ArchiveDir, when set, receives a gzipped copy of each segment before
-	// compaction deletes it, recorded in archive.jsonl (see archive.go).
+	// compaction deletes it, recorded in an index entry of its own (see
+	// archive.go).
 	ArchiveDir string
 	// DedupeWindow bounds how long ingested event IDs are remembered.
 	DedupeWindow time.Duration
@@ -149,6 +150,12 @@ type Spool struct {
 	// with sequence numbers even if the wall clock steps back.
 	lastAt  time.Time
 	floorAt time.Time
+
+	// cursorGen counts the explicit positionings of each cursor (see AckAt);
+	// dests holds each destination's start, pause and detach marks
+	// (destinations.go). Both are guarded by mu.
+	cursorGen map[string]uint64
+	dests     map[string]*DestinationState
 }
 
 // Open opens or creates a spool in dir and recovers its state.
@@ -157,11 +164,17 @@ func Open(dir string, opts Options) (*Spool, error) {
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return nil, fmt.Errorf("create spool dir: %w", err)
 	}
+	// A ledger restored halfway from its mirror is never opened (mirror_restore.go).
+	if err := restoreInProgress(dir); err != nil {
+		return nil, err
+	}
 	s := &Spool{
 		dir:        dir,
 		opts:       opts,
 		watermarks: map[string]time.Time{},
 		cursors:    map[string]uint64{},
+		cursorGen:  map[string]uint64{},
+		dests:      map[string]*DestinationState{},
 		recentIDs:  map[[16]byte]int64{},
 		changed:    make(chan struct{}),
 	}
@@ -169,6 +182,9 @@ func Open(dir string, opts Options) (*Spool, error) {
 		return nil, err
 	}
 	if err := s.loadCursors(); err != nil {
+		return nil, err
+	}
+	if err := s.loadDestinations(); err != nil {
 		return nil, err
 	}
 	if err := s.loadDedupe(); err != nil {
@@ -881,22 +897,46 @@ func (s *Spool) Scan(from, to time.Time, fn func(*usage.Event) error) error {
 	return nil
 }
 
-// Cursor returns a destination's last acknowledged sequence number. A
-// destination seen for the first time starts at the current head, so adding
-// a backend never replays history into it unless asked (see SetCursor).
+// Cursor returns a destination's last acknowledged sequence number.
+//
+// A destination never seen before starts at the current head, and where it
+// started is recorded (DestinationState.Start), so a backend that is new to
+// this ledger receives no history unless asked (see SetCursor).
+//
+// A destination seen before keeps its cursor for as long as the ledger
+// exists, also while it is not configured: the ledger alone cannot tell a
+// backend that was removed from one that is down. One that is removed and
+// configured again would therefore resume at its old cursor and receive
+// everything recorded meanwhile. The dispatcher fences that: it marks the
+// cursors of destinations that are not configured as detached, and a
+// detached destination that comes back with a backlog delivers nothing until
+// an operator decides where it starts (pipeline.Dispatcher.Start).
 func (s *Spool) Cursor(dest string) uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.cursorLocked(dest)
+}
+
+// cursorLocked returns dest's cursor, creating it at the head (and recording
+// that as where dest starts) for a destination never seen before.
+func (s *Spool) cursorLocked(dest string) uint64 {
 	c, ok := s.cursors[dest]
 	if !ok {
 		c = s.committed
+		// The start first: a crash between the two writes leaves a start
+		// without a cursor, which the next call replaces with the head of
+		// that moment, never a cursor whose start is unknown.
+		_ = s.setStartLocked(dest, c, StartCreated)
 		s.cursors[dest] = c
 		_ = s.writeCursorsLocked()
 	}
 	return c
 }
 
-// SetCursor moves a destination's cursor, e.g. to replay from the start.
+// SetCursor positions a destination's cursor explicitly (an operator's
+// rewind, replay or skip) and records that position as where the destination
+// starts. A delivery that read the cursor before the move can no longer
+// acknowledge past it (see AckAt), so it never undoes the move.
 func (s *Spool) SetCursor(dest string, seq uint64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -904,7 +944,11 @@ func (s *Spool) SetCursor(dest string, seq uint64) error {
 		seq = s.committed
 	}
 	s.cursors[dest] = seq
-	return s.writeCursorsLocked()
+	s.cursorGen[dest]++
+	if err := s.writeCursorsLocked(); err != nil {
+		return err
+	}
+	return s.setStartLocked(dest, seq, StartPositioned)
 }
 
 // Ack records that a destination has durably received everything <= seq.
@@ -916,6 +960,24 @@ func (s *Spool) Ack(dest string, seq uint64) error {
 	}
 	s.cursors[dest] = seq
 	return s.writeCursorsLocked()
+}
+
+// AckAt is Ack for a delivery that read the cursor with Delivery: gen is the
+// generation Delivery returned. If the cursor was positioned explicitly
+// since (SetCursor), the acknowledgement is dropped and AckAt reports false:
+// the delivery read from a position the operator has moved away from, and
+// acknowledging it would move the cursor back to where that delivery ended.
+func (s *Spool) AckAt(dest string, seq, gen uint64) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cursorGen[dest] != gen {
+		return false, nil
+	}
+	if seq <= s.cursors[dest] {
+		return true, nil
+	}
+	s.cursors[dest] = seq
+	return true, s.writeCursorsLocked()
 }
 
 // FirstSeq returns the oldest retained sequence number (0 if empty).

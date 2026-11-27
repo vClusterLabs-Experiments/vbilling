@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/vclusterlabs-experiments/vbilling/internal/destinations"
+	"github.com/vclusterlabs-experiments/vbilling/internal/version"
 )
 
 // Client is a minimal Stripe REST client (form-encoded v1 API).
@@ -100,7 +101,7 @@ func (c *Client) do(ctx context.Context, method, path string, form url.Values, i
 	}
 	req.Header.Set("Authorization", "Bearer "+c.key)
 	req.Header.Set("Stripe-Version", c.version)
-	req.Header.Set("User-Agent", "vbilling/0.3.1")
+	req.Header.Set("User-Agent", version.UserAgent())
 	if method != http.MethodGet {
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	}

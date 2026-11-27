@@ -19,7 +19,9 @@
 // subscription never lowers it by itself: it makes vBilling read the billing
 // platforms again, and the hold clears only when they show nothing owed.
 // Webhooks apply in the order the billing platform says they happened, and
-// each once.
+// each once. Escalation rules (ENFORCEMENT_ESCALATIONS, escalate.go) raise a
+// billing hold that stayed at one state for a set time, such as delinquent
+// to suspended after 72 hours: a grace period.
 //
 // Suspension stops growth, not service: running workloads keep running.
 // Pausing (state "paused", enforce mode) stops service: each of the tenant's
@@ -27,7 +29,10 @@
 // are drained, and billing for capacity stops once vBilling verified its
 // workloads are gone (see pauseCluster and package pause). The tenant
 // cannot restart it: its control plane is stopped, and vBilling pauses it
-// again if anything else resumes it. Clearing the hold resumes it.
+// again if anything else resumes it. Clearing the hold resumes it. A hold
+// lifted while a pause is still under way ends that pause where it is, and a
+// pause lowered to a suspension restores the cluster before the suspension
+// applies (restore.go).
 package enforcement
 
 import (
@@ -55,6 +60,7 @@ import (
 	"github.com/vclusterlabs-experiments/vbilling/internal/destinations/metronome"
 	"github.com/vclusterlabs-experiments/vbilling/internal/destinations/stripe"
 	"github.com/vclusterlabs-experiments/vbilling/internal/discovery"
+	"github.com/vclusterlabs-experiments/vbilling/internal/health"
 	"github.com/vclusterlabs-experiments/vbilling/internal/kv"
 	"github.com/vclusterlabs-experiments/vbilling/internal/pause"
 	"github.com/vclusterlabs-experiments/vbilling/internal/telemetry"
@@ -120,6 +126,10 @@ type Signal struct {
 	// are both alerts.low_remaining_commit_balance_reached.
 	NotificationID   string `json:"notification_id,omitempty"`
 	NotificationName string `json:"notification_name,omitempty"`
+
+	// refused: a payment that was applied and lifted nothing for at least
+	// one of its tenants, because something is still owed (WebhookRefused).
+	refused bool
 }
 
 // ruleKeys lists the keys ENFORCEMENT_RULES can match a signal by, most
@@ -168,6 +178,12 @@ type TenantState struct {
 	// operator. It outlives the hold, so a webhook about something older,
 	// delivered late or retried, never sets the hold again.
 	EventTimes map[string]time.Time `json:"event_times,omitempty"`
+	// EscalatedBy is the escalation rule that raised the hold the state
+	// comes from (escalate.go).
+	EscalatedBy string `json:"escalated_by,omitempty"`
+	// Escalation is when the billing hold raises the tenant's state next,
+	// and to what. It is computed when the state is read, never stored.
+	Escalation *NextEscalation `json:"escalation,omitempty"`
 }
 
 // Hold is one reason for a tenant's state. A billing hold records no more
@@ -180,6 +196,12 @@ type Hold struct {
 	Source    string    `json:"source"`
 	EventType string    `json:"event_type"`
 	Since     time.Time `json:"since"`
+	// EscalatedBy is the escalation rule that raised the hold to its state
+	// (from:after:to); empty when a signal or an operator set it.
+	EscalatedBy string `json:"escalated_by,omitempty"`
+	// Escalation is when the hold escalates next: computed when the state
+	// is read, never stored.
+	Escalation *NextEscalation `json:"escalation,omitempty"`
 }
 
 // HoldBilling is the hold billing webhooks raise, and clear once the billing
@@ -204,6 +226,7 @@ func effective(tenant string, holds map[string]Hold) TenantState {
 		h := holds[n]
 		if severity[h.State] > severity[ts.State] || (ts.Since.IsZero() && h.State == ts.State) {
 			ts.State, ts.Reason, ts.Source, ts.EventType, ts.Since, ts.Hold = h.State, h.Reason, h.Source, h.EventType, h.Since, n
+			ts.EscalatedBy = h.EscalatedBy
 			if n != HoldBilling {
 				ts.Reason = n + ": " + h.Reason
 			}
@@ -220,6 +243,9 @@ type Options struct {
 	Rules                  map[string]State // event type -> state overrides
 	Clusters               func(tenant string) []discovery.TenantCluster
 	Resolvers              map[string]destinations.CustomerResolver // "stripe", "metronome"
+	// Escalations raise a billing hold that stayed at a state for a set
+	// time (ENFORCEMENT_ESCALATIONS, see ParseEscalations and Escalate).
+	Escalations []Escalation
 	// State keeps billing states and the IDs of applied webhook events
 	// (DATA_DIR/billing-state.json).
 	State     *kv.Store
@@ -268,6 +294,15 @@ type Options struct {
 	// Gateway, in enforce mode, blocks a suspended or paused tenant's
 	// requests at its AI gateway and unblocks them when it is active again.
 	Gateway Gateway
+
+	// Health, Tenants and AllClusters are optional (see UseHealth,
+	// UseTenants and UseClusters): where a payment that did not lift a hold
+	// and a cluster whose API refuses vBilling are reported; the tenants
+	// discovery knows; and every cluster metering has, with false until the
+	// first discovery succeeded.
+	Health      *health.Registry
+	Tenants     func() []string
+	AllClusters func() (clusters []discovery.TenantCluster, ok bool)
 }
 
 // Gateway stops and restarts a tenant's requests at its AI gateway.
@@ -343,6 +378,10 @@ type Enforcer struct {
 	mu     sync.Mutex
 	states map[string]TenantState
 
+	// The escalation rules as configured, and by the state they start at.
+	rules       []Escalation
+	escalations map[State]Escalation
+
 	// applied are the webhook events already applied (ID -> when), kept
 	// for appliedKeep and at most appliedMax of them, in State.
 	evMu    sync.Mutex
@@ -350,15 +389,38 @@ type Enforcer struct {
 
 	bg                         sync.WaitGroup // background pauses and resumes
 	resumeTimeout, resumeEvery time.Duration
-	wmu                        sync.Mutex
-	workers                    map[string]*worker
-	status                     map[string]PauseStatus
+	// restoreTimeout bounds how long a suspension is held back while a
+	// cluster is restored after its pause; restoreEvery is how often the
+	// restore looks whether the workloads are back (restore.go).
+	restoreTimeout, restoreEvery time.Duration
+	wmu                          sync.Mutex
+	workers                      map[string]*worker
+	status                       map[string]PauseStatus
 	// Pause bookkeeping per cluster (see pause.go), under wmu.
 	failing    map[string]time.Time // first failed drain of a streak
 	checked    map[string]ownCheck  // what the last pause pass found on its own nodes
 	stopped    map[string]time.Time // last time its control plane was seen stopped
 	verifiedAt map[string]time.Time // external clusters: last pass that found nothing running
 	older      map[string]bool      // pauses an older version opened, without verifying them
+
+	// rmu guards records: what vBilling remembers across restarts about the
+	// clusters it paused (restore.go).
+	rmu     sync.Mutex
+	records map[string]pauseRecord
+
+	// gmu guards exported: the tenants vbilling_tenant_billing_state has
+	// series for, with the state it shows (observe.go).
+	gmu      sync.Mutex
+	exported map[string]State
+
+	// omu guards what is reported to an operator (observe.go).
+	omu         sync.Mutex
+	unlocks     map[string]unlockNote // tenant: a payment that did not lift its billing hold
+	refused     map[string]string     // cluster: how its API refused vBilling
+	installed   map[string]bool       // the in-cluster policies and bindings this process installed
+	nudgeWarned map[string]bool       // clusters whose workload controllers could not be nudged
+	unverified  map[string]bool       // paused clusters reported as not verified
+	goneWarned  bool                  // deleted clusters could not be told from the rest
 }
 
 // Applied webhook event IDs are kept this long, and at most appliedMax of
@@ -382,9 +444,16 @@ func New(kube kubernetes.Interface, opts Options) *Enforcer {
 	}
 	e := &Enforcer{kube: kube, opts: opts, states: map[string]TenantState{}, applied: map[string]time.Time{},
 		resumeTimeout: 10 * time.Minute, resumeEvery: 5 * time.Second,
+		restoreTimeout: defaultRestoreTimeout, restoreEvery: 2 * time.Second,
 		workers: map[string]*worker{}, status: map[string]PauseStatus{},
 		failing: map[string]time.Time{}, checked: map[string]ownCheck{}, stopped: map[string]time.Time{}, verifiedAt: map[string]time.Time{},
-		older: map[string]bool{}}
+		older: map[string]bool{}, records: map[string]pauseRecord{}, exported: map[string]State{},
+		unlocks: map[string]unlockNote{}, refused: map[string]string{}, installed: map[string]bool{}, nudgeWarned: map[string]bool{}, unverified: map[string]bool{},
+		rules: append([]Escalation(nil), opts.Escalations...), escalations: map[State]Escalation{}}
+	for _, r := range e.rules {
+		e.escalations[r.From] = r
+		opts.Telemetry.Add(escalationsMetric, escalationsHelp, map[string]string{"from": string(r.From), "to": string(r.To)}, 0)
+	}
 	for tenant, raw := range opts.State.WithPrefix("state/") {
 		var ts TenantState
 		if json.Unmarshal([]byte(raw), &ts) == nil {
@@ -400,6 +469,26 @@ func New(kube kubernetes.Interface, opts Options) *Enforcer {
 			log.Printf("[enforcement] applied webhook events unreadable, starting over: %v", err)
 			e.applied = map[string]time.Time{}
 		}
+	}
+	e.loadRecords()
+	e.loadUnlocks()
+	// Every metric is there from the start, at zero: a rate over it never
+	// begins with a gap, and a missing series never reads as "no tenant".
+	for tenant, ts := range e.states {
+		if len(ts.Holds) > 0 {
+			e.exportState(tenant, ts.State)
+		}
+	}
+	for source, secret := range map[string]string{"stripe": opts.StripeWebhookSecret, "metronome": opts.MetronomeWebhookSecret} {
+		if secret == "" {
+			continue
+		}
+		for _, result := range webhookResults {
+			opts.Telemetry.Add(webhooksMetric, webhooksHelp, map[string]string{"source": source, "result": result}, 0)
+		}
+	}
+	for _, kind := range []string{RepairPolicyDeleted, RepairPolicyChanged, RepairBindingDeleted, RepairBindingChanged} {
+		opts.Telemetry.Add(repairsMetric, repairsHelp, map[string]string{"kind": kind}, 0)
 	}
 	return e
 }
@@ -452,8 +541,15 @@ var (
 )
 
 // HandleStripe verifies and applies a Stripe webhook. Events are ordered by
-// their created time.
+// their created time. What became of it is counted in
+// vbilling_webhooks_total (WebhookResult).
 func (e *Enforcer) HandleStripe(ctx context.Context, body []byte, sigHeader string) (Signal, error) {
+	sig, err := e.handleStripe(ctx, body, sigHeader)
+	e.countWebhook("stripe", sig, err)
+	return sig, err
+}
+
+func (e *Enforcer) handleStripe(ctx context.Context, body []byte, sigHeader string) (Signal, error) {
 	if err := stripe.VerifySignature(body, sigHeader, e.opts.StripeWebhookSecret, stripe.DefaultTolerance, e.opts.Now()); err != nil {
 		return Signal{}, fmt.Errorf("%w: %v", ErrSignature, err)
 	}
@@ -466,7 +562,7 @@ func (e *Enforcer) HandleStripe(ctx context.Context, body []byte, sigHeader stri
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(body, &ev); err != nil {
-		return Signal{}, fmt.Errorf("decode: %w", err)
+		return Signal{}, malformed{err}
 	}
 	var obj struct {
 		Customer     string `json:"customer"`
@@ -475,7 +571,7 @@ func (e *Enforcer) HandleStripe(ctx context.Context, body []byte, sigHeader stri
 	}
 	if len(ev.Data.Object) > 0 {
 		if err := json.Unmarshal(ev.Data.Object, &obj); err != nil {
-			return Signal{}, fmt.Errorf("decode: %w", err)
+			return Signal{}, malformed{err}
 		}
 	}
 	now := e.opts.Now().UTC()
@@ -511,8 +607,15 @@ func (e *Enforcer) HandleStripe(ctx context.Context, body []byte, sigHeader stri
 // ordered by the notification's own timestamp (top level, or under
 // properties for alerts and payment gate notifications); a notification
 // without one is ordered by its signed X-Metronome-Date header, which is
-// when it was sent.
+// when it was sent. What became of it is counted in vbilling_webhooks_total
+// (WebhookResult).
 func (e *Enforcer) HandleMetronome(ctx context.Context, body []byte, date, signature string) (Signal, error) {
+	sig, err := e.handleMetronome(ctx, body, date, signature)
+	e.countWebhook("metronome", sig, err)
+	return sig, err
+}
+
+func (e *Enforcer) handleMetronome(ctx context.Context, body []byte, date, signature string) (Signal, error) {
 	if err := metronome.VerifySignature(body, date, signature, e.opts.MetronomeWebhookSecret, metronome.DefaultTolerance, e.opts.Now()); err != nil {
 		return Signal{}, fmt.Errorf("%w: %v", ErrSignature, err)
 	}
@@ -524,7 +627,7 @@ func (e *Enforcer) HandleMetronome(ctx context.Context, body []byte, date, signa
 		Properties map[string]any `json:"properties"`
 	}
 	if err := json.Unmarshal(body, &ev); err != nil {
-		return Signal{}, fmt.Errorf("decode: %w", err)
+		return Signal{}, malformed{err}
 	}
 	cus := ev.CustomerID
 	if v, ok := ev.Properties["customer_id"].(string); ok && v != "" {
@@ -575,6 +678,11 @@ func firstTime(values ...string) (time.Time, bool) {
 func (e *Enforcer) apply(ctx context.Context, sig *Signal) error {
 	if override, ok := e.ruleFor(sig.ruleKeys()); ok {
 		sig.State = override
+		if sig.Reason == "" {
+			// An event type vBilling gives no reason of its own (any type a
+			// rule names): the reason names the event.
+			sig.Reason = sig.Type
+		}
 		sig.Reason += " (rule: " + string(override) + ")"
 	}
 	if sig.State == "" {
@@ -605,6 +713,12 @@ func (e *Enforcer) apply(ctx context.Context, sig *Signal) error {
 		reads := map[string]readResult{}
 		for _, tenant := range tenants {
 			owed, read, err := e.stillOwed(ctx, tenant, sig, reads)
+			if errors.Is(err, ErrNotSettled) {
+				// The payment is answered with an error and delivered again:
+				// until the hold lifts, it shows as a payment that did not
+				// unlock its tenant.
+				e.noteUnlock(tenant, sig, WebhookUnsettled, trimSettle(err))
+			}
 			if err != nil {
 				return err
 			}
@@ -629,6 +743,11 @@ func (e *Enforcer) apply(ctx context.Context, sig *Signal) error {
 		case outKept:
 			// Applied: under the hold rules it changes nothing.
 			log.Printf("[enforcement] tenant %s: %s %s leaves the billing hold as it is: %s", tenant, sig.Source, sig.Type, res.why)
+			if sig.Positive {
+				// A payment that lifted nothing: something is still owed.
+				sig.refused = true
+				e.noteUnlock(tenant, sig, WebhookRefused, res.why)
+			}
 			continue
 		case outUnread:
 			unread = append(unread, tenant)
@@ -648,7 +767,7 @@ func (e *Enforcer) apply(ctx context.Context, sig *Signal) error {
 	}
 	var errs []error
 	for _, c := range changed {
-		errs = append(errs, e.reflectState(ctx, c.prev, c.ts, sig.Source, sig.Type))
+		errs = append(errs, e.reflectState(ctx, c.prev, c.ts, HoldBilling, sig.Source, sig.Type))
 	}
 	if len(unread) > 0 {
 		errs = append(errs, fmt.Errorf("the billing hold of tenant(s) %s was raised while %s %s was being applied: retried, to read the billing platforms again",
@@ -847,7 +966,10 @@ func (e *Enforcer) SetHold(ctx context.Context, tenant, hold string, state State
 	if err != nil {
 		return err
 	}
-	return e.reflectState(ctx, prev, ts, source, eventType)
+	if hold == "" {
+		hold = HoldBilling
+	}
+	return e.reflectState(ctx, prev, ts, hold, source, eventType)
 }
 
 // update is one change to a hold.
@@ -863,6 +985,10 @@ type update struct {
 	// were read again for it (read, see stillOwed) and showed nothing owed.
 	read bool
 	owed []string
+	// escalate raises the hold by an escalation rule (Escalate), only while
+	// it is still at the rule's state with the since it was read with.
+	escalate *Escalation
+	since    time.Time
 }
 
 // storeResult says what store did with an update.
@@ -898,7 +1024,15 @@ func (e *Enforcer) store(tenant string, u update) (ts, prev TenantState, res sto
 	}
 	kept := ""      // why the update leaves the hold as it is
 	advance := true // whether the hold's newest event time moves to this one
-	if u.webhook {
+	if u.escalate != nil {
+		cur, held := holds[u.hold]
+		if !held || cur.State != u.escalate.From || !cur.Since.Equal(u.since) {
+			return prev, prev, storeResult{outStale, "the hold changed since it was read"}, nil
+		}
+		// An escalation is no billing event: a payment made before it and
+		// delivered after it still applies.
+		advance = false
+	} else if u.webhook {
 		if !u.at.IsZero() {
 			at = u.at.UTC()
 		}
@@ -934,13 +1068,23 @@ func (e *Enforcer) store(tenant string, u update) (ts, prev TenantState, res sto
 		}
 	}
 	if kept == "" {
-		if u.state == Active {
+		switch {
+		case u.escalate != nil:
+			// The hold keeps what raised it (its source and event type, which
+			// decide what lifts it) and reaches the rule's state now: the next
+			// rule's clock starts here.
+			h := holds[u.hold]
+			h.State, h.Reason, h.EscalatedBy, h.Since = u.escalate.To, u.reason, u.escalate.String(), now
+			holds[u.hold] = h
+		case u.state == Active:
 			delete(holds, u.hold)
-		} else {
+		default:
 			// An operator's change replaces the hold.
 			h := Hold{State: u.state, Reason: u.reason, Source: u.source, EventType: u.eventType, Since: now}
 			if old, ok := holds[u.hold]; ok && old.State == u.state {
-				h.Since = old.Since
+				// The same state: its clock, and the escalation that raised
+				// it, carry on.
+				h.Since, h.EscalatedBy = old.Since, old.EscalatedBy
 			}
 			holds[u.hold] = h
 		}
@@ -979,18 +1123,32 @@ func (e *Enforcer) store(tenant string, u update) (ts, prev TenantState, res sto
 }
 
 // reflectState reports a stored state and reflects it on the tenant's
-// gateway identities and clusters.
-func (e *Enforcer) reflectState(ctx context.Context, prev, ts TenantState, source, eventType string) error {
+// gateway identities and clusters. hold is the hold the change was made to,
+// by source and eventType.
+func (e *Enforcer) reflectState(ctx context.Context, prev, ts TenantState, hold, source, eventType string) error {
 	tenant, state := ts.Tenant, ts.State
 	if prev.State != state {
-		log.Printf("[enforcement] tenant %s: %s -> %s (%s via %s %s, mode=%s)", tenant, orActive(prev.State), state, ts.Reason, source, eventType, e.opts.Mode)
-	}
-	for _, s := range []State{Active, Warning, Delinquent, Suspended, Paused} {
-		v := 0.0
-		if s == state {
-			v = 1
+		if ts.Hold == "" || ts.Hold == hold {
+			log.Printf("[enforcement] tenant %s: %s -> %s (%s via %s %s, mode=%s)", tenant, orActive(prev.State), state, ts.Reason, source, eventType, e.opts.Mode)
+		} else {
+			// The change lowered or lifted one hold, and the state now comes
+			// from another one, set earlier by someone else: the line names
+			// both, each with its own source.
+			change := "lifted"
+			if _, still := ts.Holds[hold]; still {
+				change = "lowered"
+			}
+			log.Printf("[enforcement] tenant %s: %s -> %s (the %s hold remains: %s, set via %s %s; the %s hold was %s via %s %s, mode=%s)", tenant, orActive(prev.State), state,
+				ts.Hold, ts.Holds[ts.Hold].Reason, ts.Source, ts.EventType, hold, change, source, eventType, e.opts.Mode)
 		}
-		e.opts.Telemetry.Set("vbilling_tenant_billing_state", "1 for the tenant's current billing state.", map[string]string{"tenant": tenant, "state": string(s)}, v)
+	}
+	if len(ts.Holds) > 0 || e.knownTenant(tenant) {
+		e.exportState(tenant, state)
+	} else {
+		e.syncStateMetric() // a tenant discovery does not know has no state to show once its last hold is lifted
+	}
+	if _, held := ts.Holds[HoldBilling]; !held {
+		e.clearUnlock(tenant) // the hold a payment did not lift is lifted
 	}
 	var errs []error
 	if e.opts.Mode == "enforce" && e.opts.Gateway != nil {
@@ -1050,7 +1208,8 @@ func suspendedMessage(ts TenantState) string {
 
 // reflectInside installs or removes the in-cluster admission policy, and
 // lifts the pause admission policy and the pause taint from the cluster
-// when it is not paused.
+// when it is not paused. A cluster whose API refuses vBilling is reported
+// (noteAccess).
 func (e *Enforcer) reflectInside(ctx context.Context, cl discovery.TenantCluster, ts TenantState) error {
 	kube, err := e.opts.TenantClient(ctx, cl)
 	if err != nil {
@@ -1059,35 +1218,62 @@ func (e *Enforcer) reflectInside(ctx context.Context, cl discovery.TenantCluster
 	if kube == nil {
 		return nil
 	}
-	if err := e.policyInside(ctx, kube, ts); err != nil {
+	err = e.reflectWith(ctx, kube, cl, ts)
+	e.noteAccess(cl, err)
+	return err
+}
+
+// reflectWith is reflectInside through a connection to the cluster's API.
+func (e *Enforcer) reflectWith(ctx context.Context, kube kubernetes.Interface, cl discovery.TenantCluster, ts TenantState) error {
+	lifted, err := e.policyInside(ctx, kube, cl, ts)
+	if ts.State != Paused && (err == nil || refusedAccess(err)) {
+		// The cluster's API answers, so the cluster can start pods again
+		// (and a tenant who took vBilling's access away can let it): the
+		// time of a restore runs from here, whether or not the rest of
+		// this pass succeeds. Nothing that fails later holds a suspension
+		// back any longer.
+		e.restoreLifted(cl.ExternalID())
+	}
+	if err != nil {
 		return err
 	}
-	if ts.State != Paused {
-		if err := removePolicy(ctx, kube, PausedPolicyName); apierrors.IsForbidden(err) {
-			// Credentials that may not read or delete vbilling-paused never
-			// let a pause install it (it reads the policy first), so there
-			// is nothing to remove: lift the taint all the same.
-			log.Printf("[enforcement] %s: %v (grant get, update and delete on %s to vbilling-enforcer inside the cluster)", cl.ExternalID(), err, PausedPolicyName)
-		} else if err != nil {
-			return err
-		}
-		return e.untaint(ctx, kube)
+	if ts.State == Paused {
+		return nil
+	}
+	removed, err := e.removePolicy(ctx, kube, cl, PausedPolicyName)
+	if apierrors.IsForbidden(err) {
+		// Credentials that may not read or delete vbilling-paused never
+		// let a pause install it (it reads the policy first), so there
+		// is nothing to remove: lift the taint all the same.
+		log.Printf("[enforcement] %s: %v (grant get, update and delete on %s to vbilling-enforcer inside the cluster)", cl.ExternalID(), err, PausedPolicyName)
+	} else if err != nil {
+		return err
+	}
+	if err := e.untaint(ctx, kube); err != nil {
+		return err
+	}
+	if lifted || removed {
+		// A policy that refused new pods is gone: the workload controllers
+		// that failed against it try again now, not when their waits end.
+		e.nudge(ctx, kube, cl)
 	}
 	return nil
 }
 
 // policyInside installs the admission policy inside a cluster while its
-// tenant's state blocks new workloads, and removes it otherwise. The
-// policy and its binding are set to vBilling's spec at every pass, whoever
-// created or changed them; only kube-system is exempt. The tenant is
-// cluster admin inside its cluster and can still delete them between two
-// passes or run pods in kube-system, so suspension inside a tenant's
-// cluster is best effort: a pause is the hard stop.
-func (e *Enforcer) policyInside(ctx context.Context, kube kubernetes.Interface, ts TenantState) error {
-	if !ts.State.blocks() {
-		return removePolicy(ctx, kube, PolicyName)
+// tenant's state blocks new workloads, and removes it otherwise, or while
+// the cluster is restored after a pause (restore.go); lifted reports
+// whether it removed one. The policy and its binding are set to vBilling's
+// spec at every pass, whoever created or changed them (a deleted or
+// weakened one is logged and counted, see repaired); only kube-system is
+// exempt. The tenant is cluster admin inside its cluster and can still
+// delete them between two passes or run pods in kube-system, so suspension
+// inside a tenant's cluster is best effort: a pause is the hard stop.
+func (e *Enforcer) policyInside(ctx context.Context, kube kubernetes.Interface, cl discovery.TenantCluster, ts TenantState) (lifted bool, err error) {
+	if !ts.State.blocks() || ts.State != Paused && e.restoring(cl.ExternalID()) {
+		return e.removePolicy(ctx, kube, cl, PolicyName)
 	}
-	return applyPolicy(ctx, kube, PolicyName, podPolicy(&metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{
+	return false, e.applyPolicy(ctx, kube, cl, ts.Tenant, PolicyName, podPolicy(&metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{
 		{Key: "kubernetes.io/metadata.name", Operator: metav1.LabelSelectorOpNotIn, Values: []string{"kube-system"}},
 	}}, []admissionv1.OperationType{admissionv1.Create}, admissionv1.Validation{Expression: mirrorPod, Message: suspendedMessage(ts)}))
 }
@@ -1130,8 +1316,8 @@ func pausedPolicy() admissionv1.ValidatingAdmissionPolicySpec {
 
 // pausePolicy installs the pause admission policy and binding inside a
 // cluster, with vBilling's spec whoever created or changed them.
-func (e *Enforcer) pausePolicy(ctx context.Context, kube kubernetes.Interface) error {
-	return applyPolicy(ctx, kube, PausedPolicyName, pausedPolicy())
+func (e *Enforcer) pausePolicy(ctx context.Context, kube kubernetes.Interface, cl discovery.TenantCluster, tenant string) error {
+	return e.applyPolicy(ctx, kube, cl, tenant, PausedPolicyName, pausedPolicy())
 }
 
 // podPolicy is the spec of a policy that judges the given operations on
@@ -1157,9 +1343,12 @@ func podPolicy(sel *metav1.LabelSelector, ops []admissionv1.OperationType, valid
 }
 
 // applyPolicy creates or updates a policy with vBilling's spec, and its
-// binding.
-func applyPolicy(ctx context.Context, kube kubernetes.Interface, name string, spec admissionv1.ValidatingAdmissionPolicySpec) error {
+// binding. One of them that this process installed and finds deleted, or
+// that it finds no longer denying what vBilling's does, was taken apart
+// inside the cluster: putting it back is logged and counted (repaired).
+func (e *Enforcer) applyPolicy(ctx context.Context, kube kubernetes.Interface, cl discovery.TenantCluster, tenant, name string, spec admissionv1.ValidatingAdmissionPolicySpec) error {
 	api := kube.AdmissionregistrationV1()
+	id := cl.ExternalID()
 	labels := map[string]string{"app.kubernetes.io/managed-by": "vbilling"}
 	policy := &admissionv1.ValidatingAdmissionPolicy{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: labels}, Spec: spec}
 	binding := &admissionv1.ValidatingAdmissionPolicyBinding{
@@ -1174,9 +1363,15 @@ func applyPolicy(ctx context.Context, kube kubernetes.Interface, name string, sp
 		if _, err := api.ValidatingAdmissionPolicies().Update(ctx, policy, metav1.UpdateOptions{}); err != nil {
 			return fmt.Errorf("update admission policy: %w", err)
 		}
+		if why := policyWeakened(spec, cur.Spec); why != "" {
+			e.repaired(cl, tenant, RepairPolicyChanged, "the admission policy "+name+" was changed ("+why+")")
+		}
 	} else if apierrors.IsNotFound(err) {
 		if _, err := api.ValidatingAdmissionPolicies().Create(ctx, policy, metav1.CreateOptions{}); err != nil {
 			return fmt.Errorf("create admission policy: %w", err)
+		}
+		if e.wasInstalled(id, name, "policy") {
+			e.repaired(cl, tenant, RepairPolicyDeleted, "the admission policy "+name+" was deleted")
 		}
 	} else {
 		return fmt.Errorf("read admission policy: %w", err)
@@ -1188,28 +1383,40 @@ func applyPolicy(ctx context.Context, kube kubernetes.Interface, name string, sp
 		if _, err := api.ValidatingAdmissionPolicyBindings().Update(ctx, binding, metav1.UpdateOptions{}); err != nil {
 			return fmt.Errorf("update admission policy binding: %w", err)
 		}
+		if why := bindingWeakened(name, cur.Spec); why != "" {
+			e.repaired(cl, tenant, RepairBindingChanged, "the binding of the admission policy "+name+" was changed ("+why+")")
+		}
 	} else if apierrors.IsNotFound(err) {
 		if _, err := api.ValidatingAdmissionPolicyBindings().Create(ctx, binding, metav1.CreateOptions{}); err != nil {
 			return fmt.Errorf("create admission policy binding: %w", err)
 		}
+		if e.wasInstalled(id, name, "binding") {
+			e.repaired(cl, tenant, RepairBindingDeleted, "the binding of the admission policy "+name+" was deleted")
+		}
 	} else {
 		return fmt.Errorf("read admission policy binding: %w", err)
 	}
+	e.setInstalled(id, name, true)
 	return nil
 }
 
-// removePolicy deletes an in-cluster policy and its binding.
-func removePolicy(ctx context.Context, kube kubernetes.Interface, name string) error {
+// removePolicy deletes an in-cluster policy and its binding; removed
+// reports whether one of them was there.
+func (e *Enforcer) removePolicy(ctx context.Context, kube kubernetes.Interface, cl discovery.TenantCluster, name string) (removed bool, err error) {
 	api := kube.AdmissionregistrationV1()
 	for _, del := range []func() error{
 		func() error { return api.ValidatingAdmissionPolicyBindings().Delete(ctx, name, metav1.DeleteOptions{}) },
 		func() error { return api.ValidatingAdmissionPolicies().Delete(ctx, name, metav1.DeleteOptions{}) },
 	} {
-		if err := del(); err != nil && !apierrors.IsNotFound(err) {
-			return fmt.Errorf("remove admission policy %s: %w", name, err)
+		switch err := del(); {
+		case err == nil:
+			removed = true
+		case !apierrors.IsNotFound(err):
+			return removed, fmt.Errorf("remove admission policy %s: %w", name, err)
 		}
 	}
-	return nil
+	e.setInstalled(cl.ExternalID(), name, false)
+	return removed, nil
 }
 
 // pausePolicyChanged reads the pause admission policy and binding inside a
@@ -1345,7 +1552,7 @@ func (e *Enforcer) RecheckHolds(ctx context.Context) {
 		if res.kind != outChanged {
 			continue
 		}
-		if err := e.reflectState(ctx, prev, next, sig.Source, sig.Type); err != nil {
+		if err := e.reflectState(ctx, prev, next, HoldBilling, sig.Source, sig.Type); err != nil {
 			log.Printf("[enforcement] recheck tenant %s: %v", ts.Tenant, err)
 		}
 	}
@@ -1360,6 +1567,7 @@ const RecheckEventType = "threshold_notifications_clear"
 // that was unreachable when the state changed (so a paying tenant could stay
 // blocked), converges within one resync.
 func (e *Enforcer) Resync(ctx context.Context) {
+	e.reportNotes()
 	if e.opts.Mode == "enforce" && e.opts.Gateway != nil {
 		// Tenants that only buy tokens have no cluster: the gateway is
 		// all there is to converge.
@@ -1411,13 +1619,18 @@ func (e *Enforcer) reflect(ctx context.Context, cl discovery.TenantCluster, ts T
 			}
 		}
 	}
-	blocked := func(s State) bool { return e.opts.Mode == "enforce" && s.blocks() }
+	// A cluster that is restored after a pause is not blocked yet, whatever
+	// its tenant's state (restore.go).
+	blocked := func(name string, s State) bool {
+		other := discovery.TenantCluster{Name: name, Namespace: cl.Namespace}
+		return e.enforced(other.ExternalID(), s)
+	}
 	worst, anyBlocked := Active, false
-	for _, s := range states {
+	for name, s := range states {
 		if severity[s] > severity[worst] {
 			worst = s
 		}
-		anyBlocked = anyBlocked || blocked(s)
+		anyBlocked = anyBlocked || blocked(name, s)
 	}
 	labels := map[string]any{LabelState: string(worst), LabelSuspended: nil} // merge patch: nil removes
 	if anyBlocked {
@@ -1430,7 +1643,7 @@ func (e *Enforcer) reflect(ctx context.Context, cl discovery.TenantCluster, ts T
 			continue // a name too long to mark: its pods stay blocked with the namespace
 		}
 		nsAnn[key] = nil
-		if anyBlocked && !blocked(s) {
+		if anyBlocked && !blocked(name, s) {
 			nsAnn[key] = "true"
 		}
 	}
@@ -1463,7 +1676,9 @@ func (e *Enforcer) reflect(ctx context.Context, cl discovery.TenantCluster, ts T
 		Type:           evType, Source: corev1.EventSource{Component: "vbilling"},
 		FirstTimestamp: now, LastTimestamp: now, Count: 1,
 	}, metav1.CreateOptions{})
-	if err != nil {
+	// The name makes the event of one state change one object: finding it
+	// there (the state was reflected again, unchanged) is not an error.
+	if err != nil && !apierrors.IsAlreadyExists(err) {
 		log.Printf("[enforcement] event for %s: %v", cl.ExternalID(), err) // best effort
 	}
 	return nil
@@ -1477,24 +1692,30 @@ func (e *Enforcer) HasState(tenant string) bool {
 	return ok
 }
 
-// States returns all recorded tenant states.
+// States returns all recorded tenant states, each with its next
+// escalation.
 func (e *Enforcer) States() []TenantState {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	out := make([]TenantState, 0, len(e.states))
 	for _, s := range e.states {
 		out = append(out, s)
 	}
+	e.mu.Unlock()
 	sort.Slice(out, func(i, j int) bool { return out[i].Tenant < out[j].Tenant })
+	for i := range out {
+		out[i] = e.withEscalation(out[i])
+	}
 	return out
 }
 
-// StateOf returns a tenant's state (active when unknown).
+// StateOf returns a tenant's state (active when unknown), with its next
+// escalation.
 func (e *Enforcer) StateOf(tenant string) TenantState {
 	e.mu.Lock()
-	defer e.mu.Unlock()
-	if s, ok := e.states[tenant]; ok {
-		return s
+	s, ok := e.states[tenant]
+	e.mu.Unlock()
+	if !ok {
+		return TenantState{Tenant: tenant, State: Active}
 	}
-	return TenantState{Tenant: tenant, State: Active}
+	return e.withEscalation(s)
 }

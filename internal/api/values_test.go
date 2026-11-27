@@ -17,7 +17,7 @@ func TestIngestRefusesUnsafeValues(t *testing.T) {
 	e := setup(t)
 	ws, we := now.Add(-5*time.Minute).Format(time.RFC3339), now.Add(-4*time.Minute).Format(time.RFC3339)
 	event := func(id, sku string, dims map[string]string) map[string]any {
-		return map[string]any{"id": id, "tenant": "acme", "metric": usage.MetricGPUHours, "quantity": 1, "sku": sku,
+		return map[string]any{"id": id, "tenant": "acme", "metric": pushedMetric, "quantity": 1, "sku": sku,
 			"window_start": ws, "window_end": we, "dimensions": dims}
 	}
 	for name, ev := range map[string]map[string]any{

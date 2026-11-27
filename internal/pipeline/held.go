@@ -19,18 +19,27 @@ import (
 	"github.com/vclusterlabs-experiments/vbilling/internal/usage"
 )
 
-// HeldStore parks events a destination must not receive yet (the billing
-// platform would not count them yet, or with PRICE_CHECK=hold has no price
-// for their series), durably, until they are released. Each destination and
-// series has its own append-only file, in ledger order:
+// HeldStore parks events a destination must not receive yet, durably, until
+// they are released. Two kinds of events wait in it:
 //
-//	<dir>/<destination>/<sha256(series)[:16]>.jsonl
+//   - held events: the billing platform would not count them yet, or with
+//     PRICE_CHECK=hold has no price for their series. The pricing gate
+//     decides when they ship. Count, Series and Destinations report these.
+//   - parked events: their tenant is not set up at the destination
+//     (EnsureTenant fails). They ship once it is. ParkedCount and
+//     ParkedSeries report these.
 //
-// An event line is a HeldEntry; {"released_through": N} marks every entry up
-// to sequence N as delivered. A drained file is deleted. An event is written
-// here (and fsynced) before the destination's cursor moves past it, so a held
-// event is never lost; after a crash, at worst a released batch is sent
-// again, which destinations deduplicate on event IDs.
+// Each destination and key has its own append-only file, in ledger order:
+//
+//	<dir>/<destination>/<sha256(key)[:16]>.jsonl
+//
+// The key of held events is their pricing series; the key of parked events
+// is ParkKey(tenant, series). An event line is a HeldEntry;
+// {"released_through": N} marks every entry up to sequence N as delivered. A
+// drained file is deleted. An event is written here (and fsynced) before the
+// destination's cursor moves past it, so a waiting event is never lost;
+// after a crash, at worst a released batch is sent again, which destinations
+// deduplicate on event IDs.
 type HeldStore struct {
 	dir    string
 	noSync bool
@@ -51,9 +60,10 @@ type HeldEntry struct {
 	end int64 // file offset after this entry (set by Peek)
 }
 
-// HeldSummary describes the held events of one series.
+// HeldSummary describes the held events of one series, or the parked events
+// of one tenant and series.
 type HeldSummary struct {
-	Series   string      `json:"-"`
+	Series   string      `json:"-"` // the file's key: a pricing series, or a ParkKey
 	Sample   usage.Event `json:"-"` // the oldest held event
 	Count    int         `json:"held_events"`
 	FirstSeq uint64      `json:"first_seq"`
@@ -62,6 +72,21 @@ type HeldSummary struct {
 	Oldest   time.Time   `json:"oldest_window"` // window start of the oldest one
 	Reason   string      `json:"reason"`
 }
+
+// parkPrefix starts the key of parked events. No pricing series key starts
+// with it (a series key starts with the plan's name).
+const parkPrefix = "\x01park\x01"
+
+// ParkKey is the key under which the events of a tenant that is not set up
+// at a destination are parked: the tenant and the events' pricing series (""
+// for events no gate decides for). One file per tenant and series keeps each
+// file in ledger order whichever path parks into it: new ledger records, or
+// held events of the series that the pricing gate releases.
+func ParkKey(tenant, series string) string { return parkPrefix + tenant + "\x01" + series }
+
+// IsParkKey reports whether a key is a ParkKey: its file holds parked events
+// of one tenant (the Sample.Tenant of its summary), not a held pricing series.
+func IsParkKey(key string) bool { return strings.HasPrefix(key, parkPrefix) }
 
 type heldSeries struct {
 	HeldSummary
@@ -236,44 +261,76 @@ func seriesFile(series string) string {
 	return hex.EncodeToString(sum[:8]) + ".jsonl"
 }
 
-// Has reports whether a series has events held for dest.
+// Has reports whether a key (a pricing series or a ParkKey) has events
+// waiting for dest.
 func (h *HeldStore) Has(dest, series string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.dests[dest][series] != nil
 }
 
-// Count returns how many events are held for dest.
-func (h *HeldStore) Count(dest string) int {
+// count returns how many events of one kind wait for dest.
+func (h *HeldStore) count(dest string, parked bool) int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	n := 0
-	for _, s := range h.dests[dest] {
-		n += s.Count
+	for key, s := range h.dests[dest] {
+		if IsParkKey(key) == parked {
+			n += s.Count
+		}
 	}
 	return n
 }
 
-// Series lists dest's held series, oldest first.
-func (h *HeldStore) Series(dest string) []HeldSummary {
+// summaries lists the files of one kind (or of both, with all) for dest,
+// oldest first.
+func (h *HeldStore) summaries(dest string, parked, all bool) []HeldSummary {
 	h.mu.Lock()
 	out := make([]HeldSummary, 0, len(h.dests[dest]))
-	for _, s := range h.dests[dest] {
-		out = append(out, s.HeldSummary)
+	for key, s := range h.dests[dest] {
+		if all || IsParkKey(key) == parked {
+			out = append(out, s.HeldSummary)
+		}
 	}
 	h.mu.Unlock()
 	sort.Slice(out, func(i, j int) bool { return out[i].FirstSeq < out[j].FirstSeq })
 	return out
 }
 
-// Destinations lists the destinations that have held events.
+// Count returns how many events are held for dest at the pricing gate.
+// Parked events are not counted (see ParkedCount, Total).
+func (h *HeldStore) Count(dest string) int { return h.count(dest, false) }
+
+// ParkedCount returns how many events are parked for dest because their
+// tenant is not set up there.
+func (h *HeldStore) ParkedCount(dest string) int { return h.count(dest, true) }
+
+// Total returns how many events wait for dest, held and parked.
+func (h *HeldStore) Total(dest string) int { return h.Count(dest) + h.ParkedCount(dest) }
+
+// Series lists dest's held pricing series, oldest first.
+func (h *HeldStore) Series(dest string) []HeldSummary { return h.summaries(dest, false, false) }
+
+// ParkedSeries lists what is parked for dest, one summary per tenant and
+// series, oldest first. A summary's tenant is its Sample.Tenant.
+func (h *HeldStore) ParkedSeries(dest string) []HeldSummary { return h.summaries(dest, true, false) }
+
+// AllSeries lists everything that waits for dest, held and parked, oldest
+// first.
+func (h *HeldStore) AllSeries(dest string) []HeldSummary { return h.summaries(dest, false, true) }
+
+// Destinations lists the destinations that have events held at the pricing
+// gate.
 func (h *HeldStore) Destinations() []string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	var out []string
 	for d, m := range h.dests {
-		if len(m) > 0 {
-			out = append(out, d)
+		for key := range m {
+			if !IsParkKey(key) {
+				out = append(out, d)
+				break
+			}
 		}
 	}
 	sort.Strings(out)
@@ -432,6 +489,22 @@ func (h *HeldStore) ExpiredThrough(dest, series string, cutoff time.Time) (uint6
 		if e.Event.WindowStart.Before(cutoff) {
 			seq = e.Seq
 		}
+		return true
+	})
+	return seq, err
+}
+
+// ParkedBefore returns the sequence number of the last of a key's leading
+// entries that were parked before cutoff (0 if its oldest entry was not):
+// the entries that have waited since before cutoff. Entries are parked in
+// file order, so these are the ones that waited longest.
+func (h *HeldStore) ParkedBefore(dest, key string, cutoff time.Time) (uint64, error) {
+	var seq uint64
+	_, err := h.scan(dest, key, func(e HeldEntry) bool {
+		if !e.At.Before(cutoff) {
+			return false
+		}
+		seq = e.Seq
 		return true
 	})
 	return seq, err

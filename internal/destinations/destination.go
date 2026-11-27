@@ -25,7 +25,26 @@ type Destination interface {
 	// Bootstrap creates what the backend needs to accept the catalog
 	// (meters, billable metrics, plan charges).
 	Bootstrap(ctx context.Context, metrics []usage.MetricDef) error
-	// EnsureTenant creates or updates the billing customer.
+	// EnsureTenant creates or updates the billing customer. vBilling calls it
+	// before a tenant's first event reaches the destination, and again when
+	// the tenant changes.
+	//
+	// An error concerns that tenant only: the other tenants' events are
+	// delivered. Which error it is decides what happens to the tenant's own:
+	//
+	//   - Any error that is not Permanent means the tenant is not set up and
+	//     its usage has nowhere to go yet (a quota, an alias that is taken,
+	//     an API that is down). vBilling parks the tenant's events for this
+	//     destination, retries EnsureTenant with backoff, and delivers the
+	//     parked events in ledger order once it succeeds. Return it whenever
+	//     the tenant's usage must not be sent before the tenant exists.
+	//   - Permanent(err) means the destination will not take the tenant as it
+	//     is and retrying the same call cannot help, but the tenant's usage
+	//     can be delivered anyway (the customer exists and only its plan
+	//     cannot be subscribed, a receiver refuses the tenant notice).
+	//     vBilling reports it, keeps retrying, and still sends the usage;
+	//     events the destination then refuses of that tenant are parked with
+	//     the tenant instead of being dead-lettered at once.
 	EnsureTenant(ctx context.Context, t usage.Tenant) error
 	// RemoveTenant runs once a tenant has had no tenant clusters for the
 	// offboarding grace period. Adapters decide what that means; deleting
@@ -136,6 +155,21 @@ func Accepts(d Destination, metric string) bool {
 		return f.Accepts(metric)
 	}
 	return true
+}
+
+// AcceptsEvent applies a destination's EventFilter to one event. Where how
+// an event was metered decides whether it is billed (storage under an
+// allowance, see usage.MeteredBillable), the event decides, so switching
+// ALLOWANCES_FILE never drops or doubles usage metered before the switch
+// and delivered after it. Destinations without a filter take everything.
+func AcceptsEvent(d Destination, e *usage.Event) bool {
+	if _, ok := d.(EventFilter); !ok {
+		return true
+	}
+	if billable, decided := usage.MeteredBillable(e); decided {
+		return billable
+	}
+	return Accepts(d, e.Metric)
 }
 
 // BillableOnly is an EventFilter for billing engines: builtin billable

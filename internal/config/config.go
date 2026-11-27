@@ -6,9 +6,13 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/vclusterlabs-experiments/vbilling/internal/usage"
 )
 
 type Config struct {
@@ -30,6 +34,13 @@ type Config struct {
 	DataDir    string
 	Retention  time.Duration
 	ArchiveDir string // ARCHIVE_DIR: gzipped copies of compacted segments, kept for disputes
+	// LedgerMirror (LEDGER_MIRROR) is whether a live copy of the data
+	// directory is kept, in LedgerMirrorDir or else in ARCHIVE_DIR/mirror:
+	// auto (yes, except on a bucket mounted through FUSE), on or off.
+	LedgerMirror string
+	// LedgerMirrorDir (LEDGER_MIRROR_DIR) gives the mirror a volume of its
+	// own, so the archive can stay in a bucket.
+	LedgerMirrorDir string
 
 	// Collection. CollectionInterval is the metering window size.
 	CollectionInterval time.Duration
@@ -73,6 +84,10 @@ type Config struct {
 	OffboardGrace           time.Duration
 	CustomMetrics           string
 	CustomMetricsFile       string // YAML list form of CUSTOM_METRICS (Helm metering.customMetrics)
+	// AllowancesFile (ALLOWANCES_FILE) lists storage included with a
+	// cluster's nodes, the cluster or each volume (Helm billing.allowances).
+	// With it, storage above the allowance is billed as its own metric.
+	AllowancesFile string
 	// PlanByClass picks a plan (Lago plan code, Stripe plan tag, Metronome
 	// rate card) for tenants without a vbilling.vcluster.com/plan setting.
 	PlanByClass map[string]string
@@ -121,6 +136,9 @@ type Config struct {
 	// Billing defaults.
 	DefaultPlanCode string
 	BillingCurrency string
+	// PricingKeys (PRICING_KEYS) adds pricing keys to built-in metrics:
+	// "metric:key|key,metric:key" (usage.ParsePricingKeys).
+	PricingKeys string
 
 	// Price coverage (internal/pricing): warn reports usage a billing
 	// platform has no price for; hold also keeps that usage from it until
@@ -141,6 +159,9 @@ type Config struct {
 	// Enforcement of billing state on tenant clusters: observe | annotate | enforce.
 	EnforcementMode  string
 	EnforcementRules string // "event.type=state,..." overrides
+	// EnforcementEscalations are grace periods, "from:after:to,...": a
+	// billing hold at from for after is raised to to.
+	EnforcementEscalations string
 	// EnforcementInCluster also installs an admission policy inside each
 	// suspended tenant's clusters through their own API (enforce mode). It
 	// is the only enforcement that reaches clusters with their own nodes,
@@ -205,7 +226,7 @@ type Config struct {
 // has one right value, so a setting only added a way to get billing wrong.
 const (
 	windowSize          = 60 * time.Second
-	maxBackfill         = 6 * time.Hour
+	maxBackfill         = 24 * time.Hour
 	offboardGrace       = time.Hour
 	reconcileInterval   = 30 * time.Second
 	ledgerRetention     = 7 * 24 * time.Hour // live segments; the archive keeps compressed copies
@@ -230,7 +251,7 @@ var RemovedSettings = map[string]string{
 	"ADAPTER":                            "use ADAPTERS",
 	"COLLECTION_INTERVAL":                "windows are always 60s",
 	"RECONCILE_INTERVAL":                 "fixed at 30s",
-	"MAX_BACKFILL":                       "fixed at 6h",
+	"MAX_BACKFILL":                       "fixed at 24h",
 	"OFFBOARD_GRACE":                     "fixed at 1h",
 	"RETENTION":                          "live segments are kept 7 days; ARCHIVE_DIR keeps compressed copies",
 	"ZONE":                               "the zone comes from each node's topology.kubernetes.io/zone label",
@@ -290,9 +311,12 @@ func Load() *Config {
 		Region:      envOr("REGION", "default"),
 		ClusterName: envOr("CLUSTER_NAME", "control-plane"),
 
-		DataDir:    envOr("DATA_DIR", "/var/lib/vbilling"),
-		Retention:  ledgerRetention,
-		ArchiveDir: os.Getenv("ARCHIVE_DIR"),
+		DataDir:      envOr("DATA_DIR", "/var/lib/vbilling"),
+		Retention:    ledgerRetention,
+		ArchiveDir:   os.Getenv("ARCHIVE_DIR"),
+		LedgerMirror: envOr("LEDGER_MIRROR", "auto"),
+
+		LedgerMirrorDir: os.Getenv("LEDGER_MIRROR_DIR"),
 
 		CollectionInterval: windowSize,
 		ReconcileInterval:  reconcileInterval,
@@ -335,6 +359,7 @@ func Load() *Config {
 		OffboardGrace:           offboardGrace,
 		CustomMetrics:           os.Getenv("CUSTOM_METRICS"), // v0.2 string form, still accepted
 		CustomMetricsFile:       os.Getenv("CUSTOM_METRICS_FILE"),
+		AllowancesFile:          os.Getenv("ALLOWANCES_FILE"),
 		PlanByClass:             envMap("PLAN_BY_CLASS"),
 		CollectionDelay:         envDuration("COLLECTION_DELAY", 5*time.Second),
 		RecordsSettle:           recordsSettle,
@@ -355,6 +380,7 @@ func Load() *Config {
 
 		DefaultPlanCode: envOr("DEFAULT_PLAN_CODE", "vcluster-standard"),
 		BillingCurrency: envOr("BILLING_CURRENCY", "USD"),
+		PricingKeys:     os.Getenv("PRICING_KEYS"),
 
 		PriceCheck:         envOr("PRICE_CHECK", "warn"),
 		PriceCheckInterval: priceCheckInterval,
@@ -372,6 +398,8 @@ func Load() *Config {
 		PauseKeepBilling:     envOr("PAUSE_KEEP_BILLING", "storage,load_balancers"),
 		PauseDrainTimeout:    pauseDrainTimeout,
 		PauseKeepNamespaces:  envList("PAUSE_KEEP_NAMESPACES", nil), // nil: enforcement.DefaultKeepNamespaces
+
+		EnforcementEscalations: os.Getenv("ENFORCEMENT_ESCALATIONS"),
 
 		LagoAPIURL:       envOr("LAGO_API_URL", "http://localhost:3000"),
 		LagoAPIKey:       secretEnv("LAGO_API_KEY"),
@@ -506,6 +534,23 @@ func (c *Config) Validate() error {
 	if c.RecordsArchive && c.ArchiveDir == "" {
 		return fmt.Errorf("RECORDS_ARCHIVE needs ARCHIVE_DIR")
 	}
+	switch c.LedgerMirror {
+	case "auto", "off":
+	case "on":
+		if c.ArchiveDir == "" && c.LedgerMirrorDir == "" {
+			return fmt.Errorf("LEDGER_MIRROR=on needs ARCHIVE_DIR or LEDGER_MIRROR_DIR: the mirror is kept in LEDGER_MIRROR_DIR, or else on the archive volume")
+		}
+	default:
+		return fmt.Errorf("LEDGER_MIRROR %q must be auto, on or off", c.LedgerMirror)
+	}
+	// The mirror copies DATA_DIR and, set aside, is renamed as a whole: a
+	// mirror directory that holds the data or the archive directory would
+	// copy the ledger onto itself, or move the archive.
+	for _, d := range []struct{ name, dir string }{{"DATA_DIR", c.DataDir}, {"ARCHIVE_DIR", c.ArchiveDir}} {
+		if c.LedgerMirrorDir != "" && d.dir != "" && dirWithin(c.LedgerMirrorDir, d.dir) {
+			return fmt.Errorf("LEDGER_MIRROR_DIR %s holds %s %s: give the mirror a directory of its own, on a volume of its own", c.LedgerMirrorDir, d.name, d.dir)
+		}
+	}
 	if c.RecordsRetention < 2*time.Hour {
 		return fmt.Errorf("RECORDS_RETENTION %s must be at least 2h", c.RecordsRetention)
 	}
@@ -582,6 +627,9 @@ func (c *Config) Validate() error {
 	default:
 		return fmt.Errorf("PRICE_CHECK %q must be warn, hold or off", c.PriceCheck)
 	}
+	if err := c.validatePricingKeys(); err != nil {
+		return err
+	}
 	switch c.PrometheusPreset {
 	case "", "default", "vcluster-platform":
 	default:
@@ -590,9 +638,36 @@ func (c *Config) Validate() error {
 	return nil
 }
 
+// validatePricingKeys checks PRICING_KEYS: built-in billable metrics, keys
+// their events carry, and no stripe adapter. A Stripe meter cannot price on
+// dimensions: vBilling splits meters by STRIPE_SPLIT_METERS_BY, the same
+// keys for every metric, and its price card prices SKUs.
+func (c *Config) validatePricingKeys() error {
+	keys, err := usage.ParsePricingKeys(c.PricingKeys)
+	if err != nil {
+		return fmt.Errorf("PRICING_KEYS: %w", err)
+	}
+	if len(keys) > 0 && slices.Contains(c.Adapters, "stripe") {
+		return fmt.Errorf("PRICING_KEYS does not work with the stripe adapter: a Stripe meter cannot price on dimensions, and vBilling splits meters " +
+			"by STRIPE_SPLIT_METERS_BY (stripe.splitMetersBy), the same keys for every metric. Split Stripe meters that way, or remove PRICING_KEYS")
+	}
+	return nil
+}
+
 // secretEnv reads a key or token. Secrets mounted from files usually end in a
 // newline, which would make every request's Authorization header invalid.
 func secretEnv(key string) string { return strings.TrimSpace(os.Getenv(key)) }
+
+// dirWithin reports whether path is dir or a directory under it.
+func dirWithin(dir, path string) bool {
+	absDir, errDir := filepath.Abs(dir)
+	absPath, errPath := filepath.Abs(path)
+	if errDir != nil || errPath != nil {
+		return false
+	}
+	rel, err := filepath.Rel(absDir, absPath)
+	return err == nil && (rel == "." || filepath.IsLocal(rel))
+}
 
 func envOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {

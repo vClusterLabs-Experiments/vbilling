@@ -39,6 +39,13 @@ const (
 	// Unpriced is used by price coverage checks: a billing platform has no
 	// price for usage vBilling sends it, so it would bill that usage at $0.
 	Unpriced Status = "unpriced"
+	// Unchecked is used by price coverage checks too: the check cannot
+	// decide whether a billing platform prices usage vBilling sends it (a
+	// SQL billable metric, a product priced on a key vBilling does not
+	// track). The usage is delivered. It is a setup someone chose, not an
+	// outage, so it is its own status: always listed as a problem, never
+	// counted as failing.
+	Unchecked Status = "unchecked"
 )
 
 // Source is the health of one usage source.
@@ -86,6 +93,12 @@ func (r *Registry) SetLogger(logf func(string, ...any)) { r.logf = logf }
 // OK records a successful attempt that returned n series or records.
 func (r *Registry) OK(name, kind, subject string, n int) {
 	r.report(name, kind, subject, OK, "", "", n)
+}
+
+// Note records a successful attempt that returned n series or records, with
+// something an operator should know about it.
+func (r *Registry) Note(name, kind, subject string, n int, message, hint string) {
+	r.report(name, kind, subject, OK, message, hint, n)
 }
 
 // Fail records a failed attempt.
@@ -147,7 +160,7 @@ func (r *Registry) report(name, kind, subject string, status Status, message, hi
 		r.logf("[health] %s failing (%d in a row): %s%s", name, failures, message, hintSuffix(hint))
 	case status == Empty && (changed || isPow10(empties)):
 		r.logf("[health] %s returned no data (%d in a row): %s%s", name, empties, message, hintSuffix(hint))
-	case (status == Diverged || status == Unpriced) && changed:
+	case (status == Diverged || status == Unpriced || status == Unchecked) && changed:
 		r.logf("[health] %s: %s%s", name, message, hintSuffix(hint))
 	}
 	r.export()
@@ -179,7 +192,7 @@ func (r *Registry) export() {
 	}
 	r.mu.Unlock()
 	for k := range kinds {
-		for _, st := range []Status{OK, Empty, Failing, Diverged, Unpriced} {
+		for _, st := range []Status{OK, Empty, Failing, Diverged, Unpriced, Unchecked} {
 			r.tel.Set("vbilling_sources", "Usage sources by kind and status (see GET /api/v1/sources).",
 				map[string]string{"kind": k, "status": string(st)}, float64(counts[[2]string{k, string(st)}]))
 		}
@@ -194,7 +207,7 @@ func (r *Registry) List() []Source {
 		out = append(out, *s)
 	}
 	r.mu.Unlock()
-	rank := map[Status]int{Failing: 0, Diverged: 1, Unpriced: 1, Empty: 2, OK: 3}
+	rank := map[Status]int{Failing: 0, Diverged: 1, Unpriced: 1, Unchecked: 2, Empty: 2, OK: 3}
 	sort.Slice(out, func(i, j int) bool {
 		if rank[out[i].Status] != rank[out[j].Status] {
 			return rank[out[i].Status] < rank[out[j].Status]
@@ -230,6 +243,34 @@ func (r *Registry) Prune(cutoff time.Time) {
 	r.mu.Lock()
 	for k, s := range r.sources {
 		if s.LastAttempt.Before(cutoff) {
+			delete(r.sources, k)
+		}
+	}
+	r.mu.Unlock()
+	r.export()
+}
+
+// Remove drops one source: what it reported is over (a cluster that is no
+// longer excluded from metering), so it must not linger until Prune.
+func (r *Registry) Remove(name string) {
+	r.mu.Lock()
+	_, ok := r.sources[name]
+	delete(r.sources, name)
+	r.mu.Unlock()
+	if ok {
+		r.export()
+	}
+}
+
+// Forget drops every source about subject (a cluster that was
+// deleted), so nothing of it reads as healthy after it is gone.
+func (r *Registry) Forget(subject string) {
+	if subject == "" {
+		return
+	}
+	r.mu.Lock()
+	for k, s := range r.sources {
+		if s.Subject == subject {
 			delete(r.sources, k)
 		}
 	}

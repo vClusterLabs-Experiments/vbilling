@@ -23,11 +23,12 @@ const (
 	MetricNetworkEgressGB  = usage.MetricNetworkEgressGB
 	MetricLBHours          = usage.MetricLBHours
 	MetricPrivateNodeHours = usage.MetricPrivateNodeHours
+	MetricPublicIPHours    = usage.MetricPublicIPHours
 )
 
-// lagoMetrics lists the billable metrics vBilling creates in Lago. Custom
-// metrics from the catalog get a billable metric whose field name is their
-// code.
+// lagoMetrics lists the billable metrics vBilling creates in Lago. Other
+// billable metrics of the catalog (custom ones, the storage overage) get a
+// billable metric whose field name is their code.
 func lagoMetrics(catalog []usage.MetricDef) []BillableMetric {
 	metrics := []BillableMetric{
 		{
@@ -93,10 +94,23 @@ func lagoMetrics(catalog []usage.MetricDef) []BillableMetric {
 			AggregationType: "sum_agg",
 			FieldName:       "private_node_hours",
 		},
+		{
+			Name:            "vCluster Public IP Hours",
+			Code:            MetricPublicIPHours,
+			Description:     "Hours of the public IP addresses of nodes billed whole to a tenant",
+			AggregationType: "sum_agg",
+			FieldName:       "public_ip_hours",
+		},
+	}
+	listed := map[string]bool{}
+	for _, m := range metrics {
+		listed[m.Code] = true
 	}
 	for _, def := range catalog {
-		// Informational metrics (billable: false) never reach Lago.
-		if !def.Custom || !def.Billable {
+		// Informational metrics (billable: false) never reach Lago. A
+		// billable metric not listed above (a custom one, or the storage
+		// overage of ALLOWANCES_FILE) gets a billable metric of its own.
+		if listed[def.Code] || !def.Billable {
 			continue
 		}
 		metrics = append(metrics, BillableMetric{

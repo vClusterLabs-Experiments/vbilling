@@ -216,7 +216,7 @@ func (a *Adapter) ValidateReplay(ctx context.Context, from, to uint64) error {
 			if r.Seq > from {
 				return nil
 			}
-			if e := r.Event; e != nil && a.Accepts(e.Metric) && e.WindowStart.Before(cutoff) {
+			if e := r.Event; e != nil && destinations.AcceptsEvent(a, e) && e.WindowStart.Before(cutoff) {
 				return fmt.Errorf("Stripe replay includes usage older than its guaranteed deduplication window (%s); reconcile before recovering old usage", e.ID)
 			}
 			cursor = r.Seq

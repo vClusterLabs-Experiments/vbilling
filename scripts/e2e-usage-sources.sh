@@ -3,14 +3,19 @@
 #
 # Builds a kind control plane cluster with one vCluster tenant cluster, a
 # Prometheus that scrapes it, and an "engine" pod inside the tenant cluster
-# that exposes vLLM's output token counter (+100 every 5 seconds). vBilling
-# is installed from this repository's Helm chart, then the script:
+# that exposes vLLM's output token counter (+10 every half second, with its
+# _created series, as prometheus_client does). vBilling is installed from
+# this repository's Helm chart, then the script:
 #   - posts LiteLLM-format request records (with retried batches and one
 #     late record) and checks the ledger bills exactly what was sent;
 #   - checks the counter metric bills exactly the increase Prometheus stored,
 #     across a vBilling outage that spans window boundaries, while the
 #     increase() estimate of the same counter is marked as an estimate;
 #   - checks the cross-check and source health APIs;
+#   - cuts vBilling off from Prometheus for three minutes while the engine
+#     restarts just before a window closes, and checks that every window
+#     holds exactly what Prometheus stored for it: nothing lost, nothing
+#     moved to a neighbouring window, the new engine counted from zero;
 #   - suspends the tenant and checks a pod is refused inside its own cluster,
 #     that a payment does not lift an operator's hold, and that lifting it
 #     allows pods again.
@@ -190,6 +195,47 @@ spec: {selector: {app: prometheus}, ports: [{port: 9090}]}
 EOF
 kubectl apply -f "$WORK/prometheus.yaml" >/dev/null
 
+# vBilling reads Prometheus through a small TCP gate, so the test can cut it
+# off (scale the gate to zero: its connections die with it) while Prometheus
+# itself keeps scraping.
+cat >"$WORK/prom-gate.yaml" <<'EOF'
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: prom-gate, namespace: monitoring}
+spec:
+  selector: {matchLabels: {app: prom-gate}}
+  template:
+    metadata: {labels: {app: prom-gate}}
+    spec:
+      terminationGracePeriodSeconds: 1
+      containers:
+        - name: gate
+          image: python:3.12-alpine
+          command: [python, -c]
+          args:
+            - |
+              import asyncio
+              async def pipe(r, w):
+                  try:
+                      while data := await r.read(65536):
+                          w.write(data); await w.drain()
+                  except Exception: pass
+                  finally: w.close()
+              async def handle(r, w):
+                  try: ur, uw = await asyncio.open_connection('prometheus.monitoring.svc', 9090)
+                  except Exception: w.close(); return
+                  await asyncio.gather(pipe(r, uw), pipe(ur, w))
+              async def main():
+                  async with await asyncio.start_server(handle, '', 9090) as srv: await srv.serve_forever()
+              asyncio.run(main())
+---
+apiVersion: v1
+kind: Service
+metadata: {name: prom-gate, namespace: monitoring}
+spec: {selector: {app: prom-gate}, ports: [{port: 9090}]}
+EOF
+kubectl apply -f "$WORK/prom-gate.yaml" >/dev/null
+
 cat >"$WORK/engine.yaml" <<'EOF'
 apiVersion: apps/v1
 kind: Deployment
@@ -212,8 +258,9 @@ spec:
               start = time.time()
               class H(http.server.BaseHTTPRequestHandler):
                   def do_GET(self):
-                      v = int((time.time() - start) // 5) * 100
-                      body = ('vllm:generation_tokens_total{model_name="llama-70b"} %d\n' % v).encode()
+                      v = int((time.time() - start) * 2) * 10
+                      body = ('vllm:generation_tokens_total{model_name="llama-70b"} %d\n'
+                              'vllm:generation_tokens_created{model_name="llama-70b"} %.3f\n' % (v, start)).encode()
                       self.send_response(200); self.end_headers(); self.wfile.write(body)
                   def log_message(self, *a): pass
               http.server.HTTPServer(('', 8000), H).serve_forever()
@@ -226,7 +273,7 @@ adapters: [noop]
 region: e2e
 api: {token: $TOKEN, ingestToken: $INGEST, tenantIngestTokens: {acme: gw-acme}}
 prometheus:
-  url: http://prometheus.monitoring.svc:9090
+  url: http://prom-gate.monitoring.svc:9090
   gpuUtilQuery: none
   metrics:
     - {code: engine_output_tokens, unit: tokens, billable: false, skuLabel: model_name, counter: 'vllm:generation_tokens_total{{selector}}'}
@@ -328,6 +375,72 @@ crosscheck_rows() { api "/api/v1/crosscheck?from=$START&to=$END" | jq -e '.rows 
 counter_ok() { api /api/v1/sources | jq -e '[.sources[] | select(.name | startswith("prometheus/engine_output_tokens/")) | .status] | length > 0 and all(. == "ok")' >/dev/null; }
 check "the cross-check compares both sources" crosscheck_rows
 check "source health reports the Prometheus counter as ok" counter_ok
+
+step "A Prometheus outage and engine restarts: every window holds what Prometheus stored for it"
+P0=$(minute 60) # the first full window from here
+wait_for 90 "after $P0"
+# vBilling cannot reach Prometheus (the gate is gone); Prometheus itself
+# keeps scraping, and the script reads it directly.
+kubectl -n monitoring scale deploy prom-gate --replicas=0 >/dev/null
+OUT_UNTIL=$(minute 180)
+# Meanwhile the engine restarts about five seconds before a window closes,
+# so its new counter starts in one window and is first scraped in the next.
+python3 -I -c 'import time; time.sleep((53 - time.time() % 60) % 60)'
+vc kubectl delete pod -l app=engine --wait=false >/dev/null
+wait_for 260 "after $OUT_UNTIL"
+prom_unavailable() { api /api/v1/sources | jq -e '[.sources[] | select(.name | startswith("prometheus/engine_output_tokens/")) | .status] | any(. == "failing")' >/dev/null; }
+check "vBilling notices it cannot read Prometheus" prom_unavailable
+kubectl -n monitoring scale deploy prom-gate --replicas=1 >/dev/null
+kubectl -n monitoring rollout status deploy/prom-gate --timeout=60s >/dev/null
+# A second restart with Prometheus readable, again just before a window closes.
+python3 -I -c 'import time; time.sleep((53 - time.time() % 60) % 60)'
+vc kubectl delete pod -l app=engine --wait=false >/dev/null
+P1=$(minute 180)
+wait_for 260 "after $P1"
+END=$P1
+check "every source catches up after the Prometheus outage" "wait_for 240 caught_up"
+api "/api/v1/events?from=$P0&to=$P1&limit=100000" >"$WORK/events-windows.jsonl"
+curl -fsS "http://$PROM/api/v1/query" --data-urlencode "query={__name__=~\"vllm:generation_tokens_(total|created)\",namespace=\"vc-team-a\"}[1h]" --data-urlencode "time=$P1" >"$WORK/raw-windows.json"
+python3 -I - "$WORK/events-windows.jsonl" "$WORK/raw-windows.json" "$P0" "$P1" >"$WORK/windows.json" <<'EOF'
+import json, sys, datetime
+def ts(s): return datetime.datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc).timestamp()
+p0, p1 = ts(sys.argv[3]), ts(sys.argv[4])
+billed, backfilled = {}, 0
+for line in open(sys.argv[1]):
+    if not line.startswith("{"): continue
+    e = json.loads(line)
+    if e["metric"] != "engine_output_tokens": continue
+    w = ts(e["window_start"][:19] + "Z")
+    billed[w] = billed.get(w, 0) + e["quantity"]
+    backfilled += 1 if (e.get("properties") or {}).get("backfilled") else 0
+stored, edge = {}, 0
+series = json.load(open(sys.argv[2]))["data"]["result"]
+created = {s["metric"].get("pod"): float(s["values"][0][1]) for s in series if s["metric"]["__name__"].endswith("_created")}
+for s in series:
+    if not s["metric"]["__name__"].endswith("_total"): continue
+    prev = 0.0  # every pod of this test started inside the hour read: its first sample counts from zero
+    first = float(s["values"][0][0])
+    c = created.get(s["metric"].get("pod"))
+    if c is not None and int(c // 60) != int(first // 60): edge += 1  # started in one window, first scraped in the next
+    for t, v in s["values"]:
+        t, v = float(t), float(v)
+        inc = v - prev if v >= prev else v
+        prev = v
+        w = (int(t) // 60) * 60 if t % 60 else (int(t) // 60 - 1) * 60  # (start, end]
+        if p0 <= w < p1: stored[w] = stored.get(w, 0) + inc
+windows = sorted(set(stored) | set(billed))
+wrong = [(datetime.datetime.fromtimestamp(w, datetime.timezone.utc).strftime("%H:%M"), billed.get(w, 0), stored.get(w, 0)) for w in windows if round(billed.get(w, 0)) != round(stored.get(w, 0))]
+print(json.dumps({"windows": len(windows), "wrong": wrong, "billed": round(sum(billed.values())), "stored": round(sum(stored.values())),
+                  "backfilled_events": backfilled, "pods": len(created), "started_before_a_boundary": edge}))
+EOF
+cat "$WORK/windows.json"
+wtotal() { jq -r ".$1" "$WORK/windows.json"; }
+check "the counter total equals what Prometheus stored, across the outage and both restarts ($(wtotal stored))" '[ "$(wtotal billed)" = "$(wtotal stored)" ]'
+check "every one of the $(wtotal windows) windows holds exactly what Prometheus stored for it" '[ "$(jq -r ".wrong | length" "$WORK/windows.json")" = "0" ]'
+check "the windows of the outage are marked as read late" '[ "$(wtotal backfilled_events)" -ge 2 ]'
+check "three engine pods were counted" '[ "$(wtotal pods)" = "3" ]'
+no_history() { api /api/v1/sources | jq -e '[.sources[] | select(.name | endswith("/history"))] | length == 0' >/dev/null; }
+check "no restarted engine was billed from its first sample only" no_history
 
 step "Enforcement inside the tenant's cluster"
 B="http://$API/api/v1/billing-states/acme"

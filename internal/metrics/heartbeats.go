@@ -62,7 +62,15 @@ func heartbeatRenewals(proofs map[string]nodeHeartbeat) map[string]time.Time {
 // six renewal intervals (at least a minute) are the maximum wait: local
 // metering then treats the node as unavailable from its last proof of life.
 // This changes the read snapshot, never the Kubernetes Node.
-func settleHeartbeats(nodes []corev1.Node, proofs map[string]nodeHeartbeat, windows []Window, now time.Time) *HeartbeatPending {
+//
+// since is when the API the kubelets renew against came up, if that is
+// known (a cluster's control plane that was paused, or restarted): a
+// kubelet could not renew while it was down, so its silence until then says
+// nothing about the node. Each node counts as alive at since, and has the
+// usual time from there to renew before it is held or marked. Without this
+// the first window after a resume showed every node whose kubelet had not
+// reconnected yet as down since before the pause.
+func settleHeartbeats(nodes []corev1.Node, proofs map[string]nodeHeartbeat, windows []Window, now time.Time, since time.Time) *HeartbeatPending {
 	if len(windows) == 0 {
 		return nil
 	}
@@ -81,6 +89,9 @@ func settleHeartbeats(nodes []corev1.Node, proofs map[string]nodeHeartbeat, wind
 			at := proof.At
 			if cond.LastHeartbeatTime.After(at) {
 				at = cond.LastHeartbeatTime.Time
+			}
+			if since.After(at) {
+				at = since
 			}
 			if now.Sub(at) <= 2*proof.Interval || !at.Before(last.End) {
 				continue

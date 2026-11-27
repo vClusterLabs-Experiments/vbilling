@@ -47,7 +47,7 @@ func TestSuddenNodeFailureWaitsBeforeCommittingItsWindow(t *testing.T) {
 func TestHealthyLeaseDoesNotDelayAWindow(t *testing.T) {
 	nodes := []corev1.Node{*node("healthy", nil, 1, true)}
 	proofs := map[string]nodeHeartbeat{"healthy": {At: we.Add(time.Second), Interval: 10 * time.Second}}
-	if pending := settleHeartbeats(nodes, proofs, latest(), we.Add(5*time.Second)); pending != nil {
+	if pending := settleHeartbeats(nodes, proofs, latest(), we.Add(5*time.Second), time.Time{}); pending != nil {
 		t.Fatalf("fresh Lease held the window: %v", pending)
 	}
 }

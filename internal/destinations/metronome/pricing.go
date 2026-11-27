@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"maps"
 	"net/http"
 	"net/url"
 	"slices"
@@ -24,13 +25,16 @@ import (
 //   - POST /v1/contract-pricing/rate-cards/list        (rate-cards/list-rate-cards)
 //   - POST /v1/contract-pricing/rate-cards/getRates    (rate-cards/get-rates)
 //
-// Without METRONOME_PROVISION it also reads, per tenant:
+// It also reads, per tenant:
 //   - GET  /v1/customers?ingest_alias=<tenant>         (customers/list-customers)
 //   - POST /v2/contracts/list with covering_date       (contracts/list-customer-contracts-v2)
 //
-// The rate cards are then the ones of the tenant's own customer's active
-// contracts, and a metric's billable metrics are found by their event type
-// filter and their SUM of value, whatever Finance named them.
+// The rate cards are the ones of the contracts in force of the customer that
+// gets the tenant's usage (see "Plans" below). With METRONOME_PROVISION the
+// customer is the one vBilling created, found or was pinned to, so only the
+// contracts are read. Without it, a metric's billable metrics are found by
+// their event type filter and their SUM of value, whatever Finance named
+// them.
 //
 // Metronome does not attribute usage to a billable metric created after it:
 // "When using streaming billable metrics, the billable metric must be
@@ -204,12 +208,24 @@ func (c *Client) GetRates(ctx context.Context, rateCardID string, at time.Time, 
 	return out, nil
 }
 
-// Plans without METRONOME_PROVISION. A tenant's usage is rated on the rate
-// cards of the active contracts of the customer that holds the tenant ID as
-// ingest alias. Until a check has read them (or while there is no such
-// customer or contract) the tenant's plan is aliasPlan + tenant ID; then it
-// is the rate card IDs, joined with "+", so tenants on the same rate card
-// share their series.
+// Plans. Metronome rates a tenant's usage on the rate cards of the contracts
+// in force of the customer that gets the usage: without METRONOME_PROVISION
+// the customer that holds the tenant ID as ingest alias, with it the customer
+// vBilling created, found or was pinned to. A contract keeps the rate card
+// it was created on: a rate card alias is resolved once, when the contract
+// is created, and moving the alias later moves no contract. So the price
+// check reads each tenant's contracts, in both modes, and a tenant's plan is
+// the rate card IDs of those contracts, joined with "+": tenants on the same
+// rate card share their series. Until a check has read them (or while
+// nothing rates the tenant's usage) the plan is aliasPlan + tenant ID.
+//
+// With METRONOME_PROVISION vBilling creates the contract itself, on the
+// tenant's rate card setting (its plan, else METRONOME_RATE_CARD), before
+// the tenant's first usage is delivered or held, and creates a new one only
+// when that setting changes (ensureContract). While it has yet to create the
+// contract for the current setting, the tenant's usage is checked against
+// the rate card the setting points to now, which is where the contract will
+// be created.
 const (
 	aliasPlan   = "alias:"
 	planRefresh = 5 * time.Minute // a tenant's contracts are read again after this
@@ -217,40 +233,117 @@ const (
 	planWorkers = 8               // concurrent customer and contract reads
 )
 
-// tenantPlan is what a check found for one tenant.
+// tenantPlan is where one tenant's usage is rated, as the last check read it.
 type tenantPlan struct {
-	customer string   // the customer holding the tenant's alias, "" if none
-	cards    []string // rate card IDs of its active contracts, sorted
-	plan     string   // PricePlan's answer
-	why      string   // without cards: why (no customer, no active contract)
-	checked  time.Time
-	used     time.Time // last PricePlan call
+	// What vBilling was told about the tenant, with METRONOME_PROVISION: its
+	// rate card setting (its plan, else METRONOME_RATE_CARD) and the customer
+	// it is pinned to.
+	setting, pinned string
+
+	customer  string  // the customer that gets the tenant's usage, "" if none
+	contracts []rated // its contracts in force that have a rate card
+	cards     []string
+	// pending: cards is the rate card vBilling's contract will be created
+	// on, because it has yet to create the one for the tenant's setting.
+	pending bool
+	plan    string // PricePlan's answer
+	// Without cards: why nothing rates the usage (in a few words for the
+	// log, and in full for the series), and what to add.
+	brief, why, hint string
+	moved            *moved // the rate card setting no longer points to the contract's rate card
+
+	// state is the above in a few words, as last logged, and sig the IDs it
+	// was made of: a change of sig is logged, a rate card that only reads
+	// differently (an alias moved) is not.
+	state, sig string
+	movedLog   string // moved as it was last logged
+	checked    time.Time
+	used       time.Time // last PricePlan call
 }
 
-// PricePlan is the plan a tenant's usage is rated on. With
-// METRONOME_PROVISION it is the rate card of the contract vBilling creates:
-// the tenant's plan, or METRONOME_RATE_CARD. Without it, it is the rate cards
-// of the tenant's own customer's active contracts, as the last check found
-// them (aliasPlan + tenant ID until one has).
+// rated is a contract and the rate card it rates usage on.
+type rated struct{ contract, card string }
+
+// moved says that a tenant's rate card setting points to another rate card
+// now than the one its vBilling contract is on.
+type moved struct {
+	contract, card string // the contract and the rate card it is on
+	setting, now   string // the setting, and the rate card it points to now ("" if none)
+}
+
+// PricePlan is the plan a tenant's usage is rated on: the rate cards of the
+// contracts in force of its customer, as the last check read them (aliasPlan
+// + tenant ID until one has, and while nothing rates its usage). For no
+// tenant it is the plan billable metrics without usage are checked under:
+// with METRONOME_PROVISION the rate card METRONOME_RATE_CARD points to, the
+// one new tenants get a contract on.
 func (a *Adapter) PricePlan(t usage.Tenant) string {
-	if a.provision() {
-		if t.Plan != "" {
-			return t.Plan
-		}
-		return a.cfg.MetronomeRateCard
-	}
 	if t.ID == "" {
-		return ""
+		return a.defaultPlan()
+	}
+	var setting, pinned string
+	if a.provision() {
+		setting, pinned = t.Plan, t.ProviderIDs["metronome"]
+		if setting == "" {
+			setting = a.cfg.MetronomeRateCard
+		}
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	p := a.plans[t.ID]
-	if p == nil {
-		p = &tenantPlan{plan: aliasPlan + t.ID}
+	switch {
+	case p == nil:
+		p = &tenantPlan{plan: aliasPlan + t.ID, setting: setting, pinned: pinned}
 		a.plans[t.ID] = p
+	case p.setting != setting || p.pinned != pinned:
+		// The tenant's rate card setting or customer changed (or discovery
+		// only now told vBilling about them): what the last check read no
+		// longer says where its usage is rated. The next check reads it again.
+		*p = tenantPlan{plan: aliasPlan + t.ID, setting: setting, pinned: pinned, sig: p.sig, state: p.state, movedLog: p.movedLog}
 	}
 	p.used = a.now()
 	return p.plan
+}
+
+// defaultPlan is the plan of no tenant in particular: none without
+// METRONOME_PROVISION, where only contracts say where usage is rated; with
+// it METRONOME_RATE_CARD, as the rate card ID it pointed to at the last
+// check once one has resolved it.
+func (a *Adapter) defaultPlan() string {
+	if !a.provision() {
+		return ""
+	}
+	rc := a.cfg.MetronomeRateCard
+	if rc == "" || uuidRe.MatchString(rc) {
+		return rc
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if id := a.cards[rc]; id != "" {
+		return id
+	}
+	return rc
+}
+
+// ChecksCatalog reports whether the billable metrics without usage are
+// checked under a plan (destinations.CatalogScoper). They are not for a
+// tenant whose customer and contracts have not been read, or that has none:
+// it has no rate card to check them against, and its series with usage say
+// what is missing.
+func (a *Adapter) ChecksCatalog(plan string) bool { return !strings.HasPrefix(plan, aliasPlan) }
+
+// isCardPlan reports whether a plan is rate card IDs joined with "+", as
+// PricePlan answers once a tenant's contracts were read.
+func isCardPlan(plan string) bool {
+	if plan == "" {
+		return false
+	}
+	for _, id := range strings.Split(plan, "+") {
+		if !uuidRe.MatchString(id) {
+			return false
+		}
+	}
+	return true
 }
 
 // PriceDims are the group keys of the metric's billable metric, except the
@@ -281,25 +374,29 @@ type pricingView struct {
 	cards     []RateCard
 	cardsRead bool
 	rates     map[string][]RateSchedule // rate card ID -> rates of the candidate products
-	tenants   map[string]tenantPlan     // default: tenants resolved by this check
+	tenants   map[string]tenantPlan     // tenants whose customer and contracts this check read
+	settings  map[string]string         // provisioning: rate card setting -> the rate card ID it points to now ("" if none)
+	notes     map[string]string         // plan -> note for its series with usage (see noteTenants)
 }
 
 // target is where a series is rated.
 type target struct {
-	cards   []string // rate card IDs
-	missing bool     // provisioning: the configured rate card does not exist
-	why     string   // default: why the tenant has no rate card yet
+	cards []string // rate card IDs
+	// Without cards: why nothing rates the usage and what to add (the series
+	// is unpriced), or neither, for a series that names no tenant.
+	why, hint string
 }
 
 // CheckPrices reports, for each series, whether Metronome prices it: a
-// billable metric counts it, a usage product meters that billable metric, and
-// the rate card the usage is rated on has an entitled rate for the product
-// whose pricing group values match the series (SKU and any other pricing
-// group key).
+// customer gets the tenant's usage and has a contract in force, a billable
+// metric counts the usage, a usage product meters that billable metric, and
+// the rate card of that contract has an entitled rate for the product whose
+// pricing group values match the series (SKU and any other pricing group
+// key).
 func (a *Adapter) CheckPrices(ctx context.Context, series []destinations.PriceSeries) ([]destinations.PriceCoverage, error) {
 	v := &pricingView{now: a.now().UTC(), metricID: map[string]string{}, byType: map[string][]BillableMetric{},
 		other: map[string][]BillableMetric{}, products: map[string][]Product{}, rates: map[string][]RateSchedule{},
-		tenants: map[string]tenantPlan{}}
+		tenants: map[string]tenantPlan{}, settings: map[string]string{}, notes: map[string]string{}}
 
 	bms, err := a.c.ListBillableMetrics(ctx)
 	if err != nil {
@@ -346,48 +443,29 @@ func (a *Adapter) CheckPrices(ctx context.Context, series []destinations.PriceSe
 		v.products[p.Current.BillableMetricID] = append(v.products[p.Current.BillableMetricID], p)
 	}
 
-	// Where each series is rated.
-	targets := make([]target, len(series))
-	if a.provision() {
-		cardID := map[string]string{} // plan -> rate card ID ("" if not found)
-		var plans []string
-		for _, s := range series {
-			if _, ok := cardID[s.Plan]; !ok && s.Plan != "" {
-				cardID[s.Plan] = ""
-				plans = append(plans, s.Plan)
-			}
-		}
-		sort.Strings(plans)
-		for _, plan := range plans {
-			if cardID[plan], err = a.resolveRateCard(ctx, v, plan); err != nil {
-				return nil, err
-			}
-		}
-		for i, s := range series {
-			switch id := cardID[s.Plan]; {
-			case s.Plan == "":
-			case id == "":
-				targets[i].missing = true
-			default:
-				targets[i].cards = []string{id}
-			}
-		}
-	} else {
-		if err := a.resolvePlans(ctx, v, series); err != nil {
-			return nil, err
-		}
-		named := false
-		for i, s := range series {
-			targets[i] = v.target(s)
-			named = named || len(targets[i].cards) > 0
-		}
-		if named && !v.cardsRead {
-			if v.cards, err = a.c.ListRateCards(ctx); err != nil {
-				return nil, fmt.Errorf("list rate cards: %w", err)
-			}
-			v.cardsRead = true
-		}
+	// Where each series is rated: the rate card settings in use
+	// (provisioning), then each tenant's customer and contracts.
+	if err := a.resolveSettings(ctx, v, series); err != nil {
+		return nil, err
 	}
+	if err := a.resolvePlans(ctx, v, series); err != nil {
+		return nil, err
+	}
+	targets := make([]target, len(series))
+	named := false
+	for i, s := range series {
+		targets[i] = a.target(v, s)
+		named = named || len(targets[i].cards) > 0
+	}
+	if named && !v.cardsRead && !a.provision() {
+		// For the rate cards' names. With METRONOME_PROVISION the list is
+		// read only to resolve an alias: messages name the setting.
+		if v.cards, err = a.c.ListRateCards(ctx); err != nil {
+			return nil, fmt.Errorf("list rate cards: %w", err)
+		}
+		v.cardsRead = true
+	}
+	a.noteTenants(v)
 
 	// Rates, once per rate card, for the products of the series rated on it.
 	cardProducts := map[string]map[string]bool{}
@@ -417,7 +495,7 @@ func (a *Adapter) CheckPrices(ctx context.Context, series []destinations.PriceSe
 		sort.Strings(ids)
 		rates, err := a.c.GetRates(ctx, rc, v.now, ids)
 		if err != nil {
-			return nil, fmt.Errorf("rates of rate card %s: %w", a.cardLabel(v, rc, rc), err)
+			return nil, fmt.Errorf("rates of rate card %s: %w", a.cardRef(v, rc), err)
 		}
 		v.rates[rc] = rates
 	}
@@ -426,9 +504,100 @@ func (a *Adapter) CheckPrices(ctx context.Context, series []destinations.PriceSe
 	for i, s := range series {
 		cov := a.coverage(v, s, targets[i])
 		cov.Series = s
+		var notes []string
+		if n := a.keysNote(v, s); n != "" {
+			notes = append(notes, n)
+		}
+		if n := v.notes[a.ratedPlan(v, s)]; n != "" && !s.Catalog {
+			notes = append(notes, n)
+		}
+		cov.Note = strings.Join(notes, " ")
 		out = append(out, cov)
 	}
 	return out, nil
+}
+
+// keysNote says that the billable metrics that count a series' usage do not
+// group on some of the keys PRICING_KEYS prices its metric on, so no rate
+// can depend on them: the series is priced (or not) as if those keys were
+// not there. "" when they do, and when no billable metric counts the usage.
+func (a *Adapter) keysNote(v *pricingView, s destinations.PriceSeries) string {
+	def, ok := usage.Lookup(s.Metric)
+	if !ok || len(usage.ExtraPricingKeys(s.Metric)) == 0 {
+		return ""
+	}
+	ids, miss := a.billableMetrics(v, s, def)
+	if miss != nil {
+		return ""
+	}
+	var counting []BillableMetric
+	var names []string
+	for _, m := range v.byType[s.Metric] {
+		if slices.Contains(ids, m.ID) {
+			counting = append(counting, m)
+			names = append(names, strconv.Quote(m.Name))
+		}
+	}
+	keys := ungroupedKeys(counting, def)
+	if len(counting) == 0 || len(keys) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("PRICING_KEYS prices %s on %s, but billable metric %s does not group on it, so no rate can depend on it: "+
+		"add billable metric %q (vbilling metronome billable-metrics prints it) and move the rates to usage products on it",
+		s.Metric, strings.Join(keys, ", "), strings.Join(names, ", "), metricName(def))
+}
+
+// ratedPlan is the plan a series' usage is rated on: its own, or for a
+// series of a tenant this check read for the first time, that tenant's.
+func (a *Adapter) ratedPlan(v *pricingView, s destinations.PriceSeries) string {
+	if t, ok := strings.CutPrefix(s.Plan, aliasPlan); ok {
+		if tp, ok := v.tenants[t]; ok {
+			return tp.plan
+		}
+	}
+	return s.Plan
+}
+
+// resolveSettings maps, with METRONOME_PROVISION, every rate card setting in
+// use to the rate card it points to now: METRONOME_RATE_CARD, the tenants'
+// plans, and the plans of series that name a setting. A rate card ID is
+// itself; an alias takes the list of rate cards, read once per check.
+func (a *Adapter) resolveSettings(ctx context.Context, v *pricingView, series []destinations.PriceSeries) error {
+	if !a.provision() {
+		return nil
+	}
+	want := map[string]bool{}
+	if rc := a.cfg.MetronomeRateCard; rc != "" {
+		want[rc] = true
+	}
+	a.mu.Lock()
+	for _, p := range a.plans {
+		if p.setting != "" {
+			want[p.setting] = true
+		}
+	}
+	a.mu.Unlock()
+	for _, s := range series {
+		if s.Plan != "" && !strings.HasPrefix(s.Plan, aliasPlan) && !isCardPlan(s.Plan) {
+			want[s.Plan] = true
+		}
+	}
+	names := make([]string, 0, len(want))
+	for name := range want {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		id, err := a.resolveRateCard(ctx, v, name)
+		if err != nil {
+			return err
+		}
+		v.settings[name] = id
+	}
+	a.mu.Lock()
+	a.cards = maps.Clone(v.settings)
+	a.mu.Unlock()
+	return nil
 }
 
 // resolveRateCard maps a plan (rate card ID or alias) to a rate card ID, ""
@@ -461,17 +630,29 @@ func (a *Adapter) resolveRateCard(ctx context.Context, v *pricingView, plan stri
 	return "", nil
 }
 
-// target returns where a series is rated, without METRONOME_PROVISION.
-func (v *pricingView) target(s destinations.PriceSeries) target {
+// target returns where a series is rated.
+func (a *Adapter) target(v *pricingView, s destinations.PriceSeries) target {
 	switch {
 	case s.Plan == "":
 		return target{}
 	case strings.HasPrefix(s.Plan, aliasPlan):
-		tp := v.tenants[strings.TrimPrefix(s.Plan, aliasPlan)]
-		if len(tp.cards) == 0 {
-			return target{why: tp.why}
+		// A tenant whose contracts this check read (resolvePlans answers for
+		// every such series, or fails the check).
+		tp, ok := v.tenants[strings.TrimPrefix(s.Plan, aliasPlan)]
+		switch {
+		case !ok:
+			return target{why: "the tenant's customer and contracts have not been read yet", hint: "the next price check reads them"}
+		case len(tp.cards) == 0:
+			return target{why: tp.why, hint: tp.hint}
 		}
 		return target{cards: tp.cards}
+	case a.provision() && !isCardPlan(s.Plan):
+		// A rate card setting: the rate card it points to now.
+		if id := v.settings[s.Plan]; id != "" {
+			return target{cards: []string{id}}
+		}
+		return target{why: fmt.Sprintf("no Metronome rate card has the ID or alias %q", s.Plan),
+			hint: fmt.Sprintf("create rate card %q in Metronome, or fix METRONOME_RATE_CARD or the tenant's plan", s.Plan)}
 	default:
 		return target{cards: strings.Split(s.Plan, "+")}
 	}
@@ -479,9 +660,10 @@ func (v *pricingView) target(s destinations.PriceSeries) target {
 
 // resolvePlans reads, for the tenants this check answers for (their series'
 // plan is still aliasPlan) and for those last read planRefresh ago, the
-// customer that holds the tenant's alias and its active contracts. A failed
+// customer that gets the tenant's usage and its contracts in force. A failed
 // read of a tenant this check answers for fails the check; a failed refresh
-// keeps the last answer.
+// keeps the last answer. Every tenant that was read is kept either way, so a
+// check that fails on one tenant does not read the others again.
 func (a *Adapter) resolvePlans(ctx context.Context, v *pricingView, series []destinations.PriceSeries) error {
 	need := map[string]bool{}
 	for _, s := range series {
@@ -489,97 +671,387 @@ func (a *Adapter) resolvePlans(ctx context.Context, v *pricingView, series []des
 			need[t] = true
 		}
 	}
-	var refresh []string
+	type job struct {
+		tenant string
+		known  tenantPlan // the tenant's rate card setting and pinned customer
+	}
+	var jobs []job
 	a.mu.Lock()
 	for t, p := range a.plans {
-		if v.now.Sub(p.used) > planForget {
+		if v.now.Sub(p.used) > planForget && !need[t] {
 			delete(a.plans, t)
 			continue
 		}
-		if !need[t] && v.now.Sub(p.checked) >= planRefresh {
-			refresh = append(refresh, t)
+		if need[t] || v.now.Sub(p.checked) >= planRefresh {
+			jobs = append(jobs, job{t, tenantPlan{setting: p.setting, pinned: p.pinned}})
+		}
+	}
+	for t := range need {
+		if a.plans[t] == nil { // a series names a tenant PricePlan never answered for
+			var known tenantPlan
+			if a.provision() {
+				known.setting = a.cfg.MetronomeRateCard
+			}
+			jobs = append(jobs, job{t, known})
 		}
 	}
 	a.mu.Unlock()
-	tenants := make([]string, 0, len(need)+len(refresh))
-	for t := range need {
-		tenants = append(tenants, t)
-	}
-	sort.Strings(tenants)
-	sort.Strings(refresh)
-	tenants = append(tenants, refresh...)
-	if len(tenants) == 0 {
+	if len(jobs) == 0 {
 		return nil
 	}
+	sort.Slice(jobs, func(i, j int) bool {
+		if need[jobs[i].tenant] != need[jobs[j].tenant] {
+			return need[jobs[i].tenant]
+		}
+		return jobs[i].tenant < jobs[j].tenant
+	})
+	// A tenant that appeared since resolveSettings may have a rate card
+	// setting it did not see.
+	for _, j := range jobs {
+		name := j.known.setting
+		if _, ok := v.settings[name]; ok || name == "" {
+			continue
+		}
+		id, err := a.resolveRateCard(ctx, v, name)
+		if err != nil {
+			return err
+		}
+		v.settings[name] = id
+		a.mu.Lock()
+		a.cards[name] = id
+		a.mu.Unlock()
+	}
 
-	results := make([]tenantPlan, len(tenants))
-	errs := make([]error, len(tenants))
+	results := make([]tenantPlan, len(jobs))
+	errs := make([]error, len(jobs))
 	sem := make(chan struct{}, planWorkers)
 	var wg sync.WaitGroup
-	for i, t := range tenants {
+	for i, j := range jobs {
 		wg.Add(1)
 		sem <- struct{}{}
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
-			results[i], errs[i] = a.resolveTenant(ctx, t, v.now)
+			results[i], errs[i] = a.resolveTenant(ctx, v, j.tenant, j.known, v.now)
 		}()
 	}
 	wg.Wait()
 
+	var failed error
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	for i, t := range tenants {
+	for i, j := range jobs {
+		t := j.tenant
 		if errs[i] != nil {
-			if need[t] {
-				return fmt.Errorf("customer and contracts of tenant %s: %w", t, errs[i])
+			switch {
+			case !need[t]:
+				log.Printf("[metronome] could not read the contracts of tenant %s again (%v); keeping the last answer", t, errs[i])
+			case failed == nil:
+				failed = fmt.Errorf("customer and contracts of tenant %s: %w", t, errs[i])
 			}
-			log.Printf("[metronome] could not read the contracts of tenant %s again (%v); keeping the last answer", t, errs[i])
 			continue
 		}
 		r := results[i]
 		r.checked = v.now
-		if p := a.plans[t]; p != nil {
-			r.used = p.used
-		} else {
-			r.used = v.now
-		}
-		a.plans[t] = &r
 		v.tenants[t] = r
+		switch p := a.plans[t]; {
+		case p == nil:
+			r.used = v.now
+			a.plans[t] = &r
+		case p.setting == r.setting && p.pinned == r.pinned:
+			r.used, r.sig, r.state, r.movedLog = p.used, p.sig, p.state, p.movedLog
+			a.plans[t] = &r
+		}
+		// Otherwise the tenant's setting changed while it was read: this
+		// check answers with what it read, and the next one reads it again.
 	}
-	return nil
+	return failed
 }
 
-// resolveTenant finds the customer holding a tenant's alias and the rate
-// cards of its contracts in force at at.
-func (a *Adapter) resolveTenant(ctx context.Context, tenant string, at time.Time) (tenantPlan, error) {
-	cus, err := a.c.FindCustomerByAlias(ctx, tenant)
+// resolveTenant reads where a tenant's usage is rated at at: the customer
+// that gets it and the rate cards of that customer's contracts in force.
+func (a *Adapter) resolveTenant(ctx context.Context, v *pricingView, tenant string, known tenantPlan, at time.Time) (tenantPlan, error) {
+	out := tenantPlan{setting: known.setting, pinned: known.pinned, plan: aliasPlan + tenant}
+	if a.provision() && out.setting != "" {
+		if cur, _ := a.state.Get("contract-current/" + tenant); cur != out.setting {
+			// vBilling has yet to create the tenant's contract for this
+			// setting (a new tenant, or the setting changed): EnsureTenant
+			// does before the tenant's next usage is delivered or held.
+			return a.pendingContract(v, tenant, out), nil
+		}
+	}
+	cus, err := a.customerOf(ctx, tenant, out.pinned)
 	if err != nil {
-		return tenantPlan{}, err
+		return out, err
 	}
-	if cus == nil {
-		return tenantPlan{plan: aliasPlan + tenant, why: fmt.Sprintf("no customer for this alias yet: no Metronome customer has the ingest alias %q. "+
-			"Metronome keeps the usage and attributes it to the customer that gets the alias", tenant)}, nil
+	if out.customer = cus; cus == "" {
+		out.brief, out.why, out.hint = a.noCustomer(tenant, out.setting)
+		return out, nil
 	}
-	a.remember(tenant, cus.ID)
-	contracts, err := a.c.ContractsCovering(ctx, cus.ID, at)
+	contracts, err := a.c.ContractsCovering(ctx, cus, at)
+	if IsNotFound(err) {
+		// Metronome does not know the customer vBilling sends the tenant's
+		// usage to (any more). That is an answer about this tenant, not a
+		// check that failed: one such tenant must not stop the others from
+		// being checked.
+		out.brief = fmt.Sprintf("Metronome has no customer %s, so nothing rates its usage", cus)
+		out.why = fmt.Sprintf("Metronome has no customer %s, which gets the usage of tenant %q, so nothing rates this usage", cus, tenant)
+		out.hint = fmt.Sprintf("give the tenant a customer that exists: add the ingest alias %q to it", tenant)
+		if a.provision() {
+			out.hint = "pin the tenant to a customer that exists with vbilling.vcluster.com/metronome-customer-id"
+		}
+		return out, nil
+	}
 	if err != nil {
-		return tenantPlan{}, err
+		return out, err
 	}
-	var cards []string
 	for _, c := range contracts {
 		if c.ArchivedAt != "" || c.RateCardID == "" || parseTime(c.StartingAt).After(at) ||
-			(c.EndingBefore != "" && !parseTime(c.EndingBefore).After(at)) || slices.Contains(cards, c.RateCardID) {
+			(c.EndingBefore != "" && !parseTime(c.EndingBefore).After(at)) {
 			continue
 		}
-		cards = append(cards, c.RateCardID)
+		out.contracts = append(out.contracts, rated{c.ID, c.RateCardID})
+		if !slices.Contains(out.cards, c.RateCardID) {
+			out.cards = append(out.cards, c.RateCardID)
+		}
+		// vBilling's own contract for the tenant's setting: is it on the
+		// rate card the setting points to now?
+		if a.provision() && out.setting != "" && out.moved == nil && contractRateCard(c.UniquenessKey, tenant) == rateCardToken(out.setting) {
+			if now := v.settings[out.setting]; now != c.RateCardID {
+				out.moved = &moved{contract: c.ID, card: c.RateCardID, setting: out.setting, now: now}
+			}
+		}
 	}
-	sort.Strings(cards)
-	if len(cards) == 0 {
-		return tenantPlan{customer: cus.ID, plan: aliasPlan + tenant, why: fmt.Sprintf("customer %s (ingest alias %q) has no active contract with a rate card: "+
-			"Metronome rates its usage once a contract covers it", cus.ID, tenant)}, nil
+	if len(out.cards) == 0 {
+		out.brief, out.why, out.hint = a.noContract(tenant, cus, out.setting)
+		return out, nil
 	}
-	return tenantPlan{customer: cus.ID, cards: cards, plan: strings.Join(cards, "+")}, nil
+	sort.Strings(out.cards)
+	sort.Slice(out.contracts, func(i, j int) bool { return out.contracts[i].contract < out.contracts[j].contract })
+	out.plan = strings.Join(out.cards, "+")
+	return out, nil
+}
+
+// customerOf returns the customer that gets a tenant's usage, "" when there
+// is none: with METRONOME_PROVISION the customer vBilling is pinned to,
+// created or found (ToIngest sends its usage there), else the customer that
+// holds the tenant ID as ingest alias.
+func (a *Adapter) customerOf(ctx context.Context, tenant, pinned string) (string, error) {
+	if a.provision() {
+		if pinned != "" {
+			return pinned, nil
+		}
+		if id, ok := a.state.Get("cus/" + tenant); ok {
+			return id, nil
+		}
+	}
+	cus, err := a.c.FindCustomerByAlias(ctx, tenant)
+	if err != nil || cus == nil {
+		return "", err
+	}
+	a.remember(tenant, cus.ID)
+	return cus.ID, nil
+}
+
+// pendingContract answers for a tenant whose contract vBilling has yet to
+// create: its usage will be rated on the rate card its setting points to
+// now, unless that rate card does not exist or the contract could not be
+// created.
+func (a *Adapter) pendingContract(v *pricingView, tenant string, out tenantPlan) tenantPlan {
+	a.mu.Lock()
+	failed := a.failed[tenant]
+	a.mu.Unlock()
+	card := v.settings[out.setting]
+	switch {
+	case failed != "":
+		out.brief = fmt.Sprintf("vBilling could not create its customer or contract on rate card %q, so nothing rates its usage: %s", out.setting, failed)
+		out.why = fmt.Sprintf("vBilling could not create the customer or contract of tenant %q on rate card %q, so nothing rates this usage: %s", tenant, out.setting, failed)
+		out.hint = "fix what the error names: vBilling tries again when the tenant's next usage is delivered"
+	case card == "":
+		out.brief = fmt.Sprintf("no Metronome rate card has the ID or alias %q, so vBilling cannot create its contract and nothing rates its usage", out.setting)
+		out.why = fmt.Sprintf("no Metronome rate card has the ID or alias %q", out.setting)
+		out.hint = fmt.Sprintf("create rate card %q in Metronome, or fix METRONOME_RATE_CARD or the tenant's plan", out.setting)
+	default:
+		out.cards, out.pending, out.plan = []string{card}, true, card
+	}
+	return out
+}
+
+const provisionContractHint = "set METRONOME_RATE_CARD or the tenant's vbilling.vcluster.com/plan so vBilling creates a contract, or add one for the tenant's customer in Metronome"
+
+// noCustomer says why nothing rates the usage of a tenant no customer gets
+// (in a few words about the tenant, and in full about its usage), and what
+// to add.
+func (a *Adapter) noCustomer(tenant, setting string) (brief, why, hint string) {
+	switch {
+	case !a.provision():
+		return fmt.Sprintf("no Metronome customer has the ingest alias %q, so nothing rates its usage", tenant),
+			fmt.Sprintf("no customer for this alias yet: no Metronome customer has the ingest alias %q, so nothing rates this usage", tenant),
+			fmt.Sprintf("create a Metronome customer with the ingest alias %q (or add the alias to the tenant's customer), with a contract on a rate card that prices this usage", tenant)
+	case setting == "":
+		return "no rate card is configured for it and it has no Metronome customer yet, so nothing rates its usage",
+			fmt.Sprintf("no rate card is configured for tenant %q (METRONOME_RATE_CARD or the tenant's plan), so vBilling creates no contract and nothing rates this usage "+
+				"(vBilling creates the tenant's customer when its first usage is delivered)", tenant),
+			provisionContractHint
+	}
+	return "it has no Metronome customer, so nothing rates its usage",
+		fmt.Sprintf("tenant %q has no Metronome customer, so nothing rates this usage", tenant),
+		"vBilling creates the customer and its contract when the tenant's next usage is delivered: check the metronome destination's last error in GET /api/v1/destinations"
+}
+
+// noContract says why nothing rates the usage of a customer without a
+// contract in force that has a rate card, and what to add.
+func (a *Adapter) noContract(tenant, customer, setting string) (brief, why, hint string) {
+	switch {
+	case !a.provision():
+		return fmt.Sprintf("customer %s has no active contract with a rate card, so nothing rates its usage", customer),
+			fmt.Sprintf("customer %s (ingest alias %q) has no active contract with a rate card, so nothing rates this usage", customer, tenant),
+			fmt.Sprintf("add a contract for customer %s on a rate card that prices this usage, starting no later than the usage", customer)
+	case setting == "":
+		return fmt.Sprintf("customer %s has no active contract with a rate card and no rate card is configured for the tenant, so nothing rates its usage", customer),
+			fmt.Sprintf("customer %s of tenant %q has no active contract with a rate card, and no rate card is configured for the tenant "+
+				"(METRONOME_RATE_CARD or the tenant's plan), so vBilling creates none and nothing rates this usage", customer, tenant),
+			provisionContractHint
+	}
+	return fmt.Sprintf("customer %s has no active contract with a rate card (the one vBilling created on rate card %q is not in force any more), so nothing rates its usage", customer, setting),
+		fmt.Sprintf("customer %s of tenant %q has no active contract with a rate card: the contract vBilling created on rate card %q is not in force any more, "+
+			"so nothing rates this usage", customer, tenant, setting),
+		fmt.Sprintf("add a contract for customer %s in Metronome, or change the tenant's rate card setting (vbilling.vcluster.com/plan, else METRONOME_RATE_CARD): "+
+			"vBilling starts a new contract only when that setting changes", customer)
+}
+
+// noteTenants logs, once per change, where each tenant this check read is
+// rated (the customer, its contracts and their rate cards, by ID), and that a
+// rate card setting moved away from a tenant's contract. It also writes the
+// notes of the plans that have such tenants.
+func (a *Adapter) noteTenants(v *pricingView) {
+	var lines []string
+	a.mu.Lock()
+	tenants := make([]string, 0, len(v.tenants))
+	for t := range v.tenants {
+		tenants = append(tenants, t)
+	}
+	sort.Strings(tenants)
+	for _, t := range tenants {
+		p := a.plans[t]
+		if p == nil || !p.checked.Equal(v.now) {
+			continue // forgotten, or reset since it was read
+		}
+		if state, sig := a.describe(v, p); sig != p.sig {
+			line := fmt.Sprintf("[metronome] tenant %s: %s", t, state)
+			if p.state != "" {
+				line += " (before: " + p.state + ")"
+			}
+			lines = append(lines, line)
+			p.state, p.sig = state, sig
+		}
+		was := p.movedLog
+		p.movedLog = ""
+		if m := p.moved; m != nil {
+			p.movedLog = strings.Join([]string{m.contract, m.card, m.setting, m.now}, "|")
+		}
+		switch {
+		case p.movedLog != "" && p.movedLog != was:
+			lines = append(lines, fmt.Sprintf("[metronome] WARNING: tenant %s: %s", t, a.movedText(v, []string{t}, p.moved)))
+		case p.movedLog == "" && was != "" && len(p.cards) > 0 && !p.pending:
+			lines = append(lines, fmt.Sprintf("[metronome] tenant %s: its rate card setting %q points to the rate card of its contract again", t, p.setting))
+		}
+	}
+	// Notes are for every tenant whose setting moved, read by this check or not.
+	type group struct {
+		m       moved
+		tenants []string
+	}
+	groups := map[string]map[string]*group{} // plan -> setting and rate cards -> tenants
+	for t, p := range a.plans {
+		if p.moved == nil || len(p.cards) == 0 {
+			continue
+		}
+		k := strings.Join([]string{p.moved.card, p.moved.setting, p.moved.now}, "|")
+		if groups[p.plan] == nil {
+			groups[p.plan] = map[string]*group{}
+		}
+		g := groups[p.plan][k]
+		if g == nil {
+			g = &group{m: *p.moved}
+			groups[p.plan][k] = g
+		}
+		g.tenants = append(g.tenants, t)
+	}
+	for plan, byKey := range groups {
+		keys := make([]string, 0, len(byKey))
+		for k := range byKey {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		var parts []string
+		for _, k := range keys {
+			g := byKey[k]
+			sort.Strings(g.tenants)
+			m := g.m
+			if len(g.tenants) > 1 {
+				m.contract = "" // several contracts: the tenants name them
+			}
+			parts = append(parts, a.movedText(v, g.tenants, &m))
+		}
+		v.notes[plan] = strings.Join(parts, " ")
+	}
+	a.mu.Unlock()
+	for _, l := range lines {
+		log.Print(l)
+	}
+}
+
+// describe says in a few words where a tenant's usage is rated, with the IDs
+// Metronome holds, and returns those IDs as a signature. a.mu held.
+func (a *Adapter) describe(v *pricingView, p *tenantPlan) (state, sig string) {
+	switch {
+	case p.pending:
+		return fmt.Sprintf("no contract yet: vBilling creates one on rate card %s before the tenant's next usage is delivered", a.cardRef(v, p.cards[0])),
+			"pending|" + p.cards[0]
+	case len(p.cards) == 0:
+		return p.brief, "none|" + p.brief
+	}
+	parts := make([]string, len(p.contracts))
+	ids := make([]string, len(p.contracts))
+	for i, c := range p.contracts {
+		parts[i] = fmt.Sprintf("contract %s on rate card %s", c.contract, a.cardRef(v, c.card))
+		ids[i] = c.contract + "@" + c.card
+	}
+	return fmt.Sprintf("customer %s, usage rated on %s", p.customer, strings.Join(parts, " and ")),
+		"rated|" + p.customer + "|" + strings.Join(ids, ",")
+}
+
+// movedText says that a rate card setting points to another rate card than
+// the contracts of some tenants are on, which rate card rates their usage,
+// and when vBilling moves a tenant (ensureContract's rules).
+func (a *Adapter) movedText(v *pricingView, tenants []string, m *moved) string {
+	now := "no rate card"
+	if m.now != "" {
+		now = "rate card " + a.cardRef(v, m.now)
+	}
+	who := "the contract of tenant " + tenants[0]
+	switch {
+	case len(tenants) == 1 && m.contract != "":
+		who = fmt.Sprintf("contract %s of tenant %s", m.contract, tenants[0])
+	case len(tenants) > 1:
+		who = "the contracts of tenants " + strings.Join(firstNames(tenants, 3), ", ")
+	}
+	verb := "is"
+	if len(tenants) > 1 {
+		verb = "are"
+	}
+	return fmt.Sprintf("rate card setting %q points to %s now, but %s %s on rate card %s: Metronome keeps a contract on the rate card it was created on, "+
+		"so the usage is still rated on that rate card, and that is the one the price check reads. vBilling starts a new contract for a tenant only when the tenant's "+
+		"rate card setting changes (vbilling.vcluster.com/plan, else METRONOME_RATE_CARD): the new contract starts at 00:00 UTC of the day of the change, and the old one ends there",
+		m.setting, now, who, verb, a.cardRef(v, m.card))
+}
+
+func firstNames(l []string, n int) []string {
+	if len(l) <= n {
+		return l
+	}
+	return append(append([]string(nil), l[:n]...), fmt.Sprintf("and %d more", len(l)-n))
 }
 
 // summing returns the active billable metrics that sum the value property of
@@ -793,7 +1265,9 @@ func sqlMayCount(v *pricingView, detail string) *destinations.PriceCoverage {
 		return nil
 	}
 	return &destinations.PriceCoverage{Status: destinations.PriceUnknown,
-		Detail: fmt.Sprintf("%s, but SQL billable metric %q may count it: vBilling cannot check SQL billable metrics, so it never holds this usage", detail, v.sql[0].Name)}
+		Detail: fmt.Sprintf("%s, but SQL billable metric %q may count it: vBilling cannot check SQL billable metrics, so it never holds this usage", detail, v.sql[0].Name),
+		Hint: fmt.Sprintf("check in Metronome that SQL billable metric %q bills this usage at a rate, or add a billable metric that sums value for this event type "+
+			"(vbilling metronome billable-metrics prints it), which vBilling can check", v.sql[0].Name)}
 }
 
 // productsFor returns the usage products on the billable metrics that count a series.
@@ -813,16 +1287,39 @@ func (a *Adapter) productsFor(v *pricingView, s destinations.PriceSeries) []Prod
 	return out
 }
 
-// cardLabel names a rate card in messages: the plan in provisioning mode,
-// the rate card's name otherwise.
-func (a *Adapter) cardLabel(v *pricingView, plan, rcID string) string {
+// cardLabel names a rate card in details and hints the way the operator knows
+// it: with METRONOME_PROVISION the rate card setting that points to it now
+// (METRONOME_RATE_CARD first), else its name, else its ID.
+func (a *Adapter) cardLabel(v *pricingView, rcID string) string {
 	if a.provision() {
-		return planLabel(plan)
+		var names []string
+		for name, id := range v.settings {
+			if id == rcID && name != rcID {
+				names = append(names, name)
+			}
+		}
+		sort.Slice(names, func(i, j int) bool {
+			if def := a.cfg.MetronomeRateCard; (names[i] == def) != (names[j] == def) {
+				return names[i] == def
+			}
+			return names[i] < names[j]
+		})
+		if len(names) > 0 {
+			return strconv.Quote(names[0])
+		}
 	}
 	for _, rc := range v.cards {
 		if rc.ID == rcID && rc.Name != "" {
 			return strconv.Quote(rc.Name)
 		}
+	}
+	return rcID
+}
+
+// cardRef names a rate card in log lines and notes, always with its ID.
+func (a *Adapter) cardRef(v *pricingView, rcID string) string {
+	if label := a.cardLabel(v, rcID); label != rcID {
+		return label + " (" + rcID + ")"
 	}
 	return rcID
 }
@@ -834,22 +1331,19 @@ func (a *Adapter) coverage(v *pricingView, s destinations.PriceSeries, tg target
 	if !ok {
 		return destinations.PriceCoverage{Status: destinations.PriceUnknown, Detail: "metric is not in vBilling's catalog"}
 	}
-	if !a.provision() && len(v.byType[s.Metric]) == 0 {
-		// No billable metric counts the event type: its usage is held, for
-		// every tenant, customer or not.
-		_, miss := a.billableMetrics(v, s, def)
+	bmIDs, miss := a.billableMetrics(v, s, def)
+	if miss != nil && a.Uncounted(*miss) {
+		// No billable metric counts the event type: its usage is held in
+		// every mode, for every tenant, customer or not.
 		return *miss
 	}
-	if !a.provision() && strings.HasPrefix(s.Plan, aliasPlan) && len(tg.cards) == 0 {
-		// No customer or no contract yet: a warning, never a hold. Metronome
-		// keeps the usage and rates it once a customer and contract cover it.
-		why := tg.why
-		if why == "" {
-			why = "the tenant's customer and contracts have not been read yet"
-		}
-		return destinations.PriceCoverage{Status: destinations.PriceUnknown, Detail: why}
+	if len(tg.cards) == 0 && tg.why != "" {
+		// No customer gets the tenant's usage, or no contract of that
+		// customer is in force: nothing rates the usage, whatever the
+		// catalog holds. Unpriced, so PRICE_CHECK=hold holds it until the
+		// customer and contract exist.
+		return destinations.PriceCoverage{Status: destinations.PriceMissing, Detail: tg.why, Hint: tg.hint}
 	}
-	bmIDs, miss := a.billableMetrics(v, s, def)
 	if miss != nil {
 		return *miss
 	}
@@ -868,40 +1362,31 @@ func (a *Adapter) coverage(v *pricingView, s destinations.PriceSeries, tg target
 			labels = append(labels, fmt.Sprintf("%q (%s)", name, id))
 			names = append(names, strconv.Quote(name))
 		}
-		hint := fmt.Sprintf("create a usage product on billable metric %s and add its rate to rate card %s", names[0], planLabel(s.Plan))
-		if !a.provision() {
-			hint = fmt.Sprintf("create a usage product on billable metric %s and add its rate to the rate card of the tenant's contract", names[0])
+		where := "the rate card of the tenant's contract"
+		if len(tg.cards) == 1 {
+			where = "rate card " + a.cardLabel(v, tg.cards[0])
 		}
 		return destinations.PriceCoverage{
 			Status: destinations.PriceMissing,
 			Detail: fmt.Sprintf("no usage product meters billable metric %s", strings.Join(labels, " or ")),
-			Hint:   hint,
+			Hint:   fmt.Sprintf("create a usage product on billable metric %s and add its rate to %s", names[0], where),
 		}
 	}
 	names := productNames(prods)
 	if len(tg.cards) == 0 {
-		switch {
-		case tg.missing:
-			return destinations.PriceCoverage{
-				Status: destinations.PriceMissing,
-				Detail: fmt.Sprintf("no Metronome rate card has the ID or alias %q", s.Plan),
-				Hint:   fmt.Sprintf("create rate card %q in Metronome, or fix METRONOME_RATE_CARD or the tenant's plan", s.Plan),
-			}
-		case a.provision():
-			return destinations.PriceCoverage{
-				Status: destinations.PriceUnknown,
-				Detail: fmt.Sprintf("product %s meters it, but no rate card is configured (METRONOME_RATE_CARD or the tenant's plan), so vBilling cannot tell which rates apply", names),
-			}
-		default:
-			return destinations.PriceCoverage{
-				Status: destinations.PriceUnknown,
-				Detail: fmt.Sprintf("product %s meters it; rates are checked per tenant, on the rate cards of its customer's active contracts", names),
-			}
+		// The series names no tenant, so there is no contract to read a rate
+		// card from: the billable metrics without usage, where no default
+		// rate card exists.
+		detail := fmt.Sprintf("product %s meters it; rates are checked per tenant, on the rate cards of its customer's active contracts", names)
+		if a.provision() {
+			detail = fmt.Sprintf("product %s meters it, but no rate card is configured (METRONOME_RATE_CARD), so there is no default rate card to check: "+
+				"rates are checked per tenant, on the rate card of its contract", names)
 		}
+		return destinations.PriceCoverage{Status: destinations.PriceUnknown, Detail: detail}
 	}
 	var best destinations.PriceCoverage
 	for i, rc := range tg.cards {
-		c := a.cardCoverage(v, s, prods, names, rc, a.cardLabel(v, s.Plan, rc))
+		c := a.cardCoverage(v, s, prods, names, rc, a.cardLabel(v, rc))
 		if i == 0 || coverageRank[c.Status] > coverageRank[best.Status] {
 			best = c
 		}
@@ -992,9 +1477,12 @@ func (a *Adapter) cardCoverage(v *pricingView, s destinations.PriceSeries, prods
 		}
 	}
 	if len(wanted) == 0 {
+		keys := append([]string{"sku"}, a.PriceDims(s.Metric)...)
 		return destinations.PriceCoverage{
 			Status: destinations.PriceUnknown,
 			Detail: fmt.Sprintf("%s, which vBilling does not track per series: check its rates on rate card %s", strings.Join(untracked, "; "), label),
+			Hint: fmt.Sprintf("check by hand that rate card %s has a rate for every value this usage carries, or price the product only on keys vBilling checks for this metric (%s)",
+				label, strings.Join(keys, ", ")),
 		}
 	}
 	return destinations.PriceCoverage{
@@ -1002,13 +1490,6 @@ func (a *Adapter) cardCoverage(v *pricingView, s destinations.PriceSeries, prods
 		Detail: fmt.Sprintf("rate card %s has no rate for %s", label, strings.Join(wanted, " or ")),
 		Hint:   fmt.Sprintf("add a rate for %s to rate card %s", wanted[0], label),
 	}
-}
-
-func planLabel(plan string) string {
-	if plan == "" {
-		return "(none configured)"
-	}
-	return strconv.Quote(plan)
 }
 
 func productNames(ps []Product) string {

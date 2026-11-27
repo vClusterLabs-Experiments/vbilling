@@ -61,7 +61,9 @@ func (e *Enforcer) reflectSynced(ctx context.Context, cl discovery.TenantCluster
 			targets[n.Name] = true
 		}
 	}
-	blocked := e.opts.Mode == "enforce" && ts.State.blocks()
+	// Not while the cluster is restored after a pause: its pods come back
+	// before its suspension applies (restore.go).
+	blocked := e.enforced(id, ts.State)
 	var namespaces []string
 	for ns := range targets {
 		namespaces = append(namespaces, ns)

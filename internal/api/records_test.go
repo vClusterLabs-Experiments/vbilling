@@ -200,7 +200,7 @@ func TestRecordsWaitForTheFirstDiscovery(t *testing.T) {
 	}
 	// Discovery that never succeeds does not block ingest for good.
 	ctrl.ready = false
-	env.server.started = time.Now().Add(-recordsStartupGrace - time.Second)
+	env.server.started = time.Now().Add(-ingestStartupGrace - time.Second)
 	if code, body := postJSON(t, env.srv.URL+"/api/v1/records", "ingest-secret", strings.Replace(rec, "r1", "r2", 1)); code != http.StatusOK {
 		t.Fatalf("after the grace: %d %v", code, body)
 	}

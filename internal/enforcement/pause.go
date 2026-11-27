@@ -56,6 +56,18 @@ type pauseOutcome struct {
 	why string
 }
 
+// errLifted ends a pause pass whose tenant is no longer paused: the pass
+// stops before its next step, and the worker undoes what it did.
+var errLifted = errors.New("its tenant is no longer paused")
+
+// lifted reports whether a tenant is no longer paused. A pause pass asks
+// before every step that stops or changes something, and after every wait:
+// a hold lifted while a pause is under way ends the pause there, not after
+// the cluster's workloads and its control plane were stopped.
+func (e *Enforcer) lifted(tenant string) bool {
+	return e.StateOf(tenant).State != Paused
+}
+
 // pauseCluster pauses one cluster, in this order:
 //
 //  1. mark it paused (vbilling.vcluster.com/paused-by, -at, -replicas);
@@ -74,17 +86,28 @@ type pauseOutcome struct {
 // and Guard keeps down, but opens no span: the cluster's own nodes and
 // whatever survived keep billing, and the pause status says why.
 //
-// A drain the cluster's API refuses, or that cannot reach the API, keeps
-// the control plane up and is retried within 15 seconds: once stopped, it
-// could no longer stop the pods on the cluster's own nodes. After the
-// drain timeout of failures it is stopped anyway, unverified.
+// A drain that fails for a reason that can pass (the API cannot be
+// reached, a call times out or is throttled) keeps the control plane up and
+// is retried within 15 seconds: once stopped, it could no longer stop the
+// pods on the cluster's own nodes. After the drain timeout of failures it is
+// stopped anyway, unverified. A drain the cluster's API refuses vBilling
+// (Forbidden, Unauthorized) cannot pass by waiting: the control plane is
+// stopped at once, unverified, and the missing access is reported.
+//
+// The tenant's state is read again before every step that stops or changes
+// something (lifted): when the tenant is no longer paused the pass returns
+// errLifted, nothing more is stopped, no span opens, and the worker's next
+// pass undoes what this one did.
 //
 // Every step is idempotent: a cluster resumed by anything else is paused
 // again at the next pass.
-func (e *Enforcer) pauseCluster(ctx context.Context, cl discovery.TenantCluster, ts TenantState) (pauseOutcome, error) {
+func (e *Enforcer) pauseCluster(ctx context.Context, tenant string, cl discovery.TenantCluster, ts TenantState) (pauseOutcome, error) {
 	id := cl.ExternalID()
+	if e.lifted(tenant) {
+		return pauseOutcome{}, errLifted
+	}
 	if cl.External {
-		return e.pauseExternal(ctx, cl, ts)
+		return e.pauseExternal(ctx, tenant, cl, ts)
 	}
 	w, err := e.workload(ctx, cl)
 	if err != nil {
@@ -97,25 +120,36 @@ func (e *Enforcer) pauseCluster(ctx context.Context, cl discovery.TenantCluster,
 			// Paused by someone else (vcluster pause, an operator): keep it
 			// down. vBilling verified nothing of it, so it bills as a pause
 			// it only observed: everything but its control plane.
-			if _, err := e.stopSyncedPods(ctx, cl, false); err != nil {
+			if _, err := e.stopSyncedPods(ctx, tenant, cl, false); err != nil {
 				return pauseOutcome{}, err
 			}
 			return pauseOutcome{why: "paused outside vBilling: only its control plane stops billing"}, nil
 		}
-		return e.keepPaused(ctx, cl, w)
+		return e.keepPaused(ctx, tenant, cl, w)
 	}
 
 	// It runs: a new pause, or a paused cluster something brought back
 	// (scaled up by hand, woken by vCluster Platform). It bills from the
 	// last time vBilling saw it stopped.
 	e.endSpanAt(id, e.lastStopped(id))
+	e.notePausing(id, tenant, !ours)
 	if !ours {
 		if err := e.mark(ctx, cl, w.replicas); err != nil {
 			return pauseOutcome{}, fmt.Errorf("mark paused: %w", err)
 		}
 	}
-	own, err := e.drainOwn(ctx, cl, ts)
-	if err != nil {
+	own, err := e.drainOwn(ctx, tenant, cl, ts)
+	switch {
+	case errors.Is(err, errLifted):
+		return pauseOutcome{}, err
+	case refusedAccess(err):
+		// The cluster's API refuses vBilling: no retry drains it, so the
+		// cluster is not left running for the drain timeout. Its control
+		// plane stops now; what runs on its own nodes cannot be stopped and
+		// keeps billing.
+		e.noteAccess(cl, err)
+		own = ownCheck{noAccess: true, why: fmt.Sprintf("its own nodes could not be drained: its API refuses vBilling (%v)", err)}
+	case err != nil:
 		if e.keepTrying(id) {
 			// It still runs, so it bills; without the mark it also looks
 			// like what it is, and Guard marks it again at the retry.
@@ -125,8 +159,13 @@ func (e *Enforcer) pauseCluster(ctx context.Context, cl discovery.TenantCluster,
 			return pauseOutcome{}, fmt.Errorf("drain its own nodes (retried within 15 seconds; the cluster keeps running and billing, and its control plane is stopped anyway after %s of failures): %w", e.drainTimeout(), err)
 		}
 		own = ownCheck{noAccess: true, why: fmt.Sprintf("its own nodes could not be drained for %s (%v)", e.drainTimeout(), err)}
+	default:
+		e.noteAccess(cl, nil)
 	}
 	e.clearFailing(id)
+	if e.lifted(tenant) {
+		return pauseOutcome{}, errLifted
+	}
 	if e.opts.Freeze != nil {
 		if err := e.opts.Freeze(ctx, cl); err != nil {
 			log.Printf("[enforcement] %s: save inventory before pause: %v", id, err)
@@ -140,6 +179,9 @@ func (e *Enforcer) pauseCluster(ctx context.Context, cl discovery.TenantCluster,
 			own.why = why
 		}
 	}
+	if e.lifted(tenant) {
+		return pauseOutcome{}, errLifted // before the control plane stops
+	}
 	if err := e.patchWorkload(ctx, cl, map[string]any{"spec": map[string]any{"replicas": 0}}); err != nil {
 		return pauseOutcome{}, fmt.Errorf("scale control plane down: %w", err)
 	}
@@ -152,13 +194,19 @@ func (e *Enforcer) pauseCluster(ctx context.Context, cl discovery.TenantCluster,
 		e.opts.OnPause(id, true)
 	}
 	e.opts.Telemetry.Add("vbilling_clusters_paused_total", "Clusters vBilling paused.", nil, 1)
-	synced, serr := e.stopSyncedPods(ctx, cl, true)
+	synced, serr := e.stopSyncedPods(ctx, tenant, cl, true)
+	if errors.Is(serr, errLifted) {
+		return pauseOutcome{}, serr
+	}
 	// The cluster's own nodes are watched while its control plane stops
 	// even when its synced pods could not be stopped: a later pass stops
 	// those, but only this one can see the API go away.
 	down := false
 	if own.ok {
-		own, down = e.confirmStopped(ctx, cl, own, true, true)
+		own, down = e.confirmStopped(ctx, tenant, cl, own, true, true)
+	}
+	if e.lifted(tenant) {
+		return pauseOutcome{}, errLifted // nothing is recorded as paused
 	}
 	e.setOwnChecked(id, own)
 	if serr != nil {
@@ -184,9 +232,10 @@ func (e *Enforcer) pauseCluster(ctx context.Context, cl discovery.TenantCluster,
 // A span an older version opened (v0.3.0, at its mark, before its drain and
 // whatever the drain left running) verified nothing: it ends now, and the
 // pause is verified afresh, or keeps billing.
-func (e *Enforcer) keepPaused(ctx context.Context, cl discovery.TenantCluster, w workloadState) (pauseOutcome, error) {
+func (e *Enforcer) keepPaused(ctx context.Context, tenant string, cl discovery.TenantCluster, w workloadState) (pauseOutcome, error) {
 	id := cl.ExternalID()
-	left, err := e.stopSyncedPods(ctx, cl, false)
+	e.notePausing(id, tenant, false)
+	left, err := e.stopSyncedPods(ctx, tenant, cl, false)
 	if err != nil {
 		return pauseOutcome{}, err
 	}
@@ -209,8 +258,14 @@ func (e *Enforcer) keepPaused(ctx context.Context, cl discovery.TenantCluster, w
 		// An earlier pass found its own nodes empty but did not see the
 		// API go away: watch it again. A pause verified now bills until
 		// now (verdict opens its span at this pass).
-		own, down = e.confirmStopped(ctx, cl, own, own.watch == watchResume, false)
+		own, down = e.confirmStopped(ctx, tenant, cl, own, own.watch == watchResume, false)
+		if e.lifted(tenant) {
+			return pauseOutcome{}, errLifted
+		}
 		e.setOwnChecked(id, own)
+	}
+	if e.lifted(tenant) {
+		return pauseOutcome{}, errLifted // no span opens for a tenant that is no longer paused
 	}
 	out := e.verdict(id, own, left, down)
 	if !out.verified && e.openedByOlder(id) {
@@ -281,7 +336,7 @@ const (
 // drain failed (its API refused a call or could not be reached, or the
 // pause admission policy could not be installed, or was changed during the
 // drain) and may succeed if retried.
-func (e *Enforcer) drainOwn(ctx context.Context, cl discovery.TenantCluster, ts TenantState) (ownCheck, error) {
+func (e *Enforcer) drainOwn(ctx context.Context, tenant string, cl discovery.TenantCluster, ts TenantState) (ownCheck, error) {
 	if e.opts.TenantClient == nil {
 		return ownCheck{noAccess: true}, nil
 	}
@@ -294,16 +349,19 @@ func (e *Enforcer) drainOwn(ctx context.Context, cl discovery.TenantCluster, ts 
 		// either, so nothing on its own nodes is billed.
 		return ownCheck{ok: true}, nil
 	}
+	if e.lifted(tenant) {
+		return ownCheck{}, errLifted
+	}
 	// No pod may start from here on, in any namespace: the drain then
 	// converges, and a pod that starts after the last check below needs the
 	// policy removed first, which that check sees.
-	if err := e.pausePolicy(ctx, kube); err != nil {
+	if err := e.pausePolicy(ctx, kube, cl, tenant); err != nil {
 		return ownCheck{}, fmt.Errorf("install the pause admission policy %s: %w", PausedPolicyName, err)
 	}
-	if err := e.policyInside(ctx, kube, ts); err != nil {
+	if _, err := e.policyInside(ctx, kube, cl, ts); err != nil {
 		log.Printf("[enforcement] %s: admission policy before pause: %v", cl.ExternalID(), err)
 	}
-	d, err := e.drain(ctx, kube, cl, false)
+	d, err := e.drain(ctx, kube, tenant, cl, false)
 	if err != nil {
 		return ownCheck{}, err
 	}
@@ -388,12 +446,21 @@ func (e *Enforcer) ownSinceRestart(ctx context.Context, cl discovery.TenantClust
 // patient keeps looking through calls that say nothing until the deadline
 // (the pass that stops the control plane); otherwise the first one ends the
 // watch, and the next pass (Guard, every 15 seconds) looks again.
-func (e *Enforcer) confirmStopped(ctx context.Context, cl discovery.TenantCluster, own ownCheck, clean, patient bool) (ownCheck, bool) {
+//
+// The watch ends as soon as the tenant is no longer paused (lifted): what it
+// had established does not count, and the caller ends the pass.
+func (e *Enforcer) confirmStopped(ctx context.Context, tenant string, cl discovery.TenantCluster, own ownCheck, clean, patient bool) (ownCheck, bool) {
 	deadline := time.Now().Add(e.drainTimeout())
 	every := min(time.Second, e.drainTimeout()/10+time.Millisecond)
 	answered := false // the last call that reached the API found the own nodes empty
 	var silent error  // the last call that said nothing
 	for {
+		if e.lifted(tenant) {
+			if own.list == nil {
+				return own, false
+			}
+			return own.unfinished(clean, answered, false, errLifted), false
+		}
 		w, err := e.workload(ctx, cl)
 		down := err == nil && w.down()
 		if err != nil {
@@ -579,7 +646,7 @@ func apiGone(err error) bool {
 // removed or changed (a cluster admin inside can undo it, start something
 // and put it back), ends it at the last pass that found neither, and a
 // failed pass drops what it cannot vouch for.
-func (e *Enforcer) pauseExternal(ctx context.Context, cl discovery.TenantCluster, ts TenantState) (pauseOutcome, error) {
+func (e *Enforcer) pauseExternal(ctx context.Context, tenant string, cl discovery.TenantCluster, ts TenantState) (pauseOutcome, error) {
 	id := cl.ExternalID()
 	fail := func(why string, err error) (pauseOutcome, error) {
 		e.endSpanAt(id, e.lastVerified(id))
@@ -597,20 +664,35 @@ func (e *Enforcer) pauseExternal(ctx context.Context, cl discovery.TenantCluster
 	}
 	changed, err := pausePolicyChanged(ctx, kube)
 	if err != nil {
+		e.noteAccess(cl, err)
 		return fail("", fmt.Errorf("read the pause admission policy: %w", err))
 	}
-	if err := e.pausePolicy(ctx, kube); err != nil {
+	if e.lifted(tenant) {
+		return pauseOutcome{}, errLifted
+	}
+	// A span of vBilling's that is open says this pause began earlier.
+	sp, under := e.currentSpan(id)
+	e.notePausing(id, tenant, !(under && sp.By != pause.ByExternal))
+	if err := e.pausePolicy(ctx, kube, cl, tenant); err != nil {
+		e.noteAccess(cl, err)
 		return fail("", fmt.Errorf("install the pause admission policy %s: %w", PausedPolicyName, err))
 	}
-	if err := e.policyInside(ctx, kube, ts); err != nil {
+	if _, err := e.policyInside(ctx, kube, cl, ts); err != nil {
 		log.Printf("[enforcement] %s: admission policy: %v", id, err)
 	}
-	d, err := e.drain(ctx, kube, cl, true)
+	d, err := e.drain(ctx, kube, tenant, cl, true)
+	if errors.Is(err, errLifted) {
+		return pauseOutcome{}, err
+	}
+	e.noteAccess(cl, err)
 	if err != nil {
 		return fail("", fmt.Errorf("drain its nodes: %w", err))
 	}
 	if len(d.left) > 0 {
 		return fail(stillThere(d.left, "still on its nodes after the drain"), nil)
+	}
+	if e.lifted(tenant) {
+		return pauseOutcome{}, errLifted // no span opens for a tenant that is no longer paused
 	}
 	if !d.clean || changed != "" {
 		// Something ran since the last pass, or could have (the policy was
@@ -796,35 +878,66 @@ func (e *Enforcer) forget(id string) {
 	delete(e.older, id)
 }
 
-// resumeCluster resumes a cluster vBilling paused. Clusters paused by
-// anyone else are left alone. It reports whether it scaled a control plane
-// back up; the rest (lifting the taint, the admission policy) follows once
-// that control plane answers.
-func (e *Enforcer) resumeCluster(ctx context.Context, cl discovery.TenantCluster, ts TenantState) (bool, error) {
+// resumeCluster lifts vBilling's pause from a cluster whose tenant is no
+// longer paused. Clusters paused by anyone else are left alone. ours
+// reports whether the cluster carried a pause of vBilling's, finished or
+// not; scaled, whether it scaled a control plane back up, whose API then
+// takes a moment to answer. The rest (lifting the taint, the admission
+// policy) follows in finishResume.
+//
+// A pause that is lifted while the tenant stays suspended is not followed
+// by the suspension at once: the cluster is restored first (beginRestore,
+// recorded before anything is scaled up, so a restart in between does not
+// lose it). Only vBilling's own record of the pause, in its store, starts a
+// restore. The pause mark on the control plane does not: whoever writes
+// vcluster.yaml writes that mark, and a mark planted on a running cluster
+// would otherwise hold a suspension back, again and again.
+func (e *Enforcer) resumeCluster(ctx context.Context, tenant string, cl discovery.TenantCluster, ts TenantState) (ours, scaled bool, err error) {
 	id := cl.ExternalID()
+	hold := func() {
+		if e.opts.Mode == "enforce" && ts.State.blocks() && e.hasRecord(id) {
+			e.beginRestore(id, tenant)
+		}
+	}
 	if cl.External {
-		if sp, open := e.currentSpan(id); open && sp.By != pause.ByExternal {
+		sp, open := e.currentSpan(id)
+		open = open && sp.By != pause.ByExternal
+		if ours = open || e.hasRecord(id); ours {
+			hold()
+		}
+		if open {
 			if _, err := e.opts.Pauses.End(id, e.opts.Now().UTC()); err != nil {
 				log.Printf("[enforcement] %s: record resume: %v", id, err)
 			}
 		}
 		e.forget(id)
-		return false, nil // reflectInside lifts the taint
+		return ours, false, nil // finishResume lifts the policy and the taint
 	}
 	w, err := e.workload(ctx, cl)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	if w.ann[discovery.AnnotationPausedBy] != pause.ByVBilling {
-		return false, nil
+		// No mark. A pause of vBilling's whose drain failed lifted its mark
+		// for the retry, and may have left its policy, its taint and deleted
+		// pods behind: its record says so. A control plane that is down now
+		// was stopped by someone else, and is theirs to start.
+		if !e.hasRecord(id) || cl.Paused {
+			return false, false, nil
+		}
+		hold()
+		e.forget(id)
+		return true, false, nil
 	}
 	replicas, err := strconv.Atoi(w.ann[discovery.AnnotationPausedReplicas])
 	if err != nil || replicas < 1 {
 		replicas = 1
 	}
-	if w.replicas > 0 {
-		replicas = w.replicas // already scaled back up by someone else: keep that
+	scaled = w.replicas == 0
+	if !scaled {
+		replicas = w.replicas // it runs (the pause never stopped it, or someone scaled it back up): keep that
 	}
+	hold()
 	now := e.opts.Now().UTC()
 	if err := e.patchWorkload(ctx, cl, map[string]any{
 		"metadata": map[string]any{"annotations": map[string]any{
@@ -832,7 +945,7 @@ func (e *Enforcer) resumeCluster(ctx context.Context, cl discovery.TenantCluster
 		}},
 		"spec": map[string]any{"replicas": replicas},
 	}); err != nil {
-		return false, fmt.Errorf("scale control plane up: %w", err)
+		return false, false, fmt.Errorf("scale control plane up: %w", err)
 	}
 	if e.opts.Pauses != nil {
 		if _, err := e.opts.Pauses.End(id, now); err != nil {
@@ -846,36 +959,105 @@ func (e *Enforcer) resumeCluster(ctx context.Context, cl discovery.TenantCluster
 		e.opts.OnPause(id, false)
 	}
 	e.forget(id)
+	if !scaled {
+		log.Printf("[enforcement] %s: its control plane runs (%d replica(s)): the pause mark is lifted", id, replicas)
+		return true, false, nil
+	}
 	log.Printf("[enforcement] %s: resumed (%d control plane replica(s))", id, replicas)
 	e.opts.Telemetry.Add("vbilling_clusters_resumed_total", "Clusters vBilling resumed.", nil, 1)
-	return true, nil
+	return true, true, nil
 }
 
-// finishResume waits for a resumed cluster's API, then lifts the pause
-// taint from its own nodes and sets the admission policy for its tenant's
-// current state. Resync does the same every few minutes if this gives up.
-func (e *Enforcer) finishResume(ctx context.Context, tenant string, cl discovery.TenantCluster) error {
-	ctx, cancel := context.WithTimeout(ctx, e.resumeTimeout)
+// finishResume completes lifting a pause: it waits for the cluster's API (a
+// control plane that was scaled back up takes a moment to answer), lifts
+// the pause policy and the taint from its own nodes, and sets the admission
+// policy its tenant's state asks for. A cluster whose tenant stays
+// suspended is restored first, and suspended after (awaitRestore). Resync
+// does the same every two minutes if this gives up.
+func (e *Enforcer) finishResume(ctx context.Context, tenant string, cl discovery.TenantCluster, scaled bool) error {
+	id := cl.ExternalID()
+	wait, cancel := context.WithTimeout(ctx, e.resumeTimeout)
 	defer cancel()
 	tick := time.NewTicker(e.resumeEvery)
 	defer tick.Stop()
 	cl.Paused = false
+	relabeled := false
 	for {
 		ts := e.StateOf(tenant)
 		if ts.State == Paused {
 			return nil // paused again meanwhile: the worker loops
 		}
-		err := e.reflectInside(ctx, cl, ts)
+		restoring := e.restoring(id)
+		if restoring && !relabeled {
+			// Its namespaces on the control plane cluster lose the
+			// suspended label for the restore, so its synced pods come back.
+			if err := e.reflect(wait, cl, ts, false); err != nil {
+				log.Printf("[enforcement] %s: lift the suspended label for the restore: %v", id, err)
+			} else {
+				relabeled = true
+			}
+		}
+		err := e.liftInside(wait, cl, ts, restoring)
 		if err == nil {
-			log.Printf("[enforcement] %s: workloads can run again", cl.ExternalID())
-			return nil
+			break
+		}
+		if !scaled {
+			return err // its API did not stop: resync retries
 		}
 		select {
-		case <-ctx.Done():
+		case <-wait.Done():
 			return fmt.Errorf("resumed control plane not reachable yet (%v); resync retries", err)
 		case <-tick.C:
 		}
 	}
+	ts := e.StateOf(tenant)
+	switch {
+	case ts.State == Paused:
+		return nil
+	case e.restoring(id):
+		return e.awaitRestore(ctx, tenant, cl)
+	}
+	e.dropRecord(id)
+	if ts.State.blocks() {
+		// Suspended, with no restore left to wait for: the suspension is in
+		// place. "Workloads can run again" would be wrong here.
+		log.Printf("[enforcement] %s: its pause is lifted; its tenant is %s (%s), so new pods stay blocked", id, ts.State, ts.Reason)
+		return nil
+	}
+	log.Printf("[enforcement] %s: workloads can run again", id)
+	return nil
+}
+
+// liftInside does what a cluster needs inside it once its pause is lifted
+// (reflectWith). Without a connection to its API (no credentials for it,
+// or ENFORCEMENT_IN_CLUSTER off) there is nothing to lift: a cluster that is
+// being restored then counts as able to start pods once its control plane
+// is ready.
+func (e *Enforcer) liftInside(ctx context.Context, cl discovery.TenantCluster, ts TenantState, restoring bool) error {
+	var kube kubernetes.Interface
+	if e.opts.TenantClient != nil {
+		k, err := e.opts.TenantClient(ctx, cl)
+		if err != nil {
+			return err
+		}
+		kube = k
+	}
+	if kube != nil {
+		err := e.reflectWith(ctx, kube, cl, ts)
+		e.noteAccess(cl, err)
+		return err
+	}
+	if restoring && !cl.External {
+		w, err := e.workload(ctx, cl)
+		if err != nil {
+			return err
+		}
+		if w.ready == 0 {
+			return errors.New("its control plane is not ready yet")
+		}
+		e.restoreLifted(cl.ExternalID())
+	}
+	return nil
 }
 
 // PauseStatus is the progress of pausing or resuming one cluster.
@@ -891,6 +1073,11 @@ type PauseStatus struct {
 	Unverified string    `json:"unverified,omitempty"`
 	Error      string    `json:"error,omitempty"`
 	At         time.Time `json:"at"`
+	// RestoringUntil is set while the cluster is restored after its pause
+	// was lifted and its tenant stays suspended: the suspension is applied
+	// once the workloads its pause stopped are back, at this time at the
+	// latest.
+	RestoringUntil *time.Time `json:"restoring_until,omitempty"`
 }
 
 type worker struct{ running, dirty bool }
@@ -934,16 +1121,28 @@ func (e *Enforcer) kick(tenant string, cl discovery.TenantCluster) {
 func (e *Enforcer) work(tenant string, cl discovery.TenantCluster) {
 	id := cl.ExternalID()
 	// A pause drains, stops synced pods and confirms the stop, each bounded
-	// by the drain timeout.
-	ctx, cancel := context.WithTimeout(context.Background(), 4*e.drainTimeout()+e.resumeTimeout+time.Minute)
+	// by the drain timeout; a resume waits for the control plane, and for a
+	// restore.
+	ctx, cancel := context.WithTimeout(context.Background(), 4*e.drainTimeout()+e.resumeTimeout+e.restoreTimeout+time.Minute)
 	defer cancel()
 	ts := e.StateOf(tenant)
 	var err error
 	if ts.State == Paused {
 		e.setStatus(id, tenant, "pausing", nil)
 		var out pauseOutcome
-		if out, err = e.pauseCluster(ctx, cl, ts); err == nil {
+		out, err = e.pauseCluster(ctx, tenant, cl, ts)
+		switch {
+		case err == nil:
 			e.setPaused(id, tenant, out)
+			return
+		case errors.Is(err, errLifted):
+			// The hold was lifted while this pass ran. It stopped where it
+			// was; the next pass, which runs at once, finds the tenant no
+			// longer paused and undoes what this one did: the pause mark,
+			// the pause policy, the taint, and the control plane's scale if
+			// it had been stopped.
+			log.Printf("[enforcement] %s: its tenant is no longer paused: the pause stops here, and what it changed is undone", id)
+			e.again(id)
 			return
 		}
 		// The pass failed: the status shows only what still holds.
@@ -953,25 +1152,62 @@ func (e *Enforcer) work(tenant string, cl discovery.TenantCluster) {
 		st.Verified = open && sp.Verified()
 		e.status[id] = st
 		e.wmu.Unlock()
-	} else {
-		var resumed bool
-		resumed, err = e.resumeCluster(ctx, cl, ts)
-		if err == nil && resumed {
-			e.setStatus(id, tenant, "resuming", nil)
-			if e.opts.TenantClient != nil {
-				err = e.finishResume(ctx, tenant, cl)
-			}
-		} else if err == nil && e.opts.TenantClient != nil && !cl.Paused {
-			err = e.reflectInside(ctx, cl, ts)
-		}
-		if err == nil {
-			e.setStatus(id, tenant, "running", nil)
-			return
-		}
+	} else if err = e.resume(ctx, tenant, cl, ts); err == nil {
+		return
 	}
 	if e.setStatus(id, tenant, "", err) {
 		log.Printf("[enforcement] %s: %v", id, err) // once per distinct error, not every pass
 	}
+}
+
+// resume lifts vBilling's pause from a cluster whose tenant is no longer
+// paused, and sets what the tenant's state asks for instead.
+func (e *Enforcer) resume(ctx context.Context, tenant string, cl discovery.TenantCluster, ts TenantState) error {
+	id := cl.ExternalID()
+	ours, scaled, err := e.resumeCluster(ctx, tenant, cl, ts)
+	if err != nil {
+		return err
+	}
+	if !ours {
+		// Nothing of vBilling's to lift. A control plane that is down was
+		// stopped by someone else: its API does not answer.
+		if e.opts.TenantClient != nil && !cl.Paused {
+			if err := e.reflectInside(ctx, cl, ts); err != nil {
+				return err
+			}
+		}
+		e.setStatus(id, tenant, "running", nil)
+		return nil
+	}
+	e.setStatus(id, tenant, "resuming", nil)
+	if e.opts.TenantClient != nil || e.restoring(id) {
+		if err := e.finishResume(ctx, tenant, cl, scaled); err != nil {
+			return err
+		}
+	} else {
+		e.dropRecord(id)
+	}
+	e.setStatus(id, tenant, "running", nil)
+	return nil
+}
+
+// again makes a cluster's worker run one more pass when the current one
+// ends.
+func (e *Enforcer) again(id string) {
+	e.wmu.Lock()
+	defer e.wmu.Unlock()
+	if w := e.workers[id]; w != nil {
+		w.dirty = true
+	}
+}
+
+// working reports whether a cluster's worker is in a pass: its pause, or
+// the lifting of it, is in progress.
+func (e *Enforcer) working(id string) bool {
+	e.wmu.Lock()
+	defer e.wmu.Unlock()
+	w := e.workers[id]
+	return w != nil && w.running
 }
 
 // setStatus records a cluster's phase (unchanged when empty) and error, and
@@ -996,10 +1232,10 @@ func (e *Enforcer) setStatus(id, tenant, phase string, err error) bool {
 	return st.Error != prev
 }
 
-// setPaused records how far a pause got.
+// setPaused records how far a pause got, and reports a pause that could not
+// be verified (reportPauses).
 func (e *Enforcer) setPaused(id, tenant string, out pauseOutcome) {
 	e.wmu.Lock()
-	defer e.wmu.Unlock()
 	st := e.status[id]
 	st.Cluster, st.Tenant, st.At = id, tenant, e.opts.Now().UTC()
 	st.Phase, st.Error = "paused", ""
@@ -1008,31 +1244,38 @@ func (e *Enforcer) setPaused(id, tenant string, out pauseOutcome) {
 		st.Unverified = ""
 	}
 	e.status[id] = st
+	e.wmu.Unlock()
+	e.reportPauses()
 }
 
 // Pauses returns the pause progress of clusters vBilling paused or resumed.
+// A cluster that was deleted is dropped from it (dropGone).
 func (e *Enforcer) Pauses() []PauseStatus {
 	e.wmu.Lock()
-	defer e.wmu.Unlock()
 	out := make([]PauseStatus, 0, len(e.status))
 	for _, st := range e.status {
 		out = append(out, st)
+	}
+	e.wmu.Unlock()
+	for i := range out {
+		if until := e.restoreUntil(out[i].Cluster); !until.IsZero() {
+			out[i].RestoringUntil = &until
+		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Cluster < out[j].Cluster })
 	return out
 }
 
-// needsWorker reports whether a cluster has a pause to make or undo.
+// needsWorker reports whether a cluster has a pause to make or undo: its
+// tenant is paused, a pass is running, or it carries a pause of vBilling's
+// (its mark, an open span of an external cluster, or the record of a pause
+// that began or of a restore that is not over).
 func (e *Enforcer) needsWorker(ctx context.Context, cl discovery.TenantCluster, ts TenantState) bool {
 	if ts.State == Paused {
 		return true
 	}
 	id := cl.ExternalID()
-	e.wmu.Lock()
-	w := e.workers[id]
-	busy := w != nil && w.running
-	e.wmu.Unlock()
-	if busy {
+	if e.working(id) || e.hasRecord(id) {
 		return true
 	}
 	if cl.External {
@@ -1057,7 +1300,14 @@ func (e *Enforcer) drainTimeout() time.Duration {
 // stopped cluster whose API was not seen to go away yet. It is cheap (one
 // read per cluster of a paused tenant) and runs every few seconds; Resync
 // covers the rest.
+//
+// A cluster whose worker is in a pass is left to it: while its pause is
+// still draining, its control plane runs, and that is not a cluster that
+// came back.
+//
+// In every mode it also keeps what vBilling shows in step (housekeep).
 func (e *Enforcer) Guard(ctx context.Context) {
+	e.housekeep(ctx)
 	if e.opts.Mode != "enforce" || e.kube == nil || e.opts.Clusters == nil {
 		return
 	}
@@ -1066,8 +1316,11 @@ func (e *Enforcer) Guard(ctx context.Context) {
 			continue
 		}
 		for _, cl := range e.opts.Clusters(ts.Tenant) {
+			id := cl.ExternalID()
 			if cl.External {
-				e.kick(ts.Tenant, cl)
+				if !e.working(id) {
+					e.kick(ts.Tenant, cl)
+				}
 				continue
 			}
 			w, err := e.workload(ctx, cl)
@@ -1075,18 +1328,32 @@ func (e *Enforcer) Guard(ctx context.Context) {
 				continue
 			}
 			if w.replicas == 0 {
-				e.sawStopped(cl.ExternalID())
-				if e.watching(cl.ExternalID()) {
-					e.kick(ts.Tenant, cl) // a pause to verify yet: see whether its API went away
-					continue
-				}
+				e.sawStopped(id)
 			}
-			if w.replicas > 0 || w.ann[discovery.AnnotationPausedBy] != pause.ByVBilling && w.ann[annPaused] != "true" {
-				log.Printf("[enforcement] %s: running while its tenant is paused, pausing it again", cl.ExternalID())
+			if e.working(id) {
+				continue // its pause is in progress
+			}
+			switch ours := w.ann[discovery.AnnotationPausedBy] == pause.ByVBilling; {
+			case w.replicas > 0:
+				log.Printf("[enforcement] %s: running while its tenant is paused, pausing it again", id)
 				e.kick(ts.Tenant, cl)
+			case e.watching(id):
+				e.kick(ts.Tenant, cl) // a pause to verify yet: see whether its API went away
+			case !ours && w.ann[annPaused] != "true":
+				e.kick(ts.Tenant, cl) // stopped by someone else, without a mark: its synced pods stop too
 			}
 		}
 	}
+}
+
+// housekeep keeps what vBilling shows in step with what exists, in every
+// mode: the billing state metric has a series per tenant, a cluster that
+// was deleted loses its pause entry, and a restore a restart interrupted
+// goes on.
+func (e *Enforcer) housekeep(ctx context.Context) {
+	e.syncStateMetric()
+	e.dropGone(ctx)
+	e.finishRestores()
 }
 
 // Wait waits for background pauses and resumes to finish (tests, shutdown).
@@ -1107,7 +1374,7 @@ type drained struct {
 // (shared and dedicated nodes, whose pods are the synced ones) are left
 // alone. The node rules are metering's: a node vBilling bills as the
 // cluster's own is one the drain empties.
-func (e *Enforcer) drain(ctx context.Context, kube kubernetes.Interface, cl discovery.TenantCluster, external bool) (drained, error) {
+func (e *Enforcer) drain(ctx context.Context, kube kubernetes.Interface, tenant string, cl discovery.TenantCluster, external bool) (drained, error) {
 	// Which nodes are the cluster's own is decided as metering decides it
 	// (internal/metrics hostViews), never by a node's labels: the tenant
 	// writes those, and a node the drain skipped would run unbilled. A node
@@ -1163,6 +1430,9 @@ func (e *Enforcer) drain(ctx context.Context, kube kubernetes.Interface, cl disc
 		if hasTaint(n, TaintPaused) {
 			continue
 		}
+		if e.lifted(tenant) {
+			return drained{}, errLifted
+		}
 		if err := e.updateNode(ctx, kube, n.Name, func(n *corev1.Node) bool {
 			if hasTaint(n, TaintPaused) {
 				return false
@@ -1207,7 +1477,10 @@ func (e *Enforcer) drain(ctx context.Context, kube kubernetes.Interface, cl disc
 	if len(first) == 0 {
 		return drained{list: list, clean: true}, nil
 	}
-	left, err := e.stopPods(ctx, kube, list, true)
+	// What the pause stops, by the controller that starts it again: a
+	// restore waits for these (restore.go).
+	e.noteStopped(cl.ExternalID(), first, false)
+	left, err := e.stopPods(ctx, kube, tenant, list, true)
 	if err != nil {
 		return drained{}, err
 	}
@@ -1220,24 +1493,38 @@ func (e *Enforcer) drain(ctx context.Context, kube kubernetes.Interface, cl disc
 // metering decides (discovery.HostNamespaces.Whose). They come back on resume:
 // the cluster still has them and syncs them again. With wait, it waits for
 // them to be gone (stopPods); it returns those still there.
-func (e *Enforcer) stopSyncedPods(ctx context.Context, cl discovery.TenantCluster, wait bool) ([]corev1.Pod, error) {
+func (e *Enforcer) stopSyncedPods(ctx context.Context, tenant string, cl discovery.TenantCluster, wait bool) ([]corev1.Pod, error) {
+	noted := false
 	list := func(ctx context.Context) ([]corev1.Pod, error) {
-		return e.syncedPods(ctx, cl)
+		pods, err := e.syncedPods(ctx, cl)
+		if err == nil && !noted {
+			// What the pause stops, by the controller that syncs it again: a
+			// restore waits for these (restore.go).
+			noted = true
+			e.noteStopped(cl.ExternalID(), pods, true)
+		}
+		return pods, err
 	}
-	return e.stopPods(ctx, e.kube, list, wait)
+	return e.stopPods(ctx, e.kube, tenant, list, wait)
 }
 
 // stopPods deletes the pods list returns, each with its termination grace
 // period capped at maxGrace. With wait, it lists them again until none is
 // left, up to the drain timeout, then deletes what is left with no grace
 // period and lists once more. A pod counts until it is gone, whether it is
-// terminating or not. It returns the pods still there.
-func (e *Enforcer) stopPods(ctx context.Context, kube kubernetes.Interface, list func(context.Context) ([]corev1.Pod, error), wait bool) ([]corev1.Pod, error) {
+// terminating or not. It returns the pods still there. Before every round
+// of deletions, and before every pod it deletes, it asks whether the tenant
+// is still paused, and returns errLifted when it is not: no more pods are
+// deleted.
+func (e *Enforcer) stopPods(ctx context.Context, kube kubernetes.Interface, tenant string, list func(context.Context) ([]corev1.Pod, error), wait bool) ([]corev1.Pod, error) {
 	timeout := e.drainTimeout()
 	deadline := time.Now().Add(timeout)
 	every := min(2*time.Second, timeout/10+time.Millisecond)
 	forced := false
 	for {
+		if e.lifted(tenant) {
+			return nil, errLifted
+		}
 		pods, err := list(ctx)
 		if err != nil {
 			return nil, err
@@ -1247,6 +1534,9 @@ func (e *Enforcer) stopPods(ctx context.Context, kube kubernetes.Interface, list
 		}
 		forced = wait && !time.Now().Before(deadline)
 		for i := range pods {
+			if i > 0 && e.lifted(tenant) {
+				return nil, errLifted
+			}
 			if err := deletePod(ctx, kube, &pods[i], forced); err != nil {
 				return nil, err
 			}
